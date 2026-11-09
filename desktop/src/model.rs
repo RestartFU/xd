@@ -180,7 +180,7 @@ impl Attachment {
         }
     }
 
-    pub(crate) fn from_value(value: &Value) -> Option<Self> {
+    pub fn from_value(value: &Value) -> Option<Self> {
         let name = value.get("name").and_then(Value::as_str)?;
         let mime = value.get("mime").and_then(Value::as_str)?;
         let data = value.get("data").and_then(Value::as_str)?;

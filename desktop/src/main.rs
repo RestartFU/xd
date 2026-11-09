@@ -2329,6 +2329,7 @@ impl XdDesktop {
         cx.subscribe(&new_chat_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => {
                 this.new_chat_prompt = text.clone();
+                this.persist_new_chat_draft();
                 cx.notify();
             }
             EditorEvent::Submit | EditorEvent::SubmitNow => this.save_minimal_chat_create(cx),
@@ -5285,6 +5286,7 @@ impl XdDesktop {
                             attachments: self.new_chat_submitted_attachments.clone(),
                         },
                     );
+                    self.clear_new_chat_draft();
                     // The view stays, showing the message, until the chat
                     // opens in its place.
                     self.new_chat_started = Some(chat_id.to_owned());
@@ -6867,6 +6869,7 @@ impl XdDesktop {
         }
         self.begin_chat_create(session.folder.clone(), window, cx);
         self.creating_chat_session = Some(session.id);
+        self.restore_new_chat_draft(cx);
         self.chat_create_title = "New chat".into();
         self.chat_create_input
             .update(cx, |input, cx| input.set_text_selected("New chat", cx));
@@ -7153,6 +7156,7 @@ impl XdDesktop {
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.creating_chat_session = None;
         self.creating_chat_folder = Some(folder_id.clone());
+        self.restore_new_chat_draft(cx);
         // Naming a chat up front is busywork: the title is renamed later or
         // never. Open on the name the chat would have had anyway, selected, so
         // Enter takes it and typing replaces it.
@@ -11113,6 +11117,10 @@ impl XdDesktop {
                     self.new_chat_remote,
                     Some(FirstMessage {
                         text: &self.new_chat_prompt,
+                        attachments: &self.new_chat_attachments,
+                        effort: self.new_chat_remembered.effort.as_deref(),
+                        access: self.new_chat_remembered.access.as_deref(),
+                        plan: Some(self.new_chat_remembered.plan.unwrap_or(false)),
                         worktree_backend: self.settings.git_writer.backend(),
                         worktree_model: self.settings.git_writer_model.as_deref(),
                     }),

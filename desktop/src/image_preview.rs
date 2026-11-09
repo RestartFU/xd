@@ -424,6 +424,7 @@ impl XdDesktop {
             // A chat being created already has its first message.
             (DraftOwner::NewChat, Some(index)) if !self.chat_create_submitting => {
                 self.new_chat_attachments.remove(index);
+                self.persist_new_chat_draft();
             }
             _ => {}
         }

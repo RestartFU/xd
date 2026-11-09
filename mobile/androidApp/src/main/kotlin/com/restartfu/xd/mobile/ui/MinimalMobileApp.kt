@@ -516,11 +516,13 @@ internal fun MinimalMobileApp(
     createChatIn?.let { session ->
         NewSessionDialog(
             projectName = session.title,
+            draftKey = "${activeProject?.id}/${session.id}",
+            backends = model.hostCatalog.collectAsStateWithLifecycle().value,
             chatTab = true,
             onDismiss = { createChatIn = null },
-            onCreate = { title, agent, _ ->
+            onCreate = { title, agent, _, effort, access, plan ->
                 createChatIn = null
-                activeProject?.let { project -> model.createDirectSession(project.id, title, agent, session.id) }
+                activeProject?.let { project -> model.createDirectSession(project.id, title, agent, session.id, effort = effort, access = access, plan = plan) }
             },
         )
     }
@@ -816,11 +818,13 @@ private fun MinimalProjectsHome(
     if (creatingIn != null) key(creatingIn.id) {
         NewSessionDialog(
             projectName = creatingIn.name,
+            draftKey = "${creatingIn.id}/new",
+            backends = model.hostCatalog.collectAsStateWithLifecycle().value,
             places = { NewSessionPlaces.load(model.client, creatingIn.id) },
             onDismiss = { createSessionIn = null },
-            onCreate = { title, agent, worktree ->
+            onCreate = { title, agent, worktree, effort, access, plan ->
                 createSessionIn = null
-                model.createDirectSession(creatingIn.id, title, agent, worktree = worktree)
+                model.createDirectSession(creatingIn.id, title, agent, worktree = worktree, effort = effort, access = access, plan = plan)
             },
         )
     }
@@ -1935,18 +1939,43 @@ private fun EmptyCard(text: String) {
 @Composable
 internal fun NewSessionDialog(
     projectName: String,
+    draftKey: String? = null,
+    backends: List<com.restartfu.xd.protocol.BackendReply> = emptyList(),
     chatTab: Boolean = false,
     /** Where a new session can work; null for a chat joining an existing session. */
     places: (suspend () -> NewSessionPlaces)? = null,
     onDismiss: () -> Unit,
-    onCreate: (String, DirectAgent, Ops.NewSessionWorktree?) -> Unit,
+    onCreate: (String, DirectAgent, Ops.NewSessionWorktree?, String?, String?, Boolean?) -> Unit,
 ) {
-    var title by rememberSaveable { mutableStateOf("") }
-    var agent by rememberSaveable { mutableStateOf(DirectAgent.CODEX) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val drafts = remember(context) { context.getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE) }
+    val restored = remember(draftKey) { runCatching { org.json.JSONObject(draftKey?.let { drafts.getString(it, null) } ?: "{}") }.getOrDefault(org.json.JSONObject()) }
+    var title by rememberSaveable(draftKey) { mutableStateOf(restored.optString("title")) }
+    var agent by rememberSaveable(draftKey) { mutableStateOf(DirectAgent.entries.firstOrNull { it.wire == restored.optString("agent") } ?: DirectAgent.CODEX) }
+    var effort by rememberSaveable(draftKey) { mutableStateOf(restored.optString("effort").takeIf(String::isNotBlank)) }
+    var access by rememberSaveable(draftKey) { mutableStateOf(restored.optString("access").takeIf(String::isNotBlank)) }
+    var plan by rememberSaveable(draftKey) { mutableStateOf(restored.optBoolean("plan")) }
     var loaded by remember { mutableStateOf<NewSessionPlaces?>(null) }
     var placesError by remember { mutableStateOf<String?>(null) }
-    // Saved, so rotating keeps a branch or pull request rather than falling back to the default.
-    var worktree by rememberSaveable(stateSaver = WorktreeChoiceSaver) { mutableStateOf<Ops.NewSessionWorktree?>(null) }
+    var worktree by rememberSaveable(draftKey, stateSaver = WorktreeChoiceSaver) {
+        mutableStateOf<Ops.NewSessionWorktree?>(runCatching {
+            val saved = restored.optJSONObject("worktree") ?: return@runCatching null
+            when (saved.optString("kind")) {
+                "new" -> Ops.NewSessionWorktree.New
+                "existing" -> Ops.NewSessionWorktree.Existing(saved.getString("path"))
+                "branch" -> Ops.NewSessionWorktree.Branch(saved.getString("ref"), saved.getString("oid"))
+                "pull-request" -> Ops.NewSessionWorktree.PullRequest(saved.getLong("number"), saved.getString("oid"))
+                else -> null
+            }
+        }.getOrNull())
+    }
+    androidx.compose.runtime.LaunchedEffect(draftKey, title, agent, effort, access, plan, worktree) {
+        draftKey?.let { key ->
+            drafts.edit().putString(key, org.json.JSONObject().put("title", title).put("agent", agent.wire)
+                .put("effort", effort).put("access", access).put("plan", plan)
+                .put("worktree", worktree?.let { org.json.JSONObject(it.wire().toString()) }).toString()).apply()
+        }
+    }
     if (places != null) {
         LaunchedEffect(Unit) {
             try {
@@ -1986,12 +2015,19 @@ internal fun NewSessionDialog(
                     DirectAgent.entries.forEach { candidate ->
                         FilterChip(
                             selected = agent == candidate,
-                            onClick = { agent = candidate },
+                            onClick = { agent = candidate; effort = null },
                             label = { Text(candidate.label) },
                             leadingIcon = { BackendIcon(candidate.wire, size = 16.dp) },
                         )
                     }
                 }
+                val efforts = backends.firstOrNull { it.id == agent.wire }?.efforts.orEmpty()
+                if (efforts.isNotEmpty()) CreationOption("Reasoning effort", effort ?: "Default", listOf("Default") + efforts) { effort = it.takeUnless { it == "Default" } }
+                CreationOption("Workspace access", if (plan) "Read only" else when (access) { "read-only" -> "Read only"; "edit" -> "Edit"; "full" -> "Full access"; else -> "Default" },
+                    listOf("Default", "Read only", "Edit", "Full access"), enabled = !plan) {
+                    access = when (it) { "Read only" -> "read-only"; "Edit" -> "edit"; "Full access" -> "full"; else -> null }
+                }
+                CreationOption("Chat mode", if (plan) "Plan" else "Build", listOf("Build", "Plan")) { plan = it == "Plan" }
                 if (places != null) {
                     WorkspacePicker(
                         places = loaded,
@@ -2004,7 +2040,7 @@ internal fun NewSessionDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onCreate(title.trim(), agent, worktree) },
+                onClick = { onCreate(title.trim(), agent, worktree, effort?.takeIf { it in backends.firstOrNull { b -> b.id == agent.wire }?.efforts.orEmpty() }, access, plan) },
                 // Wait for the choices, as the desktop does; if they cannot be
                 // read, the host's own default checkout still works.
                 // Only once this opening's choices have loaded, even if a choice
@@ -2018,6 +2054,20 @@ internal fun NewSessionDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun CreationOption(label: String, value: String, choices: List<String>, enabled: Boolean = true, onSelect: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Box {
+            TextButton(onClick = { open = true }, enabled = enabled) { Text(value) }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                choices.forEach { choice -> DropdownMenuItem(text = { Text(choice) }, onClick = { open = false; onSelect(choice) }) }
+            }
+        }
+    }
 }
 
 /** Where a new session in a project can work, as the desktop's new session dialog offers. */

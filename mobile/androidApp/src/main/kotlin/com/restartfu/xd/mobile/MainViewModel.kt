@@ -561,6 +561,9 @@ class MainViewModel @JvmOverloads constructor(
         agent: DirectAgent,
         sessionId: String? = null,
         worktree: Ops.NewSessionWorktree? = null,
+        effort: String? = null,
+        access: String? = null,
+        plan: Boolean? = null,
     ) {
         if (_creatingChat.value) return
         _creatingChat.value = true
@@ -573,7 +576,10 @@ class MainViewModel @JvmOverloads constructor(
                     backend = agent.wire,
                     sessionId = sessionId,
                     worktree = worktree,
+                    effort = effort, access = access, plan = plan,
                 )
+                getApplication<Application>().getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
+                    .edit().remove("$folderId/${sessionId ?: "new"}").apply()
                 _createdDirectSession.value = CreatedDirectSession(
                     folderId,
                     chatId,

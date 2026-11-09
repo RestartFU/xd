@@ -59,7 +59,7 @@ class NewSessionDialogScreenshotTest {
                             projectName = "xd",
                             places = { PLACES },
                             onDismiss = {},
-                            onCreate = { _, _, _ -> },
+                            onCreate = { _, _, _, _, _, _ -> },
                         )
                     }
                 }
