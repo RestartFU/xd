@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "xd-host"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "xd-transport"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "base64 0.22.1",
  "rustls",
