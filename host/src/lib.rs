@@ -1898,19 +1898,12 @@ impl Engine {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return error_reply("Rust host state storage is not configured.");
         };
-        let mut chats = match store.working_chats() {
-            Ok(chats) => chats,
-            Err(error) => return error_reply(error),
-        };
-        let background = runtime.background_task_counts();
-        for chat_id in background.keys() {
-            if !chats.contains(chat_id) {
-                chats.push(chat_id.clone());
-            }
-        }
-        // A send holds the chat's gate from before the chat reads as working
-        // until its turn has started, so a chat whose gate is taken may be about
-        // to work. The second pass below waits for those and looks again.
+        // Looked at in the order work moves through them, so nothing slips
+        // between two looks. A send holds the chat's gate from before the chat
+        // reads as working until its turn has started: a send in progress now
+        // still holds it below, or has started a turn by the time working chats
+        // are read. A turn that ends after that leaves any background work it
+        // started for the last look. The second pass waits for the gates.
         let gates = self
             .chat_execution
             .lock()
@@ -1921,11 +1914,25 @@ impl Engine {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        for (chat_id, gate) in gates {
-            if !chats.contains(&chat_id)
-                && matches!(gate.try_lock(), Err(std::sync::TryLockError::WouldBlock))
-            {
-                chats.push(chat_id);
+        let mut chats = gates
+            .into_iter()
+            .filter(|(_, gate)| matches!(gate.try_lock(), Err(std::sync::TryLockError::WouldBlock)))
+            .map(|(chat_id, _)| chat_id)
+            .collect::<Vec<_>>();
+        match store.working_chats() {
+            Ok(working) => {
+                for chat_id in working {
+                    if !chats.contains(&chat_id) {
+                        chats.push(chat_id);
+                    }
+                }
+            }
+            Err(error) => return error_reply(error),
+        }
+        let background = runtime.background_task_counts();
+        for chat_id in background.keys() {
+            if !chats.contains(chat_id) {
+                chats.push(chat_id.clone());
             }
         }
         let mut paused = Vec::new();
