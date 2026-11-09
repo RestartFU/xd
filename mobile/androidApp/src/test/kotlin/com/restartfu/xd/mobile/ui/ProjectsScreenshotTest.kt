@@ -14,6 +14,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
@@ -113,8 +114,13 @@ class ProjectsScreenshotTest {
     }
 
     @Test fun aClosedFolderShowsWhatItsProjectsNeed() = shoot("folder-closed-signals-dark", MinimalThemePreset.DARK) {
+        val working = xdSignals(MinimalThemePreset.DARK).working.toArgb()
+        // Open, the folder leaves its projects' dots to their own rows.
+        check(paintedOnRowOf("acme", working) == 0) { "an open folder shows dots" }
         click("acme")
         check(!shows("web") && !shows("shop"))
+        // web's working session and shop's background task, held in the closed folder.
+        check(paintedOnRowOf("acme", working) > 0) { "the closed folder shows no dots" }
     }
 
     @Test fun movingSendsTheChosenFolder() = shoot("moved-dark", MinimalThemePreset.DARK) {
@@ -199,6 +205,15 @@ class ProjectsScreenshotTest {
         }
 
         fun shows(label: String): Boolean = matching(label).fetchSemanticsNodes().isNotEmpty()
+
+        /** How many pixels of exactly [color] the row holding [label] paints, across the screen's width. */
+        fun paintedOnRowOf(label: String, color: Int): Int {
+            val bounds = matching(label).fetchSemanticsNodes().last().boundsInWindow
+            val bitmap = capture()
+            val top = bounds.top.toInt().coerceIn(0, bitmap.height)
+            val bottom = bounds.bottom.toInt().coerceIn(top, bitmap.height)
+            return (top until bottom).sumOf { y -> (0 until bitmap.width).count { x -> bitmap.getPixel(x, y) == color } }
+        }
 
         fun click(label: String) {
             matching(label).onLast().performClick()
