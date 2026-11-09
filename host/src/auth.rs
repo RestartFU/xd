@@ -513,6 +513,15 @@ impl AuthManager {
                     provider_name(provider)
                 ));
             }
+            // Checked again with the slot held: the account may have been
+            // removed since the request looked. Only adding works on a pending one.
+            let pending = self.inner.accounts.pending(provider).as_deref() == Some(account);
+            if account != DEFAULT_ACCOUNT
+                && (!self.inner.accounts.exists(provider, account)
+                    || (pending != (kind == SessionKind::Add)))
+            {
+                return Err("No such account.".into());
+            }
             sessions.insert(
                 provider.to_owned(),
                 AuthSession {
@@ -610,8 +619,15 @@ impl AuthManager {
                 command
             }
         };
+        // An added account's command runs in its own home or not at all: an
+        // empty environment would be the user's own sign-in.
+        let environment = self.inner.accounts.environment(provider, account);
+        if account != DEFAULT_ACCOUNT && environment.is_empty() {
+            self.finish_session(provider, serial, Err("That account was removed.".into()));
+            return;
+        }
         command
-            .envs(self.inner.accounts.environment(provider, account))
+            .envs(environment)
             .env("NO_COLOR", "1")
             .env("TERM", "dumb")
             .stdin(if login { Stdio::piped() } else { Stdio::null() })
