@@ -343,6 +343,7 @@ public object Ops {
         backend: String? = null,
         sessionId: String? = null,
         worktree: NewSessionWorktree? = null,
+        startFromRemote: Boolean = true,
     ): JsonObject = buildJsonObject {
         put("op", "new-chat")
         require(folderId.isNotBlank()) { "Folder id must not be blank" }
@@ -356,6 +357,7 @@ public object Ops {
         if (!title.isNullOrBlank()) put("title", title)
         if (!backend.isNullOrBlank()) put("backend", backend)
         if (worktree != null) put("worktree", worktree.wire())
+        if (worktree is NewSessionWorktree.Branch) put("start_from_remote", startFromRemote)
     }
 
     /**
