@@ -252,10 +252,6 @@ internal fun MinimalMobileApp(
         onDispose { model.client.setVisibleChat(null) }
     }
     val showProjects = { mobileDestination = MobileDestination.PROJECTS }
-    val showSessions = {
-        if (activeSession == null) activeSessionId = (sessions.firstOrNull { !it.settled } ?: sessions.firstOrNull())?.id
-        mobileDestination = if (sessions.isEmpty()) MobileDestination.PROJECTS else MobileDestination.SESSIONS
-    }
     val showTerminal = { mobileDestination = MobileDestination.TERMINAL }
     val showUsage = { mobileDestination = MobileDestination.USAGE }
     val addChat: (MinimalSession) -> Unit = { session ->
@@ -291,13 +287,13 @@ internal fun MinimalMobileApp(
     Box(Modifier.fillMaxSize()) {
     Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         if (expanded) {
-            XdNavigationRail(mobileDestination, showProjects, showSessions, showTerminal, showUsage)
+            XdNavigationRail(mobileDestination, showProjects, showTerminal, showUsage)
         }
         Column(Modifier.weight(1f)) {
             Box(Modifier.weight(1f)) {
                 when {
                     mobileDestination == MobileDestination.TERMINAL -> MinimalGlobalTerminal(
-                        model, settings, link, showProjects, showSessions,
+                        model, settings, link, showProjects,
                     )
                     mobileDestination == MobileDestination.USAGE -> Column(
                         Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
@@ -388,7 +384,7 @@ internal fun MinimalMobileApp(
                         }
                     }
                     else -> MinimalProjectsHome(
-                        model, settings, link, projects, tree.loading, tree.error, showSessions, showTerminal,
+                        model, settings, link, projects, tree.loading, tree.error, showTerminal,
                         actions = sessionActions,
                         onRenameProject = { renamingProjectId = it.id },
                         onDeleteProject = { deletingProject = it },
@@ -404,7 +400,7 @@ internal fun MinimalMobileApp(
                 }
             }
             if (showBottomNavigation) {
-                XdNavigationBar(mobileDestination, showProjects, showSessions, showTerminal, showUsage)
+                XdNavigationBar(mobileDestination, showProjects, showTerminal, showUsage)
             }
         }
     }
@@ -539,7 +535,6 @@ private fun MinimalProjectsHome(
     projects: List<MinimalProject>,
     loading: Boolean,
     treeError: String?,
-    onSessions: () -> Unit,
     onTerminal: () -> Unit,
     actions: SessionActions,
     onRenameProject: (MinimalProject) -> Unit,
@@ -853,7 +848,6 @@ private fun MinimalGlobalTerminal(
     settings: MobileSettings,
     link: Link,
     onProjects: () -> Unit,
-    onSessions: () -> Unit,
 ) {
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     val terminalOwner = remember { SessionViewModelOwner() }
@@ -1077,18 +1071,16 @@ private fun ProductHeader(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
-/** Material navigation between the three top-level places. */
+/** Material navigation between the top-level places. Sessions open from Projects. */
 @Composable
 private fun XdNavigationBar(
     active: MobileDestination,
     onProjects: () -> Unit,
-    onSessions: () -> Unit,
     onTerminal: () -> Unit,
     onUsage: () -> Unit,
 ) {
     NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
         NavItem("Projects", R.drawable.ic_projects, active = active == MobileDestination.PROJECTS, onClick = onProjects)
-        NavItem("Sessions", R.drawable.ic_sessions, active = active == MobileDestination.SESSIONS, onClick = onSessions)
         NavItem("Terminal", R.drawable.ic_terminal, active = active == MobileDestination.TERMINAL, onClick = onTerminal)
         NavItem("Usage", R.drawable.ic_usage, active = active == MobileDestination.USAGE, onClick = onUsage)
     }
@@ -1098,26 +1090,20 @@ private fun XdNavigationBar(
 private fun XdNavigationRail(
     active: MobileDestination,
     onProjects: () -> Unit,
-    onSessions: () -> Unit,
     onTerminal: () -> Unit,
     onUsage: () -> Unit,
 ) {
     NavigationRail(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         Spacer(Modifier.height(16.dp))
         listOf(
-            Triple(MobileDestination.PROJECTS, "Projects", R.drawable.ic_projects),
-            Triple(MobileDestination.SESSIONS, "Sessions", R.drawable.ic_sessions),
-            Triple(MobileDestination.TERMINAL, "Terminal", R.drawable.ic_terminal),
-            Triple(MobileDestination.USAGE, "Usage", R.drawable.ic_usage),
-        ).forEach { (destination, label, icon) ->
+            Triple(MobileDestination.PROJECTS, "Projects", R.drawable.ic_projects) to onProjects,
+            Triple(MobileDestination.TERMINAL, "Terminal", R.drawable.ic_terminal) to onTerminal,
+            Triple(MobileDestination.USAGE, "Usage", R.drawable.ic_usage) to onUsage,
+        ).forEach { (item, onClick) ->
+            val (destination, label, icon) = item
             NavigationRailItem(
                 selected = active == destination,
-                onClick = when (destination) {
-                    MobileDestination.PROJECTS -> onProjects
-                    MobileDestination.SESSIONS -> onSessions
-                    MobileDestination.TERMINAL -> onTerminal
-                    MobileDestination.USAGE -> onUsage
-                },
+                onClick = onClick,
                 icon = { Icon(painterResource(icon), contentDescription = null) },
                 label = { Text(label) },
             )

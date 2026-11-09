@@ -72,6 +72,16 @@ class ProjectsScreenshotTest {
 
     @Test fun projectsLight() = shoot("projects-light", MinimalThemePreset.LIGHT)
 
+    @Test fun bottomBarLeavesOutSessions() = shoot("bottom-bar-dark", MinimalThemePreset.DARK) {
+        // Sessions open from the Projects page; the phone's bar has no tab for them.
+        check(shows("Projects") && shows("Terminal") && shows("Usage") && !shows("Sessions"))
+    }
+
+    @Test @Config(qualifiers = "w840dp-h1200dp-320dpi")
+    fun railLeavesOutSessions() = shoot("rail-dark", MinimalThemePreset.DARK) {
+        check(shows("Projects") && shows("Terminal") && shows("Usage") && !shows("Sessions"))
+    }
+
     @Test fun newMenu() = shoot("new-menu-dark", MinimalThemePreset.DARK) {
         click("New")
         check(shows("New project") && shows("New folder"))
