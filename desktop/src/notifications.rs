@@ -121,7 +121,10 @@ async fn serve<T>(
             "/org/freedesktop/DBus",
             Some("org.freedesktop.DBus"),
             "AddMatch",
-            &format!("type='signal',sender='{SERVICE}',interface='{SERVICE}',path='{OBJECT_PATH}'"),
+            // From any connection: a server that handed the service over can
+            // still show, and report clicks on, what it showed. Whose a
+            // signal is decides what it is about (see `Tracker`).
+            &format!("type='signal',interface='{SERVICE}',path='{OBJECT_PATH}'"),
         )
         .await?;
     let desktop_entry = xd_desktop::channel::app_id();
@@ -854,8 +857,22 @@ mod tests {
                     )
                     .await?;
                     let click = clicked.recv().await.ok();
+                    // The replaced server still shows the first, and reports
+                    // its click.
+                    old.emit_signal(
+                        None::<()>,
+                        OBJECT_PATH,
+                        SERVICE,
+                        "ActionInvoked",
+                        &(7u32, DEFAULT_ACTION),
+                    )
+                    .await?;
+                    let old_click = clicked.recv().await.ok();
                     let closes = closes_during(&mut new_calls, TEST_CLOSE_AFTER * 2).await?;
-                    Ok((click.map(|click| click.target), closes))
+                    Ok((
+                        [click, old_click].map(|click| click.map(|click| click.target)),
+                        closes,
+                    ))
                 })
                 .await
             })
@@ -863,7 +880,7 @@ mod tests {
         let Some((click, closes)) = outcome else {
             return;
         };
-        assert_eq!(click, Some("second"));
+        assert_eq!(click, [Some("second"), Some("first")]);
         // The new server's notification was clicked, so it is gone: its timer
         // has nothing left to close there, and the old one's goes to the old.
         assert_eq!(closes, Vec::<u32>::new());
