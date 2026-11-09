@@ -115,7 +115,7 @@ use input::{
 use minimal::{
     AgentCli, MinimalRoute, ProjectCard, SessionCard, SettledCard, age_label, folder_tree,
     next_active_session, project_cards, project_sessions, reconcile_route, resumable_session,
-    settled_cards,
+    settled_cards, tree_descendants,
 };
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
@@ -13004,6 +13004,7 @@ impl XdDesktop {
         indent: Pixels,
         open: bool,
         held: usize,
+        signals: &[SessionSignal],
         folders: Rc<[Folder]>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -13093,6 +13094,7 @@ impl XdDesktop {
                     .child(held.to_string()),
             )
             .child(div().flex_1())
+            .when(!open, |header| header.child(drawer_tabs(signals, colors)))
             .child(
                 div()
                     .id(("catalog-folder-add", index))
@@ -13337,7 +13339,7 @@ impl XdDesktop {
         }
         let mut matches = 0usize;
         let mut hidden_below = None;
-        for row in &tree {
+        for (position, row) in tree.iter().enumerate() {
             let project_index = row.index;
             let project = &projects[project_index];
             let indent = px(row.depth as f32 * CATALOG_INDENT);
@@ -13358,6 +13360,17 @@ impl XdDesktop {
                     .iter()
                     .filter(|parent| **parent == Some(project_index))
                     .count();
+                // A closed folder hides its projects, so it carries their
+                // signals the way a closed project carries its sessions'.
+                let signals = if open {
+                    Vec::new()
+                } else {
+                    tree_descendants(&tree, position)
+                        .filter(|row| !folders[row.index].group)
+                        .flat_map(|row| project_sessions(&folders[row.index].id, &active_chats))
+                        .map(|session| self.session_signal(&session))
+                        .collect()
+                };
                 drawers.push(self.render_folder_group(
                     colors,
                     project,
@@ -13365,6 +13378,7 @@ impl XdDesktop {
                     indent,
                     open,
                     held,
+                    &signals,
                     folders.clone(),
                     cx,
                 ));
