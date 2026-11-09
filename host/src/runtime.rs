@@ -4407,6 +4407,15 @@ done
             &agent,
             format!(
                 r#"#!/bin/sh
+echo "${{CLAUDE_CONFIG_DIR:-default}} $*" >> '{log}'
+if [ -n "$CLAUDE_CONFIG_DIR" ]; then
+  while read line; do
+    echo '{{"type":"system","subtype":"init","session_id":"s1"}}'
+    echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Carried on."}}]}}}}'
+    echo '{{"type":"result","subtype":"success","result":"Carried on."}}'
+  done
+  exit 0
+fi
 read line
 echo '{{"type":"system","subtype":"init","session_id":"s1"}}'
 echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_helper","description":"Review","subagent_type":"general-purpose","is_backgrounded":true}}'
@@ -4418,8 +4427,16 @@ echo '{{"type":"system","subtype":"init","session_id":"s1"}}'
 echo '{{"type":"assistant","error":"rate_limit","message":{{"model":"<synthetic>","content":[{{"type":"text","text":"You have hit your 5-hour limit"}}]}}}}'
 echo '{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","resetsAt":{resets},"rateLimitType":"five_hour"}}}}'
 echo '{{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You have hit your 5-hour limit"}}'
+# A turn that did not complete stops its process, so this never reaches the
+# chat: it would take the chat on the spent account before the continuation,
+# which the test holds back, could move it on.
+sleep 0.5
+echo '{{"type":"system","subtype":"init","session_id":"s1"}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Woke on the spent account."}}]}}}}'
+echo '{{"type":"result","subtype":"success","result":"Woke on the spent account."}}'
 read next
-"#
+"#,
+                log = root.join("runs").display(),
             ),
         )
         .unwrap();
@@ -4461,8 +4478,22 @@ read next
         );
         let continued = Arc::new(Mutex::new(Vec::new()));
         let asked = continued.clone();
+        let continuing = (store.clone(), runtime.clone());
+        // Continues the way the engine does, off the turn's thread.
         runtime.set_account_switch_handler(Box::new(move |chat, last_message| {
-            asked.lock().unwrap().push((chat, last_message));
+            asked.lock().unwrap().push((chat.clone(), last_message));
+            let (store, runtime) = continuing.clone();
+            thread::spawn(move || {
+                // A continuation that takes its time leaves the old process
+                // the longest to wake the chat.
+                thread::sleep(Duration::from_secs(2));
+                let request = json!({"chat": chat, "text": crate::storage::CONTINUE_PROMPT});
+                if let Ok(crate::storage::SendDisposition::Start { turn, .. }) =
+                    store.prepare_after_limit(&request, last_message)
+                {
+                    runtime.start(turn).unwrap();
+                }
+            });
         }));
         let turn = match store
             .prepare_send(&json!({"chat": chat, "text": "Review it"}))
@@ -4472,15 +4503,25 @@ read next
             crate::storage::SendDisposition::Queued { .. } => panic!("the message was queued"),
         };
         runtime.start(turn).unwrap();
-
-        wait_for("the host to be asked to continue", || {
-            !continued.lock().unwrap().is_empty()
-        });
         let request = store.latest_user_message(&chat).unwrap();
-        assert_eq!(*continued.lock().unwrap(), [(chat.clone(), request)]);
-        wait_for("the background turn to end", || {
-            runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false
+
+        wait_for("the chat to carry on as the second account", || {
+            runtime.live_turn(&chat).is_none()
+                && store.chat(&chat).unwrap()["working"] == false
+                && contents(&store, &chat)
+                    .iter()
+                    .any(|(_, content)| content == "Carried on.")
         });
+        assert_eq!(*continued.lock().unwrap(), [(chat.clone(), request)]);
+        let runs = fs::read_to_string(root.join("runs")).unwrap();
+        let home = accounts.home("claude", &second).unwrap();
+        let second_run = runs
+            .lines()
+            .find(|run| run.starts_with(&home.display().to_string()))
+            .unwrap_or_else(|| panic!("no run as the second account in {runs}"));
+        assert!(second_run.contains("--resume s1"), "{second_run}");
+        // Time for anything else the spent account's process said to land.
+        thread::sleep(Duration::from_millis(500));
         let rows = contents(&store, &chat);
         assert!(
             rows.iter()
@@ -4496,8 +4537,18 @@ read next
             !rows.iter().any(|(_, content)| content.contains("hit your")),
             "the limit is not the agent's reply: {rows:?}"
         );
-        // The continuation is allowed in: the chat is waiting to be resumed.
-        assert_eq!(store.chat(&chat).unwrap()["resumable"], true);
+        assert!(
+            !rows
+                .iter()
+                .any(|(_, content)| content.contains("spent account")),
+            "the spent account's process woke the chat: {rows:?}"
+        );
+        // Explained once, when it happened.
+        let notices = rows
+            .iter()
+            .filter(|(_, content)| content.starts_with(ACCOUNT_SWITCH_PREFIX))
+            .count();
+        assert_eq!(notices, 1, "{rows:?}");
         runtime.discard_chat(&chat);
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
         unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };
