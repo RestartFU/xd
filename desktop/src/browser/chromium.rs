@@ -155,11 +155,58 @@ fn profile_holder(directory: &Path) -> Option<u32> {
     let target = std::fs::read_link(directory.join("SingletonLock")).ok()?;
     let (_, pid) = target.to_str()?.rsplit_once('-')?;
     let pid = pid.parse::<u32>().ok()?;
-    // The holder takes a connection that sends nothing as a bad message and
-    // drops it.
-    (pid != std::process::id()
-        && std::os::unix::net::UnixStream::connect(directory.join("SingletonSocket")).is_ok())
-    .then_some(pid)
+    // The socket lives in a short temporary directory; the link to it may be
+    // too long for a socket address.
+    let socket = std::fs::read_link(directory.join("SingletonSocket")).ok()?;
+    (pid != std::process::id() && listening(&directory.join(socket))).then_some(pid)
+}
+
+/// Whether a process listens on the Unix socket at `path`, asked without
+/// waiting: a holder too busy to accept would otherwise stall the browser
+/// thread. A full queue still means someone listens. The holder takes the
+/// connection, which sends nothing, as a bad message and drops it.
+fn listening(path: &Path) -> bool {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::ffi::OsStrExt,
+    };
+
+    // SAFETY: an all-zero `sockaddr_un` is a valid value.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.len() >= address.sun_path.len() {
+        return false;
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    // SAFETY: plain system call; the result is checked before use.
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: `fd` is a new descriptor nothing else owns.
+    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: `address` is a valid `sockaddr_un` that outlives the call.
+    let connected = unsafe {
+        libc::connect(
+            socket.as_raw_fd(),
+            std::ptr::from_ref(&address).cast(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    } == 0;
+    connected
+        || matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EAGAIN | libc::EINPROGRESS)
+        )
 }
 
 fn profile_in_use(pid: u32) -> String {
@@ -1313,12 +1360,53 @@ mod tests {
 
         link("SingletonLock", Path::new("some-host-1"));
         drop(listener);
-        std::fs::remove_file(&socket).unwrap();
+        assert!(socket.exists());
         assert_eq!(
             profile_holder(&directory),
             None,
             "left by a holder that exited"
         );
+        std::fs::remove_file(&socket).unwrap();
+        assert_eq!(profile_holder(&directory), None, "socket removed");
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_holder_with_a_full_queue_still_holds_the_profile() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = std::env::temp_dir().join(format!("xd-queue-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // Connect without accepting until the queue refuses more.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (slot, byte) in address.sun_path.iter_mut().zip(path.as_os_str().as_bytes()) {
+            *slot = *byte as libc::c_char;
+        }
+        let mut waiting = Vec::new();
+        let full = (0..100_000).any(|_| {
+            let fd =
+                unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0) };
+            assert!(fd >= 0);
+            let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+            let result = unsafe {
+                libc::connect(
+                    socket.as_raw_fd(),
+                    std::ptr::from_ref(&address).cast(),
+                    std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+                )
+            };
+            let refused =
+                result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN);
+            waiting.push(socket);
+            refused
+        });
+        assert!(full, "the queue never filled");
+        let started = std::time::Instant::now();
+        assert!(listening(&path));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        std::fs::remove_file(&path).unwrap();
     }
 }
