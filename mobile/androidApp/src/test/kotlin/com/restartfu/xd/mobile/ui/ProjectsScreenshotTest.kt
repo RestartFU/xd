@@ -72,6 +72,32 @@ class ProjectsScreenshotTest {
 
     @Test fun projectsLight() = shoot("projects-light", MinimalThemePreset.LIGHT)
 
+    @Test fun projectsOpenOnTheirOwn() = shoot("projects-open-dark", MinimalThemePreset.DARK) {
+        // Every project starts open, so sessions in two projects show at once.
+        check(shows("Reconnect backoff") && shows("Landing copy") && shows("No sessions yet"))
+        click("xd")
+        check(!shows("Reconnect backoff") && !shows("Usage page") && shows("Landing copy"))
+        click("xd")
+        check(shows("Reconnect backoff") && shows("Landing copy"))
+    }
+
+    @Test fun newSessionAsksForAProject() = shoot("new-session-picker-dark", MinimalThemePreset.DARK) {
+        click("New session")
+        check(shows("Choose a project") && shows("2 sessions") && shows("acme · 1 session") &&
+            shows("acme / Clients · No sessions") && !shows("Create session"))
+    }
+
+    @Test fun pickingAProjectStartsItsSession() = shoot("new-session-chosen-dark", MinimalThemePreset.DARK) {
+        click("New session")
+        // Nothing waits on the next dialog: its title field never lets Compose go idle.
+        click("acme / Clients · No sessions")
+    }
+
+    @Test fun anOpenProjectStartsASessionInItself() = shoot("new-session-here-dark", MinimalThemePreset.DARK) {
+        check(shows("New session in web") && shows("New session in xd"))
+        click("New session in web")
+    }
+
     @Test fun newMenu() = shoot("new-menu-dark", MinimalThemePreset.DARK) {
         click("New")
         check(shows("New project") && shows("New folder"))

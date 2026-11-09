@@ -63,8 +63,22 @@ public class MobileSettings(context: Context) {
         preferences.getStringSet(KEY_COLLAPSED_FOLDERS, null).orEmpty().toSet(),
     )
 
-    /** Folders closed on the Projects page; the rest are open, as on the desktop. */
+    /**
+     * Folders and projects closed on the Projects page; the rest are open, as
+     * on the desktop, so any number can be open at once.
+     */
     public val collapsedFolders: StateFlow<Set<String>> = _collapsedFolders.asStateFlow()
+
+    private val _lastSessionProject = MutableStateFlow(preferences.getString(KEY_LAST_SESSION_PROJECT, null))
+
+    /** The project the last session was started in, offered first next time. */
+    public val lastSessionProject: StateFlow<String?> = _lastSessionProject.asStateFlow()
+
+    public fun setLastSessionProject(projectId: String) {
+        if (_lastSessionProject.value == projectId) return
+        preferences.edit().putString(KEY_LAST_SESSION_PROJECT, projectId).apply()
+        _lastSessionProject.value = projectId
+    }
 
     public fun setFolderOpen(folderId: String, open: Boolean) {
         val next = if (open) _collapsedFolders.value - folderId else _collapsedFolders.value + folderId
@@ -109,6 +123,7 @@ public class MobileSettings(context: Context) {
         const val KEY_ALLOW_ALL_PERMISSIONS = "allow_all_permissions"
         const val KEY_THEME = "minimal_theme"
         const val KEY_COLLAPSED_FOLDERS = "collapsed_folders"
+        const val KEY_LAST_SESSION_PROJECT = "last_session_project"
         const val KEY_RESUME_CHATS = "resume_chats"
         const val KEY_RESET_ATTEMPT = "usage_reset_attempt:"
     }

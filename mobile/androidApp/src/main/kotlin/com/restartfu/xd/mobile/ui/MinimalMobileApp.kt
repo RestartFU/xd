@@ -110,7 +110,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import com.restartfu.xd.model.FolderDestination
 import com.restartfu.xd.model.MinimalFolder
+import com.restartfu.xd.model.ProjectChoice
 import com.restartfu.xd.model.ProjectTreeRow
+import com.restartfu.xd.model.matching
+import com.restartfu.xd.model.projectChoices
 import com.restartfu.xd.model.ancestors
 import com.restartfu.xd.model.moveDestinations
 import com.restartfu.xd.model.organizationLogin
@@ -556,7 +559,6 @@ private fun MinimalProjectsHome(
     val secretsFor = tree.folders.firstOrNull { it.id == secretsForId }
     val settled = if (actions.settlement) tree.settledSessions() else emptyList()
     val operationError by model.error.collectAsStateWithLifecycle()
-    var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     // What the New menu or a folder's menu is making ("project" or "folder"), and in which folder.
     var creating by rememberSaveable { mutableStateOf<String?>(null) }
     var createParentId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -569,7 +571,6 @@ private fun MinimalProjectsHome(
     val ownerIcons by model.client.ownerIcons.collectAsStateWithLifecycle()
     val rows = tree.projectTree(collapsed)
     val folders = tree.projectTree().mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
-    val shownProjects = rows.mapNotNull { (it as? ProjectTreeRow.ProjectRow)?.project }
     // Opens the folders [id] sits in, and [id] itself, so what lands there is in view.
     val reveal = { id: String? ->
         if (id != null) (tree.ancestors(id) + id).forEach { settings.setFolderOpen(it, true) }
@@ -579,12 +580,13 @@ private fun MinimalProjectsHome(
     val canMove = { id: String, parentId: String? -> parentId != null || tree.moveDestinations(id).isNotEmpty() }
     // The project the dialog was opened for; it closes if that project goes away.
     var createSessionIn by rememberSaveable { mutableStateOf<String?>(null) }
+    // New session asks which project first, unless there is only one.
+    var pickingProject by rememberSaveable { mutableStateOf(false) }
+    val newSession = {
+        val only = projects.singleOrNull()
+        if (only != null) createSessionIn = only.id else pickingProject = true
+    }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
-
-    // A project closed away in a folder stays chosen, but shows nothing until its folder opens.
-    val chosen = projects.firstOrNull { it.id == selectedId }
-    val selected = if (chosen != null) chosen.takeIf { it in shownProjects } else shownProjects.firstOrNull()
-    val sessions = selected?.let { tree.activeSessions(it.id) }.orEmpty()
     val waiting by model.client.waitingChats.collectAsStateWithLifecycle()
     val unread by model.client.unreadChats.collectAsStateWithLifecycle()
     val signalOf = { session: MinimalSession ->
@@ -595,10 +597,6 @@ private fun MinimalProjectsHome(
             session.chatIds.any { it in unread } -> SessionSignal.DONE
             else -> SessionSignal.IDLE
         }
-    }
-
-    LaunchedEffect(selected?.id, chosen == null) {
-        if (chosen == null && selectedId != selected?.id) selectedId = selected?.id
     }
 
     Column(
@@ -670,36 +668,44 @@ private fun MinimalProjectsHome(
                             )
                             is ProjectTreeRow.ProjectRow -> Box(indent) {
                                 val project = row.project
-                                if (project.id == selected?.id) {
+                                // Projects open and close on their own, like folders,
+                                // so several can be open at once.
+                                val projectOpen = project.id !in collapsed
+                                val toggle = { settings.setFolderOpen(project.id, !projectOpen) }
+                                val menu: @Composable () -> Unit = {
+                                    ProjectMenu(
+                                        project = project,
+                                        onShortcuts = {
+                                            model.openShortcutEditor(project.id, "${project.name} shortcuts")
+                                        },
+                                        onRename = { onRenameProject(project) },
+                                        onMove = { movingId = project.id }
+                                            .takeIf { canMove(project.id, project.parentId) },
+                                        onDelete = { onDeleteProject(project) },
+                                        onContext = { contextForId = project.id },
+                                        onSecrets = { secretsForId = project.id },
+                                    )
+                                }
+                                if (projectOpen) {
                                     OpenDrawer(
                                         project = project,
                                         icon = ownerIcons[project.owner],
-                                        sessions = sessions,
+                                        sessions = tree.activeSessions(project.id),
                                         signalOf = signalOf,
                                         open = { session -> open(project, session) },
                                         actions = actions,
-                                        menu = {
-                                            ProjectMenu(
-                                                project = project,
-                                                onShortcuts = {
-                                                    model.openShortcutEditor(project.id, "${project.name} shortcuts")
-                                                },
-                                                onRename = { onRenameProject(project) },
-                                                onMove = { movingId = project.id }
-                                                    .takeIf { canMove(project.id, project.parentId) },
-                                                onDelete = { onDeleteProject(project) },
-                                                onContext = { contextForId = project.id },
-                                                onSecrets = { secretsForId = project.id },
-                                            )
-                                        },
+                                        toggle = toggle,
+                                        onNewSession = { createSessionIn = project.id },
+                                        menu = menu,
                                     )
                                 } else {
                                     DrawerRow(
                                         project = project,
-                                        selected = false,
+                                        open = false,
                                         icon = ownerIcons[project.owner],
                                         signals = tree.activeSessions(project.id).map(signalOf),
-                                        onClick = { selectedId = project.id },
+                                        onClick = toggle,
+                                        menu = menu,
                                     )
                                 }
                             }
@@ -718,9 +724,9 @@ private fun MinimalProjectsHome(
                     }
                 }
             }
-            if (selected != null) {
+            if (projects.isNotEmpty()) {
                 ExtendedFloatingActionButton(
-                    onClick = { createSessionIn = selected.id },
+                    onClick = newSession,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(16.dp),
@@ -814,6 +820,19 @@ private fun MinimalProjectsHome(
             AgentSecretsDialog(model, project.id, "${project.name} secrets", onDismiss = { secretsForId = null })
         }
     }
+    val lastSessionProject by settings.lastSessionProject.collectAsStateWithLifecycle()
+    if (pickingProject) {
+        ProjectPickerDialog(
+            choices = tree.projectChoices(lastSessionProject),
+            lastUsed = lastSessionProject,
+            icons = ownerIcons,
+            onDismiss = { pickingProject = false },
+            onPick = { project ->
+                pickingProject = false
+                createSessionIn = project.id
+            },
+        )
+    }
     val creatingIn = projects.firstOrNull { it.id == createSessionIn }
     LaunchedEffect(createSessionIn, creatingIn == null, loading) {
         if (createSessionIn != null && creatingIn == null && !loading) createSessionIn = null
@@ -827,9 +846,17 @@ private fun MinimalProjectsHome(
             catalogError = model.hostCatalogError.collectAsStateWithLifecycle().value,
             retryCatalog = model::loadCreationCatalog,
             places = { NewSessionPlaces.load(model.client, creatingIn.id) },
+            // Back to the list of projects; what was typed stays with this one.
+            onChangeProject = {
+                createSessionIn = null
+                pickingProject = true
+            }.takeIf { projects.size > 1 },
             onDismiss = { createSessionIn = null },
             onCreate = { title, agent, worktree, startFromRemote, effort, access, plan ->
                 createSessionIn = null
+                settings.setLastSessionProject(creatingIn.id)
+                // Coming back to Projects, the new session's project is in view.
+                reveal(creatingIn.id)
                 model.createDirectSession(creatingIn.id, title, agent, worktree = worktree, startFromRemote = startFromRemote, effort = effort, access = access, plan = plan)
             },
         )
@@ -1209,11 +1236,14 @@ private fun SignalMark(signal: SessionSignal, modifier: Modifier = Modifier, bac
 @Composable
 private fun DrawerRow(
     project: MinimalProject,
-    selected: Boolean,
+    open: Boolean,
     signals: List<SessionSignal>,
+    /** Opens or closes the project. */
     onClick: () -> Unit,
     /** The avatar of the account behind the project, in place of the folder icon. */
     icon: ByteArray? = null,
+    /** Starts a session here; offered on an open project. */
+    onNewSession: (() -> Unit)? = null,
     menu: (@Composable () -> Unit)? = null,
 ) {
     val faint = LocalXdSignals.current.faint
@@ -1222,13 +1252,13 @@ private fun DrawerRow(
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp),
+            .clickable(onClickLabel = if (open) "Close project" else "Open project", onClick = onClick)
+            .padding(start = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Icon(
-            painterResource(if (selected) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
+            painterResource(if (open) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
             contentDescription = null,
             tint = faint,
             modifier = Modifier.size(14.dp),
@@ -1236,26 +1266,32 @@ private fun DrawerRow(
         OwnerAvatar(
             icon = icon,
             fallback = R.drawable.ic_folder,
-            tint = if (selected) MaterialTheme.colorScheme.onSurfaceVariant else faint,
+            tint = if (open) MaterialTheme.colorScheme.onSurfaceVariant else faint,
         )
-        Text(
-            project.name,
-            modifier = Modifier.weight(1f, fill = false),
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-            color = if (selected) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            project.sessions.toString(),
-            fontSize = 12.sp,
-            color = faint,
-        )
-        Spacer(Modifier.weight(1f))
-        menu?.invoke()
-        if (!selected) {
+        // The name takes the room left, so the buttons line up at the end.
+        Row(
+            Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                project.name,
+                modifier = Modifier.weight(1f, fill = false),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = if (open) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                project.sessions.toString(),
+                fontSize = 12.sp,
+                color = faint,
+            )
+        }
+        // A closed project still shows which of its sessions need a look.
+        if (!open) {
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1274,6 +1310,17 @@ private fun DrawerRow(
                 }
             }
         }
+        onNewSession?.let { start ->
+            IconButton(onClick = start, modifier = Modifier.size(48.dp)) {
+                Icon(
+                    painterResource(R.drawable.ic_add),
+                    contentDescription = "New session in ${project.name}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+        menu?.invoke()
     }
 }
 
@@ -1423,17 +1470,22 @@ private fun FolderRow(
             modifier = Modifier.size(14.dp),
         )
         OwnerAvatar(icon = icon, fallback = R.drawable.ic_folders, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(
-            folder.name,
-            modifier = Modifier.weight(1f, fill = false),
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(folder.items.toString(), fontSize = 12.sp, color = faint)
-        Spacer(Modifier.weight(1f))
+        Row(
+            Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                folder.name,
+                modifier = Modifier.weight(1f, fill = false),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(folder.items.toString(), fontSize = 12.sp, color = faint)
+        }
         menu()
     }
 }
@@ -1657,7 +1709,7 @@ private fun MoveRow(
     }
 }
 
-/** The current project, open, with one row per session beneath it. */
+/** An open project, with one row per session beneath it. */
 @Composable
 private fun OpenDrawer(
     project: MinimalProject,
@@ -1666,6 +1718,9 @@ private fun OpenDrawer(
     signalOf: (MinimalSession) -> SessionSignal,
     open: (MinimalSession) -> Unit,
     actions: SessionActions,
+    /** Closes the project. */
+    toggle: () -> Unit,
+    onNewSession: () -> Unit,
     menu: @Composable () -> Unit,
 ) {
     Column(
@@ -1674,12 +1729,21 @@ private fun OpenDrawer(
             .padding(vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        DrawerRow(project = project, selected = true, signals = emptyList(), onClick = {}, icon = icon, menu = menu)
+        DrawerRow(
+            project = project,
+            open = true,
+            signals = emptyList(),
+            onClick = toggle,
+            icon = icon,
+            onNewSession = onNewSession,
+            menu = menu,
+        )
+        // Kept to one quiet line: several empty projects can be open at once.
         if (sessions.isEmpty()) {
             Text(
-                "No sessions yet. Start one with Codex, Claude, or JCode.",
-                modifier = Modifier.padding(start = 30.dp, end = 10.dp, top = 4.dp, bottom = 8.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                "No sessions yet",
+                modifier = Modifier.padding(start = 30.dp, end = 10.dp, bottom = 6.dp),
+                color = LocalXdSignals.current.faint,
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
@@ -1952,6 +2016,8 @@ internal fun NewSessionDialog(
     chatTab: Boolean = false,
     /** Where a new session can work; null for a chat joining an existing session. */
     places: (suspend () -> NewSessionPlaces)? = null,
+    /** Goes back to choosing the project; null when there is no other to choose. */
+    onChangeProject: (() -> Unit)? = null,
     onDismiss: () -> Unit,
     onCreate: (String, DirectAgent, Ops.NewSessionWorktree?, Boolean, String?, String?, Boolean?) -> Unit,
 ) {
@@ -2018,7 +2084,11 @@ internal fun NewSessionDialog(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(projectName, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (onChangeProject != null) {
+                    ProjectLine(projectName, onChangeProject)
+                } else {
+                    Text(projectName, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
@@ -2085,6 +2155,147 @@ internal fun NewSessionDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+/** The project a new session starts in, with a way back to the others. */
+@Composable
+private fun ProjectLine(name: String, change: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp))
+            .clickable(onClickLabel = "Choose another project", onClick = change)
+            .padding(start = 12.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(
+            painterResource(R.drawable.ic_folder),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
+        )
+        Text(
+            name,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        TextButton(onClick = change) { Text("Change") }
+    }
+}
+
+/** More projects than this, and the picker offers a filter. */
+private const val PROJECT_FILTER_AT = 6
+
+/**
+ * The first step of New session: which project it starts in. The project the
+ * last session started in comes first, and a long list can be filtered.
+ */
+@Composable
+private fun ProjectPickerDialog(
+    choices: List<ProjectChoice>,
+    lastUsed: String?,
+    icons: Map<String, ByteArray?>,
+    onDismiss: () -> Unit,
+    onPick: (MinimalProject) -> Unit,
+) {
+    var filter by rememberSaveable { mutableStateOf("") }
+    val shown = choices.matching(filter)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New session") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Choose a project", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (choices.size > PROJECT_FILTER_AT) {
+                    OutlinedTextField(
+                        value = filter,
+                        onValueChange = { filter = it },
+                        label = { Text("Find a project") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                    if (shown.isEmpty()) {
+                        Text(
+                            "No project matches “${filter.trim()}”",
+                            modifier = Modifier.padding(vertical = 12.dp),
+                            color = LocalXdSignals.current.faint,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    shown.forEach { choice ->
+                        key(choice.project.id) {
+                            ProjectChoiceRow(
+                                choice = choice,
+                                icon = icons[choice.project.owner],
+                                lastUsed = choice.project.id == lastUsed && choices.size > 1,
+                                onClick = { onPick(choice.project) },
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun ProjectChoiceRow(
+    choice: ProjectChoice,
+    icon: ByteArray?,
+    lastUsed: Boolean,
+    onClick: () -> Unit,
+) {
+    val faint = LocalXdSignals.current.faint
+    val project = choice.project
+    // Where it sits, and how busy it is, so two projects of one name tell apart.
+    val detail = listOfNotNull(
+        choice.path.joinToString(" / ").ifEmpty { null },
+        if (project.sessions == 0) "No sessions" else "${project.sessions} session${if (project.sessions == 1) "" else "s"}",
+    ).joinToString(" · ")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        OwnerAvatar(icon = icon, fallback = R.drawable.ic_folder, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = 20.dp)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                project.name,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                detail,
+                style = MaterialTheme.typography.labelMedium,
+                color = faint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (lastUsed) StatusPill("Last used", MaterialTheme.colorScheme.primary)
+        Icon(
+            painterResource(R.drawable.ic_chevron_right),
+            contentDescription = null,
+            tint = faint,
+            modifier = Modifier.size(14.dp),
+        )
+    }
 }
 
 @Composable
