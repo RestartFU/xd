@@ -562,7 +562,7 @@ impl TurnRuntime {
             .any(|(_, router)| router.lock().map_or(true, |router| router.sink.is_some()))
         {
             return Err(
-                "A chat is working on this account. Stop it or let it finish, then remove the account."
+                "A chat is working on this account. Stop it or let it finish, then try again."
                     .into(),
             );
         }

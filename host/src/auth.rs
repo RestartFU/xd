@@ -266,12 +266,14 @@ impl AuthManager {
     pub(crate) fn signed_in(&self, provider: &str, account: &str) -> bool {
         let snapshot = self.snapshot(provider, account);
         let state = match snapshot.state.as_str() {
-            "checking" | "unknown" | "signing-in" => {
-                snapshot.settled.as_deref().unwrap_or("unknown")
-            }
+            "checking" | "unknown" => snapshot.settled.as_deref().unwrap_or("unknown"),
             state => state,
         };
-        !matches!(state, "signed-out" | "failed" | "signing-out")
+        // An account whose sign-in is being replaced runs as nobody yet.
+        !matches!(
+            state,
+            "signed-out" | "failed" | "signing-out" | "signing-in"
+        )
     }
 
     /// The account the chat's next turn runs on; see [`Accounts::choose`].
@@ -574,9 +576,12 @@ impl AuthManager {
     }
 
     fn run_session(&self, provider: &str, account: &str, serial: u64, kind: SessionKind) {
-        // Nothing may still run as an account whose home is about to go. New
-        // turns already pass it over: it reads as signing out.
-        if kind == SessionKind::Remove {
+        // Nothing may still run as an account whose home is about to go, or
+        // whose sign-in is about to be replaced. New turns already pass it
+        // over: it reads as signing out or in.
+        if kind == SessionKind::Remove
+            || (kind == SessionKind::SignIn && account != DEFAULT_ACCOUNT)
+        {
             let released = self
                 .inner
                 .releaser
