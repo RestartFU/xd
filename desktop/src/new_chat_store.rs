@@ -52,7 +52,20 @@ pub(super) fn take_error() -> Option<String> {
 fn atomic_write(path: &std::path::Path, value: &Value) -> Result<(), String> {
     use std::io::Write;
     let temp = path.with_extension("tmp");
-    let mut file = fs::File::create(&temp).map_err(|e| e.to_string())?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
     serde_json::to_writer(&mut file, value).map_err(|e| e.to_string())?;
     file.flush()
         .and_then(|_| file.sync_all())
@@ -65,6 +78,7 @@ fn worker() -> &'static mpsc::Sender<Job> {
     WORKER.get_or_init(|| {
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
+            let mut retry_payloads = std::collections::HashMap::<String, Value>::new();
             for job in receive {
                 match job {
                     Job::Save {
@@ -72,15 +86,23 @@ fn worker() -> &'static mpsc::Sender<Job> {
                         metadata,
                         attachments,
                     } => {
+                        let attachments = attachments.or_else(|| retry_payloads.remove(&key));
                         let result = (|| {
                             let dir = directory(&key);
-                            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                            let mut builder = fs::DirBuilder::new();
+                            builder.recursive(true);
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::DirBuilderExt;
+                                builder.mode(0o700);
+                            }
+                            builder.create(&dir).map_err(|e| e.to_string())?;
                             let previous = fs::read(dir.join("draft.json"))
                                 .ok()
                                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
                             let payload = attachment_path(&dir, &metadata);
-                            if let Some(attachments) = attachments {
-                                atomic_write(&payload, &attachments)?;
+                            if let Some(attachments) = &attachments {
+                                atomic_write(&payload, attachments)?;
                             }
                             atomic_write(&dir.join("draft.json"), &metadata)?;
                             if let Some(previous) = previous {
@@ -92,7 +114,12 @@ fn worker() -> &'static mpsc::Sender<Job> {
                             Ok::<(), String>(())
                         })();
                         if let Err(error) = result {
+                            if let Some(payload) = attachments {
+                                retry_payloads.insert(key, payload);
+                            }
                             *ERROR.lock().unwrap() = Some(error);
+                        } else {
+                            retry_payloads.remove(&key);
                         }
                     }
                     Job::Read { key, reply } => {
@@ -176,6 +203,38 @@ mod tests {
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
         save(key.clone(), json!({}), Some(json!([]))).unwrap();
         assert!(read(key.clone()).unwrap().get("attachments").is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(directory(&key)).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        fs::remove_dir_all(directory(&key)).unwrap();
+        // Simulate an unavailable destination, then recover and retry with only new text.
+        fs::write(directory(&key), b"blocked").unwrap();
+        save(
+            key.clone(),
+            json!({"text":"first","has_attachments":true}),
+            Some(json!([{"name":"retry.txt","mime":"text/plain","data":"bm90ZXM="}])),
+        )
+        .unwrap();
+        assert!(read(key.clone()).is_err());
+        fs::remove_file(directory(&key)).unwrap();
+        save(
+            key.clone(),
+            json!({"text":"recovered","has_attachments":true}),
+            None,
+        )
+        .unwrap();
+        let restored = read(key.clone()).unwrap();
+        assert_eq!(restored["text"], "recovered");
+        assert_eq!(restored["attachments"][0]["name"], "retry.txt");
         fs::remove_dir_all(directory(&key)).unwrap();
     }
 }
