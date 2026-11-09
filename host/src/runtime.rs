@@ -4069,22 +4069,27 @@ done
             crate::storage::SendDisposition::Start { turn, .. } => runtime.start(turn).unwrap(),
             crate::storage::SendDisposition::Queued { .. } => panic!("{text} was queued"),
         };
-        let idle = || {
-            runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false
-        };
+        let idle =
+            || runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false;
 
         send("Build it");
         wait_for("the first turn to end", idle);
         wait_for("the host to be asked to continue", || {
             !continued.lock().unwrap().is_empty()
         });
-        assert_eq!(*continued.lock().unwrap(), [chat.clone()]);
+        assert_eq!(*continued.lock().unwrap(), std::slice::from_ref(&chat));
         let notice = contents(&store, &chat)
             .into_iter()
-            .find_map(|(_, content)| content.strip_prefix(ACCOUNT_SWITCH_PREFIX).map(str::to_owned))
+            .find_map(|(_, content)| {
+                content
+                    .strip_prefix(ACCOUNT_SWITCH_PREFIX)
+                    .map(str::to_owned)
+            })
             .expect("the chat says it switched");
         assert!(
-            notice.starts_with("Switched to b@example.com: Claude Code sign-in reached its 5-hour limit (back in "),
+            notice.starts_with(
+                "Switched to b@example.com: Claude Code sign-in reached its 5-hour limit (back in "
+            ),
             "{notice}"
         );
         assert!(notice.ends_with("Continuing there."), "{notice}");
@@ -4141,14 +4146,22 @@ done
         store
             .append_turn_message(&chat, "assistant", "Renamed it to Reader.", None)
             .unwrap();
-        store.set_session(&chat, "codex", "thread-a", "default").unwrap();
+        store
+            .set_session(&chat, "codex", "thread-a", "default")
+            .unwrap();
         let accounts = crate::accounts::Accounts::with_homes(&root.join("data"), &[]);
         let second = accounts.begin_adding("codex").unwrap();
         accounts
             .finish_adding("codex", &second, &crate::accounts::Identity::default())
             .unwrap()
             .unwrap();
-        accounts.note_limited("codex", "default", None, Some("weekly limit"), crate::accounts::now_ms());
+        accounts.note_limited(
+            "codex",
+            "default",
+            None,
+            Some("weekly limit"),
+            crate::accounts::now_ms(),
+        );
         let events = Arc::new(EventBus::default());
         let runtime = TurnRuntime::with_auth(
             store.clone(),
@@ -4170,17 +4183,31 @@ done
             turn.environment,
             vec![(
                 "CODEX_HOME".to_owned(),
-                accounts.home("codex", &second).unwrap().display().to_string()
+                accounts
+                    .home("codex", &second)
+                    .unwrap()
+                    .display()
+                    .to_string()
             )]
         );
         assert!(turn.prompt.starts_with("<xd-note>"), "{}", turn.prompt);
-        assert!(turn.prompt.contains("User:\nRename the parser.\n\nAssistant:\nRenamed it to Reader."));
+        assert!(
+            turn.prompt
+                .contains("User:\nRename the parser.\n\nAssistant:\nRenamed it to Reader.")
+        );
         assert!(turn.prompt.ends_with("</xd-note>\n\nNow add tests."));
         let notice = contents(&store, &chat)
             .into_iter()
-            .find_map(|(_, content)| content.strip_prefix(ACCOUNT_SWITCH_PREFIX).map(str::to_owned))
+            .find_map(|(_, content)| {
+                content
+                    .strip_prefix(ACCOUNT_SWITCH_PREFIX)
+                    .map(str::to_owned)
+            })
             .unwrap();
-        assert!(notice.contains("Codex sign-in reached its weekly limit"), "{notice}");
+        assert!(
+            notice.contains("Codex sign-in reached its weekly limit"),
+            "{notice}"
+        );
         assert!(notice.contains("started a new one"), "{notice}");
         let _ = fs::remove_dir_all(&root);
     }
