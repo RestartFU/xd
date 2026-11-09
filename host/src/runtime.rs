@@ -4505,13 +4505,24 @@ read next
         runtime.start(turn).unwrap();
         let request = store.latest_user_message(&chat).unwrap();
 
-        wait_for("the chat to carry on as the second account", || {
+        // The fake waits on purpose for about three seconds of this, so the
+        // usual budget leaves too little for two process starts on a busy box.
+        let carried_on = || {
             runtime.live_turn(&chat).is_none()
                 && store.chat(&chat).unwrap()["working"] == false
                 && contents(&store, &chat)
                     .iter()
                     .any(|(_, content)| content == "Carried on.")
-        });
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !carried_on() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the chat to carry on as the second account: {:?}",
+                contents(&store, &chat)
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
         assert_eq!(*continued.lock().unwrap(), [(chat.clone(), request)]);
         let runs = fs::read_to_string(root.join("runs")).unwrap();
         let home = accounts.home("claude", &second).unwrap();
