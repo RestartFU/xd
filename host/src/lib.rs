@@ -473,6 +473,8 @@ impl Engine {
                 }
             }
             Some("cancel") => self.cancel(&request),
+            Some("pause-all") => self.pause_all(),
+            Some("resume-all") => self.resume_all(),
             Some("new-folder") => self.new_folder(&request),
             Some("set-folder-context") => {
                 self.tree_mutation(|store| store.set_folder_context(&request))
@@ -1802,7 +1804,8 @@ impl Engine {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
         };
-        let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false);
+        let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false)
+            || store.chat_is_paused(chat_id).unwrap_or(false);
         let prepared = match continues {
             Some(Continuation::AfterRestart(last_message)) => {
                 store.prepare_continuation(&request, last_message)
@@ -1874,6 +1877,96 @@ impl Engine {
         json!({"ok": true})
     }
 
+    /// Stops every chat at work, and every chat whose agent still runs
+    /// background agents or shells between turns, so nothing goes on while the
+    /// user is away. Each keeps its queue until [`Self::resume_all`].
+    fn pause_all(&self) -> Value {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let mut chats = match store.working_chats() {
+            Ok(chats) => chats,
+            Err(error) => return error_reply(error),
+        };
+        let background = runtime.background_task_counts();
+        for chat_id in background.keys() {
+            if !chats.contains(chat_id) {
+                chats.push(chat_id.clone());
+            }
+        }
+        let mut paused = Vec::new();
+        for chat_id in chats {
+            // Held so no message can start a turn between marking the chat and
+            // stopping it: the stop would take the new turn instead.
+            let Ok(gate) = self.chat_execution_gate(&chat_id) else {
+                continue;
+            };
+            let Ok(_execution) = gate.lock() else {
+                continue;
+            };
+            match store.pause_chat(&chat_id, background.contains_key(&chat_id)) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    eprintln!("xd-host: cannot pause chat {chat_id}: {error}");
+                    continue;
+                }
+            }
+            // As with stop: a turn that died with a previous host still ends.
+            if !runtime.stop_chat(&chat_id) {
+                let _ = store.clear_interrupted_turn(&chat_id);
+            }
+            self.events
+                .publish(json!({"event": "changed", "chat": chat_id}));
+            paused.push(chat_id);
+        }
+        if !paused.is_empty() {
+            self.events.publish(json!({"event": "tree"}));
+        }
+        json!({"ok": true, "paused": paused})
+    }
+
+    /// Picks every paused chat back up: continues the turn pausing cut short,
+    /// after which its queue runs as usual.
+    fn resume_all(&self) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let chats = match store.paused_chats() {
+            Ok(chats) => chats,
+            Err(error) => return error_reply(error),
+        };
+        let mut resumed = Vec::new();
+        for chat_id in chats {
+            let reply = self.send_message_inner(
+                &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
+                Some(Continuation::Resume),
+            );
+            if reply["ok"] != true {
+                // Nothing to continue: the chat moved on, or its turn is still
+                // stopping. Let the queue go on, and leave the turn to resume
+                // from the chat.
+                if !store.unpause_chat(&chat_id).unwrap_or(false) {
+                    continue;
+                }
+                let queued = store
+                    .chat(&chat_id)
+                    .ok()
+                    .and_then(|chat| chat["queue"][0].as_str().map(str::to_owned));
+                if let Some(text) = queued
+                    && let Err(error) = self.start_queued_if_idle(&chat_id, &text)
+                {
+                    eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
+                }
+                self.events.publish(json!({"event": "tree"}));
+            }
+            self.events
+                .publish(json!({"event": "changed", "chat": chat_id}));
+            resumed.push(chat_id);
+        }
+        json!({"ok": true, "resumed": resumed})
+    }
+
     /// Redirects the running turn to a queued message: into the turn itself
     /// when its agent can take it, otherwise by stopping the turn with the
     /// message first in line.
@@ -1920,6 +2013,7 @@ impl Engine {
         if chat["working"] == true || chat["queue"][0].as_str() != Some(text) {
             return Ok(());
         }
+        let unpauses = store.chat_is_paused(chat_id).unwrap_or(false);
         let (_, event) = store
             .take_queued(&json!({"chat": chat_id, "index": 0, "text": text}))
             .map_err(|error| error.to_string())?;
@@ -1930,6 +2024,9 @@ impl Engine {
         {
             SendDisposition::Queued { event, .. } => self.events.publish(event),
             SendDisposition::Start { turn, .. } => {
+                if unpauses {
+                    self.events.publish(json!({"event": "tree"}));
+                }
                 if let Err(error) = runtime.start(turn.clone()) {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
                     return Err(error);

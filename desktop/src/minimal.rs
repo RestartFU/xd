@@ -546,6 +546,7 @@ mod tests {
             background_tasks: 0,
             settled_at: None,
             auto_settle_disabled: false,
+            paused: false,
         }
     }
 

@@ -22,6 +22,8 @@ public data class ChatSummary(
     val sessionId: String = id,
     /** Background agents and shells its agent process is still running. */
     val backgroundTasks: Int = 0,
+    /** Stopped by pausing every chat, and not resumed or started again since. */
+    val paused: Boolean = false,
 ) {
     /**
      * How many background tasks the chat is waiting on: none while a turn
@@ -52,6 +54,8 @@ public data class TreeSnapshot(
     val settlement: Boolean = false,
     /** The connected host says it keeps folders of projects. */
     val folderGroups: Boolean = false,
+    /** The connected host can pause every chat at once and resume them. */
+    val pauseAll: Boolean = false,
 ) {
     /**
      * New folders can be made. A host that already lists one keeps them even
@@ -60,3 +64,21 @@ public data class TreeSnapshot(
      */
     val canCreateFolders: Boolean get() = folderGroups || folders.any(Folder::group)
 }
+
+/** What the Projects page's pause button does when pressed. */
+public enum class PauseAllAction { PAUSE, RESUME }
+
+/**
+ * The pause button's action: resume while any chat is paused, pause
+ * otherwise. Null when the host cannot pause every chat, so the button hides.
+ */
+public val TreeSnapshot.pauseAllAction: PauseAllAction?
+    get() = when {
+        !pauseAll -> null
+        chats.any(ChatSummary::paused) -> PauseAllAction.RESUME
+        else -> PauseAllAction.PAUSE
+    }
+
+/** Something pausing would stop: a chat running a turn or waiting on its background tasks. */
+public val TreeSnapshot.anythingToPause: Boolean
+    get() = chats.any { it.working || it.backgroundTasks > 0 }

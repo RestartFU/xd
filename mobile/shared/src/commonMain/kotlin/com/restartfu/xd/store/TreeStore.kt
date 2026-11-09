@@ -152,6 +152,7 @@ internal class TreeStore(
                         },
                         settlement = reply.settlement,
                         folderGroups = reply.folderGroups,
+                        pauseAll = reply.pauseAll,
                         chats = reply.chats.map {
                             ChatSummary(
                                 id = it.id,
@@ -186,6 +187,7 @@ internal class TreeStore(
                                     }
                                     ?.count
                                     ?: it.backgroundTasks,
+                                paused = it.paused,
                             )
                         },
                     )

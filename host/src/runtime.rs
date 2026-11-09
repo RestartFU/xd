@@ -1798,6 +1798,18 @@ impl TurnRuntime {
         killed
     }
 
+    /// Stops all of the chat's work: its turn, and the kept process with any
+    /// background agents and shells it runs between turns. True when a turn
+    /// was running.
+    pub(crate) fn stop_chat(&self, chat_id: &str) -> bool {
+        let killed = self.cancel(chat_id);
+        if !killed {
+            self.drop_session(chat_id);
+            self.publish_background_tasks(chat_id);
+        }
+        killed
+    }
+
     /// Releases running and idle resources when a conversation is deleted.
     pub(crate) fn discard_chat(&self, chat_id: &str) {
         self.cancel(chat_id);

@@ -36,6 +36,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
@@ -129,6 +130,9 @@ import androidx.compose.material3.SnackbarResult
 import com.restartfu.xd.model.SettledSession
 import com.restartfu.xd.model.activeSessions
 import com.restartfu.xd.model.settledSessions
+import com.restartfu.xd.model.PauseAllAction
+import com.restartfu.xd.model.anythingToPause
+import com.restartfu.xd.model.pauseAllAction
 import com.restartfu.xd.protocol.Ops
 import androidx.compose.material3.RadioButton
 import com.restartfu.xd.protocol.BranchSourceReply
@@ -642,6 +646,7 @@ private fun MinimalProjectsHome(
             session.chatIds.any { it in waiting } -> SessionSignal.WAITING
             session.working -> SessionSignal.WORKING
             session.backgroundTasks > 0 -> SessionSignal.BACKGROUND
+            session.paused -> SessionSignal.PAUSED
             session.chatIds.any { it in unread } -> SessionSignal.DONE
             else -> SessionSignal.IDLE
         }
@@ -653,7 +658,18 @@ private fun MinimalProjectsHome(
             .background(MaterialTheme.colorScheme.background)
             .navigationBarsPadding(),
     ) {
-        ProductHeader(link = link, title = "Projects", onSettings = { settingsOpen = true })
+        val pauseAction = tree.pauseAllAction
+        val pausingAll by model.pausingAll.collectAsStateWithLifecycle()
+        ProductHeader(link = link, title = "Projects", onSettings = { settingsOpen = true }) {
+            // Hidden on a host that cannot pause every chat.
+            if (pauseAction != null) PauseAllButton(
+                action = pauseAction,
+                enabled = !pausingAll && (pauseAction == PauseAllAction.RESUME || tree.anythingToPause),
+                onClick = {
+                    if (pauseAction == PauseAllAction.RESUME) model.resumeAll() else model.pauseAll()
+                },
+            )
+        }
         when {
             loading && projects.isEmpty() -> Box(
                 Modifier.fillMaxSize(),
@@ -1168,6 +1184,8 @@ private fun ProductHeader(
     link: Link,
     title: String,
     onSettings: () -> Unit,
+    /** Buttons for the page itself, just after its title. */
+    actions: @Composable () -> Unit = {},
 ) {
     Row(
         modifier = Modifier
@@ -1192,6 +1210,7 @@ private fun ProductHeader(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        actions()
         val up = link is Link.Up
         Box(
             modifier = Modifier.size(48.dp),
@@ -1216,6 +1235,32 @@ private fun ProductHeader(
         }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+}
+
+/**
+ * Pauses every working chat for stepping away from work, then turns into
+ * the button that resumes them all.
+ */
+@Composable
+private fun PauseAllButton(action: PauseAllAction, enabled: Boolean, onClick: () -> Unit) {
+    val resume = action == PauseAllAction.RESUME
+    val label = if (resume) "Resume paused chats" else "Pause all chats"
+    IconTooltip(label) {
+        IconButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = Modifier.size(48.dp),
+            colors = IconButtonDefaults.iconButtonColors(
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            ),
+        ) {
+            Icon(
+                painter = painterResource(if (resume) R.drawable.ic_play else R.drawable.ic_pause),
+                contentDescription = label,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
 }
 
 /** Height of the floating bar, and the size of the round New session button above it. */
@@ -1329,6 +1374,8 @@ private enum class SessionSignal(val label: String) {
     WAITING("Waiting on you"),
     /** No turn running, but background agents or shells are. */
     BACKGROUND("Waiting on background tasks"),
+    /** Stopped by pausing every chat; resuming them continues it. */
+    PAUSED("Paused"),
     DONE("Done"),
 }
 
@@ -1336,7 +1383,7 @@ private enum class SessionSignal(val label: String) {
 private fun SessionSignal.color(): Color {
     val signals = LocalXdSignals.current
     return when (this) {
-        SessionSignal.IDLE -> signals.faint
+        SessionSignal.IDLE, SessionSignal.PAUSED -> signals.faint
         SessionSignal.WORKING, SessionSignal.BACKGROUND -> signals.working
         SessionSignal.WAITING -> signals.waiting
         SessionSignal.DONE -> signals.done
@@ -1353,6 +1400,7 @@ private fun SignalMark(signal: SessionSignal, modifier: Modifier = Modifier, bac
     when (signal) {
         SessionSignal.IDLE -> Unit
         SessionSignal.WAITING -> StatusPill("Waiting", signal.color(), modifier)
+        SessionSignal.PAUSED -> StatusPill("Paused", signal.color(), modifier)
         SessionSignal.WORKING -> PulseDot(signal.color(), modifier)
         // The count beside a still ring; the words are for screen readers.
         SessionSignal.BACKGROUND -> Row(
@@ -1453,7 +1501,8 @@ private fun SignalDots(signals: List<SessionSignal>) {
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        signals.filter { it != SessionSignal.IDLE }.take(5).forEach { signal ->
+        // A paused session is quiet until resumed; the header's Resume button says so.
+        signals.filter { it != SessionSignal.IDLE && it != SessionSignal.PAUSED }.take(5).forEach { signal ->
             if (signal == SessionSignal.BACKGROUND) {
                 BackgroundRing(signal.color(), size = 6.dp)
             } else {

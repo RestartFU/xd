@@ -43,6 +43,29 @@ class TreeStoreTest {
     }
 
     @Test
+    fun treeCarriesPauseSupportAndPausedChats() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(testCredentials()), backgroundScope)
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
+        val store = TreeStore(actor)
+        val refresh = async { store.refresh() }
+        runCurrent()
+        factory.latest.receive(
+            """{"ok":true,"pause_all":true,"folders":[],"chats":[""" +
+                """{"id":"one","folder":"f","title":"One","backend":"codex","working":false,"paused":true},""" +
+                """{"id":"two","folder":"f","title":"Two","backend":"claude","working":false}],"_xd_request":2}""",
+        )
+        runCurrent()
+        refresh.await()
+        assertTrue(store.state.value.pauseAll)
+        assertEquals(listOf(true, false), store.state.value.chats.map { it.paused })
+    }
+
+    @Test
     fun lifecycleEventCoveredByTreeSnapshotIsIgnored() = runTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(

@@ -453,6 +453,101 @@ fn a_cut_short_turn_can_be_resumed_exactly_once() {
 }
 
 #[test]
+fn pausing_all_holds_working_chats_until_they_resume() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    let folder = client.call(json!({"op":"new-folder", "name":"Project"}));
+    assert_eq!(folder["ok"], true, "{folder}");
+    let mut new_chat = || {
+        let chat = client.call(json!({"op":"new-chat", "folder":folder["id"], "backend":"codex"}));
+        assert_eq!(chat["ok"], true, "{chat}");
+        chat["id"].as_str().unwrap().to_owned()
+    };
+    let busy = new_chat();
+    let idle_chat = new_chat();
+    let user_messages = |client: &mut Client<UnixStream, UnixStream>, text: &str| {
+        client.call(json!({"op":"messages", "chat":busy}))["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "user" && message["content"] == text)
+            .count()
+    };
+    let paused_in_tree = |client: &mut Client<UnixStream, UnixStream>| {
+        let tree = client.call(json!({"op":"tree"}));
+        assert_eq!(tree["pause_all"], true, "{tree}");
+        tree["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|chat| chat["paused"] == true)
+            .map(|chat| chat["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    // Nothing at work, nothing to pause.
+    let reply = client.call(json!({"op":"pause-all"}));
+    assert_eq!(reply["paused"], json!([]), "{reply}");
+
+    let reply = client.call(json!({"op":"send", "chat":busy, "text":"forever"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let reply = client.call(json!({"op":"send", "chat":busy, "text":"later"}));
+    assert_eq!(reply["queued"], true, "{reply}");
+
+    let reply = client.call(json!({"op":"pause-all"}));
+    assert_eq!(reply["paused"], json!([busy]), "{reply}");
+    // The stopped turn does not hand over to the queue while paused.
+    let chat = client.wait_for(json!({"op":"chat", "chat":busy}), |reply| {
+        reply["working"] == false
+    });
+    assert_eq!(chat["queue"], json!(["later"]), "{chat}");
+    assert_eq!(chat["resumable"], true, "{chat}");
+    assert_eq!(paused_in_tree(&mut client), vec![busy.clone()]);
+    assert_eq!(user_messages(&mut client, "later"), 0);
+    // Pausing again finds nothing more to do.
+    let reply = client.call(json!({"op":"pause-all"}));
+    assert_eq!(reply["paused"], json!([]), "{reply}");
+
+    // Resuming continues the turn, then the queue runs after it.
+    let reply = client.call(json!({"op":"resume-all"}));
+    assert_eq!(reply["resumed"], json!([busy]), "{reply}");
+    assert!(paused_in_tree(&mut client).is_empty());
+    client.wait_for(json!({"op":"chat", "chat":busy}), |reply| {
+        reply["working"] == false && reply["queue"] == json!([])
+    });
+    assert_eq!(
+        user_messages(&mut client, "Continue where you left off."),
+        1
+    );
+    assert_eq!(user_messages(&mut client, "later"), 1);
+    let reply = client.call(json!({"op":"resume-all"}));
+    assert_eq!(reply["resumed"], json!([]), "{reply}");
+    let untouched = client.call(json!({"op":"messages", "chat":idle_chat}));
+    assert_eq!(untouched["messages"], json!([]), "{untouched}");
+
+    // Writing to a paused chat picks it up without resuming the others.
+    let reply = client.call(json!({"op":"send", "chat":busy, "text":"forever"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let reply = client.call(json!({"op":"send", "chat":idle_chat, "text":"forever"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let reply = client.call(json!({"op":"pause-all"}));
+    assert_eq!(reply["paused"].as_array().unwrap().len(), 2, "{reply}");
+    for chat in [&busy, &idle_chat] {
+        client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+            reply["working"] == false
+        });
+    }
+    let reply = client.call(json!({"op":"send", "chat":busy, "text":"hello"}));
+    assert_eq!(reply["queued"], false, "{reply}");
+    assert_eq!(paused_in_tree(&mut client), vec![idle_chat.clone()]);
+    client.wait_for(json!({"op":"chat", "chat":busy}), |reply| {
+        reply["working"] == false
+    });
+    let reply = client.call(json!({"op":"resume-all"}));
+    assert_eq!(reply["resumed"], json!([idle_chat]), "{reply}");
+}
+
+#[test]
 fn a_restart_continues_cut_off_turns_only_when_asked() {
     let continued = |client: &mut Client<UnixStream, UnixStream>, chat: &str| {
         client.call(json!({"op":"messages", "chat":chat}))["messages"]

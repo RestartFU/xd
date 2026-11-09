@@ -148,6 +148,30 @@ class RepliesTest {
     }
 
     @Test
+    fun pauseMembersAreOptional() {
+        val older = WireJson.parseToJsonElement(
+            """{"ok":true,"folders":[],"chats":[{"id":"c","folder":"p","title":"T","backend":"codex","working":true}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertEquals(false, older.pauseAll)
+        assertEquals(false, older.chats.single().paused)
+
+        val current = WireJson.parseToJsonElement(
+            """{"ok":true,"pause_all":true,"folders":[],"chats":[""" +
+                """{"id":"c","folder":"p","title":"T","backend":"codex","working":false,"paused":true},""" +
+                """{"id":"d","folder":"p","title":"U","backend":"claude","working":false}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertEquals(true, current.pauseAll)
+        assertEquals(listOf(true, false), current.chats.map { it.paused })
+
+        val paused = WireJson.parseToJsonElement("""{"ok":true,"paused":["c","d"]}""")
+            .jsonObject.decodeReply<PauseAllReply>()
+        assertEquals(listOf("c", "d"), paused.paused)
+        val resumed = WireJson.parseToJsonElement("""{"ok":true,"resumed":[]}""")
+            .jsonObject.decodeReply<ResumeAllReply>()
+        assertEquals(emptyList<String>(), resumed.resumed)
+    }
+
+    @Test
     fun autoSettleSettingsReadAnOffInactivityRuleAsNull() {
         val off = WireJson.parseToJsonElement(
             """{"ok":true,"after_days":null,"on_merge":true,"keep_pull_requests":false}""",

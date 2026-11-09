@@ -719,7 +719,7 @@ impl StateStore {
         let mut statement = database.prepare(
             "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir, session_mode, workspace_session_id, \
              (SELECT CASE WHEN role = 'assistant' THEN content END FROM messages \
-              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1) FROM chats \
+              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1), paused FROM chats \
              ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
         let stored_chats = statement
@@ -735,6 +735,7 @@ impl StateStore {
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
                     row.get::<_, Option<String>>(9)?,
+                    row.get::<_, bool>(10)?,
                 ))
             })?
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
@@ -789,7 +790,7 @@ impl StateStore {
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
         for (
-            (id, folder, title, backend, working, _, _, session_mode, session, last_reply),
+            (id, folder, title, backend, working, _, _, session_mode, session, last_reply, paused),
             workdir,
         ) in visible_chats
         {
@@ -827,6 +828,9 @@ impl StateStore {
             });
             if let Some(branch) = branch {
                 chat["branch"] = Value::String(branch);
+            }
+            if paused {
+                chat["paused"] = Value::Bool(true);
             }
             let (settled_at, auto_settle_disabled) =
                 settlement.get(&session).copied().unwrap_or((None, false));
@@ -868,6 +872,8 @@ impl StateStore {
             "sessions": sessions,
             "settlement": true,
             "folder_reorder": true,
+            // The host answers `pause-all` and `resume-all`.
+            "pause_all": true,
             // The host keeps folders of projects; older hosts ignore `group`
             // and `owner` and would make a project instead.
             "folder_groups": true,
@@ -1828,8 +1834,10 @@ impl StateStore {
             clear_session_settlement(&transaction, chat_id)?;
             let mut queue = queue_from_column(Some(&stored));
             queue.push(message.prompt.clone());
+            // Writing to a chat still stopping for a pause picks it back up,
+            // so the message runs once the stopped turn ends.
             transaction.execute(
-                "UPDATE chats SET queued = ?, updated_at = ? WHERE id = ?",
+                "UPDATE chats SET queued = ?, paused = 0, updated_at = ? WHERE id = ?",
                 params![
                     serde_json::to_string(&queue).unwrap(),
                     now_seconds(),
@@ -2691,16 +2699,17 @@ impl StateStore {
                 params![chat_id, error, now_seconds()],
             )?;
         }
-        let stored = transaction
+        let (stored, paused) = transaction
             .query_row(
-                "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
+                "SELECT COALESCE(queued, ''), paused FROM chats WHERE id = ?",
                 [chat_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
         let mut queue = queue_from_column(Some(&stored));
-        let next_text = if queue.is_empty() {
+        // A paused chat keeps its queue for when it resumes.
+        let next_text = if paused || queue.is_empty() {
             None
         } else {
             Some(queue.remove(0))
@@ -2829,6 +2838,62 @@ impl StateStore {
         Ok(())
     }
 
+    /// The chats at work, to pause.
+    pub fn working_chats(&self) -> Result<Vec<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement =
+            database.prepare("SELECT id FROM chats WHERE host_working = 1 ORDER BY id")?;
+        let chats = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(chats)
+    }
+
+    /// Pauses the chat if it is at work, or if `background` says its agent
+    /// still runs something between turns. A paused chat holds its queue and
+    /// offers to continue the turn pausing cuts short. False when there was
+    /// nothing to pause, or it already is.
+    pub fn pause_chat(&self, chat_id: &str, background: bool) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chats SET paused = 1, turn_resumable = 1 \
+             WHERE id = ? AND paused = 0 AND (host_working = 1 OR ?)",
+            params![chat_id, background],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn chat_is_paused(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database
+            .query_row("SELECT paused FROM chats WHERE id = ?", [chat_id], |row| {
+                row.get::<_, bool>(0)
+            })
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn paused_chats(&self) -> Result<Vec<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement =
+            database.prepare("SELECT id FROM chats WHERE paused = 1 ORDER BY id")?;
+        let chats = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(chats)
+    }
+
+    /// Lets a paused chat go on without continuing its turn. False when it was
+    /// not paused, for example because a turn has picked it up since.
+    pub fn unpause_chat(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chats SET paused = 0 WHERE id = ? AND paused = 1",
+            [chat_id],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// The chats a restart cut off, once each. They stay in the database until
     /// the desktop decides, so another restart first does not lose them. A chat
     /// cut off while answering the resume prompt is left alone, so a turn that
@@ -2841,7 +2906,8 @@ impl StateStore {
                 "SELECT chats.id, chats.resume_after_restart FROM chats \
                  JOIN messages ON messages.id = chats.resume_after_restart \
                    AND messages.chat_id = chats.id \
-                 WHERE chats.resume_after_restart != 0 AND messages.content != ? \
+                 WHERE chats.resume_after_restart != 0 AND chats.paused = 0 \
+                   AND messages.content != ? \
                  ORDER BY chats.id",
             )?;
             statement
@@ -4707,13 +4773,13 @@ impl StateStore {
     }
 
     /// Sessions in this workspace that match `filter`, a condition on the
-    /// session `s`, with nothing running or queued in any member chat.
+    /// session `s`, with nothing running, paused, or queued in any member chat.
     fn quiet_sessions(&self, filter: &str) -> Result<Vec<SettlementCandidate>, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let root = self.workspace_root.to_string_lossy();
         let mut statement = database.prepare(&format!(
             "SELECT s.id, s.created_at, c.id, c.folder_id, c.workdir, c.original_workdir, \
-               c.host_working, c.queued, c.created_at, c.last_user_message_at, \
+               c.host_working OR c.paused, c.queued, c.created_at, c.last_user_message_at, \
                (SELECT created_at FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) \
              FROM workspace_sessions s \
              JOIN chats c ON c.workspace_session_id = s.id \
@@ -6048,6 +6114,12 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
             [],
         )?;
     }
+    if !columns.contains("paused") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN paused INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -6355,7 +6427,7 @@ const DELETABLE_SESSION: &str =
 /// Whether any chat in session `?1` has done anything since the sweep looked:
 /// `?2` is the user's latest message or start it saw, `?3` the newest activity.
 const SESSION_CHANGED_SINCE: &str = "EXISTS (SELECT 1 FROM chats c WHERE c.workspace_session_id = ?1 AND ( \
-       c.host_working != 0 OR COALESCE(c.queued, '') NOT IN ('', '[]') \
+       c.host_working != 0 OR c.paused != 0 OR COALESCE(c.queued, '') NOT IN ('', '[]') \
        OR c.last_user_message_at / 1000000 > ?2 OR c.created_at > ?2 \
        OR EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.created_at > ?3)))";
 
@@ -8619,8 +8691,9 @@ fn prepare_turn(
     text: &str,
     worktree_name: Option<&str>,
 ) -> Result<TurnSpec, StorageError> {
+    // Any turn picks a paused chat back up.
     transaction.execute(
-        "UPDATE chats SET turn_resumable = 0 WHERE id = ?",
+        "UPDATE chats SET turn_resumable = 0, paused = 0 WHERE id = ?",
         [chat_id],
     )?;
     let chat = transaction
@@ -13452,6 +13525,53 @@ mod tests {
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_none());
         assert!(resumable());
+    }
+
+    #[test]
+    fn a_paused_chat_holds_its_queue_and_stays_out_of_settling() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let send = |text: &str| {
+            store
+                .prepare_send(&json!({"chat": "chat", "text": text}))
+                .unwrap()
+        };
+
+        assert_eq!(store.settlement_candidates().unwrap().len(), 1);
+        // Nothing at work: nothing to pause, unless background work says so.
+        assert!(!store.pause_chat("chat", false).unwrap());
+        send("first");
+        send("queued");
+        assert_eq!(store.working_chats().unwrap(), ["chat"]);
+        assert!(store.pause_chat("chat", false).unwrap());
+        assert!(!store.pause_chat("chat", false).unwrap());
+        assert!(store.chat_is_paused("chat").unwrap());
+        assert!(store.settlement_candidates().unwrap().is_empty());
+
+        let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
+        assert!(finish.next.is_none());
+        let chat = store.chat("chat").unwrap();
+        assert_eq!(chat["working"], false);
+        assert_eq!(chat["queue"], json!(["queued"]));
+        assert_eq!(chat["resumable"], true);
+        assert_eq!(store.tree().unwrap()["chats"][0]["paused"], true);
+        assert_eq!(store.paused_chats().unwrap(), ["chat"]);
+        assert!(store.settlement_candidates().unwrap().is_empty());
+
+        // Resuming starts a turn, and any turn picks the chat back up.
+        store
+            .prepare_resume(&json!({"chat": "chat", "text": CONTINUE_PROMPT}))
+            .unwrap();
+        assert!(!store.chat_is_paused("chat").unwrap());
+        assert!(store.tree().unwrap()["chats"][0].get("paused").is_none());
+        let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
+        assert!(finish.next.is_some());
+        assert!(!store.unpause_chat("chat").unwrap());
     }
 
     /// Sessions from before accounts were kept are filed once, under the login

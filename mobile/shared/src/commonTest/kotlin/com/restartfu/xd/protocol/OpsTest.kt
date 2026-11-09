@@ -82,6 +82,12 @@ class OpsTest {
     }
 
     @Test
+    fun pausingAndResumingEveryChatNameNoChat() {
+        assertEquals("""{"op":"pause-all"}""", Ops.pauseAll().toString())
+        assertEquals("""{"op":"resume-all"}""", Ops.resumeAll().toString())
+    }
+
+    @Test
     fun accountOrderNamesEachAccountOnce() {
         val order = Ops.agentAccountsOrder("codex", listOf("a1", "default"))
         assertEquals("agent-accounts-order", order["op"]!!.jsonPrimitive.content)

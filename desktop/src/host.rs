@@ -285,6 +285,10 @@ pub enum RequestKind {
     },
     AgentCliUpdates,
     ResumeInterrupted,
+    /// `pause-all`, or `resume-all` when `resume`.
+    PauseAll {
+        resume: bool,
+    },
     AgentSecrets {
         folder_id: Option<String>,
     },
@@ -2067,6 +2071,12 @@ impl HostHandle {
                 "after": after,
             }),
         )
+    }
+
+    /// Stops every chat at work, or with `resume` picks the paused ones up.
+    pub fn pause_all(&self, resume: bool) -> Result<(), String> {
+        let op = if resume { "resume-all" } else { "pause-all" };
+        self.send(RequestKind::PauseAll { resume }, json!({"op": op}))
     }
 
     pub fn cancel(&self, chat_id: &str) -> Result<(), String> {

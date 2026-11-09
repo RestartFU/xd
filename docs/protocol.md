@@ -209,6 +209,11 @@ chats still answer `chat` and `messages` and can still be opened. List settled
 sessions apart from active ones, most recently settled first. Clients that
 ignore these members keep listing settled sessions with the active ones.
 
+A host that can pause every chat at once adds a top-level `"pause_all":true`;
+hide the pause button on one that does not. A chat that [`pause-all`](#pause-all-and-resume-all)
+stopped has `paused:true` until it resumes or any turn starts in it; the member
+is absent otherwise. While any chat is paused, the button resumes them.
+
 ### `background-task-output`
 
 Read-only request: `{"op":"background-task-output","chat":"<chat-id>"}`.
@@ -729,6 +734,28 @@ command is slow.
 Continues a cut-short turn by sending `Continue where you left off.` as a visible
 user message. Fails when the chat is not `resumable` or has moved on since, so
 clients pressing it together start one turn. Anything queued runs after that turn.
+
+### `pause-all` and `resume-all`
+
+```json
+{"op":"pause-all"}
+{"ok":true,"paused":["chat-1","chat-2"]}
+{"op":"resume-all"}
+{"ok":true,"resumed":["chat-1","chat-2"]}
+```
+
+`pause-all` stops every chat that is `working`, and every chat whose agent is
+running background tasks between turns, so nothing goes on while the user is
+away. Each one it stops is marked `paused` in `tree`, keeps its queue instead of
+starting the next message, and becomes `resumable`. A paused chat is not
+settled or deleted by the automatic rules. A chat that was already idle is left
+alone.
+
+`resume-all` continues each paused chat as [`resume-turn`](#resume-turn) does,
+then lets its queue run as usual. A paused chat that can no longer be resumed,
+because it has moved on or is still stopping, just loses its mark and runs its
+queue. Sending a message, resuming, or steering in one paused chat picks up only
+that chat. Both operations publish `changed` for each chat they touch and `tree`.
 
 ### `respond`
 

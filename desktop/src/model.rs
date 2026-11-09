@@ -277,6 +277,9 @@ pub struct ChatSummary {
     /// The session is kept out of automatic settling.
     #[serde(default)]
     pub auto_settle_disabled: bool,
+    /// Pausing every chat stopped this one, and it waits to resume.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 impl ChatSummary {
@@ -633,6 +636,8 @@ pub struct AppModel {
     /// The connected host keeps folders of projects. An older one ignores the
     /// request and makes a project instead.
     pub folder_groups_supported: bool,
+    /// The connected host can pause and resume every chat at once.
+    pub pause_all_supported: bool,
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
@@ -704,6 +709,9 @@ struct TreeSnapshot {
     /// The host keeps folders of projects; older hosts leave this out.
     #[serde(default)]
     folder_groups: bool,
+    /// The host answers `pause-all` and `resume-all`; older hosts leave this out.
+    #[serde(default)]
+    pause_all: bool,
     #[serde(default)]
     terminal_activity_epoch: Option<String>,
     #[serde(default)]
@@ -798,7 +806,33 @@ pub struct MessagePageChange {
     pub reset: bool,
 }
 
+/// What the button beside "Projects" offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseAllAction {
+    /// Stop every chat at work. `ready` is false while nothing is.
+    Pause { ready: bool },
+    /// Pick up the chats a pause stopped.
+    Resume,
+}
+
 impl AppModel {
+    /// Resume while any chat is paused, otherwise pause. `None` on a host
+    /// that cannot do either.
+    pub fn pause_all_action(&self) -> Option<PauseAllAction> {
+        if !self.pause_all_supported {
+            return None;
+        }
+        if self.chats.iter().any(|chat| chat.paused) {
+            return Some(PauseAllAction::Resume);
+        }
+        Some(PauseAllAction::Pause {
+            ready: self
+                .chats
+                .iter()
+                .any(|chat| chat.working || chat.background_tasks > 0),
+        })
+    }
+
     pub fn session_for_chat(&self, chat_id: &str) -> Option<&SessionSummary> {
         self.sessions
             .iter()
@@ -980,6 +1014,7 @@ impl AppModel {
         self.settlement_supported = snapshot.settlement;
         self.folder_reorder_supported = snapshot.folder_reorder;
         self.folder_groups_supported = snapshot.folder_groups;
+        self.pause_all_supported = snapshot.pause_all;
         self.refresh_session_activity();
         self.connected = true;
         self.unread_chats
@@ -1858,6 +1893,7 @@ impl AppModel {
             settlement_supported: true,
             folder_reorder_supported: true,
             folder_groups_supported: true,
+            pause_all_supported: false,
             folders: vec![Folder {
                 id: "workspace-xd".into(),
                 name: "xd".into(),
@@ -1877,6 +1913,7 @@ impl AppModel {
                     background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
+                    paused: false,
                 },
                 ChatSummary {
                     id: "chat-scroll".into(),
@@ -1889,6 +1926,7 @@ impl AppModel {
                     background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
+                    paused: false,
                 },
             ],
             sessions: Vec::new(),
@@ -2012,6 +2050,42 @@ mod tests {
         assert_eq!(model.chats[0].settled_at, Some(1234));
         assert!(model.chats[0].auto_settle_disabled);
         assert_eq!(model.chats[1].settled_at, None);
+    }
+
+    #[test]
+    fn the_pause_button_resumes_while_any_chat_is_paused() {
+        let mut model = AppModel::default();
+        model.apply_tree(&grouped_tree()).unwrap();
+        assert_eq!(
+            model.pause_all_action(),
+            None,
+            "an older host leaves it out"
+        );
+
+        let mut tree = grouped_tree();
+        tree["pause_all"] = json!(true);
+        model.apply_tree(&tree).unwrap();
+        assert_eq!(
+            model.pause_all_action(),
+            Some(PauseAllAction::Pause { ready: false })
+        );
+        tree["chats"][1]["background_tasks"] = json!(1);
+        model.apply_tree(&tree).unwrap();
+        assert_eq!(
+            model.pause_all_action(),
+            Some(PauseAllAction::Pause { ready: true })
+        );
+        tree["chats"][1]["background_tasks"] = json!(0);
+        tree["chats"][0]["working"] = json!(true);
+        model.apply_tree(&tree).unwrap();
+        assert_eq!(
+            model.pause_all_action(),
+            Some(PauseAllAction::Pause { ready: true })
+        );
+        tree["chats"][1]["paused"] = json!(true);
+        model.apply_tree(&tree).unwrap();
+        assert!(model.chats[1].paused);
+        assert_eq!(model.pause_all_action(), Some(PauseAllAction::Resume));
     }
 
     #[test]
@@ -3184,6 +3258,7 @@ mod tests {
                 background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
+                paused: false,
             }],
             ..Default::default()
         };
