@@ -669,13 +669,35 @@ impl AuthManager {
             },
         );
         let accounts = &self.inner.accounts;
-        let identity = crate::usage::check_account(accounts, provider, account).unwrap_or_default();
+        // Every account already in the list must be known by its login first,
+        // or a repeat of it could not be told apart.
+        for existing in accounts.ids(provider) {
+            if !accounts.knows_login(provider, &existing) {
+                crate::usage::check_account(accounts, provider, &existing);
+            }
+        }
+        // An account whose login cannot be read is never taken in: it could be
+        // another account's sign-in under a shared keychain entry.
+        let Some(identity) = crate::usage::check_account(accounts, provider, account)
+            .filter(|identity| identity.account_key.is_some())
+        else {
+            accounts.forget(provider, account);
+            self.forget_snapshot(provider, account);
+            self.set_notice(
+                provider,
+                "xd could not confirm which account signed in, so it was not added. Try again."
+                    .into(),
+            );
+            return;
+        };
         match accounts.finish_adding(provider, account, &identity) {
             Ok(Ok(())) => {
                 self.set_notice(
                     provider,
                     format!("Added {}.", accounts.label(provider, account)),
                 );
+                // Clears "checking" so the status check below really runs.
+                self.set_snapshot(provider, account, AuthSnapshot::unknown());
                 self.refresh_account(provider, account);
             }
             Ok(Err(existing)) => {

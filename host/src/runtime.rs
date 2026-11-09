@@ -76,7 +76,9 @@ struct RuntimeInner {
     explained_switches: Mutex<HashSet<String>>,
 }
 
-pub(crate) type AccountSwitchHandler = Box<dyn Fn(String) + Send + Sync>;
+/// Continues a chat on another account. Takes the chat and its newest user
+/// message, which must still be its newest for the continuation to go ahead.
+pub(crate) type AccountSwitchHandler = Box<dyn Fn(String, i64) + Send + Sync>;
 
 /// Marks a `tool` row that says a chat moved to another account. A client that
 /// does not know it shows the sentence after it as a small tool row.
@@ -527,14 +529,25 @@ impl TurnRuntime {
     /// session cannot: its reasoning is sealed to the account that wrote it,
     /// so the new account starts a session with the conversation's text.
     fn place_on_account(&self, turn: &mut TurnSpec) {
-        let choice = self
+        let choice = self.inner.auth.choose(
+            &turn.backend,
+            turn.session_account
+                .as_deref()
+                .map(crate::accounts::tag_account),
+        );
+        turn.environment.extend(choice.environment.iter().cloned());
+        // Filed with the login, so a session never follows the user's own
+        // sign-in to another login under the same account.
+        turn.account = self
             .inner
             .auth
-            .choose(&turn.backend, turn.session_account.as_deref());
-        turn.environment.extend(choice.environment.iter().cloned());
-        turn.account = choice.account.clone();
+            .accounts()
+            .session_tag(&turn.backend, &choice.account);
         let moved = turn.session_id.is_some()
-            && turn.session_account.as_deref() != Some(choice.account.as_str());
+            && !turn
+                .session_account
+                .as_deref()
+                .is_some_and(|stored| crate::accounts::same_login(stored, &turn.account));
         if !moved {
             return;
         }
@@ -618,6 +631,7 @@ impl TurnRuntime {
         limit: Option<String>,
     ) {
         let auth = &self.inner.auth;
+        let account = crate::accounts::tag_account(account);
         if !auth.accounts().has_several(provider) {
             return;
         }
@@ -644,11 +658,14 @@ impl TurnRuntime {
         if let Ok(mut explained) = self.inner.explained_switches.lock() {
             explained.insert(chat_id.to_owned());
         }
+        let Ok(last_message) = self.inner.store.latest_user_message(chat_id) else {
+            return;
+        };
         let handler = self.inner.on_account_switch.lock();
         if let Ok(handler) = handler
             && let Some(handler) = handler.as_ref()
         {
-            handler(chat_id.to_owned());
+            handler(chat_id.to_owned(), last_message);
         }
     }
 
@@ -4059,7 +4076,7 @@ done
         );
         let continued = Arc::new(Mutex::new(Vec::new()));
         let asked = continued.clone();
-        runtime.set_account_switch_handler(Box::new(move |chat| {
+        runtime.set_account_switch_handler(Box::new(move |chat, _| {
             asked.lock().unwrap().push(chat);
         }));
         let send = |text: &str| match store

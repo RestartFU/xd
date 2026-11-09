@@ -914,7 +914,11 @@ such account in priority order. With switching off, turns run on the first
 signed-in account. When a turn is turned away for usage and switching is on,
 the host holds the account back until its limit resets, adds an
 `account_switch` tool row to the chat, and continues it on the next account as
-`resume-turn` would. A Claude Code session moves with the chat. A Codex session
+`resume-turn` would, but only while the turn that ran out is still the chat's
+latest and still resumable. New chats start on the first usable account in
+priority order. A session is filed under its account and the login that account
+was signed in to, so a session never follows the user's own CLI sign-in to a
+different login. An account whose login the host cannot read is not added. A Claude Code session moves with the chat. A Codex session
 cannot open on another account, so the new account starts a session given the
 chat's messages as text, and the row says so.
 

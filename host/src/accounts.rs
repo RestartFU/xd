@@ -336,6 +336,29 @@ impl Accounts {
             .unwrap_or(false)
     }
 
+    /// What a chat's session is filed under: the account, and the login it was
+    /// signed in to when known. The user's own sign-in can change login under
+    /// the same account, and a Codex session must not follow it there.
+    pub(crate) fn session_tag(&self, provider: &str, id: &str) -> String {
+        self.with(provider, |state| {
+            state
+                .account(id)
+                .and_then(|account| account.account_key.clone())
+        })
+        .flatten()
+        .map_or_else(|| id.to_owned(), |key| format!("{id}#{key}"))
+    }
+
+    /// Whether the account's login has been read.
+    pub(crate) fn knows_login(&self, provider: &str, id: &str) -> bool {
+        self.with(provider, |state| {
+            state
+                .account(id)
+                .is_some_and(|account| account.account_key.is_some())
+        })
+        .unwrap_or(false)
+    }
+
     /// The account last seen signed in as this login.
     pub(crate) fn with_key(&self, provider: &str, account_key: &str) -> Option<String> {
         self.with(provider, |state| {
@@ -383,10 +406,9 @@ impl Accounts {
             .ok_or_else(|| "No such assistant.".to_owned())?;
         let before = state.clone();
         let result = change(state)?;
+        // Saved under the lock, so saves land in the order changes were made.
         if persisted(&before) != persisted(state) {
-            let snapshot = providers.clone();
-            drop(providers);
-            self.save(&snapshot)?;
+            self.save(&providers)?;
         }
         Ok(result)
     }
@@ -729,6 +751,29 @@ impl Accounts {
     }
 }
 
+/// The account part of a session tag; see [`Accounts::session_tag`].
+pub(crate) fn tag_account(tag: &str) -> &str {
+    tag.split_once('#').map_or(tag, |(id, _)| id)
+}
+
+/// Whether a session filed under `stored` may be opened as `current`: the same
+/// account, and not known to be a different login. A tag from before logins
+/// were recorded names no login and matches any.
+pub(crate) fn same_login(stored: &str, current: &str) -> bool {
+    let split = |tag: &str| {
+        let (id, key) = tag
+            .split_once('#')
+            .map_or((tag, None), |(id, key)| (id, Some(key)));
+        (id.to_owned(), key.map(str::to_owned))
+    };
+    let ((stored_id, stored_key), (current_id, current_key)) = (split(stored), split(current));
+    stored_id == current_id
+        && match (stored_key, current_key) {
+            (Some(stored), Some(current)) => stored == current,
+            _ => true,
+        }
+}
+
 /// Who a probe found signed in.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Identity {
@@ -754,9 +799,9 @@ fn choose(
     if !state.auto_switch || state.accounts.len() < 2 {
         return first_usable.map(choice);
     }
-    let own = chat_account
-        .or(Some(DEFAULT_ACCOUNT))
-        .and_then(|id| state.accounts.iter().find(|account| account.id == id));
+    // Only a chat with a session keeps to an account; a new one starts on the
+    // first account in the list that can take it.
+    let own = chat_account.and_then(|id| state.accounts.iter().find(|account| account.id == id));
     if let Some(own) = own.filter(usable)
         && own.blocked_until(now).is_none()
     {
@@ -1043,6 +1088,59 @@ mod tests {
             .unwrap()
             .unwrap();
         id
+    }
+
+    #[test]
+    fn a_session_is_filed_under_its_account_and_login() {
+        let data = temp("tags");
+        let accounts = Accounts::with_homes(&data, &[]);
+        assert_eq!(accounts.session_tag("codex", DEFAULT_ACCOUNT), "default");
+        accounts.record_probe(
+            "codex",
+            DEFAULT_ACCOUNT,
+            &identity("a@example.com"),
+            vec![],
+            0,
+        );
+        let tag = accounts.session_tag("codex", DEFAULT_ACCOUNT);
+        assert_eq!(tag, "default#key-a@example.com");
+        assert_eq!(tag_account(&tag), DEFAULT_ACCOUNT);
+        assert!(
+            same_login("default", &tag),
+            "a session from before logins were kept"
+        );
+        assert!(same_login(&tag, &tag));
+        // The user's own CLI signed in to another login: the session stays put.
+        accounts.record_probe(
+            "codex",
+            DEFAULT_ACCOUNT,
+            &identity("b@example.com"),
+            vec![],
+            1,
+        );
+        assert!(!same_login(
+            &tag,
+            &accounts.session_tag("codex", DEFAULT_ACCOUNT)
+        ));
+        assert!(!same_login(&tag, "a1b2c3d4e5f6#key-a@example.com"));
+    }
+
+    #[test]
+    fn a_new_chat_starts_on_the_first_account_in_the_list() {
+        let data = temp("order");
+        let accounts = Accounts::with_homes(&data, &[]);
+        let second = added(&accounts, "codex", "b@example.com");
+        accounts
+            .reorder("codex", &[second.clone(), DEFAULT_ACCOUNT.into()])
+            .unwrap();
+        assert_eq!(accounts.choose("codex", None, |_| true, 0).account, second);
+        assert_eq!(
+            accounts
+                .choose("codex", Some(DEFAULT_ACCOUNT), |_| true, 0)
+                .account,
+            DEFAULT_ACCOUNT,
+            "a chat with a session keeps its account"
+        );
     }
 
     #[test]

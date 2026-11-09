@@ -256,6 +256,10 @@ pub(crate) enum Continuation {
     AfterRestart(i64),
     /// The user pressed resume, valid while the chat's latest turn is resumable.
     Resume,
+    /// The host moving a chat to another account after a usage limit. Valid
+    /// while this user message is still the chat's latest and its turn is
+    /// still resumable, so a late continuation cannot restart newer work.
+    AfterLimit(i64),
 }
 
 /// A chat a restart cut off, and the user message it was working on.
@@ -1666,6 +1670,24 @@ impl StateStore {
         self.prepare_send_inner(request, Some(Continuation::Resume))
     }
 
+    pub fn prepare_after_limit(
+        &self,
+        request: &Value,
+        last_message: i64,
+    ) -> Result<SendDisposition, StorageError> {
+        self.prepare_send_inner(request, Some(Continuation::AfterLimit(last_message)))
+    }
+
+    /// The id of the chat's newest user message, or 0.
+    pub fn latest_user_message(&self, chat_id: &str) -> Result<i64, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND role = 'user'",
+            [chat_id],
+            |row| row.get::<_, i64>(0),
+        )?)
+    }
+
     fn prepare_send_inner(
         &self,
         request: &Value,
@@ -1706,6 +1728,19 @@ impl StateStore {
                 if working || latest != last_message {
                     return Err(StorageError::InvalidRequest(
                         "This chat has already continued.".into(),
+                    ));
+                }
+            }
+            Some(Continuation::AfterLimit(last_message)) => {
+                let (latest, resumable) = transaction.query_row(
+                    "SELECT (SELECT COALESCE(MAX(id), 0) FROM messages \
+                     WHERE chat_id = ?1 AND role = 'user'), turn_resumable FROM chats WHERE id = ?1",
+                    [chat_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+                )?;
+                if working || latest != last_message || !resumable {
+                    return Err(StorageError::InvalidRequest(
+                        "This chat has moved on since its account ran out.".into(),
                     ));
                 }
             }
@@ -12813,6 +12848,55 @@ mod tests {
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_none());
         assert!(resumable());
+    }
+
+    /// The host continues a chat on another account only while the turn that
+    /// ran out is still the chat's latest and still resumable.
+    #[test]
+    fn continuing_after_a_usage_limit_needs_the_chat_not_to_have_moved_on() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let continuation = json!({"chat": "chat", "text": CONTINUE_PROMPT});
+        let refused = |last: i64| {
+            matches!(
+                store.prepare_after_limit(&continuation, last),
+                Err(StorageError::InvalidRequest(_))
+            )
+        };
+
+        store
+            .prepare_send(&json!({"chat": "chat", "text": "first"}))
+            .unwrap();
+        store.mark_turn_resumable("chat").unwrap();
+        store
+            .finish_turn("chat", false, Some("limit"), 1, false)
+            .unwrap();
+        let ran_out = store.latest_user_message("chat").unwrap();
+        assert!(ran_out > 0);
+
+        // The user spoke again and stopped that turn before the host got here.
+        store
+            .prepare_send(&json!({"chat": "chat", "text": "something else"}))
+            .unwrap();
+        store.mark_turn_resumable("chat").unwrap();
+        store.finish_turn("chat", false, None, 1, false).unwrap();
+        assert!(
+            refused(ran_out),
+            "a late continuation must not restart newer work"
+        );
+
+        let latest = store.latest_user_message("chat").unwrap();
+        assert!(matches!(
+            store.prepare_after_limit(&continuation, latest),
+            Ok(SendDisposition::Start { .. })
+        ));
+        // Now working, so a second continuation is refused too.
+        assert!(refused(store.latest_user_message("chat").unwrap()));
     }
 
     #[test]

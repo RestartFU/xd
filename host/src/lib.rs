@@ -1325,7 +1325,7 @@ impl Engine {
         };
         // Weak, since the engine owns the runtime that holds this.
         let engine = Arc::downgrade(self);
-        runtime.set_account_switch_handler(Box::new(move |chat_id| {
+        runtime.set_account_switch_handler(Box::new(move |chat_id, last_message| {
             let engine = engine.clone();
             // Off the turn's thread: continuing takes the chat's own locks.
             let _ = thread::Builder::new()
@@ -1334,7 +1334,10 @@ impl Engine {
                     let Some(engine) = engine.upgrade() else {
                         return;
                     };
-                    let reply = engine.resume_turn(&json!({"chat": chat_id}));
+                    let reply = engine.send_message_inner(
+                        &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
+                        Some(Continuation::AfterLimit(last_message)),
+                    );
                     if reply["ok"] == true {
                         engine
                             .events
@@ -1778,6 +1781,9 @@ impl Engine {
                 store.prepare_continuation(&request, last_message)
             }
             Some(Continuation::Resume) => store.prepare_resume(&request),
+            Some(Continuation::AfterLimit(last_message)) => {
+                store.prepare_after_limit(&request, last_message)
+            }
             None => store.prepare_send(&request),
         };
         if resumes && prepared.is_ok() {
