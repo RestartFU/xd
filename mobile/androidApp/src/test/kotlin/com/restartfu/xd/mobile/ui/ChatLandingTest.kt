@@ -109,10 +109,11 @@ class ChatLandingTest {
         check(!endOnScreen(LAST_LINE_OF_LATEST) && shows(LAST_LINE_OF_LATEST)) { "The swipe did not scroll back inside the reply" }
         val before = compose.onNode(hasScrollToIndexAction()).fetchSemanticsNode()
             .config[SemanticsProperties.VerticalScrollAxisRange].value()
-        val reads = messageReads
         arrive()
-        waitFor { messageReads > reads }
-        settle()
+        // The reply has reached the chat on screen, though below the reader.
+        model.client.openChat("c1").use { chat ->
+            waitFor { chat.state.value.visibleItems.any { LAST_LINE_OF_NEXT in it.text } }
+        }
         val after = compose.onNode(hasScrollToIndexAction()).fetchSemanticsNode()
             .config[SemanticsProperties.VerticalScrollAxisRange].value()
         check(!shows(FIRST_LINE_OF_NEXT) && kotlin.math.abs(after - before) < 1f) {
@@ -176,7 +177,10 @@ class ChatLandingTest {
 
     private fun waitFor(condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + 60_000
-        while (!condition() && System.currentTimeMillis() < deadline) settle()
+        while (!condition()) {
+            check(System.currentTimeMillis() < deadline) { "Timed out waiting" }
+            settle()
+        }
         settle()
     }
 
@@ -246,7 +250,7 @@ class ChatLandingTest {
             "chat" -> """{"ok":true,"title":"$TITLE","backend":"claude","commands":[],"plan":false,""" +
                 """"queue":[],"working":false,"label":"Claude","items":[],"new_worktree":false,""" +
                 """"has_messages":true,"model":"claude-opus-5-5","effort":"high"}"""
-            "messages" -> MESSAGES.toList().also { messageReads++ }.let { messages -> """{"ok":true,"total_messages":${messages.size},"last_message_id":${messages.size},"messages":[""" +
+            "messages" -> MESSAGES.toList().let { messages -> """{"ok":true,"total_messages":${messages.size},"last_message_id":${messages.size},"messages":[""" +
                 messages.mapIndexed { i, (role, text) ->
                     """{"id":${i + 1},"role":"$role","content":${JsonPrimitive(text)},"at":${1762500000 + i}}"""
                 }.joinToString(",") + "]}" }
@@ -260,9 +264,6 @@ class ChatLandingTest {
         const val LAST_LINE_OF_LATEST = "That is everything; the branch is ready for review."
         const val FIRST_LINE_OF_NEXT = "One more pass over the reconnect work."
         const val LAST_LINE_OF_NEXT = "That pass is done too; nothing else is left."
-
-        /** How many times the app has read the messages. */
-        @Volatile var messageReads = 0
 
         /** The socket the app opened last, to send events on. */
         @Volatile var socket: ScriptedSocket? = null
