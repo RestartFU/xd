@@ -31,6 +31,60 @@ pub(super) struct ComposerParts {
     pub show_attachments: bool,
 }
 
+/// What an empty chat, or a new one, says above its composer.
+pub(super) const EMPTY_CHAT: (&str, &str) = (
+    "What are we working on?",
+    "A new conversation in the same workspace.",
+);
+
+/// The heading over an empty chat's composer: the project, a question, and a
+/// line under it. A new chat shows the same one, as it did when it opened as
+/// an empty chat.
+pub(super) fn chat_heading(
+    project: String,
+    avatar: Option<Arc<Image>>,
+    heading: &'static str,
+    description: &'static str,
+    colors: ThemeColors,
+) -> gpui::Div {
+    div()
+        .w_full()
+        .min_h(px(140.0))
+        .py_3()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(10.0))
+        .text_center()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_size(px(12.0))
+                .text_color(rgb(colors.muted))
+                .child(workspace_icon(avatar, 14.0, colors.muted))
+                .child(project),
+        )
+        .child(
+            div()
+                .text_size(px(28.0))
+                .debug_selector(|| "empty-chat-heading".into())
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(colors.text))
+                .child(heading),
+        )
+        .child(
+            div()
+                .text_size(px(13.0))
+                .debug_selector(|| "empty-chat-description".into())
+                .text_color(rgb(colors.muted))
+                .child(description),
+        )
+}
+
 /// A chip in the row under the composer. One that opens a picker reacts to
 /// the pointer like a button; a settled one looks the same but does not.
 pub(super) fn context_chip(

@@ -1,5 +1,8 @@
 use super::*;
 
+/// Between the heading and the composer, as an empty chat has them.
+const HEADING_GAP: f32 = 28.0;
+
 impl XdDesktop {
     pub(super) fn render_new_chat(
         &mut self,
@@ -425,12 +428,12 @@ impl XdDesktop {
             )
             .with_priority(1)
         });
-        let folder = self
+        let project = self
             .creating_chat_folder
             .as_ref()
-            .and_then(|id| self.model.folders.iter().find(|f| &f.id == id))
-            .map(|f| f.name.clone())
-            .unwrap_or_default();
+            .and_then(|id| self.model.folders.iter().find(|f| &f.id == id));
+        let avatar = self.owner_avatar(project.and_then(|f| f.owner.as_deref()));
+        let folder = project.map(|f| f.name.clone()).unwrap_or_default();
         let starting = self.chat_create_submitting;
         let editor = if starting {
             // The message went up into the conversation above.
@@ -490,7 +493,7 @@ impl XdDesktop {
             window,
             cx,
         );
-        let context = composer::context_row(folder, colors)
+        let context = composer::context_row(folder.clone(), colors)
             .debug_selector(|| "new-chat-context".into())
             .when(!shared, |row| {
                 let workspace = composer::context_chip(
@@ -554,14 +557,11 @@ impl XdDesktop {
             .px_6()
             .bg(rgb(colors.background))
             .when(!starting, |view| {
+                let (heading, description) = composer::EMPTY_CHAT;
                 view.child(
-                    div()
-                        .w_full()
+                    composer::chat_heading(folder, avatar, heading, description, colors)
                         .max_w(width)
-                        .mb_6()
-                        .text_size(px(22.0))
-                        .text_color(rgb(colors.text))
-                        .child("What would you like to build?"),
+                        .mb(px(HEADING_GAP)),
                 )
             })
             .when(starting, |view| {
@@ -1313,6 +1313,27 @@ mod choice_tests {
 #[cfg(test)]
 mod start_tests {
     use super::*;
+
+    #[gpui::test]
+    fn a_new_chat_opens_under_the_empty_chat_heading(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = crate::tests::grouped_workspace_fixture();
+            desktop.creating_chat_folder = Some("atlas".into());
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
+        cx.run_until_parked();
+
+        let heading = cx
+            .debug_bounds("empty-chat-heading")
+            .expect("the heading shows");
+        let description = cx.debug_bounds("empty-chat-description").unwrap();
+        let composer = cx.debug_bounds("new-chat-composer").unwrap();
+        assert!(heading.bottom() <= description.top() && description.bottom() < composer.top());
+        assert!((heading.center().x - composer.center().x).abs() < px(1.0));
+    }
 
     #[gpui::test]
     fn a_new_chat_shows_its_message_until_the_chat_opens(cx: &mut gpui::TestAppContext) {
