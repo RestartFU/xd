@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
     env,
     path::PathBuf,
@@ -1657,6 +1658,15 @@ fn claude_tool_summary(name: &str, arguments: Option<&Value>) -> String {
         }
         return subagent_marker(None, &identity.join(" · "), &task.join(" · "));
     }
+    // A shell command reads as itself, the way Codex commands do, rather than
+    // behind the tool's name.
+    if name == "Bash"
+        && let Some(command) = arguments
+            .and_then(|arguments| arguments.get("command"))
+            .and_then(Value::as_str)
+    {
+        return format!("$ {}", compact(command, 110));
+    }
     for key in [
         "file_path",
         "path",
@@ -1714,7 +1724,7 @@ fn tool_summary(item: &Value) -> String {
     if kind == "command_execution"
         && let Some(command) = item.get("command").and_then(Value::as_str)
     {
-        return format!("$ {}", compact(command, 110));
+        return format!("$ {}", compact(&shell_script(command), 110));
     }
     for key in [
         "file_path",
@@ -1816,6 +1826,66 @@ fn compact(value: &str, limit: usize) -> String {
         .collect::<String>();
     shortened.push('…');
     shortened
+}
+
+/// The script inside a `/bin/bash -lc "…"` wrapper, else the command as is.
+///
+/// Codex reports every command wrapped in the shell that ran it, which
+/// buries the part worth reading behind the same prefix on every row.
+pub(crate) fn shell_script(command: &str) -> Cow<'_, str> {
+    unwrap_shell(command).map_or(Cow::Borrowed(command), Cow::Owned)
+}
+
+fn unwrap_shell(command: &str) -> Option<String> {
+    let (program, rest) = command.trim().split_once(char::is_whitespace)?;
+    let name = program.rsplit(['/', '\\']).next()?;
+    if !matches!(name, "bash" | "zsh" | "sh" | "dash") {
+        return None;
+    }
+    let (flag, script) = rest.trim_start().split_once(char::is_whitespace)?;
+    if !matches!(flag, "-c" | "-lc") {
+        return None;
+    }
+    shell_word(script.trim()).filter(|script| !script.trim().is_empty())
+}
+
+/// Unquotes text that is exactly one POSIX shell word. Anything else, such as
+/// a second argument or an unterminated quote, is left for the caller to show
+/// unchanged.
+fn shell_word(text: &str) -> Option<String> {
+    let mut word = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => loop {
+                match chars.next()? {
+                    '\'' => break,
+                    c => word.push(c),
+                }
+            },
+            '"' => loop {
+                match chars.next()? {
+                    '"' => break,
+                    '\\' => match chars.next()? {
+                        '\n' => {}
+                        c @ ('$' | '`' | '"' | '\\') => word.push(c),
+                        c => {
+                            word.push('\\');
+                            word.push(c);
+                        }
+                    },
+                    c => word.push(c),
+                }
+            },
+            '\\' => match chars.next()? {
+                '\n' => {}
+                c => word.push(c),
+            },
+            c if c.is_whitespace() => return None,
+            c => word.push(c),
+        }
+    }
+    Some(word)
 }
 
 fn error_message(root: &Value) -> String {
@@ -2851,6 +2921,54 @@ mod tests {
             parser.feed(r#"{"type":"system","subtype":"init","session_id":"s9"}"#),
             vec![AgentEvent::Session("s9".into())]
         );
+    }
+
+    #[test]
+    fn claude_shell_commands_read_as_commands_not_as_the_tool_name() {
+        let command = json!({"command": "git status --short", "description": "Show status"});
+        assert_eq!(
+            claude_tool_summary("Bash", Some(&command)),
+            "$ git status --short"
+        );
+        let read = json!({"file_path": "src/main.rs"});
+        assert_eq!(
+            claude_tool_summary("Read", Some(&read)),
+            "Read  src/main.rs"
+        );
+        assert_eq!(claude_tool_summary("Bash", None), "Bash");
+    }
+
+    #[test]
+    fn shell_wrappers_are_unwrapped_only_around_one_quoted_script() {
+        for (command, script) in [
+            (
+                r#"/bin/bash -lc "rg --files -g '*.rs'""#,
+                "rg --files -g '*.rs'",
+            ),
+            (
+                r#"/bin/bash -lc 'gh run view 42 --log'"#,
+                "gh run view 42 --log",
+            ),
+            (r#"bash -c "echo \"\$HOME\" \\n""#, r#"echo "$HOME" \n"#),
+            (r#"/bin/zsh -lc 'it'\''s'"#, "it's"),
+            (
+                "/bin/bash -lc \"python3 - <<'EOF'\nprint(1)\nEOF\"",
+                "python3 - <<'EOF'\nprint(1)\nEOF",
+            ),
+            ("sh -c ls", "ls"),
+        ] {
+            assert_eq!(shell_script(command), script, "{command}");
+        }
+        for command in [
+            "git status",
+            "/bin/bash script.sh",
+            "/bin/bash -lc 'echo' extra",
+            r#"/bin/bash -lc "unterminated"#,
+            "/bin/bash -lc ''",
+            "python -c 'print(1)'",
+        ] {
+            assert_eq!(shell_script(command), command);
+        }
     }
 
     #[test]

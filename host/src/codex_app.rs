@@ -1,6 +1,6 @@
 //! Codex app-server adapter. The host owns RPC IDs and pending requests.
 use crate::{
-    agent::{AgentEvent, TodoItem, TodoStatus, TodoUpdate},
+    agent::{AgentEvent, TodoItem, TodoStatus, TodoUpdate, shell_script},
     storage::TurnSpec,
     subagent::{SubagentPatch, SubagentStatus, SubagentStep},
 };
@@ -226,8 +226,8 @@ impl CodexAppParser {
                         }
                     }
                     Some("commandExecution") => vec![AgentEvent::Tool(format!(
-                        "Command: {}\n{}",
-                        item["command"].as_str().unwrap_or_default(),
+                        "$ {}\n{}",
+                        shell_script(item["command"].as_str().unwrap_or_default()),
                         item["aggregatedOutput"].as_str().unwrap_or_default()
                     ))],
                     Some("mcpToolCall") => vec![AgentEvent::Tool(format!(
@@ -405,7 +405,10 @@ fn child_event(thread: &str, method: &str, params: &Value) -> Vec<AgentEvent> {
     match (method, item["type"].as_str()) {
         ("item/completed", Some("commandExecution")) => step(
             "Bash",
-            format!("$ {}", item["command"].as_str().unwrap_or_default()),
+            format!(
+                "$ {}",
+                shell_script(item["command"].as_str().unwrap_or_default())
+            ),
         ),
         ("item/completed", Some("fileChange")) => {
             let paths = item["changes"]
@@ -723,7 +726,7 @@ mod tests {
         assert_eq!(patch.duration_ms, Some(900));
         // Other commands are still commands.
         let plain = parser.feed(r#"{"method":"item/completed","params":{"threadId":"parent","item":{"type":"commandExecution","id":"cmd-2","command":"/bin/bash -lc 'cargo test'","aggregatedOutput":"ok"}}}"#);
-        assert!(matches!(&plain[0], AgentEvent::Tool(text) if text.starts_with("Command: ")));
+        assert_eq!(plain, vec![AgentEvent::Tool("$ cargo test\nok".into())]);
     }
 
     #[test]
@@ -752,6 +755,18 @@ mod tests {
         };
         assert_eq!(patch.status, Some(SubagentStatus::Completed));
         assert_eq!(patch.summary.as_deref(), Some("Looks good."));
+    }
+
+    #[test]
+    fn command_rows_show_the_script_rather_than_the_shell_wrapper() {
+        let mut parser = parser_on("thread");
+        let events = parser.feed(r#"{"method":"item/completed","params":{"threadId":"thread","item":{"type":"commandExecution","command":"/bin/bash -lc \"rg --files -g '*.rs'\"","aggregatedOutput":"src/main.rs\n"}}}"#);
+        assert_eq!(
+            events,
+            vec![AgentEvent::Tool(
+                "$ rg --files -g '*.rs'\nsrc/main.rs\n".into()
+            )]
+        );
     }
 
     #[test]
