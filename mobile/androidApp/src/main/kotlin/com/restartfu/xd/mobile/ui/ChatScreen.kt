@@ -237,8 +237,10 @@ internal fun ChatScreen(
     LaunchedEffect(listState, following) {
         var before: ListPlace? = null
         snapshotFlow { listState.layoutInfo.place() }.collect { now ->
-            if (now.readerMovedBackFrom(before)) following.value = false
-            else if (now.atEnd) following.value = true
+            // The end in view comes first: content collapsing at the end also
+            // moves the list back, and the reader still sees the end.
+            if (now.atEnd) following.value = true
+            else if (now.readerMovedBackFrom(before)) following.value = false
             before = now
         }
     }

@@ -19,6 +19,7 @@ import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.swipe
+import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
@@ -118,6 +119,23 @@ class ChatLandingTest {
     }
 
     @Test
+    fun collapsingRowsAtTheEndKeepsFollowing() = withApp(history = SHORT_HISTORY + TOOL_RUN) {
+        click(TITLE)
+        waitFor { shows("Expand") }
+        // The run of tool calls at the end opens past the bottom, and the
+        // reader scrolls down to its end. Closing it then pulls the list back
+        // with the end still in view.
+        click("Expand")
+        waitFor { shows("Collapse") && !endOnScreen(LAST_TOOL) }
+        compose.onNode(hasScrollToIndexAction()).performTouchInput { swipeUp() }
+        waitFor { endOnScreen(LAST_TOOL) && shows("Collapse") }
+        click("Collapse")
+        waitFor { shows("Expand") }
+        arrive()
+        waitFor { endOnScreen(LAST_LINE_OF_NEXT) }
+    }
+
+    @Test
     fun aReaderWhoScrolledBackIsLeftThereWhenAReplyArrives() = scrolledBackThenReplyArrives {
         // A short, slow swipe, as a reader scrolls back inside the long reply.
         compose.onNode(hasScrollToIndexAction()).performTouchInput {
@@ -208,7 +226,9 @@ class ChatLandingTest {
      */
     private fun endOnScreen(line: String): Boolean {
         val list = compose.onNode(hasScrollToIndexAction()).fetchSemanticsNode().boundsInRoot
-        val ends = matching(line).fetchSemanticsNodes().map { it.boundsInRoot.bottom }
+        // Where the text really ends: its bounds in root are clipped to the
+        // list, so a reply running past the bottom would seem to end there.
+        val ends = matching(line).fetchSemanticsNodes().map { it.positionInRoot.y + it.size.height }
         return ends.any { it > list.top && it <= list.bottom + 1f }
     }
 
@@ -333,6 +353,11 @@ class ChatLandingTest {
 
         /** A history of short turns, several of them on screen at once. */
         val SHORT_HISTORY = HISTORY.dropLast(1)
+
+        const val LAST_TOOL = "Read shared/src/part-12.kt"
+
+        /** Tool calls in a row, which the chat folds into one line. */
+        val TOOL_RUN = (1..12).map { "tool" to "Read shared/src/part-$it.kt" }
 
         val NEXT_REPLY = longReply(FIRST_LINE_OF_NEXT, LAST_LINE_OF_NEXT)
     }
