@@ -192,7 +192,8 @@ pub(crate) fn finished_in_background(id: &str, output_file: Option<&str>) -> Vec
 }
 
 /// The words of each simple command in a shell script, past variable
-/// assignments and wrappers such as `env` or `timeout 60`. The shell's
+/// assignments, shell keywords such as `if` or `{`, and wrappers such as
+/// `env` or `timeout 60`. The shell's
 /// quoting decides what is a command: `echo "a; gh pr create"` runs `echo`
 /// alone, and a heredoc's body runs nothing.
 fn shell_commands(script: &str) -> Vec<Vec<String>> {
@@ -213,10 +214,15 @@ fn shell_commands(script: &str) -> Vec<Vec<String>> {
                             | "nohup"
                             | "command"
                             | "exec"
-                            | "do"
+                            | "!"
+                            | "{"
+                            | "if"
+                            | "elif"
                             | "then"
                             | "else"
-                            | "!"
+                            | "while"
+                            | "until"
+                            | "do"
                     )
                 {
                     words.next();
@@ -303,6 +309,13 @@ mod tests {
             assert_eq!(created_by(command, output).len(), 1, "{command}");
         }
         assert!(created_by("gh -R o/other pr list", output).is_empty());
+        for grouped in [
+            "{ gh pr create --fill; }",
+            "if gh pr create --fill; then echo done; fi",
+            "while ! gh pr create --fill; do sleep 1; done",
+        ] {
+            assert_eq!(created_by(grouped, output).len(), 1, "{grouped}");
+        }
         let heredoc = "gh pr create --title \"Docs\" --body-file - <<'EOF'\nInspect it with:\ngh pr view\nEOF";
         assert_eq!(
             created_by(heredoc, output).len(),
