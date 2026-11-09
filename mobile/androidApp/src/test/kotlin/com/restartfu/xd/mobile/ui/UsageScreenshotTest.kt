@@ -82,6 +82,17 @@ class UsageScreenshotTest {
                 )),
             ))
         settle()
+        compose.onNodeWithText("62% left").assertIsDisplayed()
+        compose.onNodeWithText("8% left").assertIsDisplayed()
+        // The accessible progress must describe remaining quota too, not just its label.
+        compose.onNode(androidx.compose.ui.test.SemanticsMatcher.expectValue(
+            androidx.compose.ui.semantics.SemanticsProperties.ProgressBarRangeInfo,
+            androidx.compose.ui.semantics.ProgressBarRangeInfo(0.62f, 0f..1f),
+        )).assertIsDisplayed()
+        compose.onNode(androidx.compose.ui.test.SemanticsMatcher.expectValue(
+            androidx.compose.ui.semantics.SemanticsProperties.ProgressBarRangeInfo,
+            androidx.compose.ui.semantics.ProgressBarRangeInfo(0.08f, 0f..1f),
+        )).assertIsDisplayed()
         capture("overview")
         compose.onNodeWithText("Cost").performClick()
         settle()

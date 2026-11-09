@@ -58,6 +58,7 @@ import com.restartfu.xd.protocol.UsageBucketReply
 import com.restartfu.xd.protocol.UsagePriceReply
 import com.restartfu.xd.protocol.UsageSummaryReply
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -333,13 +334,14 @@ private fun LimitsCard(account: UsageAccountReply, resetting: Boolean, unsettled
             )
         }
         account.windows.forEach { window ->
+            val remaining = (100.0 - window.usedPercent.coerceIn(0.0, 100.0)).roundToInt()
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row {
                     Text(window.label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                    Text("${window.usedPercent.coerceIn(0.0, 100.0).toInt()}%", style = MaterialTheme.typography.labelMedium)
+                    Text("$remaining% left", style = MaterialTheme.typography.labelMedium)
                 }
                 LinearProgressIndicator(
-                    progress = { (window.usedPercent / 100.0).coerceIn(0.0, 1.0).toFloat() },
+                    progress = { remaining / 100f },
                     modifier = Modifier.fillMaxWidth(),
                     color = if (window.usedPercent >= 90) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                 )
