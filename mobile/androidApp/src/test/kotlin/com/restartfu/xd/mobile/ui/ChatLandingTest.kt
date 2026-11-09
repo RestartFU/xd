@@ -99,6 +99,25 @@ class ChatLandingTest {
     }
 
     @Test
+    fun rowsGrowingAboveTheEndKeepFollowing() = withApp(history = SHORT_HISTORY) {
+        click(TITLE)
+        waitFor { endOnScreen(LAST_LINE_OF_SHORT) }
+        // An earlier reply on screen grows in place, as a reply does while it
+        // streams or when its images load, and pushes the newest row down
+        // without anyone scrolling.
+        val earlier = MESSAGES.size - 3
+        MESSAGES[earlier] = longReply(MESSAGES[earlier].second, LAST_LINE_OF_GROWN, steps = 8)
+        socket?.push("""{"event":"changed","chat":"c1"}""")
+        model.client.openChat("c1").use { chat ->
+            waitFor { chat.state.value.visibleItems.any { LAST_LINE_OF_GROWN in it.text } }
+        }
+        check(shows(LAST_LINE_OF_GROWN)) { "The reply that grew was not on screen" }
+        // Still following: the next reply is brought into view.
+        arrive()
+        waitFor { endOnScreen(LAST_LINE_OF_NEXT) }
+    }
+
+    @Test
     fun aReaderWhoScrolledBackIsLeftThereWhenAReplyArrives() = scrolledBackThenReplyArrives {
         // A short, slow swipe, as a reader scrolls back inside the long reply.
         compose.onNode(hasScrollToIndexAction()).performTouchInput {
@@ -149,9 +168,9 @@ class ChatLandingTest {
     private lateinit var model: MainViewModel
 
     /** Starts the whole app against the scripted host, then runs [steps]. */
-    private fun withApp(steps: () -> Unit) {
+    private fun withApp(history: List<Pair<String, String>> = HISTORY, steps: () -> Unit) {
         MESSAGES.clear()
-        MESSAGES += HISTORY
+        MESSAGES += history
         val activity = compose.activity
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         model = MainViewModel(activity.application, XdClient({ ScriptedSocket().also { socket = it } }, NoCredentials, scope))
@@ -289,6 +308,8 @@ class ChatLandingTest {
         const val LAST_LINE_OF_LATEST = "That is everything; the branch is ready for review."
         const val FIRST_LINE_OF_NEXT = "One more pass over the reconnect work."
         const val LAST_LINE_OF_NEXT = "That pass is done too; nothing else is left."
+        const val LAST_LINE_OF_GROWN = "And with those steps the reply is complete."
+        const val LAST_LINE_OF_SHORT = "Answer 12. The connection actor retries on a timer"
 
         /** The socket the app opened last, to send events on. */
         @Volatile var socket: ScriptedSocket? = null
@@ -296,9 +317,9 @@ class ChatLandingTest {
         /** What the host has stored, which a test can add to. */
         val MESSAGES: MutableList<Pair<String, String>> = java.util.Collections.synchronizedList(mutableListOf())
 
-        fun longReply(first: String, last: String) = "assistant" to (
+        fun longReply(first: String, last: String, steps: Int = 14) = "assistant" to (
             listOf(first) +
-                (1..14).map { "Step $it of the change touched another part of the actor and its tests, and each of them still passes." } +
+                (1..steps).map { "Step $it of the change touched another part of the actor and its tests, and each of them still passes." } +
                 last
             ).joinToString("\n\n")
 
@@ -309,6 +330,9 @@ class ChatLandingTest {
                 "assistant" to "Answer $turn. The connection actor retries on a timer, and this turn looked at part $turn of it.",
             )
         } + longReply(FIRST_LINE_OF_LATEST, LAST_LINE_OF_LATEST)
+
+        /** A history of short turns, several of them on screen at once. */
+        val SHORT_HISTORY = HISTORY.dropLast(1)
 
         val NEXT_REPLY = longReply(FIRST_LINE_OF_NEXT, LAST_LINE_OF_NEXT)
     }

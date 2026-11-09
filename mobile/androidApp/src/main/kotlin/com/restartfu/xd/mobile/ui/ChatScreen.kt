@@ -226,16 +226,17 @@ internal fun ChatScreen(
     val trailingItemCount = if (state.working || waitingOn > 0) 1 else 0
     val lastTranscriptIndex = leadingItemCount + rows.lastIndex + trailingItemCount
     // Whether new output keeps the end in view. It stops when the list moves
-    // back from the end with nothing else changed: following only ever
-    // scrolls forward, so that is the reader, by touch, wheel, keyboard or
+    // back with the same items in the same viewport: following only ever
+    // scrolls forward, and output growing below leaves the first visible row
+    // where it is, so that is the reader, by touch, wheel, keyboard or
     // accessibility action. It resumes whenever the end is in view again. A
     // follow still animating when the next words arrive keeps following, and
     // a reader who scrolled back inside a long reply is left there.
     // Saved, so a rotation does not pull a reader who scrolled away back down.
     val following = rememberSaveable(state.chatId) { mutableStateOf(true) }
     LaunchedEffect(listState, following) {
-        var before: EndView? = null
-        snapshotFlow { listState.layoutInfo.endView() }.collect { now ->
+        var before: ListPlace? = null
+        snapshotFlow { listState.layoutInfo.place() }.collect { now ->
             if (now.readerMovedBackFrom(before)) following.value = false
             else if (now.atEnd) following.value = true
             before = now
@@ -1234,40 +1235,42 @@ private fun AnalysisDisclosure(
 }
 
 /**
- * Where the end of a list's content sits against the end of its viewport.
- * [left] is how far the last item reaches past the viewport, or null while
- * the last item is out of view.
+ * Where a list is scrolled to: its first visible item and how far into it,
+ * which the list holds still when content grows below, and whether the end
+ * of its content is in view.
  */
-private data class EndView(
+private data class ListPlace(
     val count: Int,
     val viewportEnd: Int,
-    val lastKey: Any?,
-    val lastSize: Int,
-    val left: Int?,
+    val firstKey: Any?,
+    val firstIndex: Int,
+    val firstOffset: Int,
+    val atEnd: Boolean,
 ) {
-    val atEnd get() = left != null && left <= 0
-
     /**
-     * Whether the list moved back from the end since [before] with the same
-     * items in the same viewport. Content that grows or arrives changes the
-     * last item or the count, so it never reads as the reader moving.
+     * Whether the list moved back since [before] with the same number of
+     * items in the same viewport. Text growing in a reply, or a row below it
+     * being pushed down, leaves the first visible item where it was, so it
+     * never reads as the reader moving.
      */
-    fun readerMovedBackFrom(before: EndView?): Boolean {
-        if (before?.left == null || count != before.count || viewportEnd != before.viewportEnd) return false
-        if (left == null) return true
-        return lastKey == before.lastKey && lastSize == before.lastSize && left > before.left + 1
+    fun readerMovedBackFrom(before: ListPlace?): Boolean {
+        if (before == null || count != before.count || viewportEnd != before.viewportEnd) return false
+        return if (firstKey == before.firstKey) firstOffset < before.firstOffset - 1 else firstIndex < before.firstIndex
     }
 }
 
-private fun LazyListLayoutInfo.endView(): EndView {
+private fun LazyListLayoutInfo.place(): ListPlace {
+    val first = visibleItemsInfo.firstOrNull()
     val last = visibleItemsInfo.lastOrNull()?.takeIf { it.index == totalItemsCount - 1 }
     val end = viewportEndOffset - afterContentPadding
-    return EndView(
+    return ListPlace(
         count = totalItemsCount,
         viewportEnd = end,
-        lastKey = last?.key,
-        lastSize = last?.size ?: 0,
-        left = last?.let { it.offset + it.size - end },
+        firstKey = first?.key,
+        firstIndex = first?.index ?: 0,
+        // How far the list has scrolled into its first visible item.
+        firstOffset = -(first?.offset ?: 0),
+        atEnd = last != null && last.offset + last.size <= end,
     )
 }
 
