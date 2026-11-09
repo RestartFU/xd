@@ -539,14 +539,16 @@ impl TurnRuntime {
     /// Refuses while a chat is working on the account; otherwise stops the
     /// processes kept running as it, which would outlive its home.
     fn release_account(&self, account: &str) -> Result<(), String> {
-        if account == crate::accounts::DEFAULT_ACCOUNT {
-            return Ok(());
-        }
         let _gate = self
             .inner
             .account_gate
             .write()
             .map_err(|_| "Agent sessions are unavailable.".to_owned())?;
+        // The user's own sign-in changes as it always could; only turns that
+        // were choosing an account when it began are waited for, above.
+        if account == crate::accounts::DEFAULT_ACCOUNT {
+            return Ok(());
+        }
         let mut sessions = self
             .inner
             .sessions

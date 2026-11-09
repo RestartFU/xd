@@ -481,14 +481,6 @@ impl Accounts {
             if let Some(account) = state.account_mut(id) {
                 account.live.identity_at_ms = Some(read_at_ms);
             }
-            let position = |id: &str| state.accounts.iter().position(|account| account.id == id);
-            let duplicate = identity.account_key.as_ref().is_some_and(|key| {
-                state.accounts.iter().any(|other| {
-                    other.id != id
-                        && other.account_key.as_ref() == Some(key)
-                        && position(&other.id) < position(id)
-                })
-            });
             let Some(account) = state.account_mut(id) else {
                 return Ok(());
             };
@@ -498,8 +490,6 @@ impl Accounts {
             );
             account.live.problem = if changed && id != DEFAULT_ACCOUNT {
                 Some("mismatch")
-            } else if duplicate {
-                Some("duplicate")
             } else {
                 None
             };
@@ -580,6 +570,7 @@ impl Accounts {
             .ok_or_else(|| "No such assistant.".to_owned())?;
         let before = state.clone();
         let result = change(state)?;
+        mark_duplicates(state);
         // Saved under the lock, so saves land in the order changes were made.
         if persisted(&before) != persisted(state) {
             self.save(&providers)?;
@@ -843,18 +834,6 @@ impl Accounts {
             if named && let Some(account) = state.account_mut(id) {
                 account.live.identity_at_ms = Some(checked_at_ms);
             }
-            let duplicate = identity.account_key.as_ref().is_some_and(|key| {
-                state.accounts.iter().any(|other| {
-                    other.id != id
-                        && other.account_key.as_ref() == Some(key)
-                        // The earlier account in the list keeps the login.
-                        && state
-                            .accounts
-                            .iter()
-                            .position(|account| account.id == other.id)
-                            < state.accounts.iter().position(|account| account.id == id)
-                })
-            });
             let Some(account) = state.account_mut(id) else {
                 return Ok(());
             };
@@ -865,8 +844,6 @@ impl Accounts {
             if named {
                 account.live.problem = if changed && id != DEFAULT_ACCOUNT {
                     Some("mismatch")
-                } else if duplicate {
-                    Some("duplicate")
                 } else {
                     None
                 };
@@ -1101,6 +1078,34 @@ fn choose(
     let mut chosen = choice(stay);
     chosen.all_spent_until = soonest;
     Some(chosen)
+}
+
+/// Marks each account whose login an earlier account in the list already has.
+/// Worked out again after every change, since any change of a login or of the
+/// order can make an account a repeat or stop it being one. An account known
+/// to be signed in to another login keeps that mark, and its recorded login
+/// counts for nothing.
+fn mark_duplicates(state: &mut Provider) {
+    let logins: Vec<Option<String>> = state
+        .accounts
+        .iter()
+        .map(|account| {
+            (account.live.problem != Some("mismatch"))
+                .then(|| account.account_key.clone())
+                .flatten()
+        })
+        .collect();
+    for (index, account) in state.accounts.iter_mut().enumerate() {
+        if account.live.problem == Some("mismatch") {
+            continue;
+        }
+        let repeat = logins[index].as_ref().is_some_and(|login| {
+            logins[..index]
+                .iter()
+                .any(|other| other.as_ref() == Some(login))
+        });
+        account.live.problem = repeat.then_some("duplicate");
+    }
 }
 
 fn account_label(provider: &str, account: &Account, state: &Provider) -> String {
@@ -1703,6 +1708,31 @@ mod tests {
                 .choose("codex", Some(&second), |_| true, 13)
                 .account,
             DEFAULT_ACCOUNT
+        );
+    }
+
+    #[test]
+    fn a_repeated_login_is_worked_out_again_after_any_change() {
+        let data = temp("repeat");
+        let accounts = Accounts::with_homes(&data, &[]);
+        let second = added(&accounts, "codex", "b@example.com");
+        // The user's own CLI signs in to b: the added account repeats it.
+        accounts.record_login("codex", DEFAULT_ACCOUNT, &identity("b@example.com"), 1);
+        assert_eq!(accounts.describe("codex", 2)[1]["problem"], "duplicate");
+        // Moving it first makes the user's own sign-in the repeat instead.
+        accounts
+            .reorder("codex", &[second.clone(), DEFAULT_ACCOUNT.into()])
+            .unwrap();
+        let described = accounts.describe("codex", 3);
+        assert_eq!(described[0]["problem"], Value::Null);
+        assert_eq!(described[1]["problem"], "duplicate");
+        // The user's own CLI moves on to c: nothing repeats any more.
+        accounts.record_login("codex", DEFAULT_ACCOUNT, &identity("c@example.com"), 4);
+        assert!(
+            accounts
+                .describe("codex", 5)
+                .iter()
+                .all(|account| account["problem"].is_null())
         );
     }
 

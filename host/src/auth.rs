@@ -587,9 +587,12 @@ impl AuthManager {
         // Nothing may still run as an account whose home is about to go, or
         // whose sign-in is about to be replaced. New turns already pass it
         // over: it reads as signing out or in.
-        if kind == SessionKind::Remove
-            || (kind == SessionKind::SignIn && account != DEFAULT_ACCOUNT)
-        {
+        // For the user's own sign-in this only waits for turns already choosing
+        // an account to register, so none can start as the login being replaced.
+        if matches!(
+            kind,
+            SessionKind::Remove | SessionKind::SignIn | SessionKind::SignOut
+        ) {
             let released = self
                 .inner
                 .releaser
