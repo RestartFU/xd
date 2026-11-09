@@ -92,6 +92,9 @@ mod tests {
         assert_eq!(parse("Check tests too"), None);
         assert_eq!(parse("[xd: message for agent \"x\"]\nhi"), None);
         assert_eq!(parse("[xd: message for agent \"x\" · id ]\nhi"), None);
+        // Whitespace after the footer does not keep it in the words.
+        let trailing = format!("{}\n  \n", format("x", "a1", "hi"));
+        assert_eq!(parse(&trailing).unwrap().text, "hi");
         // Without the footer, as someone might type it, it still reads.
         let relay = parse("[xd: message for agent \"a · id b\" · id c]\nhi").unwrap();
         assert_eq!(relay.description, "a · id b");

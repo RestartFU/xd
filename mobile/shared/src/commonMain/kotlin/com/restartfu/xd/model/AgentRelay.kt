@@ -47,7 +47,7 @@ public data class AgentRelay(
             return AgentRelay(
                 description = head.substring(PREFIX.length, separator),
                 address = address,
-                text = body.removeSuffix("\n\n$FOOTER").trim(),
+                text = body.trimEnd().removeSuffix(FOOTER).trim(),
             )
         }
     }

@@ -1405,6 +1405,9 @@ struct PendingSend {
     attachments: Vec<Attachment>,
     restore: bool,
     optimistic: OptimisticSend,
+    /// For a message to an agent, the agent's record key and the words typed
+    /// to it, which go back to its box if the send fails.
+    agent_draft: Option<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -2128,6 +2131,9 @@ struct XdDesktop {
     /// What is typed to each agent, by record key.
     agent_drafts: HashMap<String, String>,
     agent_scroll: ScrollHandle,
+    /// Holds focus in an agent tab that has no box to type in, so actions
+    /// dispatched from it still reach the window.
+    agent_view_focus: FocusHandle,
     pending_minimal_session: Option<(String, String)>,
     #[cfg(target_os = "linux")]
     turn_notifier: notifications::Notifier<TurnNotificationTarget>,
@@ -2825,6 +2831,7 @@ impl XdDesktop {
             agent_input,
             agent_drafts: HashMap::new(),
             agent_scroll: ScrollHandle::new(),
+            agent_view_focus: cx.focus_handle(),
             pending_minimal_session: None,
             #[cfg(target_os = "linux")]
             turn_notifier,
@@ -10378,6 +10385,7 @@ impl XdDesktop {
             attachments,
             restore: true,
             optimistic,
+            agent_draft: None,
         });
         self.set_composer_text(String::new(), cx);
         self.model.draft_attachments.clear();
@@ -10483,6 +10491,21 @@ impl XdDesktop {
             return;
         };
         self.rollback_optimistic_send(&pending);
+        // A message to an agent goes back to that agent's box, before
+        // anything typed to it since.
+        if let Some((key, text)) = pending.agent_draft.clone() {
+            let since = self.agent_drafts.remove(&key).unwrap_or_default();
+            let draft = if since.trim().is_empty() {
+                text
+            } else {
+                format!("{text}\n{since}")
+            };
+            self.agent_drafts.insert(key.clone(), draft.clone());
+            if self.open_agent_key() == Some(key.as_str()) {
+                self.agent_input
+                    .update(cx, |input, cx| input.set_text(draft, cx));
+            }
+        }
         if !pending.restore {
             return;
         }
@@ -10549,6 +10572,7 @@ impl XdDesktop {
             attachments: Vec::new(),
             restore: false,
             optimistic,
+            agent_draft: None,
         });
         true
     }
@@ -10589,6 +10613,7 @@ impl XdDesktop {
             attachments: Vec::new(),
             restore: false,
             optimistic,
+            agent_draft: None,
         });
         cx.notify();
     }
@@ -15838,10 +15863,17 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) {
         let draft = self.agent_drafts.get(&key).cloned().unwrap_or_default();
+        let can_message = self
+            .find_agent(&key)
+            .is_some_and(|view| agent_relay::address(&view).is_ok());
         self.open_agent = Some((chat, key));
         self.agent_input
             .update(cx, |input, cx| input.set_text(draft, cx));
-        window.focus(&self.agent_input.read(cx).focus_handle(cx));
+        if can_message {
+            window.focus(&self.agent_input.read(cx).focus_handle(cx));
+        } else {
+            window.focus(&self.agent_view_focus);
+        }
         self.agent_scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -15929,6 +15961,7 @@ impl XdDesktop {
             attachments: Vec::new(),
             restore: false,
             optimistic,
+            agent_draft: Some((key.clone(), text)),
         });
         self.agent_drafts.remove(&key);
         self.agent_input
@@ -15962,6 +15995,15 @@ impl XdDesktop {
         let running = view.status == SubagentState::Running;
         let pending = self.subagent_actions.get(view.key.as_str()).copied();
         let address = agent_relay::address(&view).map(str::to_owned);
+        if address.is_err()
+            && self
+                .agent_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        {
+            window.focus(&self.agent_view_focus);
+        }
         let messages = address
             .as_ref()
             .map(|address| self.agent_messages(address))
@@ -16311,6 +16353,7 @@ impl XdDesktop {
         };
         div()
             .id("agent-view")
+            .track_focus(&self.agent_view_focus)
             .size_full()
             .flex()
             .flex_col()
@@ -18007,6 +18050,7 @@ impl XdDesktop {
                     .read(cx)
                     .focus_handle(cx)
                     .is_focused(window)
+                    || self.agent_view_focus.is_focused(window)
                 {
                     window.focus(&self.composer_input.read(cx).focus_handle(cx));
                 }
@@ -22211,11 +22255,15 @@ Binary files /dev/null and b/image.png differ\n";
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         let record = r#"subagent_run
 {"key":"toolu_1","task_id":"a1b2","provider":"Claude","agent":"Explore","description":"Read the \"parser\"","status":"running","steps":[{"tool":"Read","text":"src/parser.rs"}]}"#;
+        // Claude has not reported this one's id yet, so it takes no messages.
+        let unaddressed = r#"subagent_run
+{"key":"toolu_2","provider":"Claude","agent":"Explore","description":"Check the lexer","status":"running"}"#;
         desktop.update(cx, |desktop, cx| {
             page_back_through_implementation(desktop, &host, false, cx);
             desktop.model.messages = vec![
                 Message::new(Some(1), "user", "Map the parser", None),
                 Message::new(Some(2), "tool", record, None),
+                Message::new(Some(4), "tool", unaddressed, None),
                 Message::new(
                     Some(3),
                     "user",
@@ -22226,7 +22274,17 @@ Binary files /dev/null and b/image.png differ\n";
             desktop.transcript_snapshot.sync_messages(&desktop.model);
         });
         cx.update_window_entity(&desktop, |desktop, window, cx| {
+            // With no box to type in, focus stays on the tab itself.
+            desktop.open_agent_tab("toolu_2".into(), window, cx);
+            assert!(desktop.agent_view_focus.is_focused(window));
             desktop.open_agent_tab("toolu_1".into(), window, cx);
+            assert!(
+                desktop
+                    .agent_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
             assert_eq!(desktop.open_agent_key(), Some("toolu_1"));
             assert_eq!(
                 desktop.agent_messages("a1b2"),
@@ -22258,9 +22316,19 @@ Binary files /dev/null and b/image.png differ\n";
         assert_eq!(relay.description, "Read the 'parser'");
         assert_eq!(relay.text, "Check the lexer too");
         desktop.update(cx, |desktop, cx| {
+            // A send the host turns away puts the words back in the agent's box.
+            desktop
+                .agent_drafts
+                .insert("toolu_1".into(), "typed since".into());
+            desktop.restore_pending_send(cx);
+            assert_eq!(
+                desktop.agent_drafts["toolu_1"],
+                "Check the lexer too\ntyped since"
+            );
+            assert!(desktop.composer.is_empty());
             desktop.close_agent_tab("toolu_1", cx);
             assert_eq!(desktop.open_agent_key(), None);
-            assert!(desktop.agent_tabs["implementation"].is_empty());
+            assert_eq!(desktop.agent_tabs["implementation"], vec!["toolu_2"]);
         });
     }
 

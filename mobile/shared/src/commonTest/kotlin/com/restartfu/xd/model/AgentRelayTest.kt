@@ -32,6 +32,12 @@ class AgentRelayTest {
     }
 
     @Test
+    fun readsPastWhitespaceAfterTheFooter() {
+        val relay = AgentRelay.parse(AgentRelay.format("Explore", "a1", "hi") + "\n  \n")
+        assertEquals("hi", relay?.text)
+    }
+
+    @Test
     fun needsAnAddressWithoutSpaces() {
         assertEquals(null, AgentRelay.parse("[xd: message for agent \"x\" · id ]\nhi"))
         assertEquals(null, AgentRelay.parse("[xd: message for agent \"x\" · id a b]\nhi"))
