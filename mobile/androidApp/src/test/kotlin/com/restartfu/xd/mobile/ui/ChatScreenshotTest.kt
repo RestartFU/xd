@@ -11,7 +11,6 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.test.core.app.ApplicationProvider
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.credentials.CredentialStore
 import com.restartfu.xd.credentials.SshAuthentication
@@ -19,7 +18,6 @@ import com.restartfu.xd.credentials.SshConnection
 import com.restartfu.xd.credentials.SshHostKey
 import com.restartfu.xd.credentials.StoredCredentials
 import com.restartfu.xd.mobile.ChatViewModel
-import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.model.ChatSummary
 import com.restartfu.xd.net.PlatformSocket
 import com.restartfu.xd.net.PlatformSocketListener
@@ -94,7 +92,6 @@ class ChatScreenshotTest {
                     Surface(Modifier.fillMaxSize()) {
                         ChatScreen(
                             model = chat,
-                            settings = MobileSettings(ApplicationProvider.getApplicationContext()),
                             goBack = {},
                             sessionTitle = "reconnect-backoff",
                             projectName = "xd",

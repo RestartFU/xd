@@ -680,27 +680,6 @@ impl XdDesktop {
                     )
                     .child(
                         settings_row(
-                            "workspace-settings-speech",
-                            "Read replies aloud",
-                            "Speak assistant output when speech tags are available.",
-                            colors,
-                        )
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.settings.speech = !this.settings.speech;
-                            if !this.settings.speech {
-                                this.pending_speech = None;
-                                this.speech_output.stop();
-                            }
-                            if let Err(error) = this.settings.save() {
-                                this.model.connection_error = Some(error);
-                            }
-                            cx.notify();
-                        }))
-                        .child(settings_switch(colors, self.settings.speech)),
-                    )
-                    .child(
-                        settings_row(
                             "workspace-settings-auto-resume",
                             "Resume chats after a restart",
                             "Continue turns a restart cut off. Agents start working without asking.",

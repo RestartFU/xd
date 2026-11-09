@@ -80,7 +80,6 @@ mod notifications;
 mod selection;
 mod settings;
 mod source_build;
-mod speech;
 mod terminal;
 mod update_popup;
 mod usage_view;
@@ -122,7 +121,6 @@ use minimal::{
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
-use speech::SpeechOutput;
 use terminal::TerminalScreen;
 use usage_view::{
     ALERT_ICON, INFO_ICON, PLUS_ICON, REFRESH_ICON, ROTATE_CCW_ICON, SLIDERS_ICON, TICKET_ICON,
@@ -1502,11 +1500,6 @@ fn terminal_panel_cache_entry_is_live(chat_id: &str, live_chats: &HashSet<String
     chat_id.starts_with("global:") || live_chats.contains(chat_id)
 }
 
-struct PendingSpeech {
-    chat_id: String,
-    previous_assistant_id: Option<i64>,
-}
-
 /// Plain tool calls in a row read as one work log, showing its newest steps.
 const WORK_LOG_VISIBLE: usize = 6;
 
@@ -2157,8 +2150,6 @@ struct XdDesktop {
     cli_versions_loading: bool,
     cli_versions_error: Option<String>,
     auth_input_text: String,
-    speech_output: SpeechOutput,
-    pending_speech: Option<PendingSpeech>,
     host: Option<HostHandle>,
     _started_host: Option<StartedHost>,
     connection_generation: u64,
@@ -2856,8 +2847,6 @@ impl XdDesktop {
             auth_input_text: String::new(),
             // A unit struct on Windows only.
             #[allow(clippy::default_constructed_unit_structs)]
-            speech_output: SpeechOutput::default(),
-            pending_speech: None,
             host: None,
             _started_host: None,
             connection_generation: 0,
@@ -3400,8 +3389,6 @@ impl XdDesktop {
         self.transcript_snapshot = TranscriptSnapshot::default();
         self.transcript_loaded = false;
         self.transcript.reset(0);
-        self.pending_speech = None;
-        self.speech_output.stop();
         self.diff_panel = None;
         self.sync_terminal_input_mode(cx);
         self.sidebar_edit = None;
@@ -3686,13 +3673,11 @@ impl XdDesktop {
                     self.transcript_loading = false;
                     self.transcript_page_loading = false;
                     self.transcript_refresh_pending = false;
-                    self.pending_speech = None;
                     Arc::make_mut(&mut self.workflow_pending).clear();
                     // Answers in flight are lost with the connection; a
                     // reconnect asks again for the avatars still unknown.
                     self.owner_icons_requested.clear();
                     self.forget_unanswered_images();
-                    self.speech_output.stop();
                     self.restore_pending_send(cx);
                     if let Some(diff) = &mut self.diff_panel {
                         diff.loading = false;
@@ -4048,11 +4033,9 @@ impl XdDesktop {
                 self.pending_clone_requests.remove(&ChatEndpoint::Local);
                 self.workspace_clone_outcomes
                     .retain(|(endpoint, _), _| *endpoint != ChatEndpoint::Local);
-                self.pending_speech = None;
                 Arc::make_mut(&mut self.workflow_pending).clear();
                 self.owner_icons_requested.clear();
                 self.forget_unanswered_images();
-                self.speech_output.stop();
                 if let Some(defaults) = &mut self.workspace_defaults {
                     defaults.loading = false;
                     defaults.submitting = false;
@@ -4244,13 +4227,6 @@ impl XdDesktop {
                     self.transcript_page_loading = false;
                     self.transcript_refresh_pending = false;
                     self.transcript_tail_pending = false;
-                    if self
-                        .pending_speech
-                        .as_ref()
-                        .is_some_and(|pending| pending.chat_id == *chat_id)
-                    {
-                        self.pending_speech = None;
-                    }
                 }
                 RequestKind::NewChat {
                     folder_id, title, ..
@@ -5621,21 +5597,6 @@ impl XdDesktop {
                 if !self.transcript_has_newer {
                     self.sync_question_from_history(&chat_id, cx);
                 }
-                if self
-                    .pending_speech
-                    .as_ref()
-                    .is_some_and(|pending| pending.chat_id == chat_id)
-                    && let Some(pending) = self.pending_speech.take()
-                    && self.settings.speech
-                    && let Some(message) = self.model.messages.iter().rev().find(|message| {
-                        message.role == "assistant"
-                            && message.id.is_some()
-                            && message.id != pending.previous_assistant_id
-                    })
-                    && let Some(text) = markdown::spoken_text(&message.content)
-                {
-                    self.speech_output.speak(&text);
-                }
                 match direction {
                     MessagePageDirection::Tail => {
                         self.transcript.reset(self.transcript_snapshot.len());
@@ -6413,16 +6374,6 @@ impl XdDesktop {
                 self.question_input
                     .update(cx, |input, cx| input.set_text("", cx));
                 if let Some(chat_id) = self.model.selected_chat.clone() {
-                    self.pending_speech = self.settings.speech.then(|| PendingSpeech {
-                        chat_id: chat_id.clone(),
-                        previous_assistant_id: self
-                            .model
-                            .messages
-                            .iter()
-                            .rev()
-                            .find(|message| message.role == "assistant")
-                            .and_then(|message| message.id),
-                    });
                     self.request_messages(&chat_id);
                     self.request_chat(&chat_id);
                     self.expire_chat_pull_request(&chat_id);

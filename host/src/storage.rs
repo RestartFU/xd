@@ -41,10 +41,6 @@ Which approach should I take?
 </ask>
 Use two to six options. When the answer must be free-form text, put <input> on its own line inside the block; options and <input> may be combined. Do not ask more than one question per reply.
 
-For an optional concise spoken response, wrap only the words that should be read aloud in an exact <speak>...</speak> block. Do not wrap code, tool output, analysis, or questions. The client may ignore speech tags when speech is disabled.
-
-Speech is played as each block closes, not at the end of the turn, so a <speak> block written before a long piece of work is heard before that work starts. When a request will take more than a moment -- anything you are about to read files or run commands for -- open with one short spoken line saying what you are about to do, then get on with it. One sentence, in your own words, about this particular request: "Let me look at why the recorder never stops" tells the listener something, "Working on it" does not. Someone who asked out loud and heard nothing back cannot tell whether the machine understood them or whether it is doing anything at all.
-
 To show the user an image file from this machine, such as a screenshot or chart you made, put it on a line of its own in your reply, outside any code block, in exactly this form:
 [image: /absolute/path/to/image.png]
 The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files.
