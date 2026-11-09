@@ -4,8 +4,13 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, Command as ProcessCommand, Stdio},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
+    time::{Duration, Instant},
 };
 
 use async_channel::{Receiver, Sender};
@@ -24,6 +29,39 @@ const MESSAGE_PAGE_SIZE: usize = 120;
 pub const RESUME_TEXT: &str = "Continue where you left off.";
 const PROCESS_STDERR_LIMIT: usize = 8 * 1024;
 const COMMAND_QUEUE_LIMIT: usize = 256;
+// Match mobile's ordinary call deadline. A live socket can still lose a
+// snapshot reply, leaving both the transcript and composer loading forever.
+const CHAT_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+struct PendingRequest {
+    kind: RequestKind,
+    started: Instant,
+}
+
+#[derive(Default)]
+struct ConnectionRequests {
+    pending: Mutex<HashMap<u64, PendingRequest>>,
+    closed: AtomicBool,
+}
+
+impl ConnectionRequests {
+    fn expire_chat_load(&self, now: Instant, timeout: Duration) -> bool {
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        let expired = pending.values().any(|request| {
+            matches!(
+                request.kind,
+                RequestKind::Tree | RequestKind::Chat { .. } | RequestKind::Messages { .. }
+            ) && now.saturating_duration_since(request.started) >= timeout
+        });
+        if !expired || self.closed.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        pending.clear();
+        true
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageCursor {
@@ -377,6 +415,7 @@ struct Command {
 #[derive(Clone)]
 pub struct HostHandle {
     commands: mpsc::SyncSender<Command>,
+    requests: Arc<ConnectionRequests>,
 }
 
 pub struct StartedHost {
@@ -487,17 +526,29 @@ impl HostHandle {
         identity: PathBuf,
         process_errors: Option<Arc<Mutex<Vec<u8>>>>,
     ) -> (Self, Receiver<HostUpdate>) {
+        Self::connect_io_with_timeout(reader, writer, identity, process_errors, CHAT_LOAD_TIMEOUT)
+    }
+
+    fn connect_io_with_timeout(
+        reader: impl Read + Send + 'static,
+        writer: impl Write + Send + 'static,
+        identity: PathBuf,
+        process_errors: Option<Arc<Mutex<Vec<u8>>>>,
+        timeout: Duration,
+    ) -> (Self, Receiver<HostUpdate>) {
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_QUEUE_LIMIT);
         let (update_tx, update_rx) = async_channel::bounded(1024);
-        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let requests = Arc::new(ConnectionRequests::default());
 
         let _ = update_tx.try_send(HostUpdate::Connected { path: identity });
-        spawn_writer(writer, command_rx, update_tx.clone(), pending.clone());
-        spawn_reader(reader, update_tx.clone(), pending, process_errors);
+        spawn_writer(writer, command_rx, update_tx.clone(), requests.clone());
+        spawn_reader(reader, update_tx.clone(), requests.clone(), process_errors);
+        spawn_chat_load_watchdog(update_tx, requests.clone(), timeout);
 
         (
             Self {
                 commands: command_tx,
+                requests,
             },
             update_rx,
         )
@@ -2005,6 +2056,9 @@ impl HostHandle {
     }
 
     fn send(&self, kind: RequestKind, body: Value) -> Result<(), String> {
+        if self.requests.closed.load(Ordering::Acquire) {
+            return Err("the xd state connection is closed".to_owned());
+        }
         self.commands
             .try_send(Command { kind, body })
             .map_err(|error| match error {
@@ -2020,7 +2074,7 @@ fn spawn_writer(
     mut stream: impl Write + Send + 'static,
     commands: mpsc::Receiver<Command>,
     updates: Sender<HostUpdate>,
-    pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
+    requests: Arc<ConnectionRequests>,
 ) {
     thread::Builder::new()
         .name("xd-host-writer".into())
@@ -2030,24 +2084,44 @@ fn spawn_writer(
                 let (request_id, encoded) = match codec.encode_request(command.body) {
                     Ok(encoded) => encoded,
                     Err(error) => {
-                        disconnect(&updates, error.to_string());
+                        close_connection(&updates, &requests, error.to_string());
                         return;
                     }
                 };
-                if let Ok(mut requests) = pending.lock() {
-                    requests.insert(request_id, command.kind);
+                if let Ok(mut pending) = requests.pending.lock() {
+                    if requests.closed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    pending.insert(
+                        request_id,
+                        PendingRequest {
+                            kind: command.kind,
+                            started: Instant::now(),
+                        },
+                    );
                 } else {
-                    disconnect(&updates, "host request state is unavailable".into());
+                    close_connection(
+                        &updates,
+                        &requests,
+                        "host request state is unavailable".into(),
+                    );
                     return;
                 }
                 if let Err(error) = stream.write_all(&encoded) {
-                    if let Ok(mut requests) = pending.lock() {
-                        requests.remove(&request_id);
+                    if let Ok(mut pending) = requests.pending.lock() {
+                        pending.remove(&request_id);
                     }
-                    disconnect(&updates, format!("could not write to xd host: {error}"));
+                    close_connection(
+                        &updates,
+                        &requests,
+                        format!("could not write to xd host: {error}"),
+                    );
                     return;
                 }
             }
+            // The last handle was dropped; the watchdog has no connection to
+            // recover, even if its reader is still waiting for EOF.
+            requests.closed.store(true, Ordering::Release);
         })
         .expect("spawn xd host writer");
 }
@@ -2055,7 +2129,7 @@ fn spawn_writer(
 fn spawn_reader(
     stream: impl Read + Send + 'static,
     updates: Sender<HostUpdate>,
-    pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
+    requests: Arc<ConnectionRequests>,
     process_errors: Option<Arc<Mutex<Vec<u8>>>>,
 ) {
     thread::Builder::new()
@@ -2070,8 +2144,9 @@ fn spawn_reader(
                     .read_until(b'\n', &mut line);
                 match read {
                     Ok(0) => {
-                        disconnect(
+                        close_connection(
                             &updates,
+                            &requests,
                             with_process_errors(
                                 "xd host closed the connection",
                                 process_errors.as_ref(),
@@ -2081,13 +2156,21 @@ fn spawn_reader(
                     }
                     Ok(_) => {}
                     Err(error) => {
-                        disconnect(&updates, format!("could not read from xd host: {error}"));
+                        close_connection(
+                            &updates,
+                            &requests,
+                            format!("could not read from xd host: {error}"),
+                        );
                         return;
                     }
                 }
 
                 if line.len() <= AUTHENTICATED_FRAME_LIMIT && line.last() != Some(&b'\n') {
-                    disconnect(&updates, "xd host closed while sending a response".into());
+                    close_connection(
+                        &updates,
+                        &requests,
+                        "xd host closed while sending a response".into(),
+                    );
                     return;
                 }
 
@@ -2095,10 +2178,13 @@ fn spawn_reader(
                     Ok(Some(frame)) => frame,
                     Ok(None) => continue,
                     Err(error) => {
-                        disconnect(&updates, error.to_string());
+                        close_connection(&updates, &requests, error.to_string());
                         return;
                     }
                 };
+                if requests.closed.load(Ordering::Acquire) {
+                    return;
+                }
                 let update = match frame {
                     Frame::Event { name, mut body } => {
                         let attachments = take_draft_attachments(&mut body);
@@ -2112,10 +2198,12 @@ fn spawn_reader(
                         request_id: Some(request_id),
                         mut body,
                     } => {
-                        let kind = pending
+                        let kind = requests
+                            .pending
                             .lock()
                             .ok()
-                            .and_then(|mut requests| requests.remove(&request_id));
+                            .and_then(|mut pending| pending.remove(&request_id))
+                            .map(|request| request.kind);
                         let Some(kind) = kind else {
                             continue;
                         };
@@ -2184,8 +2272,36 @@ fn take_draft_attachments(body: &mut Map<String, Value>) -> Option<Vec<Attachmen
     crate::model::draft_attachments(&Value::Object(taken))
 }
 
-fn disconnect(updates: &Sender<HostUpdate>, message: String) {
+fn close_connection(updates: &Sender<HostUpdate>, requests: &ConnectionRequests, message: String) {
+    if requests.closed.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if let Ok(mut pending) = requests.pending.lock() {
+        pending.clear();
+    }
     let _ = updates.send_blocking(HostUpdate::Disconnected { message });
+}
+
+fn spawn_chat_load_watchdog(
+    updates: Sender<HostUpdate>,
+    requests: Arc<ConnectionRequests>,
+    timeout: Duration,
+) {
+    thread::Builder::new()
+        .name("xd-host-load-watchdog".into())
+        .spawn(move || {
+            let interval = timeout.min(Duration::from_millis(250));
+            while !updates.is_closed() && !requests.closed.load(Ordering::Acquire) {
+                thread::sleep(interval);
+                if requests.expire_chat_load(Instant::now(), timeout) {
+                    let _ = updates.send_blocking(HostUpdate::Disconnected {
+                        message: "xd host took too long to load the chat; reconnecting".into(),
+                    });
+                    return;
+                }
+            }
+        })
+        .expect("spawn xd host load watchdog");
 }
 
 #[cfg(not(windows))]
@@ -2230,6 +2346,131 @@ mod tests {
         sync::{Arc, Condvar, Mutex},
     };
 
+    fn next_update(updates: &Receiver<HostUpdate>) -> HostUpdate {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match updates.try_recv() {
+                Ok(update) => return update,
+                Err(async_channel::TryRecvError::Empty) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                error => panic!("host update did not arrive: {error:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_chat_reply_reconnects_even_when_events_keep_arriving() {
+        let (reader, mut peer) = crate::local_socket::UnixStream::pair().unwrap();
+        let (host, updates) = HostHandle::connect_io_with_timeout(
+            reader.try_clone().unwrap(),
+            reader,
+            PathBuf::from("stalled-host"),
+            None,
+            Duration::from_millis(200),
+        );
+        assert!(matches!(
+            next_update(&updates),
+            HostUpdate::Connected { .. }
+        ));
+        host.chat("chat-1").unwrap();
+        let mut line = String::new();
+        BufReader::new(peer.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["op"], "chat");
+        writeln!(peer, "{{\"event\":\"working\",\"chat\":\"other-chat\"}}").unwrap();
+        assert!(matches!(next_update(&updates), HostUpdate::Event { .. }));
+        assert!(matches!(
+            next_update(&updates),
+            HostUpdate::Disconnected { .. }
+        ));
+        assert_eq!(
+            host.tree().unwrap_err(),
+            "the xd state connection is closed"
+        );
+        drop(peer);
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            updates.try_recv().is_err(),
+            "a connection disconnects only once"
+        );
+    }
+
+    #[test]
+    fn a_completed_snapshot_reply_cancels_its_deadline() {
+        let (reader, mut peer) = crate::local_socket::UnixStream::pair().unwrap();
+        let (host, updates) = HostHandle::connect_io_with_timeout(
+            reader.try_clone().unwrap(),
+            reader,
+            PathBuf::from("healthy-host"),
+            None,
+            Duration::from_secs(5),
+        );
+        assert!(matches!(
+            next_update(&updates),
+            HostUpdate::Connected { .. }
+        ));
+        host.tree().unwrap();
+        let mut line = String::new();
+        BufReader::new(peer.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let id = serde_json::from_str::<Value>(&line).unwrap()["_xd_request"]
+            .as_u64()
+            .unwrap();
+        writeln!(peer, "{{\"ok\":true,\"_xd_request\":{id}}}").unwrap();
+        assert!(matches!(next_update(&updates), HostUpdate::Reply { .. }));
+        assert!(!host.requests.expire_chat_load(
+            Instant::now() + Duration::from_secs(60),
+            Duration::from_secs(5)
+        ));
+        assert!(!host.requests.closed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn only_snapshot_requests_expire_and_mutations_are_not_replayed() {
+        for kind in [
+            RequestKind::Tree,
+            RequestKind::Chat {
+                chat_id: "one".into(),
+            },
+            RequestKind::Messages {
+                chat_id: "one".into(),
+                cursor: MessageCursor::Tail,
+            },
+        ] {
+            let requests = ConnectionRequests::default();
+            requests.pending.lock().unwrap().insert(
+                1,
+                PendingRequest {
+                    kind,
+                    started: Instant::now(),
+                },
+            );
+            assert!(
+                requests.expire_chat_load(Instant::now() + CHAT_LOAD_TIMEOUT, CHAT_LOAD_TIMEOUT)
+            );
+            assert!(requests.pending.lock().unwrap().is_empty());
+        }
+        let requests = ConnectionRequests::default();
+        requests.pending.lock().unwrap().insert(
+            1,
+            PendingRequest {
+                kind: RequestKind::GitPush {
+                    chat_id: "one".into(),
+                    generation: 0,
+                },
+                started: Instant::now(),
+            },
+        );
+        assert!(
+            !requests
+                .expire_chat_load(Instant::now() + Duration::from_secs(600), CHAT_LOAD_TIMEOUT)
+        );
+        assert_eq!(requests.pending.lock().unwrap().len(), 1);
+    }
+
     #[derive(Default)]
     struct WriteGate {
         entered: bool,
@@ -2260,8 +2501,9 @@ mod tests {
     #[test]
     fn black_holed_host_writer_eventually_rejects_more_commands() {
         let gate = Arc::new((Mutex::new(WriteGate::default()), Condvar::new()));
+        let (reader, _peer) = crate::local_socket::UnixStream::pair().unwrap();
         let (host, _updates) = HostHandle::connect_io(
-            io::empty(),
+            reader,
             BlockingWriter { gate: gate.clone() },
             PathBuf::from("blocked-host"),
         );
