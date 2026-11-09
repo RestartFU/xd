@@ -816,6 +816,15 @@ private fun WorkspaceSection(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+            // Said here too: with nothing listed, the branch page cannot be opened to read it.
+            places.pullRequestError?.let {
+                Text(
+                    it,
+                    modifier = Modifier.padding(start = 4.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }
@@ -1090,8 +1099,12 @@ private fun BasePicker(
     // The chosen one always shows, whatever the filter and limit hide.
     val chosenPull = (selected as? Ops.NewSessionWorktree.PullRequest)?.number
     val chosenBranch = (selected as? Ops.NewSessionWorktree.Branch)?.reference
-    val shownPulls = pulls.take(PLACE_LIMIT).let { shown -> shown + pulls.filter { it.number == chosenPull && it !in shown } }
-    val shownBranches = branches.take(PLACE_LIMIT).let { shown -> shown + branches.filter { it.reference == chosenBranch && it !in shown } }
+    val shownPulls = pulls.take(PLACE_LIMIT).let { shown ->
+        shown + places?.pullRequests.orEmpty().filter { it.number == chosenPull && it !in shown }
+    }
+    val shownBranches = branches.take(PLACE_LIMIT).let { shown ->
+        shown + places?.branches.orEmpty().filter { it.reference == chosenBranch && it !in shown }
+    }
     Column(Modifier.fillMaxSize()) {
         TopBar("Branch or pull request", Navigation.Back(onBack))
         LazyColumn(

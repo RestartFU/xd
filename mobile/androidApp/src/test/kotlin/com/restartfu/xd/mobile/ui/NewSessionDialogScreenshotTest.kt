@@ -139,6 +139,11 @@ class NewSessionDialogScreenshotTest {
         capture(screen, dialog, "$name-base")
 
         click(dialog, "fix/reconnect-backoff")
+        // The chosen branch stays listed whatever the filter hides.
+        click(dialog, "Change branch or pull request")
+        type(dialog, "docs")
+        check(shows(dialog, "docs/protocol") && shows(dialog, "fix/reconnect-backoff")) { "The chosen branch stays listed under a filter" }
+        click(dialog, "fix/reconnect-backoff")
         // Back on the form, with the branch chosen and its remote option offered.
         check(shows(dialog, "fix/reconnect-backoff") && shows(dialog, "Start from remote")) { "The form shows the chosen branch" }
         val toggle = nodes(dialog).single { it.config.getOrNull(SemanticsProperties.ToggleableState) != null }
@@ -156,6 +161,32 @@ class NewSessionDialogScreenshotTest {
      * only catches up when something draws, and a lazy list composes its rows
      * in layout.
      */
+    /** Sets the first text field's text without focusing it, which would keep Compose busy. */
+    private fun type(root: View, text: String) {
+        val field = nodes(root).first { it.config.getOrNull(SemanticsActions.SetText) != null }
+        field.config[SemanticsActions.SetText].action!!(androidx.compose.ui.text.AnnotatedString(text))
+        repeat(2) { idle() }
+    }
+
+    /** A pull request listing that failed, with nothing else to start from, still says why. */
+    @Test fun aFailedPullRequestListingIsShown() {
+        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+        activity.setContent {
+            MaterialTheme {
+                NewSessionDialog(
+                    projectName = "xd",
+                    places = { PLACES.copy(canCreateWorktree = false, branches = emptyList(), pullRequests = emptyList(), pullRequestError = "GitHub CLI is not signed in") },
+                    onDismiss = {},
+                    onCreate = {},
+                )
+            }
+        }
+        repeat(3) { idle() }
+        val dialog = dialogViews().last { it !== activity.window.decorView }
+        check(shows(dialog, "GitHub CLI is not signed in")) { "The pull request error shows on the form" }
+        activity.finish()
+    }
+
     private fun idle() {
         repeat(10) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
         dialogViews().filter { it.width > 0 && it.height > 0 }.forEach { view ->
