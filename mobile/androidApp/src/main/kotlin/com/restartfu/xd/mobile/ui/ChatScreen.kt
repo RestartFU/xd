@@ -211,6 +211,7 @@ internal fun ChatScreen(
     // A run of ordinary tool calls collapses to one line; inline diffs keep
     // their own file-change row, and a lone call shows its command.
     val rows = remember(items) { ToolGrouping.rows(items) }
+    val answered = remember(items) { AskBlock.answered(items) }
     val leadingItemCount =
         (if (state.hasOlderMessages) 1 else 0) + (if (state.error != null) 1 else 0)
     // The working row sits below the last message, so it is what "the bottom"
@@ -459,7 +460,7 @@ internal fun ChatScreen(
             }
             items(rows, key = ::rowKey) { row ->
                 when (row) {
-                    is TranscriptRow.Single -> TranscriptRow(row.item, model)
+                    is TranscriptRow.Single -> TranscriptRow(row.item, model, answered[row.item.id])
                     is TranscriptRow.Tools -> ToolGroupRow(row)
                     is TranscriptRow.Pipeline -> PipelineCard(row.run, model.client)
                     is TranscriptRow.Subagent -> {
@@ -1335,7 +1336,7 @@ private fun ToolRow(item: TranscriptItem, nested: Boolean = false) {
  * boxes where the only difference is which side is narrower.
  */
 @Composable
-private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
+private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel, answering: String? = null) {
     if (item.kind == TranscriptKind.TOOL) {
         ToolRow(item)
         return
@@ -1377,7 +1378,28 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         contentAlignment = Alignment.CenterEnd,
     ) {
-        Box(Modifier.fillMaxWidth(0.86f), contentAlignment = Alignment.CenterEnd) {
+        Column(Modifier.fillMaxWidth(0.86f), horizontalAlignment = Alignment.End) {
+            // What the message answers, attached above it like a reply's quote.
+            answering?.let { question ->
+                Row(
+                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        painterResource(com.restartfu.xd.mobile.R.drawable.ic_reply),
+                        contentDescription = null,
+                        tint = LocalXdSignals.current.faint,
+                        modifier = Modifier.padding(end = 5.dp).size(14.dp),
+                    )
+                    Text(
+                        answeredQuestionLabel(question),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = LocalXdSignals.current.faint,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
             Surface(
                 // Tinted rather than the page colour: against plain reply text
                 // the bubble has to carry the distinction on its own.
@@ -1392,6 +1414,9 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
         }
     }
 }
+
+/** The caption on a message sent in reply to a question, as on the desktop. */
+internal fun answeredQuestionLabel(question: String): String = "Answering \u201c${question.trim()}\u201d"
 
 private fun approvalTitle(request: com.restartfu.xd.model.PendingInteraction): String =
     when (request.tool) {

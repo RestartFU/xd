@@ -122,4 +122,22 @@ class AskTest {
             ),
         )
     }
+
+    @Test
+    fun aMessageRightAfterAQuestionAnswersIt() {
+        val ask = "Ready.\n\n<ask>\nWhich region?\n- us-east-1\n- eu-west-1\n</ask>"
+        fun item(id: String, kind: TranscriptKind, text: String) = TranscriptItem(id, kind, text)
+        val items = listOf(
+            item("1", TranscriptKind.USER, "Deploy staging."),
+            item("2", TranscriptKind.ASSISTANT, ask),
+            item("3", TranscriptKind.USER, "eu-west-1"),
+            item("4", TranscriptKind.ASSISTANT, "Done."),
+            item("5", TranscriptKind.USER, "Thanks"),
+            // A question the agent moved past before anyone answered.
+            item("6", TranscriptKind.ASSISTANT, ask),
+            item("7", TranscriptKind.TOOL, "Read a"),
+            item("8", TranscriptKind.USER, "Unrelated"),
+        )
+        assertEquals(mapOf("3" to "Which region?"), AskBlock.answered(items))
+    }
 }

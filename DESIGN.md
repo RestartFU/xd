@@ -136,7 +136,7 @@ Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome
 
 The normative desktop values above come from `desktop/src/theme.rs`. Roles pair by the `dark-` and `light-` prefixes. `selection` and `backdrop` include alpha as `#RRGGBBAA`; other values are opaque.
 
-Neutral surfaces distinguish canvas, sidebar, panels, hover and selection. Primary actions use a silver fill with dark ink in Dark, and charcoal with white ink in Light. Links and focus stay neutral. Working is green, waiting is amber, and destructive actions are rose. Desktop marks questions and approvals with a steady hollow amber circle and ‘Waiting on you’ in session rows and beneath paused turns. Chat tabs use the same ring; the answer card stays above the composer. Status also has text or an icon.
+Neutral surfaces distinguish canvas, sidebar, panels, hover and selection. Primary actions use a silver fill with dark ink in Dark, and charcoal with white ink in Light. Links and focus stay neutral. Working is green, waiting is amber, and destructive actions are rose. Desktop marks questions and approvals with a steady hollow amber circle and ‘Waiting on you’ in session rows and beneath paused turns. Chat tabs use the same ring; the answer card stays above the composer. Once answered, the reply carries the question above its bubble in faint text after a reply arrow, on desktop and mobile. Status also has text or an icon.
 
 Android uses complete Material color roles in `ui/Theme.kt`, with small platform-specific surface adjustments. Its charcoal conversation surface matches the desktop canvas; silver action, text and signal colors follow the same roles. Legacy accent preferences remain readable but do not recolor the main workspace.
 
