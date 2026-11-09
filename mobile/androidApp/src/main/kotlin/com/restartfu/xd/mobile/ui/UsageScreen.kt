@@ -48,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.OLDER_HOST_PRICES
@@ -68,7 +69,7 @@ import kotlinx.coroutines.launch
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun UsageContent(model: UsageViewModel) {
+internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
     val state by model.state.collectAsStateWithLifecycle()
     val metric = state.metric
     val provider = state.provider
@@ -82,7 +83,9 @@ internal fun UsageContent(model: UsageViewModel) {
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
-            .navigationBarsPadding(),
+            .navigationBarsPadding()
+            // Room to scroll the last card clear of the floating bar.
+            .padding(bottom = bottomInset),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -20,6 +20,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.AndroidComposeTestRule
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -74,6 +75,23 @@ class ProjectsScreenshotTest {
 
     @Test fun projectsLight() = shoot("projects-light", MinimalThemePreset.LIGHT)
 
+    @Test fun bottomBarLeavesOutSessions() = shoot("bottom-bar-dark", MinimalThemePreset.DARK) {
+        // Sessions open from the Projects page; the phone's bar has no tab for them.
+        check(shows("Projects") && shows("Terminal") && shows("Usage") && !shows("Sessions"))
+    }
+
+    @Test @Config(qualifiers = "w840dp-h1200dp-320dpi")
+    fun railLeavesOutSessions() = shoot("rail-dark", MinimalThemePreset.DARK) {
+        check(shows("Projects") && shows("Terminal") && shows("Usage") && !shows("Sessions"))
+    }
+
+    @Test @Config(qualifiers = "w840dp-h1200dp-320dpi")
+    fun tabletKeepsALabelledNewButton() = shoot("rail-new-menu-dark", MinimalThemePreset.DARK) {
+        check(this@ProjectsScreenshotTest.compose.onAllNodes(hasText("New"), useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())
+        click("New")
+        check(shows("New session") && shows("New project") && shows("New folder"))
+    }
+
     @Test fun projectsOpenOnTheirOwn() = shoot("projects-open-dark", MinimalThemePreset.DARK) {
         // Every project starts open, so sessions in two projects show at once.
         check(shows("Reconnect backoff") && shows("Landing copy") && shows("No sessions yet"))
@@ -84,12 +102,14 @@ class ProjectsScreenshotTest {
     }
 
     @Test fun newSessionAsksForAProject() = shoot("new-session-picker-dark", MinimalThemePreset.DARK) {
+        click("New")
         click("New session")
         check(shows("Which project?") && shows("2 sessions") && shows("acme · 1 session") &&
             shows("acme / Clients · 1 session") && !shows("Start session"))
     }
 
     @Test fun pickingAProjectOpensItsForm() = shoot("new-session-chosen-dark", MinimalThemePreset.DARK) {
+        click("New")
         click("New session")
         val before = SENT.size
         // Nothing waits on the next dialog: its title field never lets Compose go idle.
@@ -126,9 +146,56 @@ class ProjectsScreenshotTest {
         .filter { it["op"]?.jsonPrimitive?.content == "folder-settings" }
         .mapNotNull { it["folder"]?.jsonPrimitive?.content }
 
+    @Test fun phoneNewIsTheRoundButton() = shoot("phone-new-dark", MinimalThemePreset.DARK) {
+        // Named for screen readers, with no visible label and no row of its own above the list.
+        check(shows("New") && !shows("4 projects · 2 folders"))
+        check(this@ProjectsScreenshotTest.compose.onAllNodes(hasText("New"), useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test @Config(qualifiers = "w360dp-h780dp-420dpi")
+    fun narrowPhone() = longList("narrow-dark", MinimalThemePreset.DARK)
+
+    @Test @Config(qualifiers = "w320dp-h640dp-320dpi")
+    fun narrowestPhone() = longList("narrowest-dark", MinimalThemePreset.DARK)
+
+    @Test fun barStaysCentredOnTerminal() = shoot("terminal-centred-dark", MinimalThemePreset.DARK) {
+        click("Terminal")
+        checkBarCentred()
+    }
+
+    @Test fun longListDark() = longList("long-list-dark", MinimalThemePreset.DARK)
+
+    @Test fun longListLight() = longList("long-list-light", MinimalThemePreset.LIGHT)
+
+    @Test fun terminalTab() = shoot("terminal-dark", MinimalThemePreset.DARK) { click("Terminal") }
+
+    @Test fun usageTab() = shoot("usage-dark", MinimalThemePreset.DARK) { click("Usage") }
+
+    /** A list longer than the screen, to show what the bottom bar covers. */
+    private fun longList(name: String, theme: MinimalThemePreset) {
+        longTree = true
+        try {
+            shoot(name, theme) {
+                check(shows("Quota bars") && shows("New"))
+                // The round button sits above the bar at any width, so neither covers the other.
+                val usage = bounds { hasContentDescription("Usage") }
+                val button = bounds { hasContentDescription("New") }
+                check(button.bottom < usage.top) { "Usage tab $usage, New button $button" }
+                checkBarCentred()
+            }
+        } finally {
+            longTree = false
+        }
+    }
+
     @Test fun newMenu() = shoot("new-menu-dark", MinimalThemePreset.DARK) {
-        click("New")
-        check(shows("New project") && shows("New folder"))
+        showNewMenu()
+        check(shows("New session") && shows("New project") && shows("New folder"))
+    }
+
+    @Test fun newMenuLight() = shoot("new-menu-light", MinimalThemePreset.LIGHT) {
+        showNewMenu()
+        check(shows("New session"))
     }
 
     @Test fun newFolderDialog() = shoot("new-folder-dark", MinimalThemePreset.DARK) {
@@ -258,6 +325,27 @@ class ProjectsScreenshotTest {
                 ?: node.config.getOrNull(SemanticsProperties.ContentDescription)?.joinToString()
         }
 
+        /** Where the one node [matcher] picks sits on screen, merged with its children. */
+        fun bounds(matcher: () -> SemanticsMatcher) = compose.onNode(matcher()).fetchSemanticsNode().boundsInRoot
+
+        /**
+         * Opens the New menu so a capture shows it. Under Robolectric the first
+         * menu a test opens is never painted into its window, so it opens twice.
+         */
+        fun showNewMenu() {
+            click("New")
+            pressBack()
+            click("New")
+        }
+
+        /** The floating bar sits in the middle of the window. */
+        fun checkBarCentred() {
+            val root = bounds { isRoot() }
+            val left = bounds { hasContentDescription("Projects") }.left - root.left
+            val right = root.right - bounds { hasContentDescription("Usage") }.right
+            check(kotlin.math.abs(left - right) < 2f) { "bar is $left from the left and $right from the right" }
+        }
+
         fun shows(label: String): Boolean = matching(label).fetchSemanticsNodes().isNotEmpty()
 
         /** How many pixels of exactly [color] the row holding [label] paints, across the screen's width. */
@@ -361,7 +449,7 @@ class ProjectsScreenshotTest {
         override fun close() = Unit
 
         private fun reply(op: String?, owner: String?): String = when (op) {
-            "tree" -> TREE
+            "tree" -> if (longTree) TREE_LONG else TREE
             "owner-icon" -> """{"ok":true,"owner":"$owner","mime":"image/png","data":"${avatar(owner.orEmpty())}"}"""
             else -> """{"ok":true}"""
         }
@@ -369,6 +457,26 @@ class ProjectsScreenshotTest {
 
     private companion object {
         /** Every request the app sent, in order. */
+        /** Whether the scripted host answers with [TREE_LONG]. */
+        @Volatile var longTree = false
+
+        /** [TREE] with a dozen more sessions, so the list runs past the bottom of the screen. */
+        val TREE_LONG by lazy {
+            val names = listOf(
+                "Pairing flow", "Diff pane", "Terminal resize", "Model picker", "Settle shelf", "Folder moves",
+                "Push notices", "Draft sync", "Image viewer", "Theme tokens", "Quota bars", "Host update",
+            )
+            val sessions = names.mapIndexed { i, title ->
+                """{"id":"x$i","folder":"xd","title":"$title","chats":["y$i"],"terminal_chat":"session:x$i"}"""
+            }
+            val chats = names.mapIndexed { i, title ->
+                val backend = if (i % 2 == 0) "claude" else "codex"
+                """{"id":"y$i","folder":"xd","title":"$title","backend":"$backend","working":false,"session":"x$i"}"""
+            }
+            TREE.replace("\"sessions\":[", "\"sessions\":[" + sessions.joinToString(",") + ",")
+                .replace("\"chats\":[{", "\"chats\":[" + chats.joinToString(",") + ",{")
+        }
+
         val SENT: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
 
         /** An organization holding a project and a folder of client sites, beside two plain projects. */
