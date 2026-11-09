@@ -2305,10 +2305,24 @@ fn which_missing(command: &std::process::Command) -> bool {
     !std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
 }
 
-fn codex_identity<'a>(limits: &'a Value, profile: &'a Value) -> Option<&'a str> {
-    profile["account"]["email"]
-        .as_str()
-        .or(limits["accountId"].as_str())
+/// Who Codex is signed in as: the address and, when Codex names one, the
+/// workspace. A Codex session belongs to the workspace that wrote it, and one
+/// address can belong to several.
+fn codex_login(account: &Value) -> Option<String> {
+    let email = account["email"].as_str()?;
+    Some(
+        match account["workspaceName"]
+            .as_str()
+            .filter(|workspace| !workspace.trim().is_empty())
+        {
+            Some(workspace) => format!("{email}\u{1f}{workspace}"),
+            None => email.to_owned(),
+        },
+    )
+}
+
+fn codex_identity(limits: &Value, profile: &Value) -> Option<String> {
+    codex_login(&profile["account"]).or_else(|| limits["accountId"].as_str().map(str::to_owned))
 }
 
 fn codex_account(limits: &Value, profile: &Value, now: i64, zone: Tz) -> Value {
@@ -2323,7 +2337,7 @@ fn codex_account(limits: &Value, profile: &Value, now: i64, zone: Tz) -> Value {
         .or(snapshot["planType"].as_str());
     json!({
         "provider": "codex",
-        "account_key": account_key("codex", codex_identity(limits, profile)),
+        "account_key": account_key("codex", codex_identity(limits, profile).as_deref()),
         "plan": plan.map(title_case),
         "checked_at_ms": now,
         "windows": windows_json(&windows, now, zone),
@@ -2353,7 +2367,7 @@ fn verify_codex_account(session: &mut ProbeSession, expected: &str) -> Result<()
         }
     }
     let (profile, limits) = (profile.unwrap_or_default(), limits.unwrap_or_default());
-    let key = account_key("codex", codex_identity(&limits, &profile));
+    let key = account_key("codex", codex_identity(&limits, &profile).as_deref());
     if key.as_deref() == Some(expected) {
         Ok(())
     } else {
@@ -2480,7 +2494,7 @@ pub(crate) fn read_codex_login(environment: &[(String, String)]) -> Option<Ident
         return Some(Identity {
             email: Some(email.to_owned()),
             plan: account["planType"].as_str().map(title_case),
-            account_key: account_key("codex", Some(email)),
+            account_key: account_key("codex", codex_login(account).as_deref()),
         });
     }
 }
@@ -2837,6 +2851,17 @@ mod tests {
                 "cache_creation_input_tokens":5, "output_tokens":20,
             }},
         })
+    }
+
+    #[test]
+    fn one_address_in_two_codex_workspaces_is_two_logins() {
+        let personal = json!({"email":"a@example.com","planType":"pro"});
+        let work = json!({"email":"a@example.com","planType":"team","workspaceName":"Acme"});
+        let key = |account: &Value| account_key("codex", codex_login(account).as_deref());
+        assert_ne!(key(&personal), key(&work));
+        // A usage probe and a login read file the same login under one key.
+        let probed = codex_account(&json!({}), &json!({"account": work}), 0, Tz::UTC);
+        assert_eq!(probed["account_key"].as_str(), key(&work).as_deref());
     }
 
     #[test]
