@@ -10365,10 +10365,19 @@ impl XdDesktop {
             return;
         };
         // A file still being read would be left behind for the next message.
-        if text.is_empty()
-            || !self.model.draft_attachments.is_empty()
-            || self.attachments_reading > 0
-        {
+        if self.attachments_reading > 0 {
+            return;
+        }
+        // The queue op carries text alone. A send that arrives mid-turn is
+        // queued by the host with its files saved and referenced, so that is
+        // how a draft with files is queued.
+        if !self.model.draft_attachments.is_empty() {
+            if self.model.working {
+                self.submit_composer(false, cx);
+            }
+            return;
+        }
+        if text.is_empty() {
             return;
         }
         let Some(host) = self.active_host().cloned() else {
@@ -16038,10 +16047,15 @@ impl XdDesktop {
             && !self.sending
             && self.attachments_reading == 0
             && (!self.composer.trim().is_empty() || !self.model.draft_attachments.is_empty());
+        // A draft with files is queued by sending it, which queues only while
+        // a turn runs, and waits on a send in flight like the send button does.
         let can_queue = self.model.connected
-            && !self.composer.trim().is_empty()
-            && self.model.draft_attachments.is_empty()
-            && self.attachments_reading == 0;
+            && self.attachments_reading == 0
+            && if self.model.draft_attachments.is_empty() {
+                !self.composer.trim().is_empty()
+            } else {
+                self.model.working && !self.sending
+            };
         let working = self.model.working;
         // Between turns, the background agents and shells still running.
         let waiting_on = if working {
@@ -22156,6 +22170,12 @@ Binary files /dev/null and b/image.png differ\n";
             .expect("end of native composer actions")
             .0;
         assert!(actions.contains("host.queue_message(&chat_id, &text)"));
+        let queue = actions
+            .split_once("fn drop_queued(")
+            .expect("end of native queue action")
+            .0;
+        // The queue op carries text alone, so files go as a mid-turn send.
+        assert!(queue.contains("self.submit_composer(false, cx)"));
         assert!(actions.contains("host.drop_queue(&chat_id, index)"));
         assert!(actions.contains("host.steer_queue(&chat_id, index, &text)"));
         assert!(actions.contains("host.cancel(&chat_id)"));
