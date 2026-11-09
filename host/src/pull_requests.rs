@@ -1,6 +1,8 @@
 //! Pull requests linked to a chat: what counts as one, and spotting the ones an
 //! agent opens from its shell.
 
+use std::{collections::VecDeque, sync::Mutex};
+
 /// How many pull requests one chat keeps. Linking more is refused.
 pub(crate) const MAX_PER_CHAT: usize = 32;
 /// How many addresses one request may name.
@@ -120,7 +122,10 @@ pub(crate) fn created_by(command: &str, output: &str) -> Vec<String> {
 /// Whether a shell command runs `gh pr create` and nothing that prints the
 /// addresses of other pull requests, so the addresses it prints are new ones.
 pub(crate) fn creates(command: &str) -> bool {
-    let commands = shell_commands(command);
+    let commands = shell_commands(command)
+        .into_iter()
+        .map(|words| without_gh_flags(&words))
+        .collect::<Vec<_>>();
     let runs = |words: &[&str]| {
         commands
             .iter()
@@ -132,6 +137,57 @@ pub(crate) fn creates(command: &str) -> bool {
             .any(|verb| runs(&["gh", "pr", verb]))
         && !runs(&["gh", "search"])
         && !runs(&["gh", "api"])
+}
+
+/// A `gh` command's words without its flags, so `gh -R o/r pr create` reads
+/// as `gh pr create`. Other commands are left as they are.
+fn without_gh_flags<'a>(words: &[&'a str]) -> Vec<&'a str> {
+    if words.first() != Some(&"gh") {
+        return words.to_vec();
+    }
+    let mut kept = Vec::new();
+    let mut words = words.iter();
+    while let Some(word) = words.next() {
+        if matches!(*word, "-R" | "--repo") {
+            words.next();
+        } else if !word.starts_with('-') {
+            kept.push(*word);
+        }
+    }
+    kept
+}
+
+/// Commands Claude ran in the background that open a pull request, by tool
+/// use id, until their task finishes. A task can finish turns later, when
+/// another parser reads Claude's output, so they are kept here, oldest
+/// dropped first.
+static BACKGROUND: Mutex<VecDeque<(String, String)>> = Mutex::new(VecDeque::new());
+const MAX_BACKGROUND: usize = 64;
+
+/// Remembers a background command that opens a pull request.
+pub(crate) fn started_in_background(id: &str, command: &str) {
+    if let Ok(mut waiting) = BACKGROUND.lock() {
+        if waiting.len() >= MAX_BACKGROUND {
+            waiting.pop_front();
+        }
+        waiting.push_back((id.to_owned(), command.to_owned()));
+    }
+}
+
+/// The pull requests a background command opened, read from its output file
+/// once its task has finished. Nothing for any other task.
+pub(crate) fn finished_in_background(id: &str, output_file: Option<&str>) -> Vec<String> {
+    let command = BACKGROUND.lock().ok().and_then(|mut waiting| {
+        let index = waiting.iter().position(|(waiting, _)| waiting == id)?;
+        waiting.remove(index).map(|(_, command)| command)
+    });
+    let Some(command) = command else {
+        return Vec::new();
+    };
+    output_file
+        .and_then(crate::delegation::read_output)
+        .map(|output| created_by(&command, &output))
+        .unwrap_or_default()
 }
 
 /// The leading words of each simple command in a shell script, past variable
@@ -247,6 +303,37 @@ mod tests {
         ] {
             assert!(created_by(command, output).is_empty(), "{command}");
         }
+    }
+
+    #[test]
+    fn flags_before_the_subcommand_do_not_hide_a_create() {
+        let output = "https://github.com/o/other/pull/2\n";
+        for command in [
+            "gh --repo o/other pr create --fill",
+            "gh -R o/other pr create --fill",
+            "gh pr -R o/other create --fill",
+        ] {
+            assert_eq!(created_by(command, output).len(), 1, "{command}");
+        }
+        assert!(created_by("gh -R o/other pr list", output).is_empty());
+    }
+
+    #[test]
+    fn a_background_create_is_read_from_its_output_once_it_finishes() {
+        let output = std::env::temp_dir().join(format!("xd-pr-{}.output", uuid::Uuid::new_v4()));
+        std::fs::write(&output, "https://github.com/o/r/pull/4\n").unwrap();
+        let output_file = output.to_str();
+        assert!(finished_in_background("toolu_unknown", output_file).is_empty());
+        started_in_background("toolu_bg", "gh pr create --fill");
+        assert_eq!(
+            finished_in_background("toolu_bg", output_file),
+            ["https://github.com/o/r/pull/4"]
+        );
+        assert!(
+            finished_in_background("toolu_bg", output_file).is_empty(),
+            "read once"
+        );
+        let _ = std::fs::remove_file(output);
     }
 
     #[test]
