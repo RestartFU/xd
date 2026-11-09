@@ -25,6 +25,34 @@ import kotlinx.serialization.json.put
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatSessionCoreTest {
     @Test
+    fun backgroundOutputReadsFreshFilesWithoutChangingTranscriptState() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(testCredentials()), backgroundScope)
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
+        val core = ChatSessionCore("chat", actor, backgroundScope) { 10_000L }
+        val session = ChatSession(core) {}
+        val read = async { session.backgroundTaskOutput() }
+        runCurrent()
+        val request = com.restartfu.xd.protocol.WireJson.parseToJsonElement(factory.latest.writeText()).toString()
+        kotlin.test.assertTrue(request.contains("background-task-output"))
+        factory.latest.receive("""{"ok":true,"chat":"chat","tasks":[{"id":"watch","kind":"Monitor",
+            "description":"Watch CI","started_at":123,"lines":[{"text":"jq: command not found","error":true}]}],"_xd_request":2}""".replace("\n", ""))
+        runCurrent()
+        kotlin.test.assertTrue(read.await().single().lines.single().error)
+        assertNull(core.state.value.error)
+        val failure = async { runCatching { session.backgroundTaskOutput() } }
+        runCurrent()
+        factory.latest.receive("""{"ok":false,"error":"Unknown operation","_xd_request":3}""")
+        runCurrent()
+        kotlin.test.assertTrue(failure.await().isFailure)
+        assertNull(core.state.value.error)
+    }
+
+    @Test
     fun speechFlowEmitsOnlyCompleteAssistantBlocksAndResetsForTools() = runTest {
         val core = ChatSessionCore("chat", testActor(backgroundScope), backgroundScope) { 10_000L }
         val spoken = async { core.speech.take(2).toList() }

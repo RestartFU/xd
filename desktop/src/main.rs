@@ -25,7 +25,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 use std::{
     process::{Command, Stdio},
     thread,
@@ -51,9 +51,9 @@ use xd_desktop::{
     },
     markdown,
     model::{
-        AppModel, Attachment, AutoDeleteRules, AutoSettleRules, ChatSummary, Folder,
-        MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage, MessagePageDirection, SentFrom, ToolView,
-        Worktree,
+        AppModel, Attachment, AutoDeleteRules, AutoSettleRules, BackgroundTaskOutput, ChatSummary,
+        Folder, MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage, MessagePageDirection, SentFrom,
+        ToolView, Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -73,6 +73,8 @@ mod input;
 mod minimal;
 mod new_chat;
 mod new_chat_store;
+#[cfg(target_os = "linux")]
+mod notifications;
 mod selection;
 mod settings;
 mod source_build;
@@ -1947,6 +1949,13 @@ enum RemoteState {
     Offline,
 }
 
+/// Where clicking a "turn finished" notification should lead.
+#[cfg(target_os = "linux")]
+struct TurnNotificationTarget {
+    endpoint: ChatEndpoint,
+    chat_id: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 enum ChatEndpoint {
     #[default]
@@ -2038,11 +2047,19 @@ struct XdDesktop {
     chat_title_settings: Option<workspace_settings::ChatTitleSettings>,
     chat_title_model_menu: Option<&'static str>,
     expanded_activities: HashSet<i64>,
+    background_expanded: Option<(ChatEndpoint, String)>,
+    background_generation: u64,
+    background_output: Vec<BackgroundTaskOutput>,
+    background_reading: bool,
+    background_error: Option<String>,
+    background_visible: bool,
     expanded_work_logs: HashSet<i64>,
     /// Agents asked to stop or move to the background, until their record
     /// says they did.
     subagent_actions: HashMap<String, &'static str>,
     pending_minimal_session: Option<(String, String)>,
+    #[cfg(target_os = "linux")]
+    turn_notifier: notifications::Notifier<TurnNotificationTarget>,
     settings: AppSettings,
     settings_open: bool,
     auth_open: bool,
@@ -2674,6 +2691,8 @@ impl XdDesktop {
         let remote_configured = settings.remote_credentials.is_some();
         let minimal_popup_focus = cx.focus_handle();
         let (terminal_runtime, terminal_updates) = SessionRuntime::new();
+        #[cfg(target_os = "linux")]
+        let (turn_notifier, clicked_notifications) = notifications::Notifier::new();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -2704,9 +2723,17 @@ impl XdDesktop {
             chat_title_settings: None,
             chat_title_model_menu: None,
             expanded_activities: HashSet::new(),
+            background_expanded: None,
+            background_generation: 0,
+            background_output: Vec::new(),
+            background_reading: false,
+            background_error: None,
+            background_visible: false,
             expanded_work_logs: HashSet::new(),
             subagent_actions: HashMap::new(),
             pending_minimal_session: None,
+            #[cfg(target_os = "linux")]
+            turn_notifier,
             settings,
             settings_open: false,
             auth_open: false,
@@ -2914,6 +2941,18 @@ impl XdDesktop {
             }
         }
         desktop.listen_for_terminal_runtime(terminal_updates, cx);
+        #[cfg(target_os = "linux")]
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(activation) = clicked_notifications.recv().await {
+                let opened = this.update_in(cx, |this, window, cx| {
+                    this.open_clicked_notification(activation, window, cx);
+                });
+                if opened.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_secs(10)).await;
@@ -2962,6 +3001,22 @@ impl XdDesktop {
                     })
                     .unwrap_or(false);
                 if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                Timer::after(Duration::from_millis(2500)).await;
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        if window.is_window_active() {
+                            this.poll_background_tasks(cx);
+                        }
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -3094,6 +3149,7 @@ impl XdDesktop {
                 | RequestKind::AgentAuth
                 | RequestKind::AgentAuthMutation
                 | RequestKind::AgentClis
+                | RequestKind::BackgroundTaskOutput { .. }
                 | RequestKind::Chat { .. }
                 | RequestKind::Messages { .. }
                 | RequestKind::Shortcuts { .. }
@@ -3511,6 +3567,7 @@ impl XdDesktop {
                 remote_model.connected = false;
                 remote_model.connection_error = Some(format!("{message} Reconnecting…"));
                 if self.active_endpoint == ChatEndpoint::Remote {
+                    self.background_reading = false;
                     // Created already: sending its message again would make another.
                     if self.new_chat_started.take().is_some() {
                         self.creating_chat_folder = None;
@@ -3865,6 +3922,7 @@ impl XdDesktop {
                 self.host = None;
                 self.model.connected = false;
                 self.model.connection_error = Some(format!("{message} Reconnecting…"));
+                self.background_reading = false;
                 self.sending = false;
                 self.transcript_loading = false;
                 self.transcript_page_loading = false;
@@ -3960,6 +4018,34 @@ impl XdDesktop {
             *chat_id = self.model.canonical_terminal_key(chat_id);
         }
         let value = Value::Object(body);
+        if let RequestKind::BackgroundTaskOutput {
+            chat_id,
+            generation,
+        } = &kind
+        {
+            if *generation == self.background_generation
+                && self.background_expanded.as_ref()
+                    == Some(&(self.active_endpoint, chat_id.clone()))
+                && self.chat_is_active(chat_id)
+            {
+                self.background_reading = false;
+                self.background_output.clear();
+                match value
+                    .get("tasks")
+                    .cloned()
+                    .filter(|_| value["ok"] == true)
+                    .and_then(|tasks| {
+                        serde_json::from_value::<Vec<BackgroundTaskOutput>>(tasks).ok()
+                    }) {
+                    Some(tasks) => {
+                        self.background_output = tasks;
+                        self.background_error = None;
+                    }
+                    None => self.background_error = Some("Could not load background tasks.".into()),
+                }
+            }
+            return;
+        }
         if self.handle_workspace_create_reply(self.active_endpoint, &kind, &value, cx) {
             return;
         }
@@ -5987,15 +6073,24 @@ impl XdDesktop {
             self.model.apply_event(name, &body);
         }
         if name == "turn-finished" && !self.event_is_active(&body) {
-            let title = body
-                .get("chat")
-                .and_then(Value::as_str)
+            let chat_id = body.get("chat").and_then(Value::as_str);
+            let title = chat_id
                 .and_then(|chat_id| self.model.chats.iter().find(|chat| chat.id == chat_id))
                 .and_then(|chat| chat.title.as_deref())
                 .unwrap_or("Background chat")
                 .to_owned();
             self.model.apply_event(name, &body);
             if self.settings.notifications {
+                #[cfg(target_os = "linux")]
+                self.turn_notifier.show(
+                    notifications::turn_finished_body(&title),
+                    TurnNotificationTarget {
+                        endpoint: self.active_endpoint,
+                        chat_id: chat_id.map(str::to_owned),
+                    },
+                    cx.background_executor(),
+                );
+                #[cfg(not(target_os = "linux"))]
                 notify_turn_finished(&title);
             }
             self.request_tree();
@@ -9516,6 +9611,7 @@ impl XdDesktop {
     /// this naturally falls back to the tail page. The file root is retried as
     /// well because its previous request may have died with the same socket.
     fn refresh_selected_chat_after_connect(&mut self, cx: &mut Context<Self>) {
+        self.background_reading = false;
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
@@ -10691,6 +10787,167 @@ impl XdDesktop {
         body.get("chat").and_then(Value::as_str) == self.model.selected_chat.as_deref()
     }
 
+    fn toggle_background_tasks(&mut self, cx: &mut Context<Self>) {
+        let Some(chat) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let key = (self.active_endpoint, chat);
+        self.background_expanded = (self.background_expanded.as_ref() != Some(&key)).then_some(key);
+        self.background_generation += 1;
+        self.background_reading = false;
+        self.background_output.clear();
+        self.background_error = None;
+        self.background_visible = true;
+        self.poll_background_tasks(cx);
+        cx.notify();
+    }
+
+    fn poll_background_tasks(&mut self, cx: &mut Context<Self>) {
+        if !self.model.connected {
+            self.background_reading = false;
+            return;
+        }
+        if !self.background_visible || self.background_reading {
+            return;
+        }
+        let Some((endpoint, chat)) = &self.background_expanded else {
+            return;
+        };
+        if *endpoint != self.active_endpoint || self.model.selected_chat.as_ref() != Some(chat) {
+            return;
+        }
+        let result = self
+            .active_host()
+            .ok_or("Host disconnected.".to_owned())
+            .and_then(|host| host.background_task_output(chat, self.background_generation));
+        match result {
+            Ok(()) => self.background_reading = true,
+            Err(_) => {
+                self.background_output.clear();
+                self.background_error = Some("Could not load background tasks.".into());
+                cx.notify();
+            }
+        }
+    }
+
+    fn render_background_tasks(
+        &self,
+        count: u32,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let expanded = self.background_expanded.is_some();
+        let mut panel = div()
+            .w(px(self.chat_column_width.min(736.0)))
+            .max_w(px(736.0))
+            .mb_2()
+            .flex()
+            .flex_col()
+            .text_size(px(12.5))
+            .text_color(rgb(colors.muted))
+            .child(
+                div()
+                    .id("native-background-tasks")
+                    .w_full()
+                    .min_h(px(28.0))
+                    .px(px(2.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .hover(|row| row.text_color(rgb(colors.text)))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_background_tasks(cx)))
+                    .child(background_ring(7.0, colors.working))
+                    .child(background_label(count))
+                    .child(icon(
+                        if expanded {
+                            CHEVRON_DOWN_ICON
+                        } else {
+                            CHEVRON_RIGHT_ICON
+                        },
+                        12.0,
+                        colors.muted,
+                    )),
+            );
+        if expanded {
+            let mut details = div()
+                .id("native-background-output")
+                .w_full()
+                .max_h(px(280.0))
+                .overflow_y_scroll()
+                .pl(px(17.0))
+                .pb_2()
+                .flex()
+                .flex_col()
+                .gap_3();
+            if let Some(error) = &self.background_error {
+                details = details.child(error.clone());
+            } else if self.background_output.is_empty() {
+                details = details.child(if self.background_reading {
+                    "Loading background tasks…"
+                } else {
+                    "No background tasks running."
+                });
+            }
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            for task in &self.background_output {
+                let elapsed = activity::compact_duration(
+                    now.saturating_sub(task.started_at).saturating_mul(1000),
+                );
+                let mut output = div()
+                    .w_full()
+                    .p_2()
+                    .rounded(px(6.0))
+                    .bg(rgb(colors.surface))
+                    .font_family(MONO)
+                    .text_size(px(12.0))
+                    .flex()
+                    .flex_col();
+                if let Some(error) = &task.output_error {
+                    output = output.child(error.clone());
+                } else if task.lines.is_empty() {
+                    output = output.child("No output yet.");
+                } else {
+                    for line in &task.lines {
+                        output = output.child(
+                            div()
+                                .w_full()
+                                .text_color(rgb(if line.error {
+                                    colors.danger
+                                } else {
+                                    colors.muted
+                                }))
+                                .child(line.text.clone()),
+                        );
+                    }
+                }
+                let mut entry = div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(rgb(colors.text))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(task.description.clone()),
+                    )
+                    .child(format!("{} · {}", task.kind, elapsed))
+                    .child(output);
+                if task.truncated {
+                    entry = entry.child(div().text_size(px(11.0)).child("Latest output only"));
+                }
+                details = details.child(entry);
+            }
+            panel = panel.child(details);
+        }
+        panel
+    }
+
     fn chat_is_active(&self, chat_id: &str) -> bool {
         self.model.selected_chat.as_deref() == Some(chat_id)
     }
@@ -10963,6 +11220,51 @@ impl XdDesktop {
         let focus = self.composer_input.read(cx).focus_handle(cx);
         window.focus(&focus);
         cx.notify();
+    }
+
+    /// Takes the user to the window and, if it is still there, the chat that a
+    /// clicked notification was about.
+    #[cfg(target_os = "linux")]
+    fn open_clicked_notification(
+        &mut self,
+        activation: notifications::Activation<TurnNotificationTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        notifications::raise_window(window, activation.token.as_deref());
+        let TurnNotificationTarget { endpoint, chat_id } = activation.target;
+        let Some(chat_id) = chat_id else {
+            return;
+        };
+        let Some((project_id, agent)) = self
+            .endpoint_model(endpoint)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| {
+                let agent = AgentCli::from_backend(&chat.backend)?;
+                Some((chat.folder.clone(), agent))
+            })
+        else {
+            return;
+        };
+        match endpoint {
+            ChatEndpoint::Local => {
+                self.switch_active_endpoint(endpoint, cx);
+            }
+            ChatEndpoint::Remote => self.activate_remote_runtime(cx),
+        }
+        // An unsaved draft can refuse the switch.
+        if self.active_endpoint != endpoint {
+            return;
+        }
+        if self.usage_open {
+            self.toggle_usage(window, cx);
+        }
+        if self.minimal_theme_open {
+            self.close_minimal_theme_popup(window, cx);
+        }
+        self.open_minimal_session(project_id, chat_id, agent, window, cx);
     }
 
     fn select_minimal_session(
@@ -15721,6 +16023,24 @@ impl XdDesktop {
                 .and_then(|id| self.model.chats.iter().find(|chat| chat.id == id))
                 .map_or(0, |chat| chat.waiting_on())
         };
+        self.background_visible = waiting_on > 0;
+        if self
+            .background_expanded
+            .as_ref()
+            .is_some_and(|(endpoint, chat)| {
+                *endpoint != self.active_endpoint
+                    || self.model.selected_chat.as_ref() != Some(chat)
+                    || waiting_on == 0
+            })
+        {
+            self.background_expanded = None;
+            self.background_generation += 1;
+            self.background_reading = false;
+            self.background_output.clear();
+            self.background_error = None;
+        }
+        let background_row =
+            (waiting_on > 0).then(|| self.render_background_tasks(waiting_on, colors, cx));
         let shows_resume = self.shows_resume();
         let can_resume = shows_resume
             && self.model.connected
@@ -16034,23 +16354,7 @@ impl XdDesktop {
                     )
                 },
             )
-            .when(waiting_on > 0, |chat| {
-                chat.child(
-                    div()
-                        .id("native-background-tasks")
-                        .w_full()
-                        .max_w(px(736.0))
-                        .mb_2()
-                        .px(px(2.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .text_size(px(12.5))
-                        .text_color(rgb(colors.muted))
-                        .child(background_ring(7.0, colors.working))
-                        .child(background_label(waiting_on)),
-                )
-            })
+            .when_some(background_row, |chat, row| chat.child(row))
             .when(working, |chat| {
                 let (status, dot) = turn_status(!self.model.interactions.is_empty(), colors);
                 chat.child(
@@ -18806,6 +19110,7 @@ impl XdDesktop {
 
 impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.background_visible = false;
         self.expire_action_error(cx);
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let custom_titlebar = client_decorations || cfg!(target_os = "macos");
@@ -19365,68 +19670,6 @@ fn workflow_row_indices(model: &AppModel, marker: &str) -> Vec<usize> {
         .collect()
 }
 
-#[cfg(target_os = "linux")]
-fn notify_turn_finished(title: &str) {
-    let title = title
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(120)
-        .collect::<String>()
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    let body = format!("{title} finished");
-    if let Ok(child) = Command::new("notify-send")
-        // Avoid keeping completion alerts in notification history. Also close
-        // them explicitly below: GNOME ignores expire-time while locked.
-        .args([
-            "--app-name=xd",
-            "--transient",
-            "--expire-time=10000",
-            "--print-id",
-            "--",
-            "xd",
-            &body,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        thread::spawn(move || {
-            use gio::glib::variant::ToVariant;
-
-            let Ok(output) = child.wait_with_output() else {
-                return;
-            };
-            if !output.status.success() {
-                return;
-            }
-            let Some(id) = std::str::from_utf8(&output.stdout)
-                .ok()
-                .and_then(|id| id.trim().parse::<u32>().ok())
-                .filter(|id| *id != 0)
-            else {
-                return;
-            };
-            thread::sleep(Duration::from_secs(10));
-            if let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
-                let _ = bus.call_sync(
-                    Some("org.freedesktop.Notifications"),
-                    "/org/freedesktop/Notifications",
-                    "org.freedesktop.Notifications",
-                    "CloseNotification",
-                    Some(&(id,).to_variant()),
-                    None,
-                    gio::DBusCallFlags::NONE,
-                    1000,
-                    gio::Cancellable::NONE,
-                );
-            }
-        });
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn notify_turn_finished(title: &str) {
     let body = format!(
@@ -19891,6 +20134,157 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[gpui::test]
+    fn background_output_is_collapsed_and_discards_stale_replies(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.selected_chat = Some("review".into());
+            assert!(desktop.background_expanded.is_none());
+            desktop.background_expanded = Some((ChatEndpoint::Local, "review".into()));
+            desktop.background_generation = 2;
+            desktop.background_reading = true;
+            let reply = serde_json::json!({"ok":true,"chat":"review","tasks":[{
+                "id":"watch", "kind":"Monitor", "description":"Watch CI", "started_at":123,
+                "lines":[{"text":"jq: command not found", "error":true}]
+            }]})
+            .as_object()
+            .unwrap()
+            .clone();
+            desktop.handle_reply(
+                RequestKind::BackgroundTaskOutput {
+                    chat_id: "review".into(),
+                    generation: 1,
+                },
+                reply.clone(),
+                None,
+                cx,
+            );
+            assert!(desktop.background_output.is_empty());
+            assert!(desktop.background_reading);
+            desktop.handle_reply(
+                RequestKind::BackgroundTaskOutput {
+                    chat_id: "review".into(),
+                    generation: 2,
+                },
+                reply,
+                None,
+                cx,
+            );
+            assert!(desktop.background_output[0].lines[0].error);
+            assert!(!desktop.background_reading);
+            desktop.toggle_background_tasks(cx);
+            assert!(desktop.background_expanded.is_none());
+            assert!(desktop.background_output.is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    fn check_background_output_retries_after_reconnect(
+        cx: &mut gpui::TestAppContext,
+        endpoint: ChatEndpoint,
+    ) {
+        use std::{io::BufRead, os::unix::net::UnixStream};
+
+        let (client, server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let (host, _updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            PathBuf::from("background-output-test"),
+        );
+        let mut requests = std::io::BufReader::new(server);
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.active_endpoint = endpoint;
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.selected_chat = Some("review".into());
+            desktop.model.connected = true;
+            desktop.background_expanded = Some((endpoint, "review".into()));
+            desktop.background_visible = true;
+            match endpoint {
+                ChatEndpoint::Local => desktop.host = Some(host.clone()),
+                ChatEndpoint::Remote => desktop.remote_host = Some(host.clone()),
+            }
+            desktop.poll_background_tasks(cx);
+            assert!(desktop.background_reading);
+            let mut line = String::new();
+            requests.read_line(&mut line).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap()["op"],
+                "background-task-output"
+            );
+
+            let disconnected = HostUpdate::Disconnected {
+                message: "Connection lost during output read".into(),
+            };
+            match endpoint {
+                ChatEndpoint::Local => {
+                    desktop.handle_host_update(disconnected, desktop.connection_generation, cx);
+                    assert!(!desktop.background_reading);
+                    desktop.host = Some(host.clone());
+                    desktop.handle_host_update(
+                        HostUpdate::Connected {
+                            path: PathBuf::from("reconnected"),
+                        },
+                        desktop.connection_generation,
+                        cx,
+                    );
+                }
+                ChatEndpoint::Remote => {
+                    desktop.handle_remote_update(disconnected, desktop.remote_generation, cx);
+                    assert!(!desktop.background_reading);
+                    // Mirror install_remote_session after the transport is installed.
+                    desktop.remote_host = Some(host.clone());
+                    desktop.remote_state = RemoteState::Connected;
+                    desktop.model.connected = true;
+                    desktop.refresh_selected_chat_after_connect(cx);
+                }
+            }
+            // No polling tick observes the disconnected state.
+            desktop.poll_background_tasks(cx);
+            loop {
+                line.clear();
+                requests
+                    .read_line(&mut line)
+                    .expect("the next tick must send another background-task-output request");
+                let request: Value = serde_json::from_str(&line).unwrap();
+                if request["op"] == "background-task-output" {
+                    assert_eq!(request["chat"], "review");
+                    break;
+                }
+            }
+            assert!(desktop.background_reading);
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn background_output_retries_after_local_reconnect(cx: &mut gpui::TestAppContext) {
+        check_background_output_retries_after_reconnect(cx, ChatEndpoint::Local);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn background_output_retries_after_remote_reconnect(cx: &mut gpui::TestAppContext) {
+        check_background_output_retries_after_reconnect(cx, ChatEndpoint::Remote);
+    }
+
+    #[gpui::test]
+    fn background_output_reconnect_clears_an_old_pending_read(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            for endpoint in [ChatEndpoint::Local, ChatEndpoint::Remote] {
+                desktop.active_endpoint = endpoint;
+                desktop.background_reading = true;
+                desktop.refresh_selected_chat_after_connect(cx);
+                assert!(!desktop.background_reading);
+            }
+        });
+    }
+
+    #[gpui::test]
     fn owner_avatars_stand_in_for_the_folder_icon_once_the_host_answers(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -19964,6 +20358,86 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(rows[0].title.as_deref(), Some("Workspace switcher"));
             desktop.model.select_chat("implementation");
             assert_eq!(desktop.catalog_session_chats()[0].id, "implementation");
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn clicking_a_notification_opens_its_chat(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update_in(cx, |desktop, window, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.usage_open = true;
+            desktop.minimal_theme_open = true;
+            desktop.open_clicked_notification(
+                notifications::Activation {
+                    target: TurnNotificationTarget {
+                        endpoint: ChatEndpoint::Local,
+                        chat_id: Some("review".into()),
+                    },
+                    token: None,
+                },
+                window,
+                cx,
+            );
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
+            assert!(matches!(
+                &desktop.minimal_route,
+                MinimalRoute::Cli { chat_id, .. } if chat_id == "review"
+            ));
+            assert!(!desktop.usage_open);
+            assert!(!desktop.minimal_theme_open);
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn clicking_a_notification_for_a_deleted_chat_stays_where_it_is(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update_in(cx, |desktop, window, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            for chat_id in [Some("deleted".to_owned()), None] {
+                desktop.open_clicked_notification(
+                    notifications::Activation {
+                        target: TurnNotificationTarget {
+                            endpoint: ChatEndpoint::Local,
+                            chat_id,
+                        },
+                        token: None,
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    desktop.model.selected_chat.as_deref(),
+                    Some("implementation")
+                );
+            }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn clicking_a_notification_returns_to_the_host_it_came_from(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update_in(cx, |desktop, window, cx| {
+            desktop.active_endpoint = ChatEndpoint::Remote;
+            desktop.inactive_model = grouped_workspace_fixture();
+            desktop.open_clicked_notification(
+                notifications::Activation {
+                    target: TurnNotificationTarget {
+                        endpoint: ChatEndpoint::Local,
+                        chat_id: Some("review".into()),
+                    },
+                    token: None,
+                },
+                window,
+                cx,
+            );
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
         });
     }
 

@@ -69,6 +69,10 @@ pub struct NewFolder<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestKind {
     Tree,
+    BackgroundTaskOutput {
+        chat_id: String,
+        generation: u64,
+    },
     AgentCatalog,
     AgentAuth,
     AgentAuthMutation,
@@ -1287,6 +1291,16 @@ impl HostHandle {
                 chat_id: chat_id.to_owned(),
             },
             json!({"op": "delete-chat", "chat": chat_id}),
+        )
+    }
+
+    pub fn background_task_output(&self, chat_id: &str, generation: u64) -> Result<(), String> {
+        self.send(
+            RequestKind::BackgroundTaskOutput {
+                chat_id: chat_id.into(),
+                generation,
+            },
+            json!({"op":"background-task-output", "chat":chat_id}),
         )
     }
 

@@ -477,7 +477,15 @@ internal fun ChatScreen(
             if (state.working) {
                 item(key = "working") { WorkingRow(state.startedAtMillis) }
             } else if (waitingOn > 0) {
-                item(key = "background-tasks") { BackgroundTasksRow(waitingOn) }
+                item(key = "background-tasks") {
+                    androidx.compose.runtime.key(model.session) {
+                        BackgroundTasksRow(
+                            count = waitingOn,
+                            visible = listState.layoutInfo.visibleItemsInfo.any { it.key == "background-tasks" },
+                            load = { model.session.backgroundTaskOutput() },
+                        )
+                    }
+                }
             }
         }
     }

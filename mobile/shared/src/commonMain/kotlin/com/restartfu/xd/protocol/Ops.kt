@@ -26,6 +26,8 @@ public enum class ChatOption(
 public object Ops {
     public fun tree(): JsonObject = op("tree")
 
+    public fun backgroundTaskOutput(chatId: String): JsonObject = withChat("background-task-output", chatId)
+
     public fun chat(chatId: String): JsonObject = withChat("chat", chatId)
 
     public fun shortcuts(folderId: String? = null): JsonObject = buildJsonObject {

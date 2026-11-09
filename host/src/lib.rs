@@ -19,6 +19,7 @@ mod agent_text;
 mod ask;
 mod auth;
 mod background_process;
+mod background_tasks;
 mod chat_title;
 mod cli_updates;
 mod cli_versions;
@@ -285,6 +286,24 @@ impl Engine {
                 Ok(chat_id) => self.chat(chat_id),
                 Err(error) => error_reply(error),
             },
+            Some("background-task-output") => {
+                match required_string(&request, "chat", "background-task-output needs a chat id") {
+                    Ok(chat) => {
+                        let exists = self.chat(chat);
+                        if exists["ok"] != true {
+                            exists
+                        } else {
+                            self.runtime.as_ref().map_or_else(
+                                || json!({"ok":true,"chat":chat,"tasks":[]}),
+                                |runtime| {
+                                    runtime.background_task_output(chat, request["task"].as_str())
+                                },
+                            )
+                        }
+                    }
+                    Err(error) => error_reply(error),
+                }
+            }
             Some("messages") => self.messages(&request),
             Some("list-dir") => self.read(|store| store.list_directory(&request)),
             Some("file-browse") => self.read(|store| store.file_browse(&request)),
@@ -2698,6 +2717,32 @@ mod tests {
         assert_eq!(response["turn_sequence"], 12);
         assert_eq!(response["label"], "Codex");
         assert_eq!(response["segment"], "Half an ans");
+    }
+
+    #[test]
+    fn background_output_requires_a_real_chat_and_ignores_client_paths() {
+        let root = env::temp_dir().join(format!("xd-background-protocol-{}", uuid::Uuid::new_v4()));
+        let store = StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({"op":"new-folder", "name":"Demo"}));
+        let chat =
+            engine.dispatch(json!({"op":"new-chat", "folder":folder["id"], "backend":"claude"}));
+        let reply = engine.dispatch(json!({"op":"background-task-output", "chat":chat["id"],
+            "task":"/etc/passwd", "path":"/etc/passwd", "_xd_request":99}));
+        assert_eq!(
+            reply,
+            json!({"ok":true,"chat":chat["id"],"tasks":[],"_xd_request":99})
+        );
+        assert_eq!(
+            engine.dispatch(json!({"op":"background-task-output"}))["ok"],
+            false
+        );
+        assert_eq!(
+            engine.dispatch(json!({"op":"background-task-output","chat":"missing"}))["ok"],
+            false
+        );
+        engine.shutdown();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
