@@ -1211,11 +1211,21 @@ impl StateStore {
         let inherited = resolved_folder_values(&chain[..chain.len() - 1]);
         let effective = resolved_folder_values(&chain);
         let fallback = self.workspace_root.join(&current.relative);
-        let effective_workdir = effective
-            .workdir
-            .clone()
-            .or_else(|| effective.repo.clone())
-            .unwrap_or_else(|| fallback.to_string_lossy().into_owned());
+        // Where the project's chats run, as resolve_workdir finds it for them:
+        // a saved path that no longer exists, such as one left behind when
+        // the project moved, gives way to the next one, then to the project's
+        // own directory. Otherwise its worktrees, and so a new worktree, are
+        // looked for in a directory that is gone.
+        let effective_workdir =
+            resolve_workdir(&database, &self.workspace_root, folder_id, None, None).unwrap_or_else(
+                |_| {
+                    effective
+                        .workdir
+                        .clone()
+                        .or_else(|| effective.repo.clone())
+                        .unwrap_or_else(|| fallback.to_string_lossy().into_owned())
+                },
+            );
         let selected = normalize_existing_path(Path::new(&effective_workdir));
         let worktrees = list_git_worktrees(Path::new(&effective_workdir)).ok();
         let can_create_worktree = worktrees.is_some();
@@ -10758,6 +10768,63 @@ mod tests {
             .unwrap();
         assert!(child_relative.starts_with(".Trash/"));
         assert!(child_relative.ends_with("/Child"));
+    }
+
+    #[test]
+    fn a_saved_repository_path_that_is_gone_gives_way_to_the_project_directory() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let project = store.new_folder(&json!({"name": "Practice"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let directory = fixture.workspaces.join("Practice");
+        fs::create_dir_all(&directory).unwrap();
+        let git = |arguments: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&directory)
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+                .args(arguments)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {arguments:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        fs::write(directory.join("README.md"), "practice\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "Start"]);
+        // Saved before the project moved into a folder, where it no longer is.
+        Connection::open(&fixture.database)
+            .unwrap()
+            .execute(
+                "UPDATE workspace_folders SET repo = ? WHERE id = ?",
+                params![
+                    fixture.workspaces.join("Old/Practice").to_string_lossy(),
+                    project
+                ],
+            )
+            .unwrap();
+
+        let settings = store.folder_settings(&json!({"folder": project})).unwrap();
+        assert_eq!(settings["can_create_worktree"], true);
+        assert_eq!(
+            settings["effective_workdir"],
+            normalize_existing_path(&directory)
+        );
+        let worktrees = settings["worktrees"].as_array().unwrap();
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0]["branch"], "main");
+        assert_eq!(worktrees[0]["current"], true);
+        // The saved setting is the user's to change: it is reported as saved.
+        assert_eq!(
+            settings["repo"],
+            fixture
+                .workspaces
+                .join("Old/Practice")
+                .to_string_lossy()
+                .as_ref()
+        );
     }
 
     #[test]
