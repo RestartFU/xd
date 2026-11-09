@@ -2402,27 +2402,59 @@ pub(crate) fn link_pull_requests(
 }
 
 /// Asks GitHub again about a chat's links. A refresh already running for the
-/// chat covers this one, and links asked about within the last minute are
-/// skipped, so repeated requests cannot pile up lookups.
+/// chat takes over a request made meanwhile and runs once more for it, and
+/// keeps going while links wait their turn. Links asked about within the last
+/// minute are skipped, so repeated requests cannot pile up lookups.
 fn refresh_pull_request_states(store: &StateStore, events: &EventBus, chat_id: &str) {
-    static REFRESHING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    /// Chats being refreshed, and whether another refresh was asked for
+    /// since the current pass began.
+    static REFRESHING: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+    // A chat links at most 32, eight a pass, with room for requests made
+    // meanwhile.
+    const MAX_PASSES: usize = 8;
     {
         let Ok(mut refreshing) = REFRESHING.lock() else {
             return;
         };
-        if refreshing.iter().any(|chat| chat == chat_id) {
+        if let Some((_, again)) = refreshing.iter_mut().find(|(chat, _)| chat == chat_id) {
+            *again = true;
             return;
         }
-        refreshing.push(chat_id.to_owned());
+        refreshing.push((chat_id.to_owned(), false));
     }
-    let result = store.refresh_linked_pull_request_states(chat_id);
+    let mut changed = false;
+    for _ in 0..MAX_PASSES {
+        let more = match store.refresh_linked_pull_request_states(chat_id) {
+            Ok((pass_changed, more)) => {
+                changed |= pass_changed;
+                more
+            }
+            Err(error) => {
+                eprintln!("xd: cannot refresh the pull requests of {chat_id}: {error}");
+                false
+            }
+        };
+        let Ok(mut refreshing) = REFRESHING.lock() else {
+            break;
+        };
+        let asked_again = refreshing
+            .iter_mut()
+            .find(|(chat, _)| chat == chat_id)
+            .is_some_and(|(_, again)| std::mem::take(again));
+        if !more && !asked_again {
+            refreshing.retain(|(chat, _)| chat != chat_id);
+            drop(refreshing);
+            if changed {
+                events.publish(json!({"event": "tree"}));
+            }
+            return;
+        }
+    }
     if let Ok(mut refreshing) = REFRESHING.lock() {
-        refreshing.retain(|chat| chat != chat_id);
+        refreshing.retain(|(chat, _)| chat != chat_id);
     }
-    match result {
-        Ok(true) => events.publish(json!({"event": "tree"})),
-        Ok(false) => {}
-        Err(error) => eprintln!("xd: cannot refresh the pull requests of {chat_id}: {error}"),
+    if changed {
+        events.publish(json!({"event": "tree"}));
     }
 }
 

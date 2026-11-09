@@ -3713,10 +3713,12 @@ impl StateStore {
     /// time, longest unchecked first, and records what
     /// changed. Merged ones cannot change, so they are left alone. Returns
     /// whether any state changed.
+    /// Also returns whether it asked about as many as it may at once, so
+    /// more may be waiting.
     pub(crate) fn refresh_linked_pull_request_states(
         &self,
         chat_id: &str,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<(bool, bool), StorageError> {
         const MAX_REFRESHED: i64 = 8;
         // A link asked about this recently is not asked about again.
         const FRESH_SECONDS: i64 = 60;
@@ -3742,6 +3744,7 @@ impl StateStore {
                 .unwrap_or_else(|| self.workspace_root.clone());
             (urls, workdir)
         };
+        let full = urls.len() as i64 == MAX_REFRESHED;
         let mut changed = false;
         for url in urls {
             match self.pull_request_snapshot_at(&workdir, &url) {
@@ -3755,7 +3758,7 @@ impl StateStore {
                 }
             }
         }
-        Ok(changed)
+        Ok((changed, full))
     }
 
     fn mark_pull_request_checked(&self, url: &str) -> Result<(), StorageError> {

@@ -1160,6 +1160,38 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn one_refresh_asks_about_every_link_waiting_its_turn() {
+        let log = std::env::temp_dir().join(format!("xd-gh-log-{}", uuid::Uuid::new_v4()));
+        with_fake_gh(
+            &format!(
+                "echo \"$3\" >> '{}'; \
+                 echo '{{\"url\":\"'\"$3\"'\",\"state\":\"OPEN\",\"finished_at\":null}}'",
+                log.display()
+            ),
+            |fixture, _| {
+                let urls = (1..=20)
+                    .map(|number| format!("https://github.com/o/r/pull/{number}"))
+                    .collect::<Vec<_>>();
+                for batch in urls.chunks(pull_requests::MAX_PER_REQUEST) {
+                    fixture
+                        .store
+                        .link_pull_requests(&fixture.chat, batch, LinkSource::User)
+                        .unwrap();
+                }
+                let events = crate::EventBus::default();
+                crate::refresh_pull_request_states(&fixture.store, &events, &fixture.chat);
+                assert_eq!(
+                    std::fs::read_to_string(&log).unwrap().lines().count(),
+                    20,
+                    "three passes, each link once"
+                );
+            },
+        );
+        let _ = std::fs::remove_file(log);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn refreshes_take_turns_so_every_link_is_asked_about() {
         let log = std::env::temp_dir().join(format!("xd-gh-log-{}", uuid::Uuid::new_v4()));
         with_fake_gh(
@@ -1181,12 +1213,14 @@ mod tests {
                         .store
                         .refresh_linked_pull_request_states(&fixture.chat)
                         .unwrap()
+                        .0
                 );
                 assert!(
                     fixture
                         .store
                         .refresh_linked_pull_request_states(&fixture.chat)
-                        .unwrap(),
+                        .unwrap()
+                        .0,
                     "the last two get their first state"
                 );
                 // The two never asked about go next; the eight just asked
