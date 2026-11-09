@@ -235,6 +235,18 @@ pub(crate) fn folder_tree(folders: &[Folder]) -> Vec<TreeRow> {
     rows
 }
 
+/// The rows `tree[position]` holds at any depth, in sidebar order: the run of
+/// deeper rows that follows it in [`folder_tree`]'s order.
+pub(crate) fn tree_descendants(
+    tree: &[TreeRow],
+    position: usize,
+) -> impl Iterator<Item = &TreeRow> {
+    let depth = tree[position].depth;
+    tree[position + 1..]
+        .iter()
+        .take_while(move |row| row.depth > depth)
+}
+
 pub(crate) fn project_sessions(project_id: &str, chats: &[ChatSummary]) -> Vec<SessionCard> {
     chats
         .iter()
@@ -407,6 +419,32 @@ mod tests {
 
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0], TreeRow { index: 2, depth: 0 });
+    }
+
+    #[test]
+    fn a_folder_holds_everything_nested_beneath_it_and_nothing_after() {
+        let folders = vec![
+            folder("acme", "acme"),
+            folder("solo", "solo"),
+            child("web", "acme"),
+            child("clients", "acme"),
+            child("portal", "clients"),
+        ];
+        let tree = folder_tree(&folders);
+        let held = |id: &str| {
+            let position = tree
+                .iter()
+                .position(|row| folders[row.index].id == id)
+                .expect("listed folder");
+            tree_descendants(&tree, position)
+                .map(|row| folders[row.index].id.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(held("acme"), ["web", "clients", "portal"]);
+        assert_eq!(held("clients"), ["portal"]);
+        assert!(held("web").is_empty());
+        assert!(held("solo").is_empty());
     }
 
     #[test]

@@ -110,6 +110,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import com.restartfu.xd.model.FolderDestination
 import com.restartfu.xd.model.MinimalFolder
+import com.restartfu.xd.model.projectsInside
 import com.restartfu.xd.model.ProjectTreeRow
 import com.restartfu.xd.model.ancestors
 import com.restartfu.xd.model.moveDestinations
@@ -568,7 +569,9 @@ private fun MinimalProjectsHome(
     val creatingWorkspace by model.creatingWorkspace.collectAsStateWithLifecycle()
     val ownerIcons by model.client.ownerIcons.collectAsStateWithLifecycle()
     val rows = tree.projectTree(collapsed)
-    val folders = tree.projectTree().mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
+    // Every row, as if no folder were closed: built once per tree, since building it reads every chat.
+    val openTree = remember(tree) { tree.projectTree() }
+    val folders = openTree.mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
     val shownProjects = rows.mapNotNull { (it as? ProjectTreeRow.ProjectRow)?.project }
     // Opens the folders [id] sits in, and [id] itself, so what lands there is in view.
     val reveal = { id: String? ->
@@ -648,6 +651,9 @@ private fun MinimalProjectsHome(
                                 folder = row.folder,
                                 open = row.open,
                                 icon = ownerIcons[row.folder.owner],
+                                // A closed folder hides its projects, so it carries their signals.
+                                signals = if (row.open) emptyList() else openTree.projectsInside(row.folder.id)
+                                    .flatMap { tree.activeSessions(it).map(signalOf) },
                                 modifier = indent,
                                 toggle = { settings.setFolderOpen(row.folder.id, !row.open) },
                                 menu = {
@@ -1255,23 +1261,27 @@ private fun DrawerRow(
         )
         Spacer(Modifier.weight(1f))
         menu?.invoke()
-        if (!selected) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                signals.filter { it != SessionSignal.IDLE }.take(5).forEach { signal ->
-                    if (signal == SessionSignal.BACKGROUND) {
-                        BackgroundRing(signal.color(), size = 6.dp)
-                    } else {
-                        Box(
-                            Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(signal.color()),
-                        )
-                    }
-                }
+        if (!selected) SignalDots(signals)
+    }
+}
+
+/** A dot for each of up to five sessions that need a look; quiet ones draw nothing. */
+@Composable
+private fun SignalDots(signals: List<SessionSignal>) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        signals.filter { it != SessionSignal.IDLE }.take(5).forEach { signal ->
+            if (signal == SessionSignal.BACKGROUND) {
+                BackgroundRing(signal.color(), size = 6.dp)
+            } else {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(signal.color()),
+                )
             }
         }
     }
@@ -1401,6 +1411,8 @@ private fun FolderRow(
     folder: MinimalFolder,
     open: Boolean,
     icon: ByteArray?,
+    /** What the sessions of every project inside need, shown while it is closed. */
+    signals: List<SessionSignal>,
     toggle: () -> Unit,
     modifier: Modifier = Modifier,
     menu: @Composable () -> Unit,
@@ -1434,6 +1446,7 @@ private fun FolderRow(
         )
         Text(folder.items.toString(), fontSize = 12.sp, color = faint)
         Spacer(Modifier.weight(1f))
+        if (!open) SignalDots(signals)
         menu()
     }
 }
