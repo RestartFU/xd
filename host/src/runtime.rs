@@ -1839,6 +1839,27 @@ impl TurnRuntime {
         Some(killed)
     }
 
+    /// Every chat with an agent process up: running a turn, or kept between
+    /// turns, perhaps with background agents and shells.
+    pub(crate) fn chats_with_agents(&self) -> Vec<String> {
+        let mut chats = self
+            .inner
+            .active
+            .lock()
+            .map(|active| active.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let Ok(sessions) = self.inner.sessions.lock() {
+            chats.extend(
+                sessions
+                    .keys()
+                    .filter(|id| !chats.contains(id))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+        }
+        chats
+    }
+
     fn succession(&self, chat_id: &str) -> Arc<Mutex<()>> {
         let mut successions = self
             .inner

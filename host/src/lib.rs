@@ -2056,12 +2056,14 @@ impl Engine {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return error_reply("Rust host state storage is not configured.");
         };
-        // Looked at in the order work moves through them, so nothing slips
-        // between two looks. A send holds the chat's gate from before the chat
-        // reads as working until its turn has started: a send in progress now
-        // still holds it below, or has started a turn by the time working chats
-        // are read. A turn that ends after that leaves any background work it
-        // started for the last look. The second pass waits for the gates.
+        // Every chat that may have work, a superset decided one by one below
+        // under its locks. A send holds the chat's gate from before the chat
+        // reads as working until its turn has started, so one in progress now
+        // still holds it, or has started a turn by the time the agents are
+        // listed. Any turn, background work, or report on it runs in an agent
+        // process this runtime keeps, so a chat whose work moves between those
+        // while this looks is listed either way. Working rows add turns that
+        // died with a previous host. The second pass waits for the gates.
         let gates = self
             .chat_execution
             .lock()
@@ -2077,21 +2079,15 @@ impl Engine {
             .filter(|(_, gate)| matches!(gate.try_lock(), Err(std::sync::TryLockError::WouldBlock)))
             .map(|(chat_id, _)| chat_id)
             .collect::<Vec<_>>();
+        let mut add = |chat_id: String| {
+            if !chats.contains(&chat_id) {
+                chats.push(chat_id);
+            }
+        };
+        runtime.chats_with_agents().into_iter().for_each(&mut add);
         match store.working_chats() {
-            Ok(working) => {
-                for chat_id in working {
-                    if !chats.contains(&chat_id) {
-                        chats.push(chat_id);
-                    }
-                }
-            }
+            Ok(working) => working.into_iter().for_each(&mut add),
             Err(error) => return error_reply(error),
-        }
-        let background = runtime.background_task_counts();
-        for chat_id in background.keys() {
-            if !chats.contains(chat_id) {
-                chats.push(chat_id.clone());
-            }
         }
         let mut paused = Vec::new();
         let mut pause = |chat_id: String, gate: std::sync::MutexGuard<'_, ()>| {
@@ -2773,7 +2769,16 @@ pub fn serve_daemon_connection(
                             | "daemon-stop"
                     )
                 );
-            if control {
+            if authenticated && request["op"] == "pause-all" {
+                // Off the reader as well: pausing waits for sends in progress,
+                // and other control requests must not wait with it.
+                let engine = engine.clone();
+                let outbound = outbound.clone();
+                thread::spawn(move || {
+                    let reply = engine.dispatch_for(subscriber, request);
+                    let _ = outbound.try_send(reply);
+                });
+            } else if control {
                 let authenticating = matches!(request["op"].as_str(), Some("pair" | "hello"));
                 let reply = engine.dispatch_for(subscriber, request);
                 let authenticated = authenticating && reply["ok"] == true;
