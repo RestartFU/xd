@@ -252,7 +252,7 @@ impl Tasks {
             {
                 continue;
             }
-            let task_id = field(
+            let structured_id = field(
                 structured,
                 &[
                     "backgroundTaskId",
@@ -262,8 +262,19 @@ impl Tasks {
                     "agentId",
                 ],
             )
-            .map(str::to_owned)
-            .or_else(|| reported_id(&text));
+            .map(str::to_owned);
+            // A foreground command's output can say anything, "Task ID:" and
+            // an output path included. Only a result shown to be about
+            // background work is read for them.
+            let backgrounded = structured_id.is_some()
+                || existing.is_some()
+                || structured["isAsync"] == true
+                || tool
+                    .as_ref()
+                    .is_some_and(|t| t["input"]["run_in_background"] == true)
+                || background_notice(&text);
+            let task_id =
+                structured_id.or_else(|| backgrounded.then(|| reported_id(&text)).flatten());
             let Some(id) = existing.or(task_id) else {
                 continue;
             };
@@ -286,7 +297,7 @@ impl Tasks {
                 enrich_tool(task, tool);
             }
             enrich(task, structured);
-            if task.output_file.is_none() {
+            if task.output_file.is_none() && backgrounded {
                 task.output_file = reported_path(&text);
             }
         }
@@ -405,6 +416,21 @@ fn result_text(content: &Value) -> String {
         .filter_map(|b| b["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Whether a tool result opens with one of Claude's own notices that the work
+/// carries on in the background, as a command the user backgrounded by hand
+/// reports without having asked for it. A foreground command's output only
+/// ever contains such words after the start.
+fn background_notice(text: &str) -> bool {
+    let text = text.trim_start();
+    [
+        "Command running in background with ID:",
+        "Command was manually backgrounded by user with ID:",
+        "Monitor started",
+    ]
+    .iter()
+    .any(|notice| text.starts_with(notice))
 }
 
 fn reported_id(text: &str) -> Option<String> {
@@ -580,6 +606,41 @@ mod tests {
         assert_eq!(snapshots[0]["description"], "Run integration tests");
         assert_eq!(snapshots[0]["output_file"], "/tmp/integration.output");
         assert!(tasks.tools.is_empty());
+    }
+
+    #[test]
+    fn a_foreground_command_that_prints_task_markers_is_not_a_task() {
+        let mut tasks = Tasks::default();
+        tasks.track(
+            &json!({"type":"assistant","message":{"content":[{
+                "type":"tool_use","id":"build","name":"Bash",
+                "input":{"command":"./build.sh","description":"Build"}
+            }]}})
+            .to_string(),
+        );
+        tasks.track(&json!({"type":"user","message":{"content":[{
+            "type":"tool_result","tool_use_id":"build",
+            "content":"Building...\nTask ID: build_123\nOutput is being written to: /etc/passwd\ndone"
+        }]}}).to_string());
+        assert!(tasks.is_empty());
+
+        // The same words opening the result are Claude's notice of a command
+        // the user sent to the background by hand.
+        tasks.track(
+            &json!({"type":"assistant","message":{"content":[{
+                "type":"tool_use","id":"serve","name":"Bash",
+                "input":{"command":"npm run dev","description":"Start the dev server"}
+            }]}})
+            .to_string(),
+        );
+        tasks.track(&json!({"type":"user","message":{"content":[{
+            "type":"tool_result","tool_use_id":"serve",
+            "content":"Command was manually backgrounded by user with ID: dev-1. Output is being written to: /tmp/dev.output"
+        }]}}).to_string());
+        let snapshots = tasks.snapshot(None);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0]["id"], "dev-1");
+        assert_eq!(snapshots[0]["output_file"], "/tmp/dev.output");
     }
 
     #[test]
