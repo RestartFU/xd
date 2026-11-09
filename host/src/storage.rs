@@ -18,6 +18,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    database::{self, Checkpointer, Reader, ReaderPool},
     deletion::{self, AutoDeleteSettings, AutoDeletion},
     private_fs::{create_private_file, open_without_waiting, secure_directory},
     reply_images,
@@ -143,7 +144,13 @@ pub enum StorageError {
 }
 
 pub struct StateStore {
+    /// Stopped first on drop, before the connections it checkpoints for.
+    _checkpointer: Option<Checkpointer>,
+    /// Every write goes through this one connection.
     database: Mutex<Connection>,
+    /// Snapshot connections for reads; `None` when the database is not in
+    /// write-ahead-log mode and reads have to share the writer.
+    readers: Option<ReaderPool>,
     workspace_root: PathBuf,
     paste_root: PathBuf,
     chat_title_root: PathBuf,
@@ -295,6 +302,18 @@ impl StateStore {
         &self.workspace_root
     }
 
+    /// A connection for queries that only read. It sees everything committed
+    /// before the call and, in write-ahead-log mode, never waits for the
+    /// writer, so a commit stuck on a slow disk cannot hold up a chat load.
+    fn reader(&self) -> Result<Reader<'_>, StorageError> {
+        match &self.readers {
+            Some(readers) => Ok(Reader::Snapshot(readers.snapshot()?)),
+            None => Ok(Reader::Writer(
+                self.database.lock().map_err(|_| StorageError::Poisoned)?,
+            )),
+        }
+    }
+
     pub fn open(
         database_path: impl AsRef<Path>,
         workspace_root: impl Into<PathBuf>,
@@ -352,7 +371,7 @@ impl StateStore {
     }
 
     pub(crate) fn latest_shared_event_id(&self) -> Result<i64, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         database
             .query_row(
                 "SELECT COALESCE(MAX(id), 0) FROM shared_events",
@@ -366,7 +385,7 @@ impl StateStore {
         &self,
         after: i64,
     ) -> Result<Vec<(i64, String, Value)>, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let mut statement = database.prepare(
             "SELECT id, source, payload FROM shared_events WHERE id > ? ORDER BY id LIMIT 512",
         )?;
@@ -462,13 +481,20 @@ impl StateStore {
             }
         })?;
         database.busy_timeout(DATABASE_BUSY_TIMEOUT)?;
+        let writable = !flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY);
+        let write_ahead_log =
+            writable && database::enable_write_ahead_log(&database, database_path)?;
         database.pragma_update(None, "foreign_keys", true)?;
-        if !flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        if writable {
             initialize_schema(&database)?;
             initialize_generated_worktrees(&database)?;
         }
         Ok(Self {
+            _checkpointer: write_ahead_log
+                .then(|| Checkpointer::start(database_path, DATABASE_BUSY_TIMEOUT))
+                .flatten(),
             database: Mutex::new(database),
+            readers: write_ahead_log.then(|| ReaderPool::new(database_path, DATABASE_BUSY_TIMEOUT)),
             workspace_root: workspace_root.into(),
             paste_root: database_path
                 .parent()
@@ -490,7 +516,7 @@ impl StateStore {
         &self,
         connected: &HashSet<String>,
     ) -> Result<Value, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let mut statement = database.prepare(
             "SELECT token_hash, name, created_at, last_seen FROM devices \
              ORDER BY last_seen DESC, created_at DESC",
@@ -566,7 +592,7 @@ impl StateStore {
     }
 
     pub fn tree(&self) -> Result<Value, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let root = self.workspace_root.to_string_lossy();
         let mut statement = database.prepare(
             "SELECT id, relative_path, is_group, owner FROM workspace_folders \
@@ -852,7 +878,7 @@ impl StateStore {
     }
 
     pub fn chat(&self, chat_id: &str) -> Result<Value, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let row = database
             .query_row(
                 "SELECT folder_id, title, backend, workdir, model, effort, access, plan, fast, \
@@ -1008,7 +1034,7 @@ impl StateStore {
     }
 
     pub fn terminal_owner_aliases(&self) -> Result<HashMap<String, String>, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let mut statement = database.prepare("SELECT id, workspace_session_id FROM chats")?;
         let members = statement
             .query_map([], |row| {
@@ -1034,7 +1060,7 @@ impl StateStore {
                     StorageError::InvalidRequest("The host home directory is unavailable.".into())
                 });
         }
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let owner = if let Some(session) = chat_id.strip_prefix("session:") {
             workspace_session_chat(&database, session)?
         } else {
@@ -1046,7 +1072,7 @@ impl StateStore {
     /// The directory a workspace folder works in: its own or an inherited
     /// repository setting, else the folder itself.
     pub fn folder_workdir(&self, folder_id: &str) -> Result<String, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         resolve_workdir(&database, &self.workspace_root, folder_id, None, None)
     }
 
@@ -1146,13 +1172,13 @@ impl StateStore {
         } else {
             None
         };
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         shortcut_fields(&database, &self.workspace_root, folder_id)
     }
 
     pub fn folder_context(&self, request: &Value) -> Result<Value, StorageError> {
         let folder_id = required_string(request, "folder", "That request needs a folder.")?;
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let context = database
             .query_row(
                 "SELECT instructions FROM workspace_folders WHERE root_path = ? AND id = ?",
@@ -1210,7 +1236,7 @@ impl StateStore {
 
     pub fn folder_settings(&self, request: &Value) -> Result<Value, StorageError> {
         let folder_id = required_string(request, "folder", "That request needs a folder.")?;
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let chain = folder_setting_chain(&database, &self.workspace_root, folder_id)?;
         let current = chain.last().expect("folder setting chain has current row");
         let inherited = resolved_folder_values(&chain[..chain.len() - 1]);
@@ -2087,7 +2113,7 @@ impl StateStore {
     }
 
     pub fn chat_title_settings(&self) -> Result<Value, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         chat_title_settings_reply(&database)
     }
 
@@ -2791,7 +2817,7 @@ impl StateStore {
     }
 
     pub(crate) fn latest_message_id(&self, chat_id: &str) -> Result<i64, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         Ok(database.query_row(
             "SELECT COALESCE(MAX(id),0) FROM messages WHERE chat_id = ?",
             [chat_id],
@@ -2845,7 +2871,7 @@ impl StateStore {
             .get("_through_id")
             .and_then(Value::as_i64)
             .unwrap_or(i64::MAX);
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let exists: bool = database.query_row(
             "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?)",
             [chat_id],
@@ -2958,7 +2984,7 @@ impl StateStore {
             return Ok(json!({"ok": true, "results": []}));
         };
 
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let mut statement = database.prepare(
             "SELECT m.id, m.chat_id, COALESCE(NULLIF(c.title, ''), 'Untitled'), \
                     m.role, m.content \
@@ -9729,6 +9755,242 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].1, "other-host");
         assert_eq!(events[0].2["text"], "hello");
+    }
+
+    /// A store with one chat holding `messages` user messages.
+    fn store_with_chat(fixture: &Fixture, messages: usize) -> (StateStore, String) {
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "Busy"})).unwrap()["id"].clone();
+        let chat = store
+            .new_chat(&json!({"folder": folder, "backend": "codex"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for index in 0..messages {
+            store
+                .append_turn_message(&chat, "user", &format!("message {index}"), None)
+                .unwrap();
+        }
+        (store, chat)
+    }
+
+    #[test]
+    fn the_store_switches_to_a_fully_synced_write_ahead_log() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let database = store.database.lock().unwrap();
+        let mode: String = database
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = database
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        assert_eq!(synchronous, 2, "commits must stay synchronous = FULL");
+        assert!(store.readers.is_some());
+    }
+
+    #[test]
+    fn chat_reads_do_not_wait_for_a_commit_stuck_on_the_disk() {
+        let fixture = Fixture::new();
+        let (store, chat) = store_with_chat(&fixture, 20);
+        let request = json!({"chat": chat, "limit": 150});
+        let (stalled_tx, stalled_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        thread::scope(|scope| {
+            // Hold the writer inside an uncommitted write, the way a commit
+            // waiting on fsync holds it while other programs flood the disk.
+            let (writer_store, writer_chat) = (&store, &chat);
+            let writer = scope.spawn(move || {
+                let database = writer_store.database.lock().unwrap();
+                let transaction = database.unchecked_transaction().unwrap();
+                transaction
+                    .execute(
+                        "INSERT INTO messages (chat_id, role, content, created_at) \
+                         VALUES (?, 'user', 'not yet committed', 0)",
+                        [writer_chat],
+                    )
+                    .unwrap();
+                stalled_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                transaction.commit().unwrap();
+            });
+            stalled_rx.recv().unwrap();
+            let started = Instant::now();
+            for _ in 0..10 {
+                store.tree().unwrap();
+                store.chat(&chat).unwrap();
+                store.terminal_owner_aliases().unwrap();
+                let page = store.messages(&request).unwrap();
+                let contents = page["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|message| message["content"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>();
+                assert_eq!(contents.len(), 20);
+                assert!(
+                    !contents
+                        .iter()
+                        .any(|content| content == "not yet committed")
+                );
+            }
+            let elapsed = started.elapsed();
+            release_tx.send(()).unwrap();
+            writer.join().unwrap();
+            assert!(
+                elapsed < Duration::from_secs(5),
+                "reads waited {elapsed:?} for the stalled writer"
+            );
+        });
+        // The commit is visible to the very next read.
+        let page = store.messages(&request).unwrap();
+        assert_eq!(page["messages"].as_array().unwrap().len(), 21);
+        assert_eq!(page["messages"][20]["content"], "not yet committed");
+    }
+
+    #[test]
+    fn a_read_sees_one_snapshot_while_writes_commit_underneath() {
+        let fixture = Fixture::new();
+        let (store, chat) = store_with_chat(&fixture, 3);
+        let reader = store.reader().unwrap();
+        let count = |database: &Connection| -> i64 {
+            database
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE chat_id = ?",
+                    [&chat],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(count(&reader), 3);
+        store
+            .append_turn_message(&chat, "user", "later", None)
+            .unwrap();
+        assert_eq!(count(&reader), 3, "one read must not mix two states");
+        drop(reader);
+        assert_eq!(count(&store.reader().unwrap()), 4);
+    }
+
+    #[test]
+    fn read_connections_refuse_writes() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let reader = store.reader().unwrap();
+        let error = reader
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('read-path', 'write')",
+                [],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("readonly"), "{error}");
+        drop(reader);
+        // A connection that failed a write goes back to the pool usable.
+        store.tree().unwrap();
+    }
+
+    #[test]
+    fn reads_wait_for_a_free_connection_instead_of_opening_without_limit() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let held = (0..database::MAX_READERS)
+            .map(|_| store.reader().unwrap())
+            .collect::<Vec<_>>();
+        thread::scope(|scope| {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let store = &store;
+            scope.spawn(move || {
+                store.tree().unwrap();
+                done_tx.send(()).unwrap();
+            });
+            assert!(done_rx.recv_timeout(Duration::from_millis(200)).is_err());
+            drop(held);
+            done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        });
+    }
+
+    #[test]
+    fn opening_replays_a_crashed_rollback_journal_before_switching_to_wal() {
+        let fixture = Fixture::new();
+        {
+            let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+            store.save_remote_listener("::", 4001).unwrap();
+        }
+        // Recreate what an older host leaves behind when it dies mid-commit:
+        // a database in rollback mode, partly overwritten, with its journal.
+        let crashed = fixture.root.join("crashed");
+        fs::create_dir_all(&crashed).unwrap();
+        {
+            let database = Connection::open(&fixture.database).unwrap();
+            database
+                .pragma_update(None, "journal_mode", "DELETE")
+                .unwrap();
+            database.pragma_update(None, "cache_size", 2).unwrap();
+            let transaction = database.unchecked_transaction().unwrap();
+            transaction
+                .execute(
+                    "UPDATE meta SET value = 'overwritten' WHERE key = 'remote_listener'",
+                    [],
+                )
+                .unwrap();
+            for index in 0..200 {
+                transaction
+                    .execute(
+                        "INSERT INTO meta (key, value) VALUES (?, ?)",
+                        params![format!("filler-{index}"), "x".repeat(4096)],
+                    )
+                    .unwrap();
+            }
+            let journal = fixture.root.join("chats.db-journal");
+            assert!(journal.exists(), "the uncommitted write has a journal");
+            fs::copy(&fixture.database, crashed.join("chats.db")).unwrap();
+            fs::copy(&journal, crashed.join("chats.db-journal")).unwrap();
+            transaction.rollback().unwrap();
+        }
+
+        let store = StateStore::open(crashed.join("chats.db"), &fixture.workspaces).unwrap();
+        assert_eq!(store.remote_listener().unwrap(), Some(("::".into(), 4001)));
+        let database = store.database.lock().unwrap();
+        let mode: String = database
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        let fillers: i64 = database
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key LIKE 'filler-%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fillers, 0);
+        let check: String = database
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(check, "ok");
+        assert!(!crashed.join("chats.db-journal").exists());
+    }
+
+    #[test]
+    fn closing_the_store_folds_the_log_back_for_read_only_backups() {
+        let fixture = Fixture::new();
+        {
+            let (store, chat) = store_with_chat(&fixture, 2);
+            store.messages(&json!({"chat": chat})).unwrap();
+            store
+                .append_shared_event("this-host", &json!({"event": "text", "text": "token"}))
+                .unwrap();
+        }
+        assert!(!fixture.root.join("chats.db-wal").exists());
+        let backup = Connection::open_with_flags(
+            &fixture.database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        let messages: i64 = backup
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(messages, 2);
     }
 
     #[test]
