@@ -149,6 +149,10 @@ impl Live {
 }
 
 impl Account {
+    fn login_confirmed(&self) -> bool {
+        self.live.login_read_at_ms.is_some() || self.live.checked_at_ms.is_some()
+    }
+
     fn new(id: &str, now: i64) -> Self {
         Self {
             id: id.into(),
@@ -731,6 +735,8 @@ impl Accounts {
             account.email = identity.email.clone();
             account.plan = identity.plan.clone();
             account.account_key = identity.account_key.clone();
+            // Its login was read just now, which is what made it addable.
+            account.live.login_read_at_ms = Some(now_ms());
             state.accounts.push(account);
             Ok(Ok(()))
         })
@@ -1030,7 +1036,13 @@ fn choose(
     signed_in: &impl Fn(&str) -> bool,
     now: i64,
 ) -> Option<Choice> {
-    let usable = |account: &&Account| account.live.problem.is_none() && signed_in(&account.id);
+    // An added account runs only as a login read since it last signed in or
+    // the host started: until then its home could hold anyone's sign-in.
+    let usable = |account: &&Account| {
+        account.live.problem.is_none()
+            && signed_in(&account.id)
+            && (account.id == DEFAULT_ACCOUNT || account.login_confirmed())
+    };
     let choice = |account: &Account| Choice {
         account: account.id.clone(),
         environment: Vec::new(),
@@ -1637,6 +1649,37 @@ mod tests {
         assert!(!home.exists());
         assert!(accounts.environment("codex", &id).is_empty());
         assert!(!home.exists(), "a late check does not make the home again");
+    }
+
+    #[test]
+    fn an_added_account_waits_for_its_login_to_be_read_again() {
+        let data = temp("unread");
+        let accounts = Accounts::with_homes(&data, &[]);
+        let second = added(&accounts, "claude", "b@example.com");
+        accounts
+            .reorder("claude", &[second.clone(), DEFAULT_ACCOUNT.into()])
+            .unwrap();
+        assert_eq!(accounts.choose("claude", None, |_| true, 0).account, second);
+        // Signed in again: the home may hold another login now.
+        accounts.forget_login_reading("claude", &second);
+        assert_eq!(
+            accounts.choose("claude", None, |_| true, 0).account,
+            DEFAULT_ACCOUNT
+        );
+        accounts.record_probe(
+            "claude",
+            &second,
+            &identity("b@example.com"),
+            vec![],
+            now_ms(),
+        );
+        assert_eq!(accounts.choose("claude", None, |_| true, 0).account, second);
+        // After a restart nothing has been read yet.
+        let reloaded = Accounts::with_homes(&data, &[]);
+        assert_eq!(
+            reloaded.choose("claude", None, |_| true, 0).account,
+            DEFAULT_ACCOUNT
+        );
     }
 
     #[test]

@@ -913,7 +913,8 @@ reports progress through `agent-auth-changed`.
 
 Each turn runs on one account, chosen when it starts. A chat stays on the
 account its session belongs to while that account is signed in, is still the
-login it was added as, and has usage left; otherwise the turn runs on the first
+login it was added as (an added account's login must have been read since it
+last signed in or the host started), and has usage left; otherwise the turn runs on the first
 such account in priority order. With switching off, turns run on the first
 signed-in account. When a turn is turned away for usage and switching is on,
 the host holds the account back until its limit resets, adds an
