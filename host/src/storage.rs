@@ -3711,7 +3711,8 @@ impl StateStore {
     }
 
     /// Asks GitHub again about the pull requests linked to a chat that have
-    /// not merged, a few at a time, longest unchecked first, and records what
+    /// not merged and were not asked about in the last minute, a few at a
+    /// time, longest unchecked first, and records what
     /// changed. Merged ones cannot change, so they are left alone. Returns
     /// whether any state changed.
     pub(crate) fn refresh_linked_pull_request_states(
@@ -3719,17 +3720,21 @@ impl StateStore {
         chat_id: &str,
     ) -> Result<bool, StorageError> {
         const MAX_REFRESHED: i64 = 8;
+        // A link asked about this recently is not asked about again.
+        const FRESH_SECONDS: i64 = 60;
         let (urls, workdir) = {
             let database = self.reader()?;
             let mut statement = database.prepare(
                 "SELECT url FROM chat_pull_requests \
                  WHERE chat_id = ? AND dismissed = 0 AND state IS NOT 'merged' \
+                 AND (checked_at IS NULL OR checked_at <= ?) \
                  ORDER BY checked_at IS NOT NULL, checked_at, created_at, rowid LIMIT ?",
             )?;
             let urls = statement
-                .query_map(params![chat_id, MAX_REFRESHED], |row| {
-                    row.get::<_, String>(0)
-                })?
+                .query_map(
+                    params![chat_id, now_seconds() - FRESH_SECONDS, MAX_REFRESHED],
+                    |row| row.get::<_, String>(0),
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             drop(statement);
             let workdir = resolve_chat_workdir(&database, &self.workspace_root, chat_id)

@@ -2401,8 +2401,25 @@ pub(crate) fn link_pull_requests(
     }
 }
 
+/// Asks GitHub again about a chat's links. A refresh already running for the
+/// chat covers this one, and links asked about within the last minute are
+/// skipped, so repeated requests cannot pile up lookups.
 fn refresh_pull_request_states(store: &StateStore, events: &EventBus, chat_id: &str) {
-    match store.refresh_linked_pull_request_states(chat_id) {
+    static REFRESHING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    {
+        let Ok(mut refreshing) = REFRESHING.lock() else {
+            return;
+        };
+        if refreshing.iter().any(|chat| chat == chat_id) {
+            return;
+        }
+        refreshing.push(chat_id.to_owned());
+    }
+    let result = store.refresh_linked_pull_request_states(chat_id);
+    if let Ok(mut refreshing) = REFRESHING.lock() {
+        refreshing.retain(|chat| chat != chat_id);
+    }
+    match result {
         Ok(true) => events.publish(json!({"event": "tree"})),
         Ok(false) => {}
         Err(error) => eprintln!("xd: cannot refresh the pull requests of {chat_id}: {error}"),

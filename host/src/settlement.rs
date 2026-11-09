@@ -1162,6 +1162,25 @@ mod tests {
                         .refresh_linked_pull_request_states(&fixture.chat)
                         .unwrap()
                 );
+                assert!(
+                    fixture
+                        .store
+                        .refresh_linked_pull_request_states(&fixture.chat)
+                        .unwrap(),
+                    "the last two get their first state"
+                );
+                // The two never asked about go next; the eight just asked
+                // about wait out the minute.
+                assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 10);
+                fixture
+                    .store
+                    .refresh_linked_pull_request_states(&fixture.chat)
+                    .unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(&log).unwrap().lines().count(),
+                    10,
+                    "every link is fresh now"
+                );
                 fixture.sql("UPDATE chat_pull_requests SET checked_at = checked_at - 100");
                 fixture
                     .store
@@ -1169,7 +1188,7 @@ mod tests {
                     .unwrap();
                 let asked = std::fs::read_to_string(&log).unwrap();
                 let asked = asked.lines().collect::<Vec<_>>();
-                assert_eq!(asked.len(), 16);
+                assert_eq!(asked.len(), 18);
                 assert_eq!(&asked[8..10], [urls[8].as_str(), urls[9].as_str()]);
                 let tree = fixture.store.tree().unwrap();
                 assert!(
