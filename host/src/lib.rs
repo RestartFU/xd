@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 mod accounts;
 mod agent;
 mod agent_text;
+mod agent_tools;
 mod ask;
 mod auth;
 mod background_process;
@@ -39,6 +40,7 @@ mod private_fs;
 #[cfg(target_os = "linux")]
 mod process_delegation;
 mod process_tree;
+mod pull_requests;
 mod reply_images;
 mod repository_monitor;
 mod runtime;
@@ -62,6 +64,7 @@ mod user_environment;
 mod workflow;
 mod worktree_name;
 
+pub use agent_tools::{answer_mcp, offer_link_tool};
 use auth::AuthManager;
 use chat_title::ChatTitleService;
 use cli_updates::CliUpdates;
@@ -70,6 +73,7 @@ use git_draft::GitDraftService;
 use local_socket::UnixStream;
 use owner_icon::OwnerIcons;
 use pairing::{PairingService, Transport, generate_token, token_hash};
+use pull_requests::LinkSource;
 use repository_monitor::RepositoryMonitor;
 use runtime::{LiveTurn, TurnRuntime};
 use secrets::SecretsStore;
@@ -320,8 +324,10 @@ impl Engine {
             Some("diff-read") => self.read(|store| store.diff_read(&request)),
             Some("git-status") => self.read(|store| store.git_status(&request)),
             Some("git-state") => self.git_state(&request),
-            Some("git-pr-status") => self.read(|store| store.git_pull_request_status(&request)),
-            Some("git-pr-create") => self.read(|store| store.git_create_pull_request(&request)),
+            Some("git-pr-status") => self.git_pull_request_status(&request),
+            Some("git-pr-create") => self.git_create_pull_request(&request),
+            Some("link-pull-requests") => self.link_pull_requests(&request),
+            Some("unlink-pull-request") => self.unlink_pull_request(&request),
             Some("git-draft") => self
                 .git_drafts
                 .start(&request)
@@ -967,17 +973,158 @@ impl Engine {
                     .git_action_state(&chat_id)
                     .unwrap_or_else(|_| hidden_git_state());
                 if with_pull_request && let Some(pull_request) = store.chat_pull_request(&chat_id) {
+                    if let Some(url) = pull_request
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .filter(|url| !url.is_empty())
+                    {
+                        link_pull_requests(
+                            &store,
+                            &events,
+                            &chat_id,
+                            &[url.to_owned()],
+                            LinkSource::Branch,
+                        );
+                    }
                     event["pull_request"] = pull_request;
                 }
                 event["event"] = Value::String("git-state".into());
-                event["chat"] = Value::String(chat_id);
+                event["chat"] = Value::String(chat_id.clone());
                 if let Some(request_id) = request_id {
                     event["request"] = Value::String(request_id);
                 }
                 events.publish(event);
+                if with_pull_request {
+                    refresh_pull_request_states(&store, &events, &chat_id);
+                }
             })
             .map(|_| json!({"ok": true}))
             .unwrap_or_else(|error| error_reply(format!("Cannot refresh Git state: {error}")))
+    }
+
+    /// Links the branch's pull request, when the lookup found one, and asks
+    /// GitHub again about the chat's other links.
+    fn git_pull_request_status(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let reply = match store.git_pull_request_status(request) {
+            Ok(reply) => reply,
+            Err(error) => return error_reply(error),
+        };
+        if let Some(chat_id) = request.get("chat").and_then(Value::as_str) {
+            let url = reply
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|url| !url.is_empty())
+                .map(str::to_owned);
+            let chat_id = chat_id.to_owned();
+            let store = store.clone();
+            let events = self.events.clone();
+            let _ = thread::Builder::new()
+                .name("xd-pull-requests".into())
+                .spawn(move || {
+                    if let Some(url) = url {
+                        link_pull_requests(&store, &events, &chat_id, &[url], LinkSource::Branch);
+                    }
+                    refresh_pull_request_states(&store, &events, &chat_id);
+                });
+        }
+        reply
+    }
+
+    fn git_create_pull_request(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        match store.git_create_pull_request(request) {
+            Ok(reply) => {
+                if let (Some(chat_id), Some(url)) = (
+                    request.get("chat").and_then(Value::as_str),
+                    reply.get("url").and_then(Value::as_str),
+                ) {
+                    link_pull_requests(
+                        store,
+                        &self.events,
+                        chat_id,
+                        &[url.to_owned()],
+                        LinkSource::Branch,
+                    );
+                }
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    /// Links pull requests to a chat, for the user from a client, or for the
+    /// agent through its link tool when `source` says so.
+    fn link_pull_requests(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let chat_id = match required_string(request, "chat", "Linking needs a chat.") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        let Some(urls) = request.get("urls").and_then(Value::as_array) else {
+            return error_reply("Name the pull requests to link.");
+        };
+        let urls = urls
+            .iter()
+            .map(|url| url.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>();
+        let Some(urls) = urls.filter(|urls| !urls.is_empty()) else {
+            return error_reply("Name the pull requests to link.");
+        };
+        let source = match request.get("source").and_then(Value::as_str) {
+            None | Some("user") => LinkSource::User,
+            Some("agent") => LinkSource::Agent,
+            Some(_) => return error_reply("No such link source."),
+        };
+        match store.link_pull_requests(chat_id, &urls, source) {
+            Ok(outcome) => {
+                if outcome.changed {
+                    self.events.publish(json!({"event": "tree"}));
+                }
+                if !outcome.linked.is_empty() {
+                    let chat_id = chat_id.to_owned();
+                    let store = store.clone();
+                    let events = self.events.clone();
+                    let _ = thread::Builder::new()
+                        .name("xd-pull-requests".into())
+                        .spawn(move || refresh_pull_request_states(&store, &events, &chat_id));
+                }
+                json!({"ok": true, "linked": outcome.linked, "invalid": outcome.invalid})
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    fn unlink_pull_request(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let (chat_id, url) = match (
+            required_string(
+                request,
+                "chat",
+                "Unlinking needs a chat and a pull request.",
+            ),
+            required_string(request, "url", "Unlinking needs a chat and a pull request."),
+        ) {
+            (Ok(chat_id), Ok(url)) => (chat_id, url),
+            (Err(error), _) | (_, Err(error)) => return error_reply(error),
+        };
+        match store.unlink_pull_request(chat_id, url) {
+            Ok(changed) => {
+                if changed {
+                    self.events.publish(json!({"event": "tree"}));
+                }
+                json!({"ok": true, "changed": changed})
+            }
+            Err(error) => error_reply(error),
+        }
     }
 
     fn git_action(&self, request: &Value) -> Value {
@@ -1050,6 +1197,17 @@ impl Engine {
                 match result {
                     Ok(state) => {
                         repository_monitor.reset(&chat_id);
+                        if action == "create-pr"
+                            && let Some(url) = state.get("url").and_then(Value::as_str)
+                        {
+                            link_pull_requests(
+                                &store,
+                                &events,
+                                &chat_id,
+                                &[url.to_owned()],
+                                LinkSource::Branch,
+                            );
+                        }
                         if let (Some(event), Some(state)) =
                             (event.as_object_mut(), state.as_object())
                         {
@@ -2227,6 +2385,30 @@ fn serve_connection_with_engine(
 }
 
 /// Serve an authenticated connection to the shared daemon.
+/// Links pull requests the host found by itself, and tells clients when the
+/// chat's list changed. A failure only costs the link, so it is logged.
+pub(crate) fn link_pull_requests(
+    store: &StateStore,
+    events: &EventBus,
+    chat_id: &str,
+    urls: &[String],
+    source: LinkSource,
+) {
+    match store.link_pull_requests(chat_id, urls, source) {
+        Ok(outcome) if outcome.changed => events.publish(json!({"event": "tree"})),
+        Ok(_) => {}
+        Err(error) => eprintln!("xd: cannot link a pull request to {chat_id}: {error}"),
+    }
+}
+
+fn refresh_pull_request_states(store: &StateStore, events: &EventBus, chat_id: &str) {
+    match store.refresh_linked_pull_request_states(chat_id) {
+        Ok(true) => events.publish(json!({"event": "tree"})),
+        Ok(false) => {}
+        Err(error) => eprintln!("xd: cannot refresh the pull requests of {chat_id}: {error}"),
+    }
+}
+
 pub fn serve_daemon_connection(
     stream: UnixStream,
     engine: Arc<Engine>,

@@ -154,20 +154,37 @@ fn pull_request_settles(
 
 /// When the rules say this session settled, or `None` if they leave it active.
 ///
+/// `pull_requests` are all the session's: its branch's and those linked to its
+/// chats. They settle it once every one that still speaks for it has finished,
+/// as [`pull_request_settles`] says. One that finished before the user's
+/// latest message speaks for work since resumed, so it is passed over; if none
+/// is left, inactivity decides.
+///
 /// The answer is the moment work stopped rather than now, so the settled shelf
 /// orders sessions by when they went quiet.
 pub(crate) fn auto_settled_at(
     candidate: &SettlementCandidate,
-    pull_request: Option<&PullRequestSnapshot>,
+    pull_requests: &[PullRequestSnapshot],
     now: i64,
     settings: &AutoSettleSettings,
 ) -> Option<i64> {
-    if pull_request
-        .is_some_and(|pull_request| pull_request_settles(candidate, pull_request, settings))
+    let current = pull_requests
+        .iter()
+        .filter(|pull_request| {
+            pull_request.state == PullRequestState::Open
+                || pull_request
+                    .finished_at
+                    .is_none_or(|finished_at| finished_at > candidate.user_anchor_at)
+        })
+        .collect::<Vec<_>>();
+    if !current.is_empty()
+        && current
+            .iter()
+            .all(|pull_request| pull_request_settles(candidate, pull_request, settings))
     {
         return Some(candidate.activity_at);
     }
-    if settings.keep_pull_requests && pull_request.is_some() {
+    if settings.keep_pull_requests && !pull_requests.is_empty() {
         return None;
     }
     let days = settings.after_days?;
@@ -199,7 +216,7 @@ impl AutoSettler {
         let spawned = thread::Builder::new()
             .name("xd-auto-settle".into())
             .spawn(move || {
-                let mut pull_requests = HashMap::new();
+                let mut pull_requests = PullRequestCache::default();
                 loop {
                     match wakes.recv_timeout(SWEEP_INTERVAL) {
                         Ok(()) | Err(RecvTimeoutError::Timeout) => {}
@@ -207,10 +224,11 @@ impl AutoSettler {
                     }
                     let has_interaction = |chat: &str| runtime.has_interactions(chat);
                     match sweep(&store, &has_interaction, &mut pull_requests, now_seconds()) {
-                        Ok(0) => {}
+                        Ok(0) if !pull_requests.states_changed => {}
                         Ok(_) => events.publish(json!({"event": "tree"})),
                         Err(error) => eprintln!("xd: automatic settling skipped: {error}"),
                     }
+                    pull_requests.states_changed = false;
                     after_sweep();
                     runtime.release_idle_agents();
                 }
@@ -231,9 +249,34 @@ impl AutoSettler {
     }
 }
 
-/// Answers by directory and branch: switching branches in a directory must not
-/// settle a session on the strength of the branch it left.
-type PullRequestCache = HashMap<(PathBuf, String), (Instant, Option<PullRequestSnapshot>)>;
+/// What GitHub said about pull requests, kept for [`PULL_REQUEST_LIFETIME`].
+#[derive(Default)]
+pub(crate) struct PullRequestCache {
+    /// By directory and branch: switching branches in a directory must not
+    /// settle a session on the strength of the branch it left.
+    branches: HashMap<(PathBuf, String), (Instant, BranchPullRequest)>,
+    /// Pull requests linked to chats, by address.
+    linked: HashMap<String, (Instant, Option<PullRequestSnapshot>)>,
+    /// A lookup changed the state recorded for a linked pull request, so
+    /// clients should read the tree again.
+    states_changed: bool,
+}
+
+type BranchPullRequest = Option<(Option<String>, PullRequestSnapshot)>;
+
+impl PullRequestCache {
+    fn retain_fresh(&mut self) {
+        self.branches
+            .retain(|_, (read_at, _)| read_at.elapsed() < PULL_REQUEST_LIFETIME);
+        self.linked
+            .retain(|_, (read_at, _)| read_at.elapsed() < PULL_REQUEST_LIFETIME);
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.branches.is_empty() && self.linked.is_empty()
+    }
+}
 
 /// One pass of the rules. Returns how many sessions it settled.
 fn sweep(
@@ -245,7 +288,7 @@ fn sweep(
     if !store.auto_settle_settings()?.configured() {
         return Ok(0);
     }
-    pull_requests.retain(|_, (read_at, _)| read_at.elapsed() < PULL_REQUEST_LIFETIME);
+    pull_requests.retain_fresh();
     let mut settled = 0;
     for candidate in store.settlement_candidates()? {
         if candidate.chats.iter().any(|chat| has_interaction(chat)) {
@@ -260,15 +303,15 @@ fn sweep(
         // Inactivity alone decides unless the pull request could veto it, so
         // the network is only asked about sessions that are still in doubt.
         let without_lookup = (!settings.keep_pull_requests)
-            .then(|| auto_settled_at(&candidate, None, now, &settings))
+            .then(|| auto_settled_at(&candidate, &[], now, &settings))
             .flatten();
         let settled_at = match without_lookup {
             Some(settled_at) => Some(settled_at),
             None => {
-                let Some(pull_request) = pull_request_for(store, &candidate, pull_requests) else {
+                let Some(found) = pull_requests_for(store, &candidate, pull_requests) else {
                     continue;
                 };
-                auto_settled_at(&candidate, pull_request.as_ref(), now, &settings)
+                auto_settled_at(&candidate, &found, now, &settings)
             }
         };
         let Some(settled_at) = settled_at else {
@@ -281,46 +324,100 @@ fn sweep(
     Ok(settled)
 }
 
-/// The session's pull request, or `None` when the lookup failed and the
-/// session has to wait for a sweep that can tell.
-fn pull_request_for(
+/// The session's pull requests: its branch's, unless the user removed that
+/// one from every chat in it, and those linked to its chats. `None` when a
+/// lookup failed and the session has to wait for a sweep that can tell.
+fn pull_requests_for(
     store: &StateStore,
     candidate: &SettlementCandidate,
     cache: &mut PullRequestCache,
-) -> Option<Option<PullRequestSnapshot>> {
-    let Some(workdir) = &candidate.workdir else {
-        return Some(None);
-    };
-    let Some(branch) = store.checked_out_branch(workdir) else {
-        return Some(None);
-    };
-    let key = (workdir.clone(), branch);
-    if let Some((_, known)) = cache.get(&key) {
-        return Some(*known);
-    }
-    match store.pull_request_snapshot(workdir) {
-        Ok(pull_request) => {
-            // The lookup takes a while, and it answers for the branch that was
-            // checked out when it began. If that has changed, ask again later.
-            if store.checked_out_branch(workdir).as_ref() != Some(&key.1) {
-                return None;
+) -> Option<Vec<PullRequestSnapshot>> {
+    let mut found = Vec::new();
+    if let Some(workdir) = &candidate.workdir
+        && let Some(branch) = store.checked_out_branch(workdir)
+    {
+        let key = (workdir.clone(), branch);
+        let known = match cache.branches.get(&key) {
+            Some((_, known)) => known.clone(),
+            None => match store.branch_pull_request(workdir) {
+                Ok(pull_request) => {
+                    // The lookup takes a while, and it answers for the branch
+                    // that was checked out when it began. If that has
+                    // changed, ask again later.
+                    if store.checked_out_branch(workdir).as_ref() != Some(&key.1) {
+                        return None;
+                    }
+                    if let Some((Some(url), snapshot)) = &pull_request {
+                        cache.states_changed |= store
+                            .set_pull_request_state(url, snapshot.state)
+                            .unwrap_or(false);
+                    }
+                    cache
+                        .branches
+                        .insert(key, (Instant::now(), pull_request.clone()));
+                    pull_request
+                }
+                Err(error) => {
+                    eprintln!(
+                        "xd: cannot read the pull request for {}: {error}",
+                        workdir.display()
+                    );
+                    return None;
+                }
+            },
+        };
+        if let Some((url, snapshot)) = known {
+            let removed = url.as_deref().is_some_and(|url| {
+                store
+                    .pull_request_dismissed(&candidate.chats, url)
+                    .unwrap_or(false)
+            });
+            if !removed {
+                found.push(snapshot);
             }
-            cache.insert(key, (Instant::now(), pull_request));
-            Some(pull_request)
-        }
-        Err(error) => {
-            eprintln!(
-                "xd: cannot read the pull request for {}: {error}",
-                workdir.display()
-            );
-            None
         }
     }
+    let linked = match store.linked_pull_request_urls(&candidate.chats) {
+        Ok(linked) => linked,
+        Err(error) => {
+            eprintln!("xd: cannot read linked pull requests: {error}");
+            return None;
+        }
+    };
+    // gh picks the host and account from the directory it runs in.
+    let directory = candidate
+        .workdir
+        .clone()
+        .filter(|workdir| workdir.is_dir())
+        .unwrap_or_else(|| store.workspace_path().to_path_buf());
+    for url in linked {
+        let snapshot = match cache.linked.get(&url) {
+            Some((_, known)) => *known,
+            None => match store.pull_request_snapshot_at(&directory, &url) {
+                Ok(snapshot) => {
+                    if let Some(snapshot) = &snapshot {
+                        cache.states_changed |= store
+                            .set_pull_request_state(&url, snapshot.state)
+                            .unwrap_or(false);
+                    }
+                    cache.linked.insert(url.clone(), (Instant::now(), snapshot));
+                    snapshot
+                }
+                Err(error) => {
+                    eprintln!("xd: cannot read the pull request {url}: {error}");
+                    return None;
+                }
+            },
+        };
+        found.extend(snapshot);
+    }
+    Some(found)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pull_requests::{self, LinkSource};
 
     const NOW: i64 = 100 * DAY_SECONDS;
 
@@ -345,11 +442,11 @@ mod tests {
     #[test]
     fn inactivity_settles_only_past_the_chosen_days() {
         let settings = AutoSettleSettings::default();
-        assert_eq!(auto_settled_at(&candidate(2), None, NOW, &settings), None);
-        assert_eq!(auto_settled_at(&candidate(3), None, NOW, &settings), None);
+        assert_eq!(auto_settled_at(&candidate(2), &[], NOW, &settings), None);
+        assert_eq!(auto_settled_at(&candidate(3), &[], NOW, &settings), None);
         let old = candidate(4);
         assert_eq!(
-            auto_settled_at(&old, None, NOW, &settings),
+            auto_settled_at(&old, &[], NOW, &settings),
             Some(old.activity_at),
             "a settled session is dated by when it went quiet"
         );
@@ -357,7 +454,7 @@ mod tests {
             after_days: None,
             ..settings
         };
-        assert_eq!(auto_settled_at(&candidate(40), None, NOW, &off), None);
+        assert_eq!(auto_settled_at(&candidate(40), &[], NOW, &off), None);
     }
 
     #[test]
@@ -366,16 +463,13 @@ mod tests {
         let idle = candidate(0);
         let merged = pull_request(PullRequestState::Merged, NOW + 1);
         let closed = pull_request(PullRequestState::Closed, NOW + 1);
-        assert!(auto_settled_at(&idle, Some(&merged), NOW, &settings).is_some());
+        assert!(auto_settled_at(&idle, &[merged], NOW, &settings).is_some());
         let keep_merged = AutoSettleSettings {
             on_merge: false,
             ..settings
         };
-        assert_eq!(
-            auto_settled_at(&idle, Some(&merged), NOW, &keep_merged),
-            None
-        );
-        assert!(auto_settled_at(&idle, Some(&closed), NOW, &keep_merged).is_some());
+        assert_eq!(auto_settled_at(&idle, &[merged], NOW, &keep_merged), None);
+        assert!(auto_settled_at(&idle, &[closed], NOW, &keep_merged).is_some());
     }
 
     #[test]
@@ -383,10 +477,10 @@ mod tests {
         let settings = AutoSettleSettings::default();
         let resumed = candidate(0);
         let old = pull_request(PullRequestState::Merged, resumed.user_anchor_at - 1);
-        assert_eq!(auto_settled_at(&resumed, Some(&old), NOW, &settings), None);
+        assert_eq!(auto_settled_at(&resumed, &[old], NOW, &settings), None);
         let same_second = pull_request(PullRequestState::Merged, resumed.user_anchor_at);
         assert_eq!(
-            auto_settled_at(&resumed, Some(&same_second), NOW, &settings),
+            auto_settled_at(&resumed, &[same_second], NOW, &settings),
             None,
             "the same second cannot show the merge came after the message"
         );
@@ -395,7 +489,7 @@ mod tests {
             finished_at: None,
         };
         assert_eq!(
-            auto_settled_at(&resumed, Some(&unknown_time), NOW, &settings),
+            auto_settled_at(&resumed, &[unknown_time], NOW, &settings),
             None
         );
     }
@@ -411,12 +505,12 @@ mod tests {
             state: PullRequestState::Open,
             finished_at: None,
         };
-        assert_eq!(auto_settled_at(&old, Some(&open), NOW, &settings), None);
-        assert!(auto_settled_at(&old, None, NOW, &settings).is_some());
+        assert_eq!(auto_settled_at(&old, &[open], NOW, &settings), None);
+        assert!(auto_settled_at(&old, &[], NOW, &settings).is_some());
         assert!(
             auto_settled_at(
                 &old,
-                Some(&pull_request(PullRequestState::Merged, NOW)),
+                &[pull_request(PullRequestState::Merged, NOW)],
                 NOW,
                 &settings
             )
@@ -431,13 +525,7 @@ mod tests {
             finished_at: None,
         };
         assert!(
-            auto_settled_at(
-                &candidate(30),
-                Some(&open),
-                NOW,
-                &AutoSettleSettings::default()
-            )
-            .is_some()
+            auto_settled_at(&candidate(30), &[open], NOW, &AutoSettleSettings::default()).is_some()
         );
     }
 
@@ -500,7 +588,13 @@ mod tests {
         }
 
         fn sweep(&self) -> usize {
-            sweep(&self.store, &|_| false, &mut HashMap::new(), now_seconds()).unwrap()
+            sweep(
+                &self.store,
+                &|_| false,
+                &mut PullRequestCache::default(),
+                now_seconds(),
+            )
+            .unwrap()
         }
     }
 
@@ -508,6 +602,175 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn every_current_pull_request_has_to_finish_before_a_session_settles() {
+        let settings = AutoSettleSettings::default();
+        let idle = candidate(0);
+        let merged = pull_request(PullRequestState::Merged, NOW + 1);
+        let closed = pull_request(PullRequestState::Closed, NOW + 2);
+        let open = PullRequestSnapshot {
+            state: PullRequestState::Open,
+            finished_at: None,
+        };
+        let earlier = pull_request(PullRequestState::Merged, idle.user_anchor_at - 1);
+        assert_eq!(
+            auto_settled_at(&idle, &[merged, closed], NOW, &settings),
+            Some(idle.activity_at)
+        );
+        assert_eq!(
+            auto_settled_at(&idle, &[merged, open], NOW, &settings),
+            None
+        );
+        assert_eq!(
+            auto_settled_at(&idle, &[earlier, merged], NOW, &settings),
+            Some(idle.activity_at),
+            "one that finished before the latest message speaks for nothing"
+        );
+        assert_eq!(auto_settled_at(&idle, &[earlier], NOW, &settings), None);
+        let keep_merged = AutoSettleSettings {
+            on_merge: false,
+            ..settings
+        };
+        assert_eq!(
+            auto_settled_at(&idle, &[merged, closed], NOW, &keep_merged),
+            None,
+            "a merge that does not settle holds the closed one back"
+        );
+    }
+
+    #[test]
+    fn links_are_listed_once_and_a_removed_one_stays_removed_unless_asked_for() {
+        let fixture = Fixture::new();
+        let store = &fixture.store;
+        let chat = &fixture.chat;
+        let listed = || {
+            store.tree().unwrap()["chats"][0]
+                .get("pull_requests")
+                .cloned()
+                .unwrap_or(json!([]))
+        };
+        assert_eq!(store.tree().unwrap()["linked_pull_requests"], true);
+        let first = "https://github.com/o/r/pull/1".to_owned();
+        let outcome = store
+            .link_pull_requests(
+                chat,
+                &[
+                    "https://github.com/o/r/pull/1/files".into(),
+                    first.clone(),
+                    "https://github.com/o/r/issues/4".into(),
+                ],
+                LinkSource::User,
+            )
+            .unwrap();
+        assert_eq!(outcome.linked, std::slice::from_ref(&first));
+        assert_eq!(outcome.invalid, ["https://github.com/o/r/issues/4"]);
+        assert!(outcome.changed);
+        assert!(
+            !store
+                .link_pull_requests(chat, std::slice::from_ref(&first), LinkSource::Agent)
+                .unwrap()
+                .changed
+        );
+        assert_eq!(listed(), json!([{"url": first}]));
+
+        assert!(store.unlink_pull_request(chat, &first).unwrap());
+        assert!(!store.unlink_pull_request(chat, &first).unwrap());
+        assert_eq!(listed(), json!([]));
+        for automatic in [LinkSource::Branch, LinkSource::Command] {
+            assert!(
+                !store
+                    .link_pull_requests(chat, std::slice::from_ref(&first), automatic)
+                    .unwrap()
+                    .changed
+            );
+        }
+        assert_eq!(listed(), json!([]), "automatic links do not bring it back");
+        assert!(
+            store
+                .link_pull_requests(chat, std::slice::from_ref(&first), LinkSource::Agent)
+                .unwrap()
+                .changed
+        );
+        assert!(
+            store
+                .set_pull_request_state(&first, PullRequestState::Merged)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_pull_request_state(&first, PullRequestState::Merged)
+                .unwrap()
+        );
+        assert_eq!(listed(), json!([{"url": first, "state": "merged"}]));
+
+        assert!(matches!(
+            store.link_pull_requests("missing", std::slice::from_ref(&first), LinkSource::User),
+            Err(crate::StorageError::NoChat(_))
+        ));
+        let many = (1..=pull_requests::MAX_PER_REQUEST + 1)
+            .map(|number| format!("https://github.com/o/r/pull/{number}"))
+            .collect::<Vec<_>>();
+        assert!(
+            store
+                .link_pull_requests(chat, &many, LinkSource::User)
+                .is_err()
+        );
+        fixture.sql("DELETE FROM chats");
+        assert!(
+            store
+                .linked_pull_request_urls(std::slice::from_ref(chat))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_linked_pull_request_keeps_a_session_until_every_one_has_finished() {
+        let merged_at = now_seconds() + 60;
+        with_fake_gh(
+            &format!(
+                "case \"$3\" in \
+                 https://github.com/o/r/pull/1) \
+                   echo '{{\"url\":\"https://github.com/o/r/pull/1\",\"state\":\"MERGED\",\"finished_at\":{merged_at}}}';; \
+                 https://github.com/o/r/pull/2) \
+                   echo '{{\"url\":\"https://github.com/o/r/pull/2\",\"state\":\"OPEN\",\"finished_at\":null}}';; \
+                 *) echo 'no pull requests found for branch \"feature\"' >&2; exit 1;; \
+                 esac"
+            ),
+            |fixture, _| {
+                let urls = [
+                    "https://github.com/o/r/pull/1",
+                    "https://github.com/o/r/pull/2",
+                ]
+                .map(str::to_owned);
+                fixture
+                    .store
+                    .link_pull_requests(&fixture.chat, &urls, LinkSource::Command)
+                    .unwrap();
+                let mut cache = PullRequestCache::default();
+                assert_eq!(
+                    sweep(&fixture.store, &|_| false, &mut cache, now_seconds()).unwrap(),
+                    0,
+                    "one is still open"
+                );
+                assert!(cache.states_changed);
+                assert_eq!(
+                    fixture.store.tree().unwrap()["chats"][0]["pull_requests"],
+                    json!([
+                        {"url": urls[0], "state": "merged"},
+                        {"url": urls[1], "state": "open"},
+                    ])
+                );
+                fixture
+                    .store
+                    .unlink_pull_request(&fixture.chat, &urls[1])
+                    .unwrap();
+                assert_eq!(fixture.sweep(), 1);
+            },
+        );
     }
 
     #[test]
@@ -693,7 +956,7 @@ mod tests {
         let waiting = sweep(
             &fixture.store,
             &|chat| chat == fixture.chat,
-            &mut HashMap::new(),
+            &mut PullRequestCache::default(),
             now_seconds(),
         )
         .unwrap();
@@ -842,7 +1105,7 @@ mod tests {
                  echo '{{\"state\":\"MERGED\",\"finished_at\":{merged_at}}}'"
             ),
             |fixture, _| {
-                let mut cache = HashMap::new();
+                let mut cache = PullRequestCache::default();
                 assert_eq!(
                     sweep(&fixture.store, &|_| false, &mut cache, now_seconds()).unwrap(),
                     0
@@ -1069,7 +1332,7 @@ mod tests {
                  echo '{{\"state\":\"MERGED\",\"finished_at\":{merged_at}}}'"
             ),
             |fixture, _| {
-                let mut cache = HashMap::new();
+                let mut cache = PullRequestCache::default();
                 let now = now_seconds();
                 for _ in 0..3 {
                     assert_eq!(
