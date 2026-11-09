@@ -383,6 +383,10 @@ class MainViewModel @JvmOverloads constructor(
     fun loadChatTitles() {
         chatTitlesWanted = true
         chatTitleRequest("Could not read the chat title settings") { client.chatTitleSettings() }
+        loadCreationCatalog()
+    }
+
+    fun loadCreationCatalog() {
         val read = ++catalogReads
         _catalogError.value = null
         viewModelScope.launch {

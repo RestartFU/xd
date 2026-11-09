@@ -514,10 +514,13 @@ internal fun MinimalMobileApp(
         )
     }
     createChatIn?.let { session ->
+        LaunchedEffect(session.id) { model.loadCreationCatalog() }
         NewSessionDialog(
             projectName = session.title,
             draftKey = "${activeProject?.id}/${session.id}",
             backends = model.hostCatalog.collectAsStateWithLifecycle().value,
+            catalogError = model.hostCatalogError.collectAsStateWithLifecycle().value,
+            retryCatalog = model::loadCreationCatalog,
             chatTab = true,
             onDismiss = { createChatIn = null },
             onCreate = { title, agent, _, effort, access, plan ->
@@ -816,10 +819,13 @@ private fun MinimalProjectsHome(
         if (createSessionIn != null && creatingIn == null && !loading) createSessionIn = null
     }
     if (creatingIn != null) key(creatingIn.id) {
+        LaunchedEffect(creatingIn.id) { model.loadCreationCatalog() }
         NewSessionDialog(
             projectName = creatingIn.name,
             draftKey = "${creatingIn.id}/new",
             backends = model.hostCatalog.collectAsStateWithLifecycle().value,
+            catalogError = model.hostCatalogError.collectAsStateWithLifecycle().value,
+            retryCatalog = model::loadCreationCatalog,
             places = { NewSessionPlaces.load(model.client, creatingIn.id) },
             onDismiss = { createSessionIn = null },
             onCreate = { title, agent, worktree, effort, access, plan ->
@@ -1941,6 +1947,8 @@ internal fun NewSessionDialog(
     projectName: String,
     draftKey: String? = null,
     backends: List<com.restartfu.xd.protocol.BackendReply> = emptyList(),
+    catalogError: String? = null,
+    retryCatalog: (() -> Unit)? = null,
     chatTab: Boolean = false,
     /** Where a new session can work; null for a chat joining an existing session. */
     places: (suspend () -> NewSessionPlaces)? = null,
@@ -1973,7 +1981,16 @@ internal fun NewSessionDialog(
         draftKey?.let { key ->
             drafts.edit().putString(key, org.json.JSONObject().put("title", title).put("agent", agent.wire)
                 .put("effort", effort).put("access", access).put("plan", plan)
-                .put("worktree", worktree?.let { org.json.JSONObject(it.wire().toString()) }).toString()).apply()
+                .put("worktree", worktree?.let { choice ->
+                    org.json.JSONObject().apply {
+                        when (choice) {
+                            Ops.NewSessionWorktree.New -> put("kind", "new")
+                            is Ops.NewSessionWorktree.Existing -> { put("kind", "existing"); put("path", choice.path) }
+                            is Ops.NewSessionWorktree.Branch -> { put("kind", "branch"); put("ref", choice.reference); put("oid", choice.oid) }
+                            is Ops.NewSessionWorktree.PullRequest -> { put("kind", "pull-request"); put("number", choice.number); put("oid", choice.oid) }
+                        }
+                    }
+                }).toString()).apply()
         }
     }
     if (places != null) {
@@ -2021,6 +2038,10 @@ internal fun NewSessionDialog(
                         )
                     }
                 }
+                if (retryCatalog != null && backends.isEmpty()) {
+                    Text(catalogError ?: "Loading assistant options…", style = MaterialTheme.typography.bodySmall)
+                    if (catalogError != null) TextButton(onClick = retryCatalog) { Text("Retry") }
+                }
                 val efforts = backends.firstOrNull { it.id == agent.wire }?.efforts.orEmpty()
                 if (efforts.isNotEmpty()) CreationOption("Reasoning effort", effort ?: "Default", listOf("Default") + efforts) { effort = it.takeUnless { it == "Default" } }
                 CreationOption("Workspace access", if (plan) "Read only" else when (access) { "read-only" -> "Read only"; "edit" -> "Edit"; "full" -> "Full access"; else -> "Default" },
@@ -2046,8 +2067,9 @@ internal fun NewSessionDialog(
                 // Only once this opening's choices have loaded, even if a choice
                 // was restored from before a rotation; a project with no
                 // checkout to list leaves the choice to the host, as before.
-                enabled = places == null || placesError != null ||
-                    (loaded != null && (worktree != null || loaded?.default == null)),
+                enabled = (retryCatalog == null || backends.isNotEmpty()) &&
+                    (places == null || placesError != null ||
+                    (loaded != null && (worktree != null || loaded?.default == null))),
             ) {
                 Text(if (chatTab) "Create chat" else "Create session")
             }

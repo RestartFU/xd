@@ -124,6 +124,7 @@ pub struct AppSettings {
     pub usage_hidden_providers: Vec<String>,
     /// The choices of each project's last new chat, per connection and project.
     pub new_chat_choices: HashMap<String, NewChatChoices>,
+    #[serde(skip)]
     pub new_chat_drafts: HashMap<String, serde_json::Value>,
     #[serde(skip)]
     load_error: Option<String>,
@@ -222,7 +223,7 @@ impl AppSettings {
     }
 }
 
-fn settings_path() -> PathBuf {
+pub(super) fn settings_path() -> PathBuf {
     if let Some(path) = env::var_os("XD_SETTINGS_PATH").filter(|path| !path.is_empty()) {
         return PathBuf::from(path);
     }

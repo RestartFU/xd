@@ -449,6 +449,7 @@ impl XdDesktop {
                                                 this.minimal_new_session_agent = agent;
                                                 this.new_chat_model = None;
                                             }
+                                            this.remember_new_chat_choices();
                                             this.new_chat_query.clear();
                                             this.new_chat_search.update(cx, |input, cx| {
                                                 input.set_text(String::new(), cx)
@@ -999,37 +1000,86 @@ impl XdDesktop {
         ))
     }
 
+    pub(super) fn schedule_new_chat_draft(&mut self, cx: &mut Context<Self>) {
+        self.new_chat_save_generation += 1;
+        let generation = self.new_chat_save_generation;
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_millis(250)).await;
+            let _ = this.update(cx, |this, _| {
+                if this.new_chat_save_generation == generation {
+                    this.persist_new_chat_draft();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn persist_new_chat_draft(&mut self) {
+        self.new_chat_save_generation += 1;
         if self.chat_create_submitting {
             return;
         }
         let Some(key) = self.new_chat_draft_key() else {
             return;
         };
-        if self.new_chat_prompt.is_empty() && self.new_chat_attachments.is_empty() {
-            self.settings.new_chat_drafts.remove(&key);
-        } else {
-            let attachments = self
-                .new_chat_attachments
+        let ids = json!(
+            self.new_chat_attachments
                 .iter()
-                .map(|a| json!({"name": a.name, "mime": a.mime, "data": a.data}))
-                .collect::<Vec<_>>();
-            self.settings.new_chat_drafts.insert(
-                key,
-                json!({
-                    "text": self.new_chat_prompt, "attachments": attachments, "choices": self.new_chat_remembered
-                }),
-            );
+                .map(|a| a.id)
+                .collect::<Vec<_>>()
+        );
+        let changed = self
+            .settings
+            .new_chat_drafts
+            .get(&key)
+            .is_none_or(|d| d["ids"] != ids);
+        let attachments = (changed || cfg!(test)).then(|| {
+            json!(
+                self.new_chat_attachments
+                    .iter()
+                    .map(|a| json!({"name": a.name, "mime": a.mime, "data": a.data}))
+                    .collect::<Vec<_>>()
+            )
+        });
+        let mut choices = self.new_chat_remembered.clone();
+        choices.agent = Some(self.minimal_new_session_agent.protocol_name().to_owned());
+        choices.model = self.new_chat_model.clone();
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&ids.to_string(), &mut hash);
+        let attachment_file = format!("attachments-{:016x}.json", std::hash::Hasher::finish(&hash));
+        let mut draft = json!({"text": self.new_chat_prompt, "choices": choices,
+            "has_attachments": !self.new_chat_attachments.is_empty(), "ids": ids, "attachment_file": attachment_file});
+        if cfg!(test) {
+            draft["attachments"] = attachments.clone().unwrap_or(json!([]));
         }
-        if let Err(error) = self.settings.save() {
-            self.model.connection_error = Some(error);
+        self.settings
+            .new_chat_drafts
+            .insert(key.clone(), draft.clone());
+        if !cfg!(test)
+            && let Err(error) = new_chat_store::save(key, draft, attachments)
+        {
+            self.model.connection_error =
+                Some(format!("Could not save the new-chat draft: {error}"));
         }
     }
 
     pub(super) fn restore_new_chat_draft(&mut self, cx: &mut Context<Self>) {
-        let draft = self
-            .new_chat_draft_key()
-            .and_then(|key| self.settings.new_chat_drafts.get(&key));
+        let key = self.new_chat_draft_key();
+        let loaded = if cfg!(test) {
+            key.as_ref()
+                .and_then(|k| self.settings.new_chat_drafts.get(k))
+                .cloned()
+        } else {
+            key.and_then(|key| match new_chat_store::read(key) {
+                Ok(draft) => Some(draft),
+                Err(error) => {
+                    self.model.connection_error =
+                        Some(format!("Could not restore the new-chat draft: {error}"));
+                    None
+                }
+            })
+        };
+        let draft = loaded.as_ref();
         self.new_chat_prompt = draft
             .and_then(|d| d["text"].as_str())
             .unwrap_or_default()
@@ -1057,10 +1107,21 @@ impl XdDesktop {
             .update(cx, |input, cx| input.set_text(text, cx));
     }
 
+    pub(super) fn flush_new_chat_draft(&mut self) {
+        if !cfg!(test)
+            && let Some(key) = self.new_chat_draft_key()
+            && let Err(error) = new_chat_store::read(key)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
     pub(super) fn clear_new_chat_draft(&mut self) {
         if let Some(key) = self.new_chat_draft_key() {
             self.settings.new_chat_drafts.remove(&key);
-            if let Err(error) = self.settings.save() {
+            if !cfg!(test)
+                && let Err(error) = new_chat_store::save(key, json!({}), Some(json!([])))
+            {
                 self.model.connection_error = Some(error);
             }
         }
@@ -1203,7 +1264,6 @@ impl XdDesktop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[gpui::test]
     fn new_chat_drafts_restore_text_files_and_keep_destinations_separate(
@@ -1327,7 +1387,6 @@ mod tests {
 #[cfg(test)]
 mod choice_tests {
     use super::*;
-    use serde_json::json;
 
     fn reply(
         desktop: &mut XdDesktop,
@@ -1543,7 +1602,6 @@ mod choice_tests {
 #[cfg(test)]
 mod start_tests {
     use super::*;
-    use serde_json::json;
 
     #[gpui::test]
     fn a_new_chat_opens_under_the_empty_chat_heading(cx: &mut gpui::TestAppContext) {
@@ -1938,7 +1996,6 @@ mod start_tests {
 #[cfg(test)]
 mod image_tests {
     use super::*;
-    use serde_json::json;
     #[gpui::test]
     fn first_message_carries_images_through_chat_creation(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
