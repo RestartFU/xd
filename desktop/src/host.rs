@@ -2,10 +2,15 @@ use std::{
     collections::HashMap,
     env,
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, LazyLock, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
+    time::{Duration, Instant},
 };
 
 use async_channel::{Receiver, Sender};
@@ -24,8 +29,206 @@ const MESSAGE_PAGE_SIZE: usize = 120;
 pub const RESUME_TEXT: &str = "Continue where you left off.";
 const PROCESS_STDERR_LIMIT: usize = 8 * 1024;
 const COMMAND_QUEUE_LIMIT: usize = 256;
+// Match mobile's ordinary call deadline. A live socket can still lose a
+// snapshot reply, leaving both the transcript and composer loading forever.
+const CHAT_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+// Each timeout in a row doubles the next deadline for that snapshot, up to
+// 2^4 times the first one: 30 s, 1, 2, 4, then 8 minutes.
+const CHAT_LOAD_TIMEOUT_DOUBLINGS: u32 = 4;
+// How long a request without a deadline of its own, such as a Git push, may
+// hold up the snapshots queued behind it before the connection counts as
+// stuck: the longest a snapshot's deadline grows.
+const QUEUED_BEHIND_TIMEOUT: Duration =
+    Duration::from_secs(CHAT_LOAD_TIMEOUT.as_secs() << CHAT_LOAD_TIMEOUT_DOUBLINGS);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingRequest {
+    kind: RequestKind,
+    started: Instant,
+    /// How long a snapshot may go unanswered, fixed when it is sent so a
+    /// later answer cannot shorten it; `None` for requests without one.
+    deadline: Option<Duration>,
+}
+
+/// One snapshot that reloads a chat, which the deadline covers: the tree, a
+/// chat's settings, or one page of its transcript.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Snapshot {
+    Tree,
+    Chat(String),
+    Messages(String, MessageCursor),
+}
+
+impl Snapshot {
+    fn of(kind: &RequestKind) -> Option<Self> {
+        match kind {
+            RequestKind::Tree => Some(Self::Tree),
+            RequestKind::Chat { chat_id } => Some(Self::Chat(chat_id.clone())),
+            RequestKind::Messages { chat_id, cursor } => {
+                Some(Self::Messages(chat_id.clone(), *cursor))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// How often each snapshot has timed out in a row on one host, shared by
+/// every connection to it. A host that is slow rather than stuck, such as a
+/// large transcript page over a slow link, would otherwise time out on every
+/// reconnect; doubling the deadline lets it finish. An answer to that same
+/// snapshot brings its deadline back down to the shortest that answer fit
+/// in, so a page that keeps needing a minute keeps getting one.
+#[derive(Default)]
+struct SnapshotDeadlines {
+    timeouts: Mutex<HashMap<Snapshot, u32>>,
+}
+
+impl SnapshotDeadlines {
+    fn for_host(identity: &Path) -> Arc<Self> {
+        static HOSTS: LazyLock<Mutex<HashMap<PathBuf, Arc<SnapshotDeadlines>>>> =
+            LazyLock::new(Mutex::default);
+        let mut hosts = HOSTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        hosts.entry(identity.to_owned()).or_default().clone()
+    }
+
+    fn deadline(&self, snapshot: &Snapshot, base: Duration) -> Duration {
+        let timeouts = self
+            .timeouts
+            .lock()
+            .map(|timeouts| timeouts.get(snapshot).copied().unwrap_or(0))
+            .unwrap_or(0);
+        base.saturating_mul(1 << timeouts.min(CHAT_LOAD_TIMEOUT_DOUBLINGS))
+    }
+
+    fn timed_out(&self, snapshot: Snapshot) {
+        if let Ok(mut timeouts) = self.timeouts.lock() {
+            let count = timeouts.entry(snapshot).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+
+    fn answered(&self, snapshot: &Snapshot, took: Duration, base: Duration) {
+        let needed = (0..CHAT_LOAD_TIMEOUT_DOUBLINGS)
+            .find(|&doublings| base.saturating_mul(1 << doublings) > took)
+            .unwrap_or(CHAT_LOAD_TIMEOUT_DOUBLINGS);
+        if let Ok(mut timeouts) = self.timeouts.lock() {
+            if needed == 0 {
+                timeouts.remove(snapshot);
+            } else {
+                timeouts.insert(snapshot.clone(), needed);
+            }
+        }
+    }
+}
+
+struct ConnectionRequests {
+    pending: Mutex<HashMap<u64, PendingRequest>>,
+    /// When the oldest request then waiting was answered. The host answers a
+    /// connection's requests one at a time, in order, so the next one only
+    /// starts being worked on then.
+    head_answered: Mutex<Option<Instant>>,
+    closed: AtomicBool,
+    /// Held to publish an update or to close, so nothing is published after
+    /// the one Disconnected.
+    publishing: Mutex<()>,
+    deadlines: Arc<SnapshotDeadlines>,
+    /// A snapshot's deadline before it has timed out on this host.
+    timeout: Duration,
+}
+
+impl ConnectionRequests {
+    fn new(deadlines: Arc<SnapshotDeadlines>, timeout: Duration) -> Self {
+        Self {
+            pending: Mutex::default(),
+            head_answered: Mutex::default(),
+            closed: AtomicBool::new(false),
+            publishing: Mutex::default(),
+            deadlines,
+            timeout,
+        }
+    }
+
+    /// A request about to be sent, with its snapshot deadline as of now.
+    fn pending_request(&self, kind: RequestKind, started: Instant) -> PendingRequest {
+        let deadline =
+            Snapshot::of(&kind).map(|snapshot| self.deadlines.deadline(&snapshot, self.timeout));
+        PendingRequest {
+            kind,
+            started,
+            deadline,
+        }
+    }
+
+    /// Takes the request a reply answers, noting when the oldest one was and
+    /// how long a snapshot took to answer.
+    fn take_reply(&self, request_id: u64, now: Instant) -> Option<RequestKind> {
+        let mut pending = self.pending.lock().ok()?;
+        let request = pending.remove(&request_id)?;
+        let mut head_answered = self.head_answered.lock().ok()?;
+        if let Some(snapshot) = Snapshot::of(&request.kind) {
+            let since = head_answered.map_or(request.started, |at| at.max(request.started));
+            self.deadlines.answered(
+                &snapshot,
+                now.saturating_duration_since(since),
+                self.timeout,
+            );
+        }
+        if pending.keys().all(|&other| other > request_id) {
+            *head_answered = Some(now);
+        }
+        Some(request.kind)
+    }
+
+    fn publishing(&self) -> MutexGuard<'_, ()> {
+        self.publishing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Publishes an update unless the connection has closed.
+    fn publish(&self, updates: &Sender<HostUpdate>, update: HostUpdate) -> bool {
+        let _publishing = self.publishing();
+        !self.closed.load(Ordering::Acquire) && updates.send_blocking(update).is_ok()
+    }
+
+    /// Whether the connection has stopped answering while a snapshot waits.
+    /// Only the oldest unanswered request is being worked on, so only its
+    /// clock runs, from when it was sent or the request before it was
+    /// answered: a snapshot queued behind a slow but healthy reply is not
+    /// late. A later reply does not restart that clock, so a lost reply
+    /// still expires.
+    fn expire_chat_load(&self, now: Instant) -> bool {
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        if !pending.values().any(|request| request.deadline.is_some()) {
+            return false;
+        }
+        let Some((_, head)) = pending.iter().min_by_key(|(id, _)| **id) else {
+            return false;
+        };
+        let head_answered = self
+            .head_answered
+            .lock()
+            .ok()
+            .and_then(|head_answered| *head_answered);
+        let since = head_answered.map_or(head.started, |answered| answered.max(head.started));
+        let allowed = head.deadline.unwrap_or(QUEUED_BEHIND_TIMEOUT);
+        if now.saturating_duration_since(since) < allowed
+            || self.closed.swap(true, Ordering::AcqRel)
+        {
+            return false;
+        }
+        if let Some(snapshot) = Snapshot::of(&head.kind) {
+            self.deadlines.timed_out(snapshot);
+        }
+        pending.clear();
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MessageCursor {
     Tail,
     Before(i64),
@@ -377,6 +580,7 @@ struct Command {
 #[derive(Clone)]
 pub struct HostHandle {
     commands: mpsc::SyncSender<Command>,
+    requests: Arc<ConnectionRequests>,
 }
 
 pub struct StartedHost {
@@ -487,17 +691,32 @@ impl HostHandle {
         identity: PathBuf,
         process_errors: Option<Arc<Mutex<Vec<u8>>>>,
     ) -> (Self, Receiver<HostUpdate>) {
+        Self::connect_io_with_timeout(reader, writer, identity, process_errors, CHAT_LOAD_TIMEOUT)
+    }
+
+    fn connect_io_with_timeout(
+        reader: impl Read + Send + 'static,
+        writer: impl Write + Send + 'static,
+        identity: PathBuf,
+        process_errors: Option<Arc<Mutex<Vec<u8>>>>,
+        timeout: Duration,
+    ) -> (Self, Receiver<HostUpdate>) {
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_QUEUE_LIMIT);
         let (update_tx, update_rx) = async_channel::bounded(1024);
-        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let requests = Arc::new(ConnectionRequests::new(
+            SnapshotDeadlines::for_host(&identity),
+            timeout,
+        ));
 
         let _ = update_tx.try_send(HostUpdate::Connected { path: identity });
-        spawn_writer(writer, command_rx, update_tx.clone(), pending.clone());
-        spawn_reader(reader, update_tx.clone(), pending, process_errors);
+        spawn_writer(writer, command_rx, update_tx.clone(), requests.clone());
+        spawn_reader(reader, update_tx.clone(), requests.clone(), process_errors);
+        spawn_chat_load_watchdog(update_tx, requests.clone(), timeout);
 
         (
             Self {
                 commands: command_tx,
+                requests,
             },
             update_rx,
         )
@@ -2005,6 +2224,9 @@ impl HostHandle {
     }
 
     fn send(&self, kind: RequestKind, body: Value) -> Result<(), String> {
+        if self.requests.closed.load(Ordering::Acquire) {
+            return Err("the xd state connection is closed".to_owned());
+        }
         self.commands
             .try_send(Command { kind, body })
             .map_err(|error| match error {
@@ -2020,7 +2242,7 @@ fn spawn_writer(
     mut stream: impl Write + Send + 'static,
     commands: mpsc::Receiver<Command>,
     updates: Sender<HostUpdate>,
-    pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
+    requests: Arc<ConnectionRequests>,
 ) {
     thread::Builder::new()
         .name("xd-host-writer".into())
@@ -2030,24 +2252,41 @@ fn spawn_writer(
                 let (request_id, encoded) = match codec.encode_request(command.body) {
                     Ok(encoded) => encoded,
                     Err(error) => {
-                        disconnect(&updates, error.to_string());
+                        close_connection(&updates, &requests, error.to_string());
                         return;
                     }
                 };
-                if let Ok(mut requests) = pending.lock() {
-                    requests.insert(request_id, command.kind);
+                if let Ok(mut pending) = requests.pending.lock() {
+                    if requests.closed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    pending.insert(
+                        request_id,
+                        requests.pending_request(command.kind, Instant::now()),
+                    );
                 } else {
-                    disconnect(&updates, "host request state is unavailable".into());
+                    close_connection(
+                        &updates,
+                        &requests,
+                        "host request state is unavailable".into(),
+                    );
                     return;
                 }
                 if let Err(error) = stream.write_all(&encoded) {
-                    if let Ok(mut requests) = pending.lock() {
-                        requests.remove(&request_id);
+                    if let Ok(mut pending) = requests.pending.lock() {
+                        pending.remove(&request_id);
                     }
-                    disconnect(&updates, format!("could not write to xd host: {error}"));
+                    close_connection(
+                        &updates,
+                        &requests,
+                        format!("could not write to xd host: {error}"),
+                    );
                     return;
                 }
             }
+            // The last handle was dropped; the watchdog has no connection to
+            // recover, even if its reader is still waiting for EOF.
+            requests.closed.store(true, Ordering::Release);
         })
         .expect("spawn xd host writer");
 }
@@ -2055,7 +2294,7 @@ fn spawn_writer(
 fn spawn_reader(
     stream: impl Read + Send + 'static,
     updates: Sender<HostUpdate>,
-    pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
+    requests: Arc<ConnectionRequests>,
     process_errors: Option<Arc<Mutex<Vec<u8>>>>,
 ) {
     thread::Builder::new()
@@ -2070,8 +2309,9 @@ fn spawn_reader(
                     .read_until(b'\n', &mut line);
                 match read {
                     Ok(0) => {
-                        disconnect(
+                        close_connection(
                             &updates,
+                            &requests,
                             with_process_errors(
                                 "xd host closed the connection",
                                 process_errors.as_ref(),
@@ -2081,13 +2321,21 @@ fn spawn_reader(
                     }
                     Ok(_) => {}
                     Err(error) => {
-                        disconnect(&updates, format!("could not read from xd host: {error}"));
+                        close_connection(
+                            &updates,
+                            &requests,
+                            format!("could not read from xd host: {error}"),
+                        );
                         return;
                     }
                 }
 
                 if line.len() <= AUTHENTICATED_FRAME_LIMIT && line.last() != Some(&b'\n') {
-                    disconnect(&updates, "xd host closed while sending a response".into());
+                    close_connection(
+                        &updates,
+                        &requests,
+                        "xd host closed while sending a response".into(),
+                    );
                     return;
                 }
 
@@ -2095,10 +2343,13 @@ fn spawn_reader(
                     Ok(Some(frame)) => frame,
                     Ok(None) => continue,
                     Err(error) => {
-                        disconnect(&updates, error.to_string());
+                        close_connection(&updates, &requests, error.to_string());
                         return;
                     }
                 };
+                if requests.closed.load(Ordering::Acquire) {
+                    return;
+                }
                 let update = match frame {
                     Frame::Event { name, mut body } => {
                         let attachments = take_draft_attachments(&mut body);
@@ -2112,11 +2363,7 @@ fn spawn_reader(
                         request_id: Some(request_id),
                         mut body,
                     } => {
-                        let kind = pending
-                            .lock()
-                            .ok()
-                            .and_then(|mut requests| requests.remove(&request_id));
-                        let Some(kind) = kind else {
+                        let Some(kind) = requests.take_reply(request_id, Instant::now()) else {
                             continue;
                         };
                         let attachments = take_draft_attachments(&mut body);
@@ -2130,7 +2377,7 @@ fn spawn_reader(
                         request_id: None, ..
                     } => continue,
                 };
-                if updates.send_blocking(update).is_err() {
+                if !requests.publish(&updates, update) {
                     return;
                 }
             }
@@ -2184,8 +2431,38 @@ fn take_draft_attachments(body: &mut Map<String, Value>) -> Option<Vec<Attachmen
     crate::model::draft_attachments(&Value::Object(taken))
 }
 
-fn disconnect(updates: &Sender<HostUpdate>, message: String) {
+fn close_connection(updates: &Sender<HostUpdate>, requests: &ConnectionRequests, message: String) {
+    let _publishing = requests.publishing();
+    if requests.closed.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if let Ok(mut pending) = requests.pending.lock() {
+        pending.clear();
+    }
     let _ = updates.send_blocking(HostUpdate::Disconnected { message });
+}
+
+fn spawn_chat_load_watchdog(
+    updates: Sender<HostUpdate>,
+    requests: Arc<ConnectionRequests>,
+    timeout: Duration,
+) {
+    thread::Builder::new()
+        .name("xd-host-load-watchdog".into())
+        .spawn(move || {
+            let interval = timeout.min(Duration::from_millis(250));
+            while !updates.is_closed() && !requests.closed.load(Ordering::Acquire) {
+                thread::sleep(interval);
+                let _publishing = requests.publishing();
+                if requests.expire_chat_load(Instant::now()) {
+                    let _ = updates.send_blocking(HostUpdate::Disconnected {
+                        message: "xd host took too long to load the chat; reconnecting".into(),
+                    });
+                    return;
+                }
+            }
+        })
+        .expect("spawn xd host load watchdog");
 }
 
 #[cfg(not(windows))]
@@ -2230,6 +2507,424 @@ mod tests {
         sync::{Arc, Condvar, Mutex},
     };
 
+    fn next_update(updates: &Receiver<HostUpdate>) -> HostUpdate {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match updates.try_recv() {
+                Ok(update) => return update,
+                Err(async_channel::TryRecvError::Empty) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                error => panic!("host update did not arrive: {error:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_chat_reply_reconnects_even_when_events_keep_arriving() {
+        let (reader, mut peer) = crate::local_socket::UnixStream::pair().unwrap();
+        let (host, updates) = HostHandle::connect_io_with_timeout(
+            reader.try_clone().unwrap(),
+            reader,
+            PathBuf::from("stalled-host"),
+            None,
+            Duration::from_secs(60),
+        );
+        assert!(matches!(
+            next_update(&updates),
+            HostUpdate::Connected { .. }
+        ));
+        host.chat("chat-1").unwrap();
+        let mut line = String::new();
+        BufReader::new(peer.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["op"], "chat");
+        let sent = host
+            .requests
+            .pending
+            .lock()
+            .unwrap()
+            .values()
+            .map(|request| (request.started, request.deadline))
+            .collect::<Vec<_>>();
+        assert_eq!(sent.len(), 1);
+        for _ in 0..3 {
+            writeln!(peer, "{{\"event\":\"working\",\"chat\":\"other-chat\"}}").unwrap();
+            assert!(matches!(next_update(&updates), HostUpdate::Event { .. }));
+        }
+        let after_events = host
+            .requests
+            .pending
+            .lock()
+            .unwrap()
+            .values()
+            .map(|request| (request.started, request.deadline))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after_events, sent,
+            "events leave the reply's deadline alone"
+        );
+        // Let the deadline pass without waiting a minute.
+        for request in host.requests.pending.lock().unwrap().values_mut() {
+            request.deadline = Some(Duration::ZERO);
+        }
+        writeln!(peer, "{{\"event\":\"working\",\"chat\":\"other-chat\"}}").unwrap();
+        let mut disconnected = false;
+        for _ in 0..2 {
+            match next_update(&updates) {
+                HostUpdate::Event { .. } => {}
+                HostUpdate::Disconnected { .. } => {
+                    disconnected = true;
+                    break;
+                }
+                _ => panic!("unexpected host update"),
+            }
+        }
+        assert!(disconnected, "events still arriving do not keep it alive");
+        assert_eq!(
+            host.tree().unwrap_err(),
+            "the xd state connection is closed"
+        );
+        // Let every connection thread finish, then check what they left.
+        drop(host);
+        drop(peer);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !updates.is_closed() {
+            assert!(Instant::now() < deadline, "connection threads kept running");
+            thread::sleep(Duration::from_millis(5));
+        }
+        while let Ok(update) = updates.try_recv() {
+            assert!(
+                matches!(update, HostUpdate::Event { .. }),
+                "a connection disconnects only once and drops late replies"
+            );
+        }
+    }
+
+    #[test]
+    fn a_completed_snapshot_reply_cancels_its_deadline() {
+        let (reader, mut peer) = crate::local_socket::UnixStream::pair().unwrap();
+        let (host, updates) = HostHandle::connect_io_with_timeout(
+            reader.try_clone().unwrap(),
+            reader,
+            PathBuf::from("healthy-host"),
+            None,
+            Duration::from_secs(5),
+        );
+        assert!(matches!(
+            next_update(&updates),
+            HostUpdate::Connected { .. }
+        ));
+        // An earlier connection to this host let the tree time out.
+        host.requests.deadlines.timed_out(Snapshot::Tree);
+        host.tree().unwrap();
+        let mut line = String::new();
+        BufReader::new(peer.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let id = serde_json::from_str::<Value>(&line).unwrap()["_xd_request"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            host.requests.pending.lock().unwrap()[&id].deadline,
+            Some(Duration::from_secs(10)),
+            "the tree was sent with the longer deadline"
+        );
+        writeln!(peer, "{{\"ok\":true,\"_xd_request\":{id}}}").unwrap();
+        assert!(matches!(next_update(&updates), HostUpdate::Reply { .. }));
+        assert!(
+            !host
+                .requests
+                .expire_chat_load(Instant::now() + Duration::from_secs(60))
+        );
+        assert!(!host.requests.closed.load(Ordering::Acquire));
+        assert_eq!(
+            host.requests
+                .deadlines
+                .deadline(&Snapshot::Tree, Duration::from_secs(5)),
+            Duration::from_secs(5),
+            "the answer brings the deadline back down"
+        );
+    }
+
+    #[test]
+    fn a_slow_snapshot_gets_longer_deadlines_until_it_is_answered() {
+        let host = SnapshotDeadlines::for_host(Path::new("slow-host"));
+        assert!(Arc::ptr_eq(
+            &host,
+            &SnapshotDeadlines::for_host(Path::new("slow-host"))
+        ));
+        let page = |cursor| RequestKind::Messages {
+            chat_id: "big".into(),
+            cursor,
+        };
+        let older = || page(MessageCursor::Before(500));
+        // One connection per attempt, as reconnecting makes, each asking for
+        // the same older page, which takes longer than the first deadline.
+        let attempt = |kind: RequestKind, waited: Duration| {
+            let requests = ConnectionRequests::new(host.clone(), CHAT_LOAD_TIMEOUT);
+            let started = Instant::now();
+            let request = requests.pending_request(kind, started);
+            requests.pending.lock().unwrap().insert(1, request);
+            requests.expire_chat_load(started + waited)
+        };
+        assert!(attempt(older(), CHAT_LOAD_TIMEOUT));
+        assert!(!attempt(older(), CHAT_LOAD_TIMEOUT));
+        assert!(attempt(older(), CHAT_LOAD_TIMEOUT * 2));
+        assert!(!attempt(older(), CHAT_LOAD_TIMEOUT * 3));
+        assert!(attempt(older(), CHAT_LOAD_TIMEOUT * 4));
+        // Quick answers to the tree and to the chat's latest page, as each
+        // reconnect brings, leave the slow page's longer deadline alone.
+        host.answered(&Snapshot::Tree, Duration::ZERO, CHAT_LOAD_TIMEOUT);
+        host.answered(
+            &Snapshot::Messages("big".into(), MessageCursor::Tail),
+            Duration::ZERO,
+            CHAT_LOAD_TIMEOUT,
+        );
+        let slow = Snapshot::Messages("big".into(), MessageCursor::Before(500));
+        assert_eq!(
+            host.deadline(&slow, CHAT_LOAD_TIMEOUT),
+            CHAT_LOAD_TIMEOUT * 8
+        );
+        assert_eq!(
+            host.deadline(
+                &Snapshot::Messages("big".into(), MessageCursor::Tail),
+                CHAT_LOAD_TIMEOUT
+            ),
+            CHAT_LOAD_TIMEOUT
+        );
+        // A request keeps the deadline it was sent with, even if an answer
+        // to the same page arrives on another connection meanwhile.
+        let requests = ConnectionRequests::new(host.clone(), CHAT_LOAD_TIMEOUT);
+        let started = Instant::now();
+        let request = requests.pending_request(older(), started);
+        requests.pending.lock().unwrap().insert(1, request);
+        host.answered(&slow, Duration::ZERO, CHAT_LOAD_TIMEOUT);
+        assert!(!requests.expire_chat_load(started + CHAT_LOAD_TIMEOUT * 7));
+        assert!(requests.expire_chat_load(started + CHAT_LOAD_TIMEOUT * 8));
+        for _ in 0..10 {
+            host.timed_out(slow.clone());
+        }
+        assert_eq!(
+            host.deadline(&slow, CHAT_LOAD_TIMEOUT),
+            Duration::from_secs(8 * 60),
+            "the deadline stops growing at eight minutes"
+        );
+        host.answered(&slow, Duration::ZERO, CHAT_LOAD_TIMEOUT);
+        assert!(attempt(older(), CHAT_LOAD_TIMEOUT));
+        assert!(
+            !Arc::ptr_eq(&host, &SnapshotDeadlines::for_host(Path::new("other-host"))),
+            "each host keeps its own deadlines"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_queued_behind_a_slow_reply_is_not_late() {
+        let deadlines = Arc::new(SnapshotDeadlines::default());
+        let page = Snapshot::Messages("big".into(), MessageCursor::Before(500));
+        deadlines.timed_out(page.clone());
+        let requests = ConnectionRequests::new(deadlines.clone(), CHAT_LOAD_TIMEOUT);
+        let sent = Instant::now();
+        let after = |seconds| sent + Duration::from_secs(seconds);
+        let older_page = requests.pending_request(
+            RequestKind::Messages {
+                chat_id: "big".into(),
+                cursor: MessageCursor::Before(500),
+            },
+            sent,
+        );
+        let tree = requests.pending_request(RequestKind::Tree, sent);
+        requests
+            .pending
+            .lock()
+            .unwrap()
+            .extend([(1, older_page), (2, tree)]);
+        // The tree's own 30 seconds pass while the page, with 60, is still
+        // being sent ahead of it.
+        assert!(!requests.expire_chat_load(after(40)));
+        assert!(requests.take_reply(1, after(45)).is_some());
+        // The tree's clock starts once the page is in.
+        assert!(!requests.expire_chat_load(after(70)));
+        assert!(requests.expire_chat_load(after(75)));
+        assert_eq!(
+            deadlines.deadline(&Snapshot::Tree, CHAT_LOAD_TIMEOUT),
+            CHAT_LOAD_TIMEOUT * 2
+        );
+    }
+
+    #[test]
+    fn a_snapshot_that_keeps_needing_longer_keeps_its_longer_deadline() {
+        let deadlines = Arc::new(SnapshotDeadlines::default());
+        let page = || RequestKind::Messages {
+            chat_id: "big".into(),
+            cursor: MessageCursor::Before(500),
+        };
+        let snapshot = Snapshot::Messages("big".into(), MessageCursor::Before(500));
+        // Each load of the page takes 45 seconds and is answered.
+        let load = |id| {
+            let requests = ConnectionRequests::new(deadlines.clone(), CHAT_LOAD_TIMEOUT);
+            let sent = Instant::now();
+            let request = requests.pending_request(page(), sent);
+            let deadline = request.deadline;
+            requests.pending.lock().unwrap().insert(id, request);
+            let late = requests.expire_chat_load(sent + Duration::from_secs(45));
+            if !late {
+                requests
+                    .take_reply(id, sent + Duration::from_secs(45))
+                    .unwrap();
+            }
+            (deadline, late)
+        };
+        assert_eq!(load(1), (Some(CHAT_LOAD_TIMEOUT), true));
+        assert_eq!(load(2), (Some(CHAT_LOAD_TIMEOUT * 2), false));
+        assert_eq!(
+            load(3),
+            (Some(CHAT_LOAD_TIMEOUT * 2), false),
+            "no new timeout"
+        );
+        // A slower answer after the deadline grew further lowers it only to
+        // what that answer needed; a quick one returns it to 30 seconds.
+        deadlines.timed_out(snapshot.clone());
+        deadlines.timed_out(snapshot.clone());
+        deadlines.answered(&snapshot, Duration::from_secs(70), CHAT_LOAD_TIMEOUT);
+        assert_eq!(
+            deadlines.deadline(&snapshot, CHAT_LOAD_TIMEOUT),
+            CHAT_LOAD_TIMEOUT * 4
+        );
+        deadlines.answered(&snapshot, Duration::from_secs(10), CHAT_LOAD_TIMEOUT);
+        assert_eq!(
+            deadlines.deadline(&snapshot, CHAT_LOAD_TIMEOUT),
+            CHAT_LOAD_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn nothing_is_published_after_the_disconnect() {
+        let (updates_tx, updates) = async_channel::bounded(8);
+        let requests = ConnectionRequests::new(Arc::default(), CHAT_LOAD_TIMEOUT);
+        let sent = Instant::now();
+        let older = requests.pending_request(RequestKind::Tree, sent);
+        let later = requests.pending_request(
+            RequestKind::Chat {
+                chat_id: "one".into(),
+            },
+            sent,
+        );
+        requests
+            .pending
+            .lock()
+            .unwrap()
+            .extend([(1, older), (2, later)]);
+        // The reader takes the later reply, then the older request expires
+        // before the reader publishes it.
+        let kind = requests.take_reply(2, sent).unwrap();
+        {
+            let _publishing = requests.publishing();
+            assert!(requests.expire_chat_load(sent + CHAT_LOAD_TIMEOUT));
+            updates_tx
+                .send_blocking(HostUpdate::Disconnected {
+                    message: "late".into(),
+                })
+                .unwrap();
+        }
+        assert!(!requests.publish(
+            &updates_tx,
+            HostUpdate::Reply {
+                kind,
+                body: Map::new(),
+                attachments: None,
+            }
+        ));
+        close_connection(&updates_tx, &requests, "closed again".into());
+        assert!(matches!(
+            updates.try_recv(),
+            Ok(HostUpdate::Disconnected { .. })
+        ));
+        assert!(updates.try_recv().is_err(), "the late reply was dropped");
+    }
+
+    #[test]
+    fn a_lost_reply_expires_even_when_later_requests_are_answered() {
+        let requests = ConnectionRequests::new(Arc::default(), CHAT_LOAD_TIMEOUT);
+        let sent = Instant::now();
+        let chat = requests.pending_request(
+            RequestKind::Chat {
+                chat_id: "lost".into(),
+            },
+            sent,
+        );
+        let tree = requests.pending_request(RequestKind::Tree, sent);
+        requests
+            .pending
+            .lock()
+            .unwrap()
+            .extend([(1, chat), (2, tree)]);
+        assert!(
+            requests
+                .take_reply(2, sent + Duration::from_secs(20))
+                .is_some()
+        );
+        assert!(requests.expire_chat_load(sent + CHAT_LOAD_TIMEOUT));
+    }
+
+    #[test]
+    fn a_request_without_a_deadline_holds_up_snapshots_only_so_long() {
+        let requests = ConnectionRequests::new(Arc::default(), CHAT_LOAD_TIMEOUT);
+        let sent = Instant::now();
+        let push = requests.pending_request(
+            RequestKind::GitPush {
+                chat_id: "one".into(),
+                generation: 0,
+            },
+            sent,
+        );
+        let tree = requests.pending_request(RequestKind::Tree, sent);
+        requests
+            .pending
+            .lock()
+            .unwrap()
+            .extend([(1, push), (2, tree)]);
+        assert!(!requests.expire_chat_load(sent + Duration::from_secs(5 * 60)));
+        assert!(requests.expire_chat_load(sent + QUEUED_BEHIND_TIMEOUT));
+        assert_eq!(QUEUED_BEHIND_TIMEOUT, Duration::from_secs(8 * 60));
+    }
+
+    #[test]
+    fn only_snapshot_requests_have_a_deadline() {
+        for kind in [
+            RequestKind::Tree,
+            RequestKind::Chat {
+                chat_id: "one".into(),
+            },
+            RequestKind::Messages {
+                chat_id: "one".into(),
+                cursor: MessageCursor::Tail,
+            },
+        ] {
+            let requests = ConnectionRequests::new(Arc::default(), CHAT_LOAD_TIMEOUT);
+            let started = Instant::now();
+            let request = requests.pending_request(kind, started);
+            assert_eq!(request.deadline, Some(CHAT_LOAD_TIMEOUT));
+            requests.pending.lock().unwrap().insert(1, request);
+            assert!(requests.expire_chat_load(started + CHAT_LOAD_TIMEOUT));
+            assert!(requests.pending.lock().unwrap().is_empty());
+        }
+        let requests = ConnectionRequests::new(Arc::default(), CHAT_LOAD_TIMEOUT);
+        let started = Instant::now();
+        let request = requests.pending_request(
+            RequestKind::GitPush {
+                chat_id: "one".into(),
+                generation: 0,
+            },
+            started,
+        );
+        assert_eq!(request.deadline, None);
+        requests.pending.lock().unwrap().insert(1, request);
+        assert!(!requests.expire_chat_load(started + Duration::from_secs(600)));
+        assert_eq!(requests.pending.lock().unwrap().len(), 1);
+    }
+
     #[derive(Default)]
     struct WriteGate {
         entered: bool,
@@ -2260,8 +2955,9 @@ mod tests {
     #[test]
     fn black_holed_host_writer_eventually_rejects_more_commands() {
         let gate = Arc::new((Mutex::new(WriteGate::default()), Condvar::new()));
+        let (reader, _peer) = crate::local_socket::UnixStream::pair().unwrap();
         let (host, _updates) = HostHandle::connect_io(
-            io::empty(),
+            reader,
             BlockingWriter { gate: gate.clone() },
             PathBuf::from("blocked-host"),
         );
