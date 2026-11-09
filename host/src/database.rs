@@ -35,7 +35,8 @@ const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
 /// rollback journal left by a crash, so the switch never discards a commit.
 ///
 /// Commits keep `synchronous = FULL`: every commit is on disk before it
-/// returns.
+/// returns. Only [`without_sync`] callers opt out, for data nobody needs
+/// after a crash.
 pub(crate) fn enable_write_ahead_log(
     connection: &Connection,
     path: &Path,
@@ -68,6 +69,30 @@ pub(crate) fn enable_write_ahead_log(
     connection.pragma_update(None, "wal_autocheckpoint", WRITER_AUTOCHECKPOINT_PAGES)?;
     connection.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
     Ok(true)
+}
+
+/// Runs `write` with commits that do not wait for the disk, then restores
+/// full syncing. Only call it on a connection in write-ahead-log mode, which
+/// keeps commits in order: a machine crash can drop the newest relaxed
+/// commits but never corrupts the database, the next normal commit makes
+/// them durable too, and an application crash loses nothing. Use it only for
+/// data that is worthless after a machine crash, never for messages or
+/// settings. `write` must finish its transaction before returning, since
+/// SQLite refuses to change the sync level inside one.
+pub(crate) fn without_sync<T>(
+    connection: &Connection,
+    write: impl FnOnce(&Connection) -> Result<T, crate::StorageError>,
+) -> Result<T, crate::StorageError> {
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    let written = write(connection);
+    debug_assert!(
+        connection.is_autocommit(),
+        "the relaxed write left a transaction open"
+    );
+    // Every other commit on this connection must stay fully synced, so a
+    // failure to restore it outranks the write's own result.
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    written
 }
 
 /// A bounded set of read-only connections to one database.

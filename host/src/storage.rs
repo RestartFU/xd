@@ -344,30 +344,42 @@ impl StateStore {
     ) -> Result<(), StorageError> {
         let encoded = serde_json::to_string(event)
             .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        let transaction = database.unchecked_transaction()?;
-        let chunked = encoded.len() > DRAFT_CHUNK_BYTES;
-        transaction.execute(
-            "INSERT INTO shared_events (source, payload) VALUES (?, ?)",
-            (source, if chunked { CHUNKED_DRAFT } else { &encoded }),
-        )?;
-        let id = transaction.last_insert_rowid();
-        if chunked {
-            let mut insert = transaction.prepare(
-                "INSERT INTO shared_event_chunks (event_id, ordinal, data) VALUES (?, ?, ?)",
-            )?;
-            for (ordinal, chunk) in encoded.as_bytes().chunks(DRAFT_CHUNK_BYTES).enumerate() {
-                insert.execute(params![id, ordinal as i64, chunk])?;
-            }
-        }
-        if id % 256 == 0 {
+        let write = |database: &Connection| -> Result<(), StorageError> {
+            let transaction = database.unchecked_transaction()?;
+            let chunked = encoded.len() > DRAFT_CHUNK_BYTES;
             transaction.execute(
-                "DELETE FROM shared_events WHERE id <= ?",
-                [id.saturating_sub(16_384)],
+                "INSERT INTO shared_events (source, payload) VALUES (?, ?)",
+                (source, if chunked { CHUNKED_DRAFT } else { &encoded }),
             )?;
+            let id = transaction.last_insert_rowid();
+            if chunked {
+                let mut insert = transaction.prepare(
+                    "INSERT INTO shared_event_chunks (event_id, ordinal, data) VALUES (?, ?, ?)",
+                )?;
+                for (ordinal, chunk) in encoded.as_bytes().chunks(DRAFT_CHUNK_BYTES).enumerate() {
+                    insert.execute(params![id, ordinal as i64, chunk])?;
+                }
+            }
+            if id % 256 == 0 {
+                transaction.execute(
+                    "DELETE FROM shared_events WHERE id <= ?",
+                    [id.saturating_sub(16_384)],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(())
+        };
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        // These rows only relay live updates to other host processes; they are
+        // pruned soon after and nothing reads them back after a restart. A
+        // reply streams one per token, so syncing each to disk queued every
+        // chat behind a busy disk. Write-ahead logging keeps them in order
+        // without a sync, and the next real commit makes them durable anyway.
+        if self.readers.is_some() {
+            database::without_sync(&database, write)
+        } else {
+            write(&database)
         }
-        transaction.commit()?;
-        Ok(())
     }
 
     pub(crate) fn latest_shared_event_id(&self) -> Result<i64, StorageError> {
@@ -9969,6 +9981,41 @@ mod tests {
             .unwrap();
         assert_eq!(check, "ok");
         assert!(!crashed.join("chats.db-journal").exists());
+    }
+
+    #[test]
+    fn relayed_events_skip_the_sync_but_other_commits_stay_fully_synced() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .append_shared_event("this-host", &json!({"event": "text", "text": "token"}))
+            .unwrap();
+        let database = store.database.lock().unwrap();
+        let level = |database: &Connection| -> i64 {
+            database
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(level(&database), 2);
+        let inside = database::without_sync(&database, |database| Ok(level(database))).unwrap();
+        assert_eq!(
+            inside, 1,
+            "relayed events commit without waiting for the disk"
+        );
+        let failed = database::without_sync(&database, |_| -> Result<(), StorageError> {
+            Err(StorageError::InvalidRequest("write failed".into()))
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            level(&database),
+            2,
+            "a failed relay must not relax later commits"
+        );
+        drop(database);
+        let other = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let events = other.shared_events_after(0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].2["text"], "token");
     }
 
     #[test]
