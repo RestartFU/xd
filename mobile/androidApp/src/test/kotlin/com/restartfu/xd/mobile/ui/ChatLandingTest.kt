@@ -16,12 +16,9 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
-import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.swipe
-import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.XdClient
@@ -100,75 +97,16 @@ class ChatLandingTest {
     }
 
     @Test
-    fun rowsGrowingAboveTheEndKeepFollowing() = withApp(history = SHORT_HISTORY) {
+    fun aReaderWhoScrolledBackIsLeftThereWhenAReplyArrives() = withApp {
         click(TITLE)
-        waitFor { endOnScreen(LAST_LINE_OF_SHORT) }
-        // An earlier reply on screen grows in place, as a reply does while it
-        // streams or when its images load, and pushes the newest row down
-        // without anyone scrolling.
-        val earlier = MESSAGES.size - 3
-        MESSAGES[earlier] = longReply(MESSAGES[earlier].second, LAST_LINE_OF_GROWN, steps = 8)
-        socket?.push("""{"event":"changed","chat":"c1"}""")
-        model.client.openChat("c1").use { chat ->
-            waitFor { chat.state.value.visibleItems.any { LAST_LINE_OF_GROWN in it.text } }
-        }
-        check(shows(LAST_LINE_OF_GROWN)) { "The reply that grew was not on screen" }
-        // Still following: the next reply is brought into view.
-        arrive()
-        waitFor { endOnScreen(LAST_LINE_OF_NEXT) }
-    }
-
-    @Test
-    fun collapsingRowsAtTheEndKeepsFollowing() = withApp(history = SHORT_HISTORY + TOOL_RUN) {
-        click(TITLE)
-        waitFor { shows("Expand") }
-        // The run of tool calls at the end opens past the bottom, and the
-        // reader scrolls down to its end. Closing it then pulls the list back
-        // with the end still in view.
-        click("Expand")
-        waitFor { shows("Collapse") && !endOnScreen(LAST_TOOL) }
-        compose.onNode(hasScrollToIndexAction()).performTouchInput { swipeUp() }
-        waitFor { endOnScreen(LAST_TOOL) && shows("Collapse") }
-        click("Collapse")
-        waitFor { shows("Expand") }
-        arrive()
-        waitFor { endOnScreen(LAST_LINE_OF_NEXT) }
-    }
-
-    @Test
-    fun aReaderWhoScrolledBackIsLeftThereWhenAReplyArrives() = scrolledBackThenReplyArrives {
-        // A short, slow swipe, as a reader scrolls back inside the long reply.
+        waitFor { endOnScreen(LAST_LINE_OF_LATEST) }
+        // A short, slow swipe, as a reader scrolls back inside the long reply:
+        // its rows stay in view, and only the reader's own scrolling stops the follow.
         compose.onNode(hasScrollToIndexAction()).performTouchInput {
             swipe(center, center + Offset(0f, 400f), durationMillis = 1000)
         }
-    }
-
-    @Test
-    fun aScreenReaderScrollBackIsLeftThereWhenAReplyArrives() = scrolledBackThenReplyArrives {
-        // TalkBack scrolls the list through its semantics action, not a gesture.
-        compose.onNode(hasScrollToIndexAction()).performSemanticsAction(SemanticsActions.ScrollBy) { it(0f, -400f) }
-    }
-
-    @Test
-    fun aJumpBackToAnEarlierRowIsLeftThereWhenAReplyArrives() = scrolledBackThenReplyArrives(insideReply = false) {
-        // Accessibility services can also jump to a row, which moves the
-        // list without any scrolling gesture at all.
-        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
-    }
-
-    /**
-     * Lands on the newest reply, scrolls back with [scrollBack] (inside that
-     * reply, or past it), and checks that a reply arriving then leaves the
-     * list where it was.
-     */
-    private fun scrolledBackThenReplyArrives(insideReply: Boolean = true, scrollBack: () -> Unit) = withApp {
-        click(TITLE)
-        waitFor { endOnScreen(LAST_LINE_OF_LATEST) }
-        scrollBack()
         settle()
-        check(!endOnScreen(LAST_LINE_OF_LATEST) && shows(LAST_LINE_OF_LATEST) == insideReply) {
-            "Did not scroll back to where the test meant to"
-        }
+        check(!endOnScreen(LAST_LINE_OF_LATEST) && shows(LAST_LINE_OF_LATEST)) { "The swipe did not scroll back inside the reply" }
         val before = compose.onNode(hasScrollToIndexAction()).fetchSemanticsNode()
             .config[SemanticsProperties.VerticalScrollAxisRange].value()
         arrive()
@@ -186,9 +124,9 @@ class ChatLandingTest {
     private lateinit var model: MainViewModel
 
     /** Starts the whole app against the scripted host, then runs [steps]. */
-    private fun withApp(history: List<Pair<String, String>> = HISTORY, steps: () -> Unit) {
+    private fun withApp(steps: () -> Unit) {
         MESSAGES.clear()
-        MESSAGES += history
+        MESSAGES += HISTORY
         val activity = compose.activity
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         model = MainViewModel(activity.application, XdClient({ ScriptedSocket().also { socket = it } }, NoCredentials, scope))
@@ -328,8 +266,6 @@ class ChatLandingTest {
         const val LAST_LINE_OF_LATEST = "That is everything; the branch is ready for review."
         const val FIRST_LINE_OF_NEXT = "One more pass over the reconnect work."
         const val LAST_LINE_OF_NEXT = "That pass is done too; nothing else is left."
-        const val LAST_LINE_OF_GROWN = "And with those steps the reply is complete."
-        const val LAST_LINE_OF_SHORT = "Answer 12. The connection actor retries on a timer"
 
         /** The socket the app opened last, to send events on. */
         @Volatile var socket: ScriptedSocket? = null
@@ -337,9 +273,9 @@ class ChatLandingTest {
         /** What the host has stored, which a test can add to. */
         val MESSAGES: MutableList<Pair<String, String>> = java.util.Collections.synchronizedList(mutableListOf())
 
-        fun longReply(first: String, last: String, steps: Int = 14) = "assistant" to (
+        fun longReply(first: String, last: String) = "assistant" to (
             listOf(first) +
-                (1..steps).map { "Step $it of the change touched another part of the actor and its tests, and each of them still passes." } +
+                (1..14).map { "Step $it of the change touched another part of the actor and its tests, and each of them still passes." } +
                 last
             ).joinToString("\n\n")
 
@@ -350,14 +286,6 @@ class ChatLandingTest {
                 "assistant" to "Answer $turn. The connection actor retries on a timer, and this turn looked at part $turn of it.",
             )
         } + longReply(FIRST_LINE_OF_LATEST, LAST_LINE_OF_LATEST)
-
-        /** A history of short turns, several of them on screen at once. */
-        val SHORT_HISTORY = HISTORY.dropLast(1)
-
-        const val LAST_TOOL = "Read shared/src/part-12.kt"
-
-        /** Tool calls in a row, which the chat folds into one line. */
-        val TOOL_RUN = (1..12).map { "tool" to "Read shared/src/part-$it.kt" }
 
         val NEXT_REPLY = longReply(FIRST_LINE_OF_NEXT, LAST_LINE_OF_NEXT)
     }

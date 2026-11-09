@@ -1,6 +1,10 @@
 package com.restartfu.xd.mobile.ui
 
 import android.app.Activity
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.platform.LocalUriHandler
@@ -43,7 +47,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListLayoutInfo
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -72,7 +75,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -225,23 +227,18 @@ internal fun ChatScreen(
     val waitingOn = if (state.working) 0 else backgroundTasks
     val trailingItemCount = if (state.working || waitingOn > 0) 1 else 0
     val lastTranscriptIndex = leadingItemCount + rows.lastIndex + trailingItemCount
-    // Whether new output keeps the end in view. It stops when the list moves
-    // back with the same items in the same viewport: following only ever
-    // scrolls forward, and output growing below leaves the first visible row
-    // where it is, so that is the reader, by touch, wheel, keyboard or
-    // accessibility action. It resumes whenever the end is in view again. A
-    // follow still animating when the next words arrive keeps following, and
-    // a reader who scrolled back inside a long reply is left there.
+    // Whether new output keeps the end in view. Only the reader's own drags
+    // and flings change it (scrolling from code is not nested scrolling), so
+    // a follow still animating when the next words arrive keeps following,
+    // and a reader who scrolled back inside a long reply is left there.
     // Saved, so a rotation does not pull a reader who scrolled away back down.
     val following = rememberSaveable(state.chatId) { mutableStateOf(true) }
-    LaunchedEffect(listState, following) {
-        var before: ListPlace? = null
-        snapshotFlow { listState.layoutInfo.place() }.collect { now ->
-            // The end in view comes first: content collapsing at the end also
-            // moves the list back, and the reader still sees the end.
-            if (now.atEnd) following.value = true
-            else if (now.readerMovedBackFrom(before)) following.value = false
-            before = now
+    val followReader = remember(listState, following) {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                following.value = !listState.canScrollForward
+                return Offset.Zero
+            }
         }
     }
 
@@ -459,7 +456,8 @@ internal fun ChatScreen(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding),
+                .padding(padding)
+                .nestedScroll(followReader),
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -1234,46 +1232,6 @@ private fun AnalysisDisclosure(
             }
         }
     }
-}
-
-/**
- * Where a list is scrolled to: its first visible item and how far into it,
- * which the list holds still when content grows below, and whether the end
- * of its content is in view.
- */
-private data class ListPlace(
-    val count: Int,
-    val viewportEnd: Int,
-    val firstKey: Any?,
-    val firstIndex: Int,
-    val firstOffset: Int,
-    val atEnd: Boolean,
-) {
-    /**
-     * Whether the list moved back since [before] with the same number of
-     * items in the same viewport. Text growing in a reply, or a row below it
-     * being pushed down, leaves the first visible item where it was, so it
-     * never reads as the reader moving.
-     */
-    fun readerMovedBackFrom(before: ListPlace?): Boolean {
-        if (before == null || count != before.count || viewportEnd != before.viewportEnd) return false
-        return if (firstKey == before.firstKey) firstOffset < before.firstOffset - 1 else firstIndex < before.firstIndex
-    }
-}
-
-private fun LazyListLayoutInfo.place(): ListPlace {
-    val first = visibleItemsInfo.firstOrNull()
-    val last = visibleItemsInfo.lastOrNull()?.takeIf { it.index == totalItemsCount - 1 }
-    val end = viewportEndOffset - afterContentPadding
-    return ListPlace(
-        count = totalItemsCount,
-        viewportEnd = end,
-        firstKey = first?.key,
-        firstIndex = first?.index ?: 0,
-        // How far the list has scrolled into its first visible item.
-        firstOffset = -(first?.offset ?: 0),
-        atEnd = last != null && last.offset + last.size <= end,
-    )
 }
 
 /**
