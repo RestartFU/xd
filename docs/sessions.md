@@ -19,6 +19,13 @@ Both panes can stay open together, and hiding them keeps their content.
 The integrated browser keeps separate tabs for each chat and shares site data
 between them. Swipe horizontally on a supported touchpad to go back or forward.
 
+## Linked pull requests
+
+A chat can link any number of pull requests. The chat's branch PR, PRs opened from
+xd, and PRs the agent opens with `gh pr create` are linked by themselves. Agents
+link others through xd's `link_pull_requests` tool, and you can add or remove
+links from the session header on desktop or the chat menu on Android.
+
 ## Settling sessions
 
 Hover over a session in the sidebar and press its check mark to settle it, or use
@@ -42,8 +49,8 @@ Settings.
 
 ### Auto-settle
 
-By default the host settles sessions after three days without activity and when
-their pull request merges or closes. Change this in **Settings → General →
+By default the host settles sessions after three days without activity and once
+all of their linked pull requests have merged or closed. Change this in **Settings → General →
 Auto-settle**. Those rules belong to the host, so they keep running while the app
 is closed, and each host keeps its own. To keep one session out of them, choose
 **Disable auto-settle** from its right-click menu.

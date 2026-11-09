@@ -17,6 +17,8 @@ import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.ChatTitleSettingsReply
 import com.restartfu.xd.protocol.FolderContextReply
+import com.restartfu.xd.protocol.PauseAllReply
+import com.restartfu.xd.protocol.ResumeAllReply
 import com.restartfu.xd.protocol.ResumeInterruptedReply
 import com.restartfu.xd.protocol.UsageAccountReply
 import com.restartfu.xd.protocol.UsagePriceReply
@@ -37,6 +39,8 @@ import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
 import com.restartfu.xd.protocol.FolderSettingsReply
+import com.restartfu.xd.protocol.LinkPullRequestsReply
+import com.restartfu.xd.protocol.UnlinkPullRequestReply
 import com.restartfu.xd.protocol.NewChatSourcesReply
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.RemoteProtocolException
@@ -552,6 +556,25 @@ public class XdClient(
         requestTreeRefresh()
     }
 
+    /**
+     * Links pull requests to [chatId]; see [Ops.linkPullRequests]. The list
+     * itself comes back through [tree], which the host broadcasts.
+     */
+    public suspend fun linkPullRequests(chatId: String, urls: List<String>): LinkPullRequestsReply {
+        val value = actor.call(Ops.linkPullRequests(chatId, urls))
+        val reply = actor.decodeReply(value) { it.decodeReply<LinkPullRequestsReply>() }
+        if (reply.linked.isNotEmpty()) requestTreeRefresh()
+        return reply
+    }
+
+    /** Removes a linked pull request from [chatId]; true when it was linked. */
+    public suspend fun unlinkPullRequest(chatId: String, url: String): Boolean {
+        val value = actor.call(Ops.unlinkPullRequest(chatId, url))
+        val changed = actor.decodeReply(value) { it.decodeReply<UnlinkPullRequestReply>() }.changed
+        if (changed) requestTreeRefresh()
+        return changed
+    }
+
     /** Asks each assistant for its sign-in state, into [agentAuth]. */
     public suspend fun loadAgentAuth() {
         agentAuthWanted.value = true
@@ -644,6 +667,21 @@ public class XdClient(
 
     public suspend fun setAgentSecrets(folderId: String?, entries: List<Ops.SecretEntry>) {
         actor.call(Ops.setAgentSecrets(folderId, entries))
+    }
+
+    /** Stops every working chat and marks it paused; answers the chats it stopped. */
+    public suspend fun pauseAll(): List<String> {
+        val paused = actor.decodeReply(actor.call(Ops.pauseAll())) { it.decodeReply<PauseAllReply>() }.paused
+        // The host broadcasts `tree` too; this brings the paused marks in either way.
+        requestTreeRefresh()
+        return paused
+    }
+
+    /** Continues every paused chat; answers the chats it continued. */
+    public suspend fun resumeAll(): List<String> {
+        val resumed = actor.decodeReply(actor.call(Ops.resumeAll())) { it.decodeReply<ResumeAllReply>() }.resumed
+        requestTreeRefresh()
+        return resumed
     }
 
     /** Answers for chats a host restart cut off; see [Ops.resumeInterrupted]. */

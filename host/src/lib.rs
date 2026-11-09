@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 mod accounts;
 mod agent;
 mod agent_text;
+mod agent_tools;
 mod ask;
 mod auth;
 mod background_process;
@@ -39,6 +40,7 @@ mod private_fs;
 #[cfg(target_os = "linux")]
 mod process_delegation;
 mod process_tree;
+mod pull_requests;
 mod reply_images;
 mod repository_monitor;
 mod runtime;
@@ -62,6 +64,7 @@ mod user_environment;
 mod workflow;
 mod worktree_name;
 
+pub use agent_tools::{answer_mcp, offer_link_tool};
 use auth::AuthManager;
 use chat_title::ChatTitleService;
 use cli_updates::CliUpdates;
@@ -70,6 +73,7 @@ use git_draft::GitDraftService;
 use local_socket::UnixStream;
 use owner_icon::OwnerIcons;
 use pairing::{PairingService, Transport, generate_token, token_hash};
+use pull_requests::LinkSource;
 use repository_monitor::RepositoryMonitor;
 use runtime::{LiveTurn, TurnRuntime};
 use secrets::SecretsStore;
@@ -320,8 +324,10 @@ impl Engine {
             Some("diff-read") => self.read(|store| store.diff_read(&request)),
             Some("git-status") => self.read(|store| store.git_status(&request)),
             Some("git-state") => self.git_state(&request),
-            Some("git-pr-status") => self.read(|store| store.git_pull_request_status(&request)),
-            Some("git-pr-create") => self.read(|store| store.git_create_pull_request(&request)),
+            Some("git-pr-status") => self.git_pull_request_status(&request),
+            Some("git-pr-create") => self.git_create_pull_request(&request),
+            Some("link-pull-requests") => self.link_pull_requests(&request),
+            Some("unlink-pull-request") => self.unlink_pull_request(&request),
             Some("git-draft") => self
                 .git_drafts
                 .start(&request)
@@ -473,6 +479,8 @@ impl Engine {
                 }
             }
             Some("cancel") => self.cancel(&request),
+            Some("pause-all") => self.pause_all(),
+            Some("resume-all") => self.resume_all(),
             Some("new-folder") => self.new_folder(&request),
             Some("set-folder-context") => {
                 self.tree_mutation(|store| store.set_folder_context(&request))
@@ -530,7 +538,7 @@ impl Engine {
             Some("drop-queue") => self.event_mutation(|store| store.drop_queue(&request)),
             Some("edit-queue") => self.event_mutation(|store| store.edit_queue(&request)),
             Some("reorder-queue") => self.event_mutation(|store| store.reorder_queue(&request)),
-            Some("steer-queue") => self.steer_queued(&request),
+            Some("steer-queue") => self.steer_queued(&request, false),
             Some("workflow-status") => self.workflow_status(owner, &request),
             Some("usage-summary") => self
                 .usage
@@ -967,17 +975,158 @@ impl Engine {
                     .git_action_state(&chat_id)
                     .unwrap_or_else(|_| hidden_git_state());
                 if with_pull_request && let Some(pull_request) = store.chat_pull_request(&chat_id) {
+                    if let Some(url) = pull_request
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .filter(|url| !url.is_empty())
+                    {
+                        link_pull_requests(
+                            &store,
+                            &events,
+                            &chat_id,
+                            &[url.to_owned()],
+                            LinkSource::Branch,
+                        );
+                    }
                     event["pull_request"] = pull_request;
                 }
                 event["event"] = Value::String("git-state".into());
-                event["chat"] = Value::String(chat_id);
+                event["chat"] = Value::String(chat_id.clone());
                 if let Some(request_id) = request_id {
                     event["request"] = Value::String(request_id);
                 }
                 events.publish(event);
+                if with_pull_request {
+                    refresh_pull_request_states(&store, &events, &chat_id);
+                }
             })
             .map(|_| json!({"ok": true}))
             .unwrap_or_else(|error| error_reply(format!("Cannot refresh Git state: {error}")))
+    }
+
+    /// Links the branch's pull request, when the lookup found one, and asks
+    /// GitHub again about the chat's other links.
+    fn git_pull_request_status(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let reply = match store.git_pull_request_status(request) {
+            Ok(reply) => reply,
+            Err(error) => return error_reply(error),
+        };
+        if let Some(chat_id) = request.get("chat").and_then(Value::as_str) {
+            let url = reply
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|url| !url.is_empty())
+                .map(str::to_owned);
+            let chat_id = chat_id.to_owned();
+            let store = store.clone();
+            let events = self.events.clone();
+            let _ = thread::Builder::new()
+                .name("xd-pull-requests".into())
+                .spawn(move || {
+                    if let Some(url) = url {
+                        link_pull_requests(&store, &events, &chat_id, &[url], LinkSource::Branch);
+                    }
+                    refresh_pull_request_states(&store, &events, &chat_id);
+                });
+        }
+        reply
+    }
+
+    fn git_create_pull_request(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        match store.git_create_pull_request(request) {
+            Ok(reply) => {
+                if let (Some(chat_id), Some(url)) = (
+                    request.get("chat").and_then(Value::as_str),
+                    reply.get("url").and_then(Value::as_str),
+                ) {
+                    link_pull_requests(
+                        store,
+                        &self.events,
+                        chat_id,
+                        &[url.to_owned()],
+                        LinkSource::Branch,
+                    );
+                }
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    /// Links pull requests to a chat, for the user from a client, or for the
+    /// agent through its link tool when `source` says so.
+    fn link_pull_requests(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let chat_id = match required_string(request, "chat", "Linking needs a chat.") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        let Some(urls) = request.get("urls").and_then(Value::as_array) else {
+            return error_reply("Name the pull requests to link.");
+        };
+        let urls = urls
+            .iter()
+            .map(|url| url.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>();
+        let Some(urls) = urls.filter(|urls| !urls.is_empty()) else {
+            return error_reply("Name the pull requests to link.");
+        };
+        let source = match request.get("source").and_then(Value::as_str) {
+            None | Some("user") => LinkSource::User,
+            Some("agent") => LinkSource::Agent,
+            Some(_) => return error_reply("No such link source."),
+        };
+        match store.link_pull_requests(chat_id, &urls, source) {
+            Ok(outcome) => {
+                if outcome.changed {
+                    self.events.publish(json!({"event": "tree"}));
+                }
+                if !outcome.linked.is_empty() {
+                    let chat_id = chat_id.to_owned();
+                    let store = store.clone();
+                    let events = self.events.clone();
+                    let _ = thread::Builder::new()
+                        .name("xd-pull-requests".into())
+                        .spawn(move || refresh_pull_request_states(&store, &events, &chat_id));
+                }
+                json!({"ok": true, "linked": outcome.linked, "invalid": outcome.invalid})
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    fn unlink_pull_request(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let (chat_id, url) = match (
+            required_string(
+                request,
+                "chat",
+                "Unlinking needs a chat and a pull request.",
+            ),
+            required_string(request, "url", "Unlinking needs a chat and a pull request."),
+        ) {
+            (Ok(chat_id), Ok(url)) => (chat_id, url),
+            (Err(error), _) | (_, Err(error)) => return error_reply(error),
+        };
+        match store.unlink_pull_request(chat_id, url) {
+            Ok(changed) => {
+                if changed {
+                    self.events.publish(json!({"event": "tree"}));
+                }
+                json!({"ok": true, "changed": changed})
+            }
+            Err(error) => error_reply(error),
+        }
     }
 
     fn git_action(&self, request: &Value) -> Value {
@@ -1050,6 +1199,17 @@ impl Engine {
                 match result {
                     Ok(state) => {
                         repository_monitor.reset(&chat_id);
+                        if action == "create-pr"
+                            && let Some(url) = state.get("url").and_then(Value::as_str)
+                        {
+                            link_pull_requests(
+                                &store,
+                                &events,
+                                &chat_id,
+                                &[url.to_owned()],
+                                LinkSource::Branch,
+                            );
+                        }
                         if let (Some(event), Some(state)) =
                             (event.as_object_mut(), state.as_object())
                         {
@@ -1802,7 +1962,8 @@ impl Engine {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
         };
-        let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false);
+        let was_paused = store.chat_is_paused(chat_id).unwrap_or(false);
+        let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false) || was_paused;
         let prepared = match continues {
             Some(Continuation::AfterRestart(last_message)) => {
                 store.prepare_continuation(&request, last_message)
@@ -1828,8 +1989,10 @@ impl Engine {
                 if request.get("steer").and_then(Value::as_bool) == Some(true)
                     && let Some((index, text)) = newest
                 {
-                    let steer =
-                        self.steer_queued(&json!({"chat": chat_id, "index": index, "text": text}));
+                    let steer = self.steer_queued(
+                        &json!({"chat": chat_id, "index": index, "text": text}),
+                        true,
+                    );
                     if steer.get("ok").and_then(Value::as_bool) != Some(true) {
                         return steer;
                     }
@@ -1846,10 +2009,22 @@ impl Engine {
                 }
                 Err(error) => {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
+                    self.keep_paused_after_failed_start(chat_id, was_paused);
                     error_reply(error)
                 }
             },
             Err(error) => error_reply(error),
+        }
+    }
+
+    /// A turn that would have picked a paused chat up never started, so the
+    /// chat stays paused: its queue waits and resuming tries it again.
+    fn keep_paused_after_failed_start(&self, chat_id: &str, was_paused: bool) {
+        if was_paused
+            && let Some(store) = self.store.as_ref()
+            && store.repause_chat(chat_id).unwrap_or(false)
+        {
+            self.events.publish(json!({"event": "tree"}));
         }
     }
 
@@ -1874,18 +2049,192 @@ impl Engine {
         json!({"ok": true})
     }
 
+    /// Stops every chat at work, and every chat whose agent still runs
+    /// background agents or shells between turns, so nothing goes on while the
+    /// user is away. Each keeps its queue until [`Self::resume_all`].
+    fn pause_all(&self) -> Value {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        // Every chat that may have work, a superset decided one by one below
+        // under its locks. A send holds the chat's gate from before the chat
+        // reads as working until its turn has started, so one in progress now
+        // still holds it, or has started a turn by the time the agents are
+        // listed. Any turn, background work, or report on it runs in an agent
+        // process this runtime keeps, so a chat whose work moves between those
+        // while this looks is listed either way. Working rows add turns that
+        // died with a previous host. The second pass waits for the gates.
+        let gates = self
+            .chat_execution
+            .lock()
+            .map(|gates| {
+                gates
+                    .iter()
+                    .map(|(chat_id, gate)| (chat_id.clone(), gate.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut chats = gates
+            .into_iter()
+            .filter(|(_, gate)| matches!(gate.try_lock(), Err(std::sync::TryLockError::WouldBlock)))
+            .map(|(chat_id, _)| chat_id)
+            .collect::<Vec<_>>();
+        let mut add = |chat_id: String| {
+            if !chats.contains(&chat_id) {
+                chats.push(chat_id);
+            }
+        };
+        runtime.chats_with_agents().into_iter().for_each(&mut add);
+        match store.working_chats() {
+            Ok(working) => working.into_iter().for_each(&mut add),
+            Err(error) => return error_reply(error),
+        }
+        let mut paused = Vec::new();
+        let mut pause = |chat_id: String, gate: std::sync::MutexGuard<'_, ()>| {
+            // The gate is held so no message can start a turn between marking
+            // the chat and stopping it: the stop would take the new turn instead.
+            let stopped = runtime.stop_chat_if(&chat_id, |background| {
+                store
+                    .pause_chat(&chat_id, background)
+                    .unwrap_or_else(|error| {
+                        eprintln!("xd-host: cannot pause chat {chat_id}: {error}");
+                        false
+                    })
+            });
+            match stopped {
+                None => return,
+                // As with stop: a turn that died with a previous host still ends.
+                Some(false) => {
+                    let _ = store.clear_interrupted_turn(&chat_id);
+                }
+                Some(true) => {}
+            }
+            drop(gate);
+            self.events
+                .publish(json!({"event": "changed", "chat": chat_id}));
+            paused.push(chat_id);
+        };
+        // Chats a message is being sent to wait until it is: everything else
+        // stops first, so one slow send does not hold up the rest.
+        let mut busy = Vec::new();
+        for chat_id in chats {
+            let Ok(gate) = self.chat_execution_gate(&chat_id) else {
+                continue;
+            };
+            match gate.try_lock() {
+                Ok(execution) => pause(chat_id, execution),
+                Err(std::sync::TryLockError::WouldBlock) => busy.push((chat_id, gate.clone())),
+                Err(std::sync::TryLockError::Poisoned(_)) => {}
+            }
+        }
+        for (chat_id, gate) in &busy {
+            if let Ok(execution) = gate.lock() {
+                pause(chat_id.clone(), execution);
+            }
+        }
+        if !paused.is_empty() {
+            self.events.publish(json!({"event": "tree"}));
+        }
+        json!({"ok": true, "paused": paused})
+    }
+
+    /// Picks every paused chat back up: continues the turn pausing cut short,
+    /// after which its queue runs as usual.
+    fn resume_all(&self) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let chats = match store.paused_chats() {
+            Ok(chats) => chats,
+            Err(error) => return error_reply(error),
+        };
+        let mut resumed = Vec::new();
+        for chat_id in chats {
+            let before = store.latest_user_message(&chat_id).ok();
+            let reply = self.send_message_inner(
+                &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
+                Some(Continuation::Resume),
+            );
+            if reply["ok"] != true {
+                // A continuation that was stored got as far as starting its
+                // turn, which failed and left the chat paused for another try.
+                // Only one refused outright falls back to the queue.
+                if store.latest_user_message(&chat_id).ok() != before
+                    || !store.chat_is_paused(&chat_id).unwrap_or(false)
+                {
+                    continue;
+                }
+                // Nothing to continue: the chat moved on, or its turn is still
+                // stopping. Let the queue go on, and leave the turn to resume
+                // from the chat. Unpaused first, so a turn ending meanwhile
+                // hands the queue on itself; an idle chat starts it here. All
+                // under the gate, so a pause-all since is either seen here or
+                // stops what this starts.
+                let Ok(gate) = self.chat_execution_gate(&chat_id) else {
+                    continue;
+                };
+                let Ok(_execution) = gate.lock() else {
+                    continue;
+                };
+                if !store.unpause_chat(&chat_id).unwrap_or(false) {
+                    continue;
+                }
+                self.events.publish(json!({"event": "tree"}));
+                let queued = store
+                    .chat(&chat_id)
+                    .ok()
+                    .and_then(|chat| chat["queue"][0].as_str().map(str::to_owned));
+                if let Some(text) = queued
+                    && let Err(error) = self.start_queued_if_idle(&chat_id, &text, true, true)
+                {
+                    eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
+                    continue;
+                }
+            }
+            self.events
+                .publish(json!({"event": "changed", "chat": chat_id}));
+            resumed.push(chat_id);
+        }
+        json!({"ok": true, "resumed": resumed})
+    }
+
     /// Redirects the running turn to a queued message: into the turn itself
     /// when its agent can take it, otherwise by stopping the turn with the
     /// message first in line.
-    fn steer_queued(&self, request: &Value) -> Value {
+    /// `gated` when the caller already holds the chat's execution gate.
+    fn steer_queued(&self, request: &Value, gated: bool) -> Value {
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
+        };
+        // The whole steer runs under the chat's gate, as a send does, so a
+        // pause-all either comes first and is undone by this explicit steer, or
+        // comes after and stops whatever it started.
+        let gate = if gated {
+            None
+        } else {
+            match self.chat_execution_gate(request["chat"].as_str().unwrap_or_default()) {
+                Ok(gate) => Some(gate),
+                Err(error) => return error_reply(error),
+            }
+        };
+        let _execution = match &gate {
+            Some(gate) => match gate.lock() {
+                Ok(execution) => Some(execution),
+                Err(_) => return error_reply("This session's agent state is unavailable."),
+            },
+            None => None,
         };
         match store.take_queued(request) {
             Ok((mut reply, event)) => {
                 self.events.publish(event);
                 let chat_id = request["chat"].as_str().unwrap_or_default();
                 let text = request["text"].as_str().unwrap_or_default();
+                // Steering asks for this message now, so a paused chat goes on:
+                // a turn still stopping for the pause then hands it over.
+                let unpaused = store.unpause_chat(chat_id).unwrap_or(false);
+                if unpaused {
+                    self.events.publish(json!({"event": "tree"}));
+                }
                 let steered = self
                     .runtime
                     .as_ref()
@@ -1898,7 +2247,7 @@ impl Engine {
                     if let Some(runtime) = &self.runtime {
                         runtime.cancel(chat_id);
                     }
-                    if let Err(error) = self.start_queued_if_idle(chat_id, text) {
+                    if let Err(error) = self.start_queued_if_idle(chat_id, text, true, unpaused) {
                         return error_reply(error);
                     }
                 }
@@ -1912,14 +2261,40 @@ impl Engine {
     /// The turn a steer was meant for may have ended before it could take it,
     /// with nothing left to start the message when it does. A turn still ending
     /// picks the message up from the queue itself.
-    fn start_queued_if_idle(&self, chat_id: &str, text: &str) -> Result<(), String> {
+    ///
+    /// Like any send it starts the turn under the chat's execution gate, taken
+    /// here unless the caller (`gated`) already holds it, so `pause-all` sees
+    /// either the idle chat or the started turn.
+    ///
+    /// `was_paused` when the caller has just unpaused the chat, which pauses
+    /// again if the message fails to start.
+    fn start_queued_if_idle(
+        &self,
+        chat_id: &str,
+        text: &str,
+        gated: bool,
+        was_paused: bool,
+    ) -> Result<(), String> {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return Ok(());
+        };
+        let gate = if gated {
+            None
+        } else {
+            Some(self.chat_execution_gate(chat_id)?)
+        };
+        let _execution = match &gate {
+            Some(gate) => Some(
+                gate.lock()
+                    .map_err(|_| "This session's agent state is unavailable.".to_owned())?,
+            ),
+            None => None,
         };
         let chat = store.chat(chat_id).map_err(|error| error.to_string())?;
         if chat["working"] == true || chat["queue"][0].as_str() != Some(text) {
             return Ok(());
         }
+        let unpauses = store.chat_is_paused(chat_id).unwrap_or(false);
         let (_, event) = store
             .take_queued(&json!({"chat": chat_id, "index": 0, "text": text}))
             .map_err(|error| error.to_string())?;
@@ -1928,15 +2303,22 @@ impl Engine {
             .prepare_send(&json!({"chat": chat_id, "text": text}))
             .map_err(|error| error.to_string())?
         {
-            SendDisposition::Queued { event, .. } => self.events.publish(event),
+            SendDisposition::Queued { event, .. } => {
+                self.events.publish(event);
+                Ok(())
+            }
             SendDisposition::Start { turn, .. } => {
+                if unpauses {
+                    self.events.publish(json!({"event": "tree"}));
+                }
                 if let Err(error) = runtime.start(turn.clone()) {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
+                    self.keep_paused_after_failed_start(chat_id, unpauses || was_paused);
                     return Err(error);
                 }
+                Ok(())
             }
         }
-        Ok(())
     }
 
     fn remove_worktree(&self, request: &Value) -> Value {
@@ -2227,6 +2609,79 @@ fn serve_connection_with_engine(
 }
 
 /// Serve an authenticated connection to the shared daemon.
+/// Links pull requests the host found by itself, and tells clients when the
+/// chat's list changed. A failure only costs the link, so it is logged.
+pub(crate) fn link_pull_requests(
+    store: &StateStore,
+    events: &EventBus,
+    chat_id: &str,
+    urls: &[String],
+    source: LinkSource,
+) {
+    match store.link_pull_requests(chat_id, urls, source) {
+        Ok(outcome) if outcome.changed => events.publish(json!({"event": "tree"})),
+        Ok(_) => {}
+        Err(error) => eprintln!("xd: cannot link a pull request to {chat_id}: {error}"),
+    }
+}
+
+/// Asks GitHub again about a chat's links. A refresh already running for the
+/// chat takes over a request made meanwhile and runs once more for it, and
+/// keeps going while links wait their turn. Links asked about within the last
+/// minute are skipped, so repeated requests cannot pile up lookups.
+fn refresh_pull_request_states(store: &StateStore, events: &EventBus, chat_id: &str) {
+    /// Chats being refreshed, and whether another refresh was asked for
+    /// since the current pass began.
+    static REFRESHING: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+    // A chat links at most 32, eight a pass, with room for requests made
+    // meanwhile.
+    const MAX_PASSES: usize = 8;
+    {
+        let Ok(mut refreshing) = REFRESHING.lock() else {
+            return;
+        };
+        if let Some((_, again)) = refreshing.iter_mut().find(|(chat, _)| chat == chat_id) {
+            *again = true;
+            return;
+        }
+        refreshing.push((chat_id.to_owned(), false));
+    }
+    let mut changed = false;
+    for _ in 0..MAX_PASSES {
+        let more = match store.refresh_linked_pull_request_states(chat_id) {
+            Ok((pass_changed, more)) => {
+                changed |= pass_changed;
+                more
+            }
+            Err(error) => {
+                eprintln!("xd: cannot refresh the pull requests of {chat_id}: {error}");
+                false
+            }
+        };
+        let Ok(mut refreshing) = REFRESHING.lock() else {
+            break;
+        };
+        let asked_again = refreshing
+            .iter_mut()
+            .find(|(chat, _)| chat == chat_id)
+            .is_some_and(|(_, again)| std::mem::take(again));
+        if !more && !asked_again {
+            refreshing.retain(|(chat, _)| chat != chat_id);
+            drop(refreshing);
+            if changed {
+                events.publish(json!({"event": "tree"}));
+            }
+            return;
+        }
+    }
+    if let Ok(mut refreshing) = REFRESHING.lock() {
+        refreshing.retain(|(chat, _)| chat != chat_id);
+    }
+    if changed {
+        events.publish(json!({"event": "tree"}));
+    }
+}
+
 pub fn serve_daemon_connection(
     stream: UnixStream,
     engine: Arc<Engine>,
@@ -2307,13 +2762,23 @@ pub fn serve_daemon_connection(
                     Some(
                         "ping"
                             | "cancel"
+                            | "pause-all"
                             | "respond"
                             | "subagent"
                             | "agent-auth-cancel"
                             | "daemon-stop"
                     )
                 );
-            if control {
+            if authenticated && request["op"] == "pause-all" {
+                // Off the reader as well: pausing waits for sends in progress,
+                // and other control requests must not wait with it.
+                let engine = engine.clone();
+                let outbound = outbound.clone();
+                thread::spawn(move || {
+                    let reply = engine.dispatch_for(subscriber, request);
+                    let _ = outbound.try_send(reply);
+                });
+            } else if control {
                 let authenticating = matches!(request["op"].as_str(), Some("pair" | "hello"));
                 let reply = engine.dispatch_for(subscriber, request);
                 let authenticated = authenticating && reply["ok"] == true;
@@ -2563,6 +3028,57 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    #[cfg(unix)]
+    fn linking_over_the_protocol_updates_every_client_only_when_the_list_changes() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!("xd-engine-links-{}-{id}", std::process::id()));
+        let workspaces = root.join("Workspaces");
+        std::fs::create_dir_all(&workspaces).unwrap();
+        let store = StateStore::open(root.join("chats.db"), &workspaces).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
+        let chat = engine.dispatch(json!({"op": "new-chat", "folder": folder}))["id"].clone();
+        let (sender, events) = sync_channel::<Value>(64);
+        let (connection, _peer) = UnixStream::pair().unwrap();
+        let _subscriber = engine.events.subscribe(sender, connection).unwrap();
+        let saw_tree = |events: &std::sync::mpsc::Receiver<Value>| {
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| event["event"] == "tree")
+        };
+        let url = "https://github.com/o/r/pull/3";
+
+        let linked = engine.dispatch(json!({"op": "link-pull-requests", "chat": chat,
+            "urls": [format!("{url}/files"), "not a link"], "source": "agent"}));
+        assert_eq!(linked["linked"], json!([url]), "{linked}");
+        assert_eq!(linked["invalid"], json!(["not a link"]));
+        assert!(saw_tree(&events));
+        engine.dispatch(json!({"op": "link-pull-requests", "chat": chat, "urls": [url]}));
+        assert!(!saw_tree(&events), "nothing changed");
+        assert_eq!(
+            engine.dispatch(json!({"op": "tree"}))["chats"][0]["pull_requests"],
+            json!([{"url": url}])
+        );
+        for refused in [
+            json!({"op": "link-pull-requests", "chat": chat, "urls": []}),
+            json!({"op": "link-pull-requests", "chat": chat, "urls": [url], "source": "branch"}),
+            json!({"op": "link-pull-requests", "chat": "missing", "urls": [url]}),
+            json!({"op": "unlink-pull-request", "chat": chat, "url": "https://example.com"}),
+        ] {
+            assert_eq!(engine.dispatch(refused.clone())["ok"], false, "{refused}");
+        }
+
+        let unlinked =
+            engine.dispatch(json!({"op": "unlink-pull-request", "chat": chat, "url": url}));
+        assert_eq!(unlinked["changed"], true);
+        assert!(saw_tree(&events));
+        assert!(
+            engine.dispatch(json!({"op": "tree"}))["chats"][0]
+                .get("pull_requests")
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     #[cfg(unix)]

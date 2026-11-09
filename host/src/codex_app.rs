@@ -225,11 +225,16 @@ impl CodexAppParser {
                                 .unwrap_or_default()
                         }
                     }
-                    Some("commandExecution") => vec![AgentEvent::Tool(format!(
-                        "$ {}\n{}",
-                        shell_script(item["command"].as_str().unwrap_or_default()),
-                        item["aggregatedOutput"].as_str().unwrap_or_default()
-                    ))],
+                    Some("commandExecution") => {
+                        let command = shell_script(item["command"].as_str().unwrap_or_default());
+                        let output = item["aggregatedOutput"].as_str().unwrap_or_default();
+                        let created = crate::pull_requests::created_by(&command, output);
+                        let mut events = vec![AgentEvent::Tool(format!("$ {command}\n{output}"))];
+                        if !created.is_empty() {
+                            events.push(AgentEvent::PullRequests(created));
+                        }
+                        events
+                    }
                     Some("mcpToolCall") => vec![AgentEvent::Tool(format!(
                         "Tool: {} · {}\n{}",
                         item["server"].as_str().unwrap_or_default(),
@@ -774,6 +779,20 @@ mod tests {
                 "$ rg --files -g '*.rs'\nsrc/main.rs\n".into()
             )]
         );
+    }
+
+    #[test]
+    fn a_command_that_opens_a_pull_request_links_it() {
+        let mut parser = parser_on("thread");
+        let events = parser.feed(r#"{"method":"item/completed","params":{"threadId":"thread","item":{"type":"commandExecution","command":"/bin/bash -lc 'git push -u origin HEAD && gh pr create --fill'","aggregatedOutput":"Creating pull request\nhttps://github.com/o/r/pull/5\n"}}}"#);
+        assert_eq!(
+            events[1..],
+            [AgentEvent::PullRequests(vec![
+                "https://github.com/o/r/pull/5".into()
+            ])]
+        );
+        let listed = parser.feed(r#"{"method":"item/completed","params":{"threadId":"thread","item":{"type":"commandExecution","command":"gh pr list","aggregatedOutput":"https://github.com/o/r/pull/5\n"}}}"#);
+        assert_eq!(listed.len(), 1);
     }
 
     #[test]

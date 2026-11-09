@@ -181,4 +181,27 @@ class MinimalProjectsTest {
         assertEquals(true, shelf.first().session.autoSettleDisabled)
         assertEquals(false, shelf.last().session.autoSettleDisabled)
     }
+
+    @Test
+    fun thePauseButtonPausesUntilSomethingIsPausedThenResumes() {
+        val idle = TreeSnapshot(chats = listOf(chat("one", "p", "Idle", "codex")), pauseAll = true)
+        // An older host cannot pause every chat, so the button hides.
+        assertEquals(null, idle.copy(pauseAll = false).pauseAllAction)
+        assertEquals(PauseAllAction.PAUSE, idle.pauseAllAction)
+        assertEquals(false, idle.anythingToPause)
+
+        val working = idle.copy(chats = idle.chats + chat("two", "p", "Busy", "claude", working = true))
+        assertEquals(PauseAllAction.PAUSE, working.pauseAllAction)
+        assertEquals(true, working.anythingToPause)
+        // A chat waiting on background tasks between turns is paused too.
+        val background = idle.copy(chats = listOf(chat("one", "p", "Idle", "codex").copy(backgroundTasks = 1)))
+        assertEquals(true, background.anythingToPause)
+        // A terminal running a command is not a chat at work.
+        val terminal = idle.copy(chats = listOf(chat("one", "p", "Idle", "codex", terminalWorking = true)))
+        assertEquals(false, terminal.anythingToPause)
+
+        val paused = idle.copy(chats = idle.chats + chat("two", "p", "Busy", "claude").copy(paused = true))
+        assertEquals(PauseAllAction.RESUME, paused.pauseAllAction)
+        assertEquals(listOf(false, true), paused.minimalSessions("p").map { it.paused })
+    }
 }

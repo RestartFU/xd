@@ -2,6 +2,7 @@ package com.restartfu.xd.store
 
 import com.restartfu.xd.model.ChatSummary
 import com.restartfu.xd.model.Folder
+import com.restartfu.xd.model.LinkedPullRequest
 import com.restartfu.xd.model.TreeSnapshot
 import com.restartfu.xd.model.WorkspaceSession
 import com.restartfu.xd.net.ConnectionActor
@@ -152,6 +153,8 @@ internal class TreeStore(
                         },
                         settlement = reply.settlement,
                         folderGroups = reply.folderGroups,
+                        pauseAll = reply.pauseAll,
+                        linkedPullRequests = reply.linkedPullRequests,
                         chats = reply.chats.map {
                             ChatSummary(
                                 id = it.id,
@@ -186,6 +189,10 @@ internal class TreeStore(
                                     }
                                     ?.count
                                     ?: it.backgroundTasks,
+                                paused = it.paused,
+                                pullRequests = it.pullRequests.map { pull ->
+                                    LinkedPullRequest(pull.url, pull.state?.takeIf(String::isNotBlank))
+                                },
                             )
                         },
                     )

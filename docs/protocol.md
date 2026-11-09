@@ -48,8 +48,8 @@ rather than by arrival position:
 ```
 
 This matters because the host answers requests concurrently. The operations
-that must stay responsive — `cancel`, `voice-cancel`, `agent-auth-cancel`, and
-`ping` — bypass the serialized command path entirely. Without ids, a `cancel`
+that must stay responsive — `cancel`, `pause-all`, `voice-cancel`,
+`agent-auth-cancel`, and `ping` — bypass the serialized command path entirely. Without ids, a `cancel`
 answered promptly by the host would still sit behind a slow `diff-read` in
 the reply stream.
 
@@ -208,6 +208,18 @@ otherwise. Settling changes where a session is listed and nothing else: its
 chats still answer `chat` and `messages` and can still be opened. List settled
 sessions apart from active ones, most recently settled first. Clients that
 ignore these members keep listing settled sessions with the active ones.
+
+A host that can pause every chat at once adds a top-level `"pause_all":true`;
+hide the pause button on one that does not. A chat that [`pause-all`](#pause-all-and-resume-all)
+stopped has `paused:true` until it resumes or any turn starts in it; the member
+is absent otherwise. While any chat is paused, the button resumes them.
+
+A host that keeps pull requests linked to chats adds a top-level
+`"linked_pull_requests":true`. Each chat with links then has `pull_requests`, a
+list of `{url, state}` oldest first, where `url` is the canonical
+`https://host/owner/repo/pull/N` and `state` is `open`, `closed` or `merged`,
+absent until the host has asked GitHub. The member is absent when the chat has
+none. See [Linked pull requests](#linked-pull-requests).
 
 ### `background-task-output`
 
@@ -488,14 +500,17 @@ connected:
 
 - `after_days`, from 1 to 90, settles a session after that many days without
   activity. Here `null` is meaningful: it turns this rule off.
-- `on_merge` settles a session when the pull request of its checked-out branch
-  merges. A closed pull request settles it whenever either of these two rules is
-  on; with both off the host settles nothing by itself.
+- `on_merge` settles a session when its pull requests merge. A closed pull
+  request settles it whenever either of these two rules is on; with both off the
+  host settles nothing by itself.
 - `keep_pull_requests` stops inactivity from settling a session that has a pull
   request. Merging and closing still do.
 
-A pull request that finished before the user's latest message in the session
-does not count. The rules skip sessions the operations above would refuse and
+A session's pull requests are those linked to any of its chats and the pull
+request of its checked-out branch, unless the user unlinked that one and no chat
+in the session still links it. The session settles once every one of them has finished. A pull
+request that finished before the user's latest message in the session does not
+count. The rules skip sessions the operations above would refuse and
 sessions the user un-settled. `settled_at` is then when the session went quiet,
 not when the sweep ran. `set-auto-settle-settings` changes only the members it
 names, broadcasts `auto-settle-settings`, and applies at once.
@@ -729,6 +744,32 @@ command is slow.
 Continues a cut-short turn by sending `Continue where you left off.` as a visible
 user message. Fails when the chat is not `resumable` or has moved on since, so
 clients pressing it together start one turn. Anything queued runs after that turn.
+
+### `pause-all` and `resume-all`
+
+```json
+{"op":"pause-all"}
+{"ok":true,"paused":["chat-1","chat-2"]}
+{"op":"resume-all"}
+{"ok":true,"resumed":["chat-1","chat-2"]}
+```
+
+`pause-all` stops every chat that is `working`, and every chat whose agent is
+running background tasks between turns, so nothing goes on while the user is
+away. Each one it stops is marked `paused` in `tree`, keeps its queue instead of
+starting the next message, and becomes `resumable`. A paused chat is not
+settled or deleted by the automatic rules. A chat that was already idle is left
+alone. `pause-all` is a control operation, like `cancel`. It stops a chat that
+a message is being sent to, even one that was idle, once that send has started
+its turn, after the others.
+The host never continues a paused chat by itself: not after a restart, not on
+another account after a usage limit, and not for an agent's background report.
+
+`resume-all` continues each paused chat as [`resume-turn`](#resume-turn) does,
+then lets its queue run as usual. A paused chat that can no longer be resumed,
+because it has moved on or is still stopping, just loses its mark and runs its
+queue. Sending a message, resuming, or steering in one paused chat picks up only
+that chat. Both operations publish `changed` for each chat they touch and `tree`.
 
 ### `respond`
 
@@ -1059,7 +1100,39 @@ works in that chat's checkout:
 - `git-commit` takes a `message` of 1 to 4096 bytes after trimming, stages every
   change, commits, and answers like `git-status`.
 - `git-pr-status` asks GitHub's CLI for the checked-out branch's pull request and
-  answers `url`, empty when there is none or GitHub could not say.
+  answers `url`, empty when there is none or GitHub could not say. A pull request it
+  finds is linked to the chat.
+
+### Linked pull requests
+
+A chat can have any number of pull requests linked to it. Clients list them
+from `tree` (see above) and change them with two requests:
+
+```json
+{"op":"link-pull-requests","chat":"chat-1","urls":["https://github.com/o/r/pull/7/files"]}
+{"ok":true,"linked":["https://github.com/o/r/pull/7"],"invalid":[]}
+{"op":"unlink-pull-request","chat":"chat-1","url":"https://github.com/o/r/pull/7"}
+{"ok":true,"changed":true}
+```
+
+`link-pull-requests` takes 1 to 16 addresses, keeps those that are GitHub-style
+pull request addresses in their canonical form, and answers the rest in
+`invalid`. A chat keeps at most 32. `unlink-pull-request` marks the link
+removed rather than forgetting it. Both broadcast `tree` when the list changed.
+
+The host also links pull requests by itself: the one a `git-state` lookup with
+`pull_request: true` or `git-pr-status` finds for the chat's branch, the one
+`git-pr-create` or the `create-pr` action opens, and any an agent opens by
+running `gh pr create`. These never bring back a link the user removed; a
+`link-pull-requests` request does. The same lookups ask GitHub again about the
+chat's open links and broadcast `tree` when a state changed, as does automatic
+settling when its lookups find one.
+
+Agents link the rest themselves. The daemon starts Claude and Codex with an MCP
+server, `xd-host mcp --database PATH --workspaces PATH --chat ID`, named `xd`,
+whose one tool, `link_pull_requests`, takes `urls` and sends
+`link-pull-requests` with `"source":"agent"` for its chat. The tool is approved
+in advance, and one sentence in the agent's instructions says when to use it.
 
 `move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
 to move the folder to the workspace root. A folder cannot be moved into itself

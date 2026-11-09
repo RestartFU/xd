@@ -23,6 +23,8 @@ import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.protocol.Ops
+import com.restartfu.xd.mobile.ui.NOT_A_PULL_REQUEST_LINK
+import com.restartfu.xd.model.pastedPullRequestLinks
 import com.restartfu.xd.store.ChatSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -124,6 +126,7 @@ class MainViewModel @JvmOverloads constructor(
     private val _createdDirectSession = MutableStateFlow<CreatedDirectSession?>(null)
     private val _deletingChat = MutableStateFlow(false)
     private val _renamingChat = MutableStateFlow(false)
+    private val _pausingAll = MutableStateFlow(false)
     private val _error = MutableStateFlow<String?>(null)
     private val _shortcutEditor = MutableStateFlow<ShortcutEditorState?>(null)
 
@@ -136,6 +139,8 @@ class MainViewModel @JvmOverloads constructor(
     val creatingWorkspace: StateFlow<Boolean> = _creatingWorkspace.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
     val renamingChat: StateFlow<Boolean> = _renamingChat.asStateFlow()
+    /** A pause-all or resume-all request is on its way, so the button waits. */
+    val pausingAll: StateFlow<Boolean> = _pausingAll.asStateFlow()
     private val _settledNotice = MutableStateFlow<SettledNotice?>(null)
     private var settledSerial = 0L
     val settledNotice: StateFlow<SettledNotice?> = _settledNotice.asStateFlow()
@@ -751,6 +756,29 @@ class MainViewModel @JvmOverloads constructor(
         client.deleteSession(sessionId)
     }
 
+    /** Stops every working chat on the host, for stepping away from work. */
+    fun pauseAll() = pauseOrResumeAll("Could not pause the chats") { client.pauseAll() }
+
+    /** Continues every chat [pauseAll] stopped. */
+    fun resumeAll() = pauseOrResumeAll("Could not resume the chats") { client.resumeAll() }
+
+    private fun pauseOrResumeAll(failure: String, action: suspend () -> Unit) {
+        if (_pausingAll.value) return
+        _pausingAll.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                action()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: failure
+            } finally {
+                _pausingAll.value = false
+            }
+        }
+    }
+
     fun renameProject(folderId: String, name: String) = treeAction("Could not rename the project") {
         client.renameFolder(folderId, name)
     }
@@ -954,7 +982,7 @@ class MainViewModel @JvmOverloads constructor(
 
 class ChatViewModel(
     val client: XdClient,
-    chatId: String,
+    private val chatId: String,
 ) : ViewModel() {
     val session: ChatSession = client.openChat(chatId)
     val state = session.state
@@ -1426,6 +1454,97 @@ class ChatViewModel(
                 throw error
             } catch (error: Throwable) {
                 // Leave whatever was shown.
+            }
+        }
+    }
+
+    /**
+     * The Pull requests dialog: what is typed into its link field, whether a
+     * link or a removal is out, and what went wrong. Kept here so a rotation
+     * neither loses the paste nor the outcome of a request still out.
+     */
+    data class PullRequestLinks(
+        val draft: String = "",
+        val linking: Boolean = false,
+        val removing: Set<String> = emptySet(),
+        val error: String? = null,
+    )
+
+    private val _pullRequestLinks = MutableStateFlow(PullRequestLinks())
+    val pullRequestLinks: StateFlow<PullRequestLinks> = _pullRequestLinks.asStateFlow()
+
+    fun editPullRequestDraft(text: String) {
+        _pullRequestLinks.update { it.copy(draft = text, error = null) }
+    }
+
+    /** Bumped when the dialog closes, so a reply that lands later does not refill the next one. */
+    private var pullRequestDialogs = 0L
+
+    /** Forgets the dialog's draft and error when it closes. A request still out keeps running. */
+    fun closePullRequests() {
+        pullRequestDialogs++
+        _pullRequestLinks.update { it.copy(draft = "", error = null) }
+    }
+
+    /**
+     * Links every pull request address in the draft. The host broadcasts the
+     * new list in `tree`; what it refuses stays in the field with an error.
+     */
+    fun linkPullRequests() {
+        val current = _pullRequestLinks.value
+        if (current.linking) return
+        val urls = pastedPullRequestLinks(current.draft)
+        if (urls.isEmpty()) return
+        if (urls.size > Ops.MAX_PULL_REQUEST_LINKS) {
+            _pullRequestLinks.update { it.copy(error = "Link at most ${Ops.MAX_PULL_REQUEST_LINKS} pull requests at a time.") }
+            return
+        }
+        _pullRequestLinks.update { it.copy(linking = true, error = null) }
+        val dialog = pullRequestDialogs
+        viewModelScope.launch {
+            try {
+                val reply = client.linkPullRequests(chatId, urls)
+                _pullRequestLinks.update {
+                    when {
+                        dialog != pullRequestDialogs -> it.copy(linking = false)
+                        reply.invalid.isEmpty() -> it.copy(draft = "", linking = false)
+                        else -> it.copy(draft = reply.invalid.joinToString(" "), linking = false, error = NOT_A_PULL_REQUEST_LINK)
+                    }
+                }
+            } catch (error: CancellationException) {
+                _pullRequestLinks.update { it.copy(linking = false) }
+                throw error
+            } catch (error: Throwable) {
+                _pullRequestLinks.update {
+                    if (dialog != pullRequestDialogs) {
+                        it.copy(linking = false)
+                    } else {
+                        it.copy(linking = false, error = error.message?.takeIf(String::isNotBlank) ?: NOT_A_PULL_REQUEST_LINK)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Removes a linked pull request; the host's own lookups will not link it again. */
+    fun unlinkPullRequest(url: String) {
+        if (url in _pullRequestLinks.value.removing) return
+        _pullRequestLinks.update { it.copy(removing = it.removing + url, error = null) }
+        val dialog = pullRequestDialogs
+        viewModelScope.launch {
+            try {
+                client.unlinkPullRequest(chatId, url)
+                _pullRequestLinks.update { it.copy(removing = it.removing - url) }
+            } catch (error: CancellationException) {
+                _pullRequestLinks.update { it.copy(removing = it.removing - url) }
+                throw error
+            } catch (error: Throwable) {
+                _pullRequestLinks.update {
+                    it.copy(
+                        removing = it.removing - url,
+                        error = if (dialog == pullRequestDialogs) error.message ?: "Could not remove the pull request." else it.error,
+                    )
+                }
             }
         }
     }

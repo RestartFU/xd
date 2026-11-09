@@ -1,6 +1,7 @@
 use std::{env, path::PathBuf, process::ExitCode};
 
 mod daemon;
+mod mcp;
 
 #[derive(Clone)]
 struct HostOptions {
@@ -13,6 +14,8 @@ enum CliCommand {
     Daemon(HostOptions),
     DaemonStatus(HostOptions),
     DaemonStop(HostOptions),
+    /// Serves an agent its link tool, bound to one chat.
+    Mcp(HostOptions, String),
     Version,
     Help,
 }
@@ -31,6 +34,7 @@ fn main() -> ExitCode {
         Ok(CliCommand::Daemon(options)) => finish(daemon::run(options)),
         Ok(CliCommand::DaemonStatus(options)) => finish(daemon::control(options, "daemon-info")),
         Ok(CliCommand::DaemonStop(options)) => finish(daemon::control(options, "daemon-stop")),
+        Ok(CliCommand::Mcp(options, chat)) => finish(mcp::serve(options, &chat)),
         Err(error) => {
             eprintln!("xd-host: {error}");
             eprintln!("{}", usage());
@@ -56,6 +60,22 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
         Some("daemon") => host_arguments(arguments).map(CliCommand::Daemon),
         Some("daemon-status") => host_arguments(arguments).map(CliCommand::DaemonStatus),
         Some("daemon-stop") => host_arguments(arguments).map(CliCommand::DaemonStop),
+        Some("mcp") => {
+            let mut chat = None;
+            let mut rest = Vec::new();
+            let mut arguments = arguments;
+            while let Some(argument) = arguments.next() {
+                if argument == "--chat" {
+                    chat = Some(arguments.next().ok_or("--chat needs a chat id")?);
+                } else {
+                    rest.push(argument);
+                }
+            }
+            let chat = chat
+                .filter(|chat| !chat.is_empty())
+                .ok_or("mcp needs --chat")?;
+            host_arguments(rest.into_iter()).map(|options| CliCommand::Mcp(options, chat))
+        }
         Some("--version" | "-v") if arguments.next().is_none() => Ok(CliCommand::Version),
         Some("--help" | "-h") if arguments.next().is_none() => Ok(CliCommand::Help),
         Some("serve" | "pair" | "broker") => {

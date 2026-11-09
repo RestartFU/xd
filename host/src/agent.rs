@@ -31,6 +31,8 @@ pub enum AgentEvent {
     Text(String),
     TextDelta(String),
     Tool(String),
+    /// Pull requests a shell command opened, by canonical address.
+    PullRequests(Vec<String>),
     /// A delegated agent changed. The runtime keeps one record per agent and
     /// rewrites it in place.
     Subagent(SubagentPatch),
@@ -243,8 +245,30 @@ impl CodexParser {
                 {
                     return vec![AgentEvent::Subagent(patch)];
                 }
+                let created = if item.get("type").and_then(Value::as_str)
+                    == Some("command_execution")
+                {
+                    crate::pull_requests::created_by(
+                        &shell_script(item.get("command").and_then(Value::as_str).unwrap_or("")),
+                        item.get("aggregated_output")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                    )
+                } else {
+                    Vec::new()
+                };
                 if started {
-                    return Vec::new();
+                    return if created.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![AgentEvent::PullRequests(created)]
+                    };
+                }
+                if !created.is_empty() {
+                    return vec![
+                        AgentEvent::Tool(tool_summary(item)),
+                        AgentEvent::PullRequests(created),
+                    ];
                 }
                 if item.get("type").and_then(Value::as_str) == Some("file_change")
                     && let Some(snapshots) = item
@@ -469,6 +493,10 @@ pub struct ClaudeParser {
     agent_tools: HashSet<String>,
     /// Bash calls in this turn that run another assistant, by tool use id.
     shell_agents: HashSet<String>,
+    /// Bash calls in this turn that open a pull request: their commands and
+    /// whether they run in the background, by tool use id, until their
+    /// output arrives.
+    pull_request_commands: HashMap<String, (String, bool)>,
     saw_streamed_text: bool,
     saw_text: bool,
     /// The account's limit turned this turn away, as far as Claude has said.
@@ -551,6 +579,7 @@ impl ClaudeParser {
     const MAX_PENDING_TOOLS: usize = 64;
     const ARGUMENT_LIMIT: usize = 2 * 1024 * 1024;
     const MAX_COMPLETED_TASK_TOOLS: usize = 64;
+    const MAX_PULL_REQUEST_COMMANDS: usize = 64;
 
     fn record_text(&mut self, text: &str) {
         self.saw_text = true;
@@ -589,9 +618,21 @@ impl ClaudeParser {
                 .map(|id| vec![AgentEvent::InteractionResolved(id.clone())])
                 .unwrap_or_default(),
             Some("system") if root.get("subtype").and_then(Value::as_str) != Some("init") => {
-                claude_task_event(&root)
+                let mut events = claude_task_event(&root)
                     .map(|patch| vec![AgentEvent::Subagent(patch)])
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                if root.get("subtype").and_then(Value::as_str) == Some("task_notification")
+                    && let Some(id) = text_field(&root, "tool_use_id")
+                {
+                    let urls = crate::pull_requests::finished_in_background(
+                        id,
+                        text_field(&root, "output_file"),
+                    );
+                    if !urls.is_empty() {
+                        events.push(AgentEvent::PullRequests(urls));
+                    }
+                }
+                events
             }
             _ => self.feed_main(root),
         }
@@ -920,6 +961,22 @@ impl ClaudeParser {
                         ..delegation.started(&id, "Claude", text_field(arguments, "description"))
                     })];
                 }
+                if tool.name == "Bash"
+                    && let Some(id) = tool.id.clone()
+                    && let Some(command) = arguments
+                        .as_ref()
+                        .and_then(|arguments| text_field(arguments, "command"))
+                    && crate::pull_requests::creates(command)
+                    && self.pull_request_commands.len() < Self::MAX_PULL_REQUEST_COMMANDS
+                {
+                    let background = arguments
+                        .as_ref()
+                        .and_then(|arguments| arguments.get("run_in_background"))
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                    self.pull_request_commands
+                        .insert(id, (command.to_owned(), background));
+                }
                 if matches!(tool.name.as_str(), "TaskCreate" | "TaskList" | "TaskGet")
                     && let Some(id) = tool.id.clone()
                     && self.completed_task_tools.len() < Self::MAX_COMPLETED_TASK_TOOLS
@@ -950,6 +1007,17 @@ impl ClaudeParser {
                 }
                 if self.shell_agents.remove(id) {
                     return claude_shell_agent_result(id, block).map(AgentEvent::Subagent);
+                }
+                if let Some((command, background)) = self.pull_request_commands.remove(id) {
+                    // A background command's result only says it started; its
+                    // output comes with its task notification.
+                    if background {
+                        crate::pull_requests::started_in_background(id, &command);
+                        return None;
+                    }
+                    let output = tool_result_text(block.get("content")?)?;
+                    let urls = crate::pull_requests::created_by(&command, &output);
+                    return (!urls.is_empty()).then_some(AgentEvent::PullRequests(urls));
                 }
                 let tool = self.completed_task_tools.remove(id)?;
                 let content = tool_result_text(block.get("content")?)?;
@@ -2720,6 +2788,46 @@ mod tests {
                 .unwrap()
                 .starts_with("None found.")
         );
+
+        // A Bash call that opens a pull request links it once its output arrives.
+        let mut parser = ClaudeParser::default();
+        let input = serde_json::json!({"command": "gh pr create --fill"}).to_string();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_pr","name":"Bash"}}}"#.to_owned(),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input}}}).to_string(),
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#.to_owned(),
+        ] {
+            parser.feed(&line);
+        }
+        assert_eq!(
+            parser.feed(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_pr","content":"https://github.com/o/r/pull/6\n"}]}}"#),
+            [AgentEvent::PullRequests(vec!["https://github.com/o/r/pull/6".into()])]
+        );
+
+        // Run in the background, it links once its task finishes, even in a
+        // later turn's parser.
+        let mut parser = ClaudeParser::default();
+        let input =
+            serde_json::json!({"command": "gh pr create --fill", "run_in_background": true})
+                .to_string();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_prbg","name":"Bash"}}}"#.to_owned(),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input}}}).to_string(),
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#.to_owned(),
+        ] {
+            parser.feed(&line);
+        }
+        assert!(parser.feed(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_prbg","content":"Command running in background with ID: b9. Output is being written to: /tmp/b9.output"}]}}"#).is_empty());
+        let output = std::env::temp_dir().join(format!("xd-agent-{}.output", uuid::Uuid::new_v4()));
+        std::fs::write(&output, "https://github.com/o/r/pull/8\n").unwrap();
+        let mut later = ClaudeParser::default();
+        let finished = later.feed(
+            &serde_json::json!({"type":"system","subtype":"task_notification","task_id":"b9","tool_use_id":"toolu_prbg","status":"completed","output_file":output,"summary":"Background command completed"}).to_string(),
+        );
+        assert!(finished.contains(&AgentEvent::PullRequests(vec![
+            "https://github.com/o/r/pull/8".into()
+        ])));
+        let _ = std::fs::remove_file(&output);
 
         // Sent to the background, it finishes later through Claude's task events.
         let mut parser = ClaudeParser::default();

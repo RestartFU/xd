@@ -285,6 +285,10 @@ pub enum RequestKind {
     },
     AgentCliUpdates,
     ResumeInterrupted,
+    /// `pause-all`, or `resume-all` when `resume`.
+    PauseAll {
+        resume: bool,
+    },
     AgentSecrets {
         folder_id: Option<String>,
     },
@@ -355,6 +359,15 @@ pub enum RequestKind {
     },
     GitPullRequestCreate {
         chat_id: String,
+        generation: u64,
+    },
+    LinkPullRequests {
+        chat_id: String,
+        generation: u64,
+    },
+    UnlinkPullRequest {
+        chat_id: String,
+        url: String,
         generation: u64,
     },
     FileBrowseList {
@@ -1718,6 +1731,39 @@ impl HostHandle {
         )
     }
 
+    /// Links pull requests to a chat by their web addresses. The host answers
+    /// the canonical addresses it kept in `linked` and the rest in `invalid`.
+    pub fn link_pull_requests(
+        &self,
+        chat_id: &str,
+        urls: &[String],
+        generation: u64,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::LinkPullRequests {
+                chat_id: chat_id.to_owned(),
+                generation,
+            },
+            json!({"op": "link-pull-requests", "chat": chat_id, "urls": urls}),
+        )
+    }
+
+    pub fn unlink_pull_request(
+        &self,
+        chat_id: &str,
+        url: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::UnlinkPullRequest {
+                chat_id: chat_id.to_owned(),
+                url: url.to_owned(),
+                generation,
+            },
+            json!({"op": "unlink-pull-request", "chat": chat_id, "url": url}),
+        )
+    }
+
     pub fn file_browse_list(
         &self,
         chat_id: &str,
@@ -2067,6 +2113,12 @@ impl HostHandle {
                 "after": after,
             }),
         )
+    }
+
+    /// Stops every chat at work, or with `resume` picks the paused ones up.
+    pub fn pause_all(&self, resume: bool) -> Result<(), String> {
+        let op = if resume { "resume-all" } else { "pause-all" };
+        self.send(RequestKind::PauseAll { resume }, json!({"op": op}))
     }
 
     pub fn cancel(&self, chat_id: &str) -> Result<(), String> {
@@ -3943,6 +3995,75 @@ mod tests {
                 kind: RequestKind::SetAutoDeleteSettings,
                 ..
             }
+        ));
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn pull_request_links_name_the_chat_and_the_addresses() {
+        let directory = env::temp_dir().join(format!("xd-pr-links-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for (expected, reply) in [
+                (
+                    json!({"op":"link-pull-requests","chat":"chat-1",
+                        "urls":["https://github.com/o/r/pull/7/files","nope"]}),
+                    json!({"ok":true,"linked":["https://github.com/o/r/pull/7"],"invalid":["nope"]}),
+                ),
+                (
+                    json!({"op":"unlink-pull-request","chat":"chat-1",
+                        "url":"https://github.com/o/r/pull/7"}),
+                    json!({"ok":true,"changed":true}),
+                ),
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut request: Value = serde_json::from_str(&line).unwrap();
+                let request_id = request
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("_xd_request")
+                    .unwrap();
+                assert_eq!(request, expected);
+                let mut reply = reply;
+                reply["_xd_request"] = request_id;
+                writeln!(stream, "{reply}").unwrap();
+            }
+        });
+        let (host, updates) = HostHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Connected { .. }
+        ));
+        host.link_pull_requests(
+            "chat-1",
+            &["https://github.com/o/r/pull/7/files".into(), "nope".into()],
+            3,
+        )
+        .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::LinkPullRequests { chat_id, generation: 3 },
+                body,
+                ..
+            } if chat_id == "chat-1" && body["invalid"] == json!(["nope"])
+        ));
+        host.unlink_pull_request("chat-1", "https://github.com/o/r/pull/7", 4)
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::UnlinkPullRequest { chat_id, url, generation: 4 },
+                body,
+                ..
+            } if chat_id == "chat-1" && url == "https://github.com/o/r/pull/7" && body["changed"] == true
         ));
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);

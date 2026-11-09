@@ -56,6 +56,28 @@ class OpsTest {
     }
 
     @Test
+    fun pullRequestsAreLinkedInBatchesAndUnlinkedOneAtATime() {
+        val link = Ops.linkPullRequests("c", listOf(" https://github.com/o/r/pull/7/files ", "", "https://github.com/o/r/pull/8"))
+        assertEquals("link-pull-requests", link["op"]!!.jsonPrimitive.content)
+        assertEquals("c", link["chat"]!!.jsonPrimitive.content)
+        assertEquals(
+            listOf("https://github.com/o/r/pull/7/files", "https://github.com/o/r/pull/8"),
+            link["urls"]!!.jsonArray.map { it.jsonPrimitive.content },
+        )
+        // The host takes 1 to 16 at once.
+        assertFailsWith<IllegalArgumentException> { Ops.linkPullRequests("c", listOf(" ")) }
+        assertFailsWith<IllegalArgumentException> { Ops.linkPullRequests("c", List(17) { "https://github.com/o/r/pull/$it" }) }
+        assertEquals(16, Ops.linkPullRequests("c", List(16) { "https://github.com/o/r/pull/$it" })["urls"]!!.jsonArray.size)
+        assertFailsWith<IllegalArgumentException> { Ops.linkPullRequests(" ", listOf("https://github.com/o/r/pull/7")) }
+
+        val unlink = Ops.unlinkPullRequest("c", "https://github.com/o/r/pull/7")
+        assertEquals("unlink-pull-request", unlink["op"]!!.jsonPrimitive.content)
+        assertEquals("c", unlink["chat"]!!.jsonPrimitive.content)
+        assertEquals("https://github.com/o/r/pull/7", unlink["url"]!!.jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.unlinkPullRequest("c", "") }
+    }
+
+    @Test
     fun hostSettingOperationsMatchTheHostsRules() {
         val start = Ops.agentAuthAction(Ops.AuthAction.START, "claude")
         assertEquals("agent-auth-start", start["op"]!!.jsonPrimitive.content)
@@ -79,6 +101,12 @@ class OpsTest {
         assertTrue(Ops.setFolderContext("f", "   ")["context"] is JsonNull)
         assertEquals("notes", Ops.setFolderContext("f", " notes ")["context"]!!.jsonPrimitive.content)
         assertEquals(true, Ops.resumeInterrupted(true)["resume"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun pausingAndResumingEveryChatNameNoChat() {
+        assertEquals("""{"op":"pause-all"}""", Ops.pauseAll().toString())
+        assertEquals("""{"op":"resume-all"}""", Ops.resumeAll().toString())
     }
 
     @Test

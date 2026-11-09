@@ -49,8 +49,9 @@ computer or your Android phone.
   its workspace.
 - **Side pane and terminal** next to every chat: an integrated browser, files, and
   changes on the side, a shell below, all resizable and remembered per chat.
-- **Pull requests in place.** Projects, worktrees, branches, and pull requests live
-  in one sidebar.
+- **Pull requests in place.** Projects, worktrees, and branches live in one
+  sidebar, and a chat can link any number of pull requests: its branch's PR, ones
+  opened from xd or by the agent, and any you add from the session header.
 - **Settle finished sessions** with one click. Idle and merged sessions settle by
   themselves, even while the app is closed.
 

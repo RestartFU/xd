@@ -2,6 +2,7 @@ package com.restartfu.xd.store
 
 import com.restartfu.xd.credentials.MemoryCredentialStore
 import com.restartfu.xd.credentials.testCredentials
+import com.restartfu.xd.model.LinkedPullRequest
 import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.FakeSocketFactory
 import kotlin.test.Test
@@ -40,6 +41,60 @@ class TreeStoreTest {
         assertFalse(store.state.value.chats.any { it.terminalWorking })
         store.setChatTerminalWorking("one", true, sequence = 101)
         assertTrue(store.state.value.chats.all { it.terminalWorking }, "legacy terminal aliases reach the shared workspace")
+    }
+
+    @Test
+    fun linkedPullRequestsReachEachChat() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(testCredentials()), backgroundScope)
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
+        val store = TreeStore(actor)
+        val refresh = async { store.refresh() }
+        runCurrent()
+        factory.latest.receive(
+            """{"ok":true,"linked_pull_requests":true,"folders":[],"chats":[""" +
+                """{"id":"one","folder":"folder","title":"One","backend":"codex","working":false,"pull_requests":[""" +
+                """{"url":"https://github.com/o/r/pull/7","state":"merged"},{"url":"https://github.com/o/r/pull/9","state":""}]},""" +
+                """{"id":"two","folder":"folder","title":"Two","backend":"codex","working":false}],"_xd_request":2}""",
+        )
+        runCurrent()
+        refresh.await()
+        assertTrue(store.state.value.linkedPullRequests)
+        assertEquals(
+            listOf(
+                LinkedPullRequest("https://github.com/o/r/pull/7", "merged"),
+                LinkedPullRequest("https://github.com/o/r/pull/9", null),
+            ),
+            store.state.value.chats.first { it.id == "one" }.pullRequests,
+        )
+        assertEquals(emptyList(), store.state.value.chats.first { it.id == "two" }.pullRequests)
+    }
+
+    @Test
+    fun treeCarriesPauseSupportAndPausedChats() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(testCredentials()), backgroundScope)
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
+        val store = TreeStore(actor)
+        val refresh = async { store.refresh() }
+        runCurrent()
+        factory.latest.receive(
+            """{"ok":true,"pause_all":true,"folders":[],"chats":[""" +
+                """{"id":"one","folder":"f","title":"One","backend":"codex","working":false,"paused":true},""" +
+                """{"id":"two","folder":"f","title":"Two","backend":"claude","working":false}],"_xd_request":2}""",
+        )
+        runCurrent()
+        refresh.await()
+        assertTrue(store.state.value.pauseAll)
+        assertEquals(listOf(true, false), store.state.value.chats.map { it.paused })
     }
 
     @Test

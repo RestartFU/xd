@@ -21,6 +21,7 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.AndroidComposeTestRule
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -167,6 +168,44 @@ class ProjectsScreenshotTest {
 
     @Test fun longListLight() = longList("long-list-light", MinimalThemePreset.LIGHT)
 
+    @Test fun pausingStopsEveryChatThenOffersResume() = shoot("paused-dark", MinimalThemePreset.DARK) {
+        check(shows("Pause all chats") && !shows("Resume paused chats") && !shows("Paused"))
+        this@ProjectsScreenshotTest.compose.onNode(hasContentDescription("Pause all chats")).assertIsEnabled()
+        click("Pause all chats")
+        awaitShown("Resume paused chats")
+        check(sent("pause-all") == 1) { "pause-all was sent ${sent("pause-all")} times" }
+        // The working session and the one waiting on a background task both say so.
+        check(shows("Resume paused chats") && !shows("Pause all chats") && shows("Paused"))
+    }
+
+    @Test fun pausedLight() = shoot("paused-light", MinimalThemePreset.LIGHT, paused = true) {
+        check(shows("Resume paused chats") && shows("Paused"))
+    }
+
+    @Test fun resumingContinuesEveryPausedChat() = shoot("resumed-dark", MinimalThemePreset.DARK, paused = true) {
+        click("Resume paused chats")
+        awaitShown("Pause all chats")
+        check(sent("resume-all") == 1) { "resume-all was sent ${sent("resume-all")} times" }
+        check(!shows("Resume paused chats") && !shows("Paused"))
+    }
+
+    @Test fun anOlderHostHasNoPauseButton() = shoot("no-pause-dark", MinimalThemePreset.DARK, pauseAll = false) {
+        check(shows("Projects") && !shows("Pause all chats") && !shows("Resume paused chats"))
+    }
+
+    /** How many [op] requests the app sent. */
+    private fun sent(op: String): Int = synchronized(SENT) { SENT.toList() }
+        .count { Json.parseToJsonElement(it).jsonObject["op"]?.jsonPrimitive?.content == op }
+
+    /** Waits for the host's answer and the tree it refreshes to reach the page. */
+    private fun Screen.awaitShown(label: String) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (!shows(label) && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+    }
+
     @Test fun terminalTab() = shoot("terminal-dark", MinimalThemePreset.DARK) { click("Terminal") }
 
     @Test fun usageTab() = shoot("usage-dark", MinimalThemePreset.DARK) { click("Usage") }
@@ -256,7 +295,15 @@ class ProjectsScreenshotTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     /** Opens the page, lets [steps] act on it, and captures the result. */
-    private fun shoot(name: String, theme: MinimalThemePreset, steps: Screen.() -> Unit = {}) {
+    private fun shoot(
+        name: String,
+        theme: MinimalThemePreset,
+        paused: Boolean = false,
+        pauseAll: Boolean = true,
+        steps: Screen.() -> Unit = {},
+    ) {
+        chatsPaused = paused
+        canPauseAll = pauseAll
         val activity = compose.activity
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val model = MainViewModel(activity.application, XdClient({ ScriptedSocket() }, NoCredentials, scope))
@@ -449,7 +496,11 @@ class ProjectsScreenshotTest {
         override fun close() = Unit
 
         private fun reply(op: String?, owner: String?): String = when (op) {
-            "tree" -> if (longTree) TREE_LONG else TREE
+            "tree" -> (if (longTree) TREE_LONG else TREE)
+                .let { if (chatsPaused) paused(it) else it }
+                .let { if (canPauseAll) it else it.replace("\"pause_all\":true,", "") }
+            "pause-all" -> { chatsPaused = true; """{"ok":true,"paused":["c3","c4"]}""" }
+            "resume-all" -> { chatsPaused = false; """{"ok":true,"resumed":["c3","c4"]}""" }
             "owner-icon" -> """{"ok":true,"owner":"$owner","mime":"image/png","data":"${avatar(owner.orEmpty())}"}"""
             else -> """{"ok":true}"""
         }
@@ -459,6 +510,16 @@ class ProjectsScreenshotTest {
         /** Every request the app sent, in order. */
         /** Whether the scripted host answers with [TREE_LONG]. */
         @Volatile var longTree = false
+
+        /** Whether the scripted host has paused every chat, which stops web's turn and shop's task. */
+        @Volatile var chatsPaused = false
+
+        /** Whether the scripted host says it can pause every chat. */
+        @Volatile var canPauseAll = true
+
+        fun paused(tree: String): String = tree
+            .replace(""""working":true,"session":"s3"}""", """"working":false,"paused":true,"session":"s3"}""")
+            .replace(""""background_tasks":1,"session":"s4"}""", """"paused":true,"session":"s4"}""")
 
         /** [TREE] with a dozen more sessions, so the list runs past the bottom of the screen. */
         val TREE_LONG by lazy {
@@ -480,7 +541,7 @@ class ProjectsScreenshotTest {
         val SENT: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
 
         /** An organization holding a project and a folder of client sites, beside two plain projects. */
-        val TREE = """{"ok":true,"settlement":true,"folder_reorder":true,"folder_groups":true,"folders":[""" +
+        val TREE = """{"ok":true,"settlement":true,"folder_reorder":true,"folder_groups":true,"pause_all":true,"folders":[""" +
             """{"id":"xd","name":"xd","owner":"RestartFU"},""" +
             """{"id":"acme","name":"acme","group":true,"owner":"acme"},""" +
             """{"id":"web","name":"web","parent":"acme","owner":"acme"},""" +

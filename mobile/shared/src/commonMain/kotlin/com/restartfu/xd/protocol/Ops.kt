@@ -317,6 +317,12 @@ public object Ops {
     /** Continues a cut-short turn; the host refuses if the chat moved on. */
     public fun resumeTurn(chatId: String): JsonObject = withChat("resume-turn", chatId)
 
+    /** Stops every working chat, and every one waiting on background tasks, marking them paused. */
+    public fun pauseAll(): JsonObject = op("pause-all")
+
+    /** Continues every chat [pauseAll] stopped. */
+    public fun resumeAll(): JsonObject = op("resume-all")
+
     /**
      * Moves queued message [source] before or [after] [anchor]. Both texts are
      * what the client saw there, so a queue another device changed is refused
@@ -618,6 +624,32 @@ public object Ops {
     }
 
     public fun gitPullRequestStatus(chatId: String): JsonObject = withChat("git-pr-status", chatId)
+
+    /**
+     * Links pull requests to a chat. The host keeps the GitHub-style ones in
+     * canonical form and answers the rest as `invalid`; it takes 1 to
+     * [MAX_PULL_REQUEST_LINKS] at once.
+     */
+    public fun linkPullRequests(chatId: String, urls: List<String>): JsonObject = buildJsonObject {
+        val cleaned = urls.map(String::trim).filter(String::isNotEmpty)
+        require(cleaned.size in 1..MAX_PULL_REQUEST_LINKS) {
+            "Link 1 to $MAX_PULL_REQUEST_LINKS pull requests at a time"
+        }
+        put("op", "link-pull-requests")
+        put("chat", requireId(chatId, "Chat"))
+        put("urls", buildJsonArray { cleaned.forEach { add(JsonPrimitive(it)) } })
+    }
+
+    /** Removes one linked pull request from a chat; the host's automatic links will not bring it back. */
+    public fun unlinkPullRequest(chatId: String, url: String): JsonObject = buildJsonObject {
+        require(url.isNotBlank()) { "A pull request link is required" }
+        put("op", "unlink-pull-request")
+        put("chat", requireId(chatId, "Chat"))
+        put("url", url)
+    }
+
+    /** The most addresses one `link-pull-requests` request takes. */
+    public const val MAX_PULL_REQUEST_LINKS: Int = 16
 
     /**
      * Asks for the checkout's Git state and its branch's pull request. The

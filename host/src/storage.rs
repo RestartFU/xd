@@ -21,6 +21,7 @@ use crate::{
     database::{self, Checkpointer, Reader, ReaderPool},
     deletion::{self, AutoDeleteSettings, AutoDeletion},
     private_fs::{create_private_file, open_without_waiting, secure_directory},
+    pull_requests::{self, LinkSource},
     reply_images,
     settlement::{
         self, AutoSettleSettings, PullRequestSnapshot, PullRequestState, SettlementCandidate,
@@ -237,6 +238,51 @@ pub struct TurnSpec {
     pub carries_cut_off_note: bool,
     pub label: String,
     pub environment: Vec<(String, String)>,
+}
+
+/// One link of a chat, as settling reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LinkRow {
+    pub(crate) chat: String,
+    pub(crate) url: String,
+    pub(crate) dismissed: bool,
+}
+
+/// Every link of a session's chats, removed ones too. A settling decision is
+/// made from one of these and holds only while the links still read the same.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LinkState(pub(crate) Vec<LinkRow>);
+
+impl LinkState {
+    /// The linked pull requests, each once, oldest first per chat.
+    pub(crate) fn linked(&self) -> Vec<String> {
+        let mut urls = Vec::new();
+        for link in &self.0 {
+            if !link.dismissed && !urls.contains(&link.url) {
+                urls.push(link.url.clone());
+            }
+        }
+        urls
+    }
+
+    /// Whether the user removed `url` and none of the chats links it now.
+    /// A chat that never had it says nothing either way, so removing it
+    /// from the one chat that showed it is enough.
+    pub(crate) fn removed(&self, url: &str) -> bool {
+        let rows = self.0.iter().filter(|link| link.url == url);
+        rows.clone().any(|link| link.dismissed) && rows.clone().all(|link| link.dismissed)
+    }
+}
+
+/// What linking pull requests to a chat did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct PullRequestLinks {
+    /// Canonical addresses of the pull requests named, each once.
+    pub(crate) linked: Vec<String>,
+    /// What was named that is not a pull request address.
+    pub(crate) invalid: Vec<String>,
+    /// Whether the chat's list changed.
+    pub(crate) changed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -719,7 +765,7 @@ impl StateStore {
         let mut statement = database.prepare(
             "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir, session_mode, workspace_session_id, \
              (SELECT CASE WHEN role = 'assistant' THEN content END FROM messages \
-              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1) FROM chats \
+              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1), paused FROM chats \
              ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
         let stored_chats = statement
@@ -735,6 +781,7 @@ impl StateStore {
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
                     row.get::<_, Option<String>>(9)?,
+                    row.get::<_, bool>(10)?,
                 ))
             })?
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
@@ -783,13 +830,35 @@ impl StateStore {
             }
             visible_chats.push((chat, workdir));
         }
+        let mut linked_pull_requests = HashMap::<String, Vec<Value>>::new();
+        {
+            let mut statement = database.prepare(
+                "SELECT chat_id, url, state FROM chat_pull_requests WHERE dismissed = 0 \
+                 ORDER BY created_at, rowid",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (chat, url, state) = row?;
+                let mut link = json!({"url": url});
+                if let Some(state) = state {
+                    link["state"] = Value::String(state);
+                }
+                linked_pull_requests.entry(chat).or_default().push(link);
+            }
+        }
         drop(database);
 
         let mut branches = HashMap::<String, Option<String>>::new();
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
         for (
-            (id, folder, title, backend, working, _, _, session_mode, session, last_reply),
+            (id, folder, title, backend, working, _, _, session_mode, session, last_reply, paused),
             workdir,
         ) in visible_chats
         {
@@ -827,6 +896,12 @@ impl StateStore {
             });
             if let Some(branch) = branch {
                 chat["branch"] = Value::String(branch);
+            }
+            if paused {
+                chat["paused"] = Value::Bool(true);
+            }
+            if let Some(links) = linked_pull_requests.remove(&id) {
+                chat["pull_requests"] = Value::Array(links);
             }
             let (settled_at, auto_settle_disabled) =
                 settlement.get(&session).copied().unwrap_or((None, false));
@@ -867,7 +942,10 @@ impl StateStore {
             "chats": chats,
             "sessions": sessions,
             "settlement": true,
+            "linked_pull_requests": true,
             "folder_reorder": true,
+            // The host answers `pause-all` and `resume-all`.
+            "pause_all": true,
             // The host keeps folders of projects; older hosts ignore `group`
             // and `owner` and would make a project instead.
             "folder_groups": true,
@@ -1769,11 +1847,17 @@ impl StateStore {
         let mut message = self.materialize_message(request, text)?;
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let (working, backend) = transaction
+        let (working, backend, paused) = transaction
             .query_row(
-                "SELECT host_working, backend FROM chats WHERE id = ?",
+                "SELECT host_working, backend, paused FROM chats WHERE id = ?",
                 [chat_id],
-                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
@@ -1786,7 +1870,8 @@ impl StateStore {
                     [chat_id],
                     |row| row.get::<_, i64>(0),
                 )?;
-                if working || latest != last_message {
+                // A paused chat waits for the user, not for the host.
+                if working || paused || latest != last_message {
                     return Err(StorageError::InvalidRequest(
                         "This chat has already continued.".into(),
                     ));
@@ -1799,7 +1884,7 @@ impl StateStore {
                     [chat_id],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
                 )?;
-                if working || latest != last_message || !resumable {
+                if working || paused || latest != last_message || !resumable {
                     return Err(StorageError::InvalidRequest(
                         "This chat has moved on since its account ran out.".into(),
                     ));
@@ -1828,8 +1913,10 @@ impl StateStore {
             clear_session_settlement(&transaction, chat_id)?;
             let mut queue = queue_from_column(Some(&stored));
             queue.push(message.prompt.clone());
+            // Writing to a chat still stopping for a pause picks it back up,
+            // so the message runs once the stopped turn ends.
             transaction.execute(
-                "UPDATE chats SET queued = ?, updated_at = ? WHERE id = ?",
+                "UPDATE chats SET queued = ?, paused = 0, updated_at = ? WHERE id = ?",
                 params![
                     serde_json::to_string(&queue).unwrap(),
                     now_seconds(),
@@ -2691,16 +2778,17 @@ impl StateStore {
                 params![chat_id, error, now_seconds()],
             )?;
         }
-        let stored = transaction
+        let (stored, paused) = transaction
             .query_row(
-                "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
+                "SELECT COALESCE(queued, ''), paused FROM chats WHERE id = ?",
                 [chat_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
         let mut queue = queue_from_column(Some(&stored));
-        let next_text = if queue.is_empty() {
+        // A paused chat keeps its queue for when it resumes.
+        let next_text = if paused || queue.is_empty() {
             None
         } else {
             Some(queue.remove(0))
@@ -2829,6 +2917,74 @@ impl StateStore {
         Ok(())
     }
 
+    /// The chats at work, to pause.
+    pub fn working_chats(&self) -> Result<Vec<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement =
+            database.prepare("SELECT id FROM chats WHERE host_working = 1 ORDER BY id")?;
+        let chats = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(chats)
+    }
+
+    /// Pauses the chat if it is at work, or if `background` says its agent
+    /// still runs something between turns. A paused chat holds its queue and
+    /// offers to continue the turn pausing cuts short. False when there was
+    /// nothing to pause, or it already is.
+    pub fn pause_chat(&self, chat_id: &str, background: bool) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chats SET paused = 1, turn_resumable = 1 \
+             WHERE id = ? AND paused = 0 AND (host_working = 1 OR ?)",
+            params![chat_id, background],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn chat_is_paused(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database
+            .query_row("SELECT paused FROM chats WHERE id = ?", [chat_id], |row| {
+                row.get::<_, bool>(0)
+            })
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn paused_chats(&self) -> Result<Vec<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement =
+            database.prepare("SELECT id FROM chats WHERE paused = 1 ORDER BY id")?;
+        let chats = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(chats)
+    }
+
+    /// Pauses an idle chat again after the turn that would have picked it up
+    /// failed to start, so the cut-short turn can still be resumed.
+    pub fn repause_chat(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chats SET paused = 1, turn_resumable = 1 \
+             WHERE id = ? AND paused = 0 AND host_working = 0",
+            [chat_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Lets a paused chat go on without continuing its turn. False when it was
+    /// not paused, for example because a turn has picked it up since.
+    pub fn unpause_chat(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chats SET paused = 0 WHERE id = ? AND paused = 1",
+            [chat_id],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// The chats a restart cut off, once each. They stay in the database until
     /// the desktop decides, so another restart first does not lose them. A chat
     /// cut off while answering the resume prompt is left alone, so a turn that
@@ -2841,7 +2997,8 @@ impl StateStore {
                 "SELECT chats.id, chats.resume_after_restart FROM chats \
                  JOIN messages ON messages.id = chats.resume_after_restart \
                    AND messages.chat_id = chats.id \
-                 WHERE chats.resume_after_restart != 0 AND messages.content != ? \
+                 WHERE chats.resume_after_restart != 0 AND chats.paused = 0 \
+                   AND messages.content != ? \
                  ORDER BY chats.id",
             )?;
             statement
@@ -2904,7 +3061,7 @@ impl StateStore {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let changed = database.execute(
             "UPDATE chats SET host_working = 1, turn_resumable = 0, updated_at = ? \
-             WHERE id = ? AND host_working = 0",
+             WHERE id = ? AND host_working = 0 AND paused = 0",
             params![now_seconds(), chat_id],
         )?;
         Ok(changed > 0)
@@ -3478,6 +3635,234 @@ impl StateStore {
             StorageError::InvalidRequest("GitHub CLI did not return a pull request URL.".into())
         })?;
         Ok(json!({"ok": true, "url": url}))
+    }
+
+    /// Links pull requests to a chat. Returns the addresses linked, in their
+    /// canonical form, those that are not pull requests, and whether anything
+    /// changed. Automatic sources leave alone a link the user removed.
+    pub(crate) fn link_pull_requests(
+        &self,
+        chat_id: &str,
+        urls: &[String],
+        source: LinkSource,
+    ) -> Result<PullRequestLinks, StorageError> {
+        if urls.len() > pull_requests::MAX_PER_REQUEST {
+            return Err(StorageError::InvalidRequest(format!(
+                "Link at most {} pull requests at once.",
+                pull_requests::MAX_PER_REQUEST
+            )));
+        }
+        let mut outcome = PullRequestLinks::default();
+        for url in urls {
+            match pull_requests::normalize_url(url) {
+                Some(url) if !outcome.linked.contains(&url) => outcome.linked.push(url),
+                Some(_) => {}
+                None => outcome.invalid.push(url.chars().take(200).collect()),
+            }
+        }
+        if outcome.linked.is_empty() {
+            return Ok(outcome);
+        }
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let exists = transaction
+            .query_row("SELECT 1 FROM chats WHERE id = ?", [chat_id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(StorageError::NoChat(chat_id.into()));
+        }
+        let now = now_seconds();
+        for url in &outcome.linked {
+            let known = transaction
+                .query_row(
+                    "SELECT dismissed FROM chat_pull_requests WHERE chat_id = ? AND url = ?",
+                    params![chat_id, url],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?;
+            let full = || -> Result<bool, StorageError> {
+                let count: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM chat_pull_requests WHERE chat_id = ? AND dismissed = 0",
+                    [chat_id],
+                    |row| row.get(0),
+                )?;
+                Ok(count as usize >= pull_requests::MAX_PER_CHAT)
+            };
+            let refuse = || {
+                StorageError::InvalidRequest(format!(
+                    "A chat can link at most {} pull requests.",
+                    pull_requests::MAX_PER_CHAT
+                ))
+            };
+            match known {
+                Some(false) => {}
+                Some(true) if source.restores() => {
+                    if full()? {
+                        return Err(refuse());
+                    }
+                    transaction.execute(
+                        "UPDATE chat_pull_requests SET dismissed = 0, source = ?, created_at = ? \
+                         WHERE chat_id = ? AND url = ?",
+                        params![source.as_str(), now, chat_id, url],
+                    )?;
+                    outcome.changed = true;
+                }
+                Some(true) => {}
+                None => {
+                    if full()? {
+                        return Err(refuse());
+                    }
+                    transaction.execute(
+                        "INSERT INTO chat_pull_requests (chat_id, url, source, created_at) \
+                         VALUES (?, ?, ?, ?)",
+                        params![chat_id, url, source.as_str(), now],
+                    )?;
+                    outcome.changed = true;
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
+    /// Removes a pull request from a chat. The link is kept as removed, so the
+    /// branch lookup and command detection do not bring it back.
+    pub(crate) fn unlink_pull_request(
+        &self,
+        chat_id: &str,
+        url: &str,
+    ) -> Result<bool, StorageError> {
+        let url = pull_requests::normalize_url(url).ok_or_else(|| {
+            StorageError::InvalidRequest("That is not a pull request address.".into())
+        })?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chat_pull_requests SET dismissed = 1 \
+             WHERE chat_id = ? AND url = ? AND dismissed = 0",
+            params![chat_id, url],
+        )?;
+        if changed == 0
+            && database
+                .query_row("SELECT 1 FROM chats WHERE id = ?", [chat_id], |_| Ok(()))
+                .optional()?
+                .is_none()
+        {
+            return Err(StorageError::NoChat(chat_id.into()));
+        }
+        Ok(changed > 0)
+    }
+
+    /// The pull requests linked to any of these chats, each once.
+    #[cfg(test)]
+    pub(crate) fn linked_pull_request_urls(
+        &self,
+        chats: &[String],
+    ) -> Result<Vec<String>, StorageError> {
+        Ok(self.link_state(chats)?.linked())
+    }
+
+    /// Every link of these chats, removed ones too, as a settling decision
+    /// reads them. See [`LinkState`].
+    pub(crate) fn link_state(&self, chats: &[String]) -> Result<LinkState, StorageError> {
+        let database = self.reader()?;
+        read_link_state(&database, chats)
+    }
+
+    /// Records a pull request's state on every chat that links it. Returns
+    /// whether any of them changed.
+    pub(crate) fn set_pull_request_state(
+        &self,
+        url: &str,
+        state: PullRequestState,
+    ) -> Result<bool, StorageError> {
+        let state = match state {
+            PullRequestState::Open => "open",
+            PullRequestState::Closed => "closed",
+            PullRequestState::Merged => "merged",
+        };
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chat_pull_requests SET state = ? WHERE url = ? AND state IS NOT ?",
+            params![state, url, state],
+        )?;
+        database.execute(
+            "UPDATE chat_pull_requests SET checked_at = ? WHERE url = ?",
+            params![now_seconds(), url],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Asks GitHub again about the pull requests linked to a chat that have
+    /// not merged and were not asked about in the last minute, a few at a
+    /// time, longest unchecked first, and records what
+    /// changed. Merged ones cannot change, so they are left alone. Returns
+    /// whether any state changed.
+    /// Also returns whether it asked about as many as it may at once, so
+    /// more may be waiting.
+    pub(crate) fn refresh_linked_pull_request_states(
+        &self,
+        chat_id: &str,
+    ) -> Result<(bool, bool), StorageError> {
+        const MAX_REFRESHED: i64 = 8;
+        // A link asked about this recently is not asked about again.
+        const FRESH_SECONDS: i64 = 60;
+        let (urls, workdir) = {
+            let database = self.reader()?;
+            let mut statement = database.prepare(
+                "SELECT url FROM chat_pull_requests \
+                 WHERE chat_id = ? AND dismissed = 0 AND state IS NOT 'merged' \
+                 AND (checked_at IS NULL OR checked_at <= ?) \
+                 ORDER BY checked_at IS NOT NULL, checked_at, created_at, rowid LIMIT ?",
+            )?;
+            let urls = statement
+                .query_map(
+                    params![chat_id, now_seconds() - FRESH_SECONDS, MAX_REFRESHED],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            let workdir = resolve_chat_workdir(&database, &self.workspace_root, chat_id)
+                .map(PathBuf::from)
+                .ok()
+                .filter(|workdir| workdir.is_dir())
+                .unwrap_or_else(|| self.workspace_root.clone());
+            (urls, workdir)
+        };
+        let full = urls.len() as i64 == MAX_REFRESHED;
+        let mut changed = false;
+        for url in urls {
+            match self.pull_request_snapshot_at(&workdir, &url) {
+                Ok(Some(snapshot)) => {
+                    changed |= self.set_pull_request_state(&url, snapshot.state)?
+                }
+                Ok(None) => self.mark_pull_request_checked(&url)?,
+                Err(error) => {
+                    self.mark_pull_request_checked(&url)?;
+                    eprintln!("xd: cannot read pull request {url}: {error}");
+                }
+            }
+        }
+        Ok((changed, full))
+    }
+
+    fn mark_pull_request_checked(&self, url: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE chat_pull_requests SET checked_at = ? WHERE url = ?",
+            params![now_seconds(), url],
+        )?;
+        Ok(())
+    }
+
+    /// What GitHub says about a pull request named by its address. Answers
+    /// from `workdir`, so gh picks the same host and account as the chat's.
+    pub(crate) fn pull_request_snapshot_at(
+        &self,
+        workdir: &Path,
+        url: &str,
+    ) -> Result<Option<PullRequestSnapshot>, StorageError> {
+        Ok(read_pull_request(workdir, Some(url))?.map(|(_, snapshot)| snapshot))
     }
 
     pub(crate) fn prepare_git_draft(&self, request: &Value) -> Result<GitDraftSpec, StorageError> {
@@ -4707,13 +5092,13 @@ impl StateStore {
     }
 
     /// Sessions in this workspace that match `filter`, a condition on the
-    /// session `s`, with nothing running or queued in any member chat.
+    /// session `s`, with nothing running, paused, or queued in any member chat.
     fn quiet_sessions(&self, filter: &str) -> Result<Vec<SettlementCandidate>, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let root = self.workspace_root.to_string_lossy();
         let mut statement = database.prepare(&format!(
             "SELECT s.id, s.created_at, c.id, c.folder_id, c.workdir, c.original_workdir, \
-               c.host_working, c.queued, c.created_at, c.last_user_message_at, \
+               c.host_working OR c.paused, c.queued, c.created_at, c.last_user_message_at, \
                (SELECT created_at FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) \
              FROM workspace_sessions s \
              JOIN chats c ON c.workspace_session_id = s.id \
@@ -4783,14 +5168,22 @@ impl StateStore {
     /// the sweep looked: what the user does always outranks the rules. One
     /// statement both checks and updates, so no message can land between them,
     /// and the rules the sweep decided under must still be the ones in force.
+    /// `links_seen`, when given, is the session's links as the decision read
+    /// them. A link added, removed or restored since then voids it.
     pub(crate) fn auto_settle_session(
         &self,
         candidate: &SettlementCandidate,
         settled_at: i64,
         decided_under: &AutoSettleSettings,
+        links_seen: Option<&LinkState>,
     ) -> Result<bool, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         if read_auto_settle_settings(&database)? != *decided_under {
+            return Ok(false);
+        }
+        if let Some(links_seen) = links_seen
+            && read_link_state(&database, &candidate.chats)? != *links_seen
+        {
             return Ok(false);
         }
         let changed = database.execute(
@@ -4978,49 +5371,21 @@ impl StateStore {
 
     /// The pull request of the branch checked out in `workdir`, if it has one.
     /// An error means GitHub could not say, which is not the same as no.
+    #[cfg(test)]
     pub(crate) fn pull_request_snapshot(
         &self,
         workdir: &Path,
     ) -> Result<Option<PullRequestSnapshot>, StorageError> {
-        let (status, stdout, stderr) = run_gh(
-            workdir,
-            &[
-                "pr",
-                "view",
-                "--json",
-                "state,mergedAt,closedAt",
-                "--jq",
-                "{state, finished_at: ((.mergedAt // .closedAt) | if . then fromdate else null end)}",
-            ],
-        )?;
-        if !status.success() {
-            let complaint = String::from_utf8_lossy(&stderr);
-            if complaint.contains("no pull requests found") {
-                return Ok(None);
-            }
-            return Err(command_failure(
-                &stdout,
-                &stderr,
-                "The GitHub CLI could not read this pull request.",
-            ));
-        }
-        let parsed: Value = serde_json::from_slice(&stdout).map_err(|error| {
-            StorageError::InvalidRequest(format!("Unreadable pull request: {error}"))
-        })?;
-        let state = match parsed.get("state").and_then(Value::as_str) {
-            Some("OPEN") => PullRequestState::Open,
-            Some("CLOSED") => PullRequestState::Closed,
-            Some("MERGED") => PullRequestState::Merged,
-            other => {
-                return Err(StorageError::InvalidRequest(format!(
-                    "Unknown pull request state: {other:?}"
-                )));
-            }
-        };
-        Ok(Some(PullRequestSnapshot {
-            state,
-            finished_at: parsed.get("finished_at").and_then(Value::as_i64),
-        }))
+        Ok(read_pull_request(workdir, None)?.map(|(_, snapshot)| snapshot))
+    }
+
+    /// As [`Self::pull_request_snapshot`], with the pull request's address
+    /// when GitHub gave one.
+    pub(crate) fn branch_pull_request(
+        &self,
+        workdir: &Path,
+    ) -> Result<Option<(Option<String>, PullRequestSnapshot)>, StorageError> {
+        read_pull_request(workdir, None)
     }
 
     pub fn rename_chat(&self, request: &Value) -> Result<Value, StorageError> {
@@ -5583,7 +5948,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             .optional()?
             .and_then(|version| version.parse::<u32>().ok())
             .unwrap_or(0);
-        if version > 26 {
+        if version > 27 {
             return Err(StorageError::InvalidRequest(format!(
                 "The chat database requires a newer xd version (schema {version})."
             )));
@@ -5603,6 +5968,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_backend_choices(database)?;
             retire_jcode_defaults(database)?;
             ensure_draft_chunks(database)?;
+            ensure_chat_pull_requests(database)?;
             return Ok(());
         }
     }
@@ -5700,6 +6066,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_backend_choices(database)?;
     retire_jcode_defaults(database)?;
     ensure_draft_chunks(database)?;
+    ensure_chat_pull_requests(database)?;
     Ok(())
 }
 
@@ -6048,6 +6415,12 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
             [],
         )?;
     }
+    if !columns.contains("paused") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN paused INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -6355,7 +6728,7 @@ const DELETABLE_SESSION: &str =
 /// Whether any chat in session `?1` has done anything since the sweep looked:
 /// `?2` is the user's latest message or start it saw, `?3` the newest activity.
 const SESSION_CHANGED_SINCE: &str = "EXISTS (SELECT 1 FROM chats c WHERE c.workspace_session_id = ?1 AND ( \
-       c.host_working != 0 OR COALESCE(c.queued, '') NOT IN ('', '[]') \
+       c.host_working != 0 OR c.paused != 0 OR COALESCE(c.queued, '') NOT IN ('', '[]') \
        OR c.last_user_message_at / 1000000 > ?2 OR c.created_at > ?2 \
        OR EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.created_at > ?3)))";
 
@@ -7756,6 +8129,58 @@ fn head_move_count(workdir: &Path) -> Option<u64> {
         .flatten()
 }
 
+/// What GitHub says about the pull request at `target`, or about the branch
+/// checked out in `workdir` without one: its address when given, and its state.
+fn read_pull_request(
+    workdir: &Path,
+    target: Option<&str>,
+) -> Result<Option<(Option<String>, PullRequestSnapshot)>, StorageError> {
+    let mut arguments = vec!["pr", "view"];
+    arguments.extend(target);
+    arguments.extend([
+        "--json",
+        "url,state,mergedAt,closedAt",
+        "--jq",
+        "{url, state, finished_at: ((.mergedAt // .closedAt) | if . then fromdate else null end)}",
+    ]);
+    let (status, stdout, stderr) = run_gh(workdir, &arguments)?;
+    if !status.success() {
+        let complaint = String::from_utf8_lossy(&stderr);
+        if complaint.contains("no pull requests found") {
+            return Ok(None);
+        }
+        return Err(command_failure(
+            &stdout,
+            &stderr,
+            "The GitHub CLI could not read this pull request.",
+        ));
+    }
+    let parsed: Value = serde_json::from_slice(&stdout).map_err(|error| {
+        StorageError::InvalidRequest(format!("Unreadable pull request: {error}"))
+    })?;
+    let state = match parsed.get("state").and_then(Value::as_str) {
+        Some("OPEN") => PullRequestState::Open,
+        Some("CLOSED") => PullRequestState::Closed,
+        Some("MERGED") => PullRequestState::Merged,
+        other => {
+            return Err(StorageError::InvalidRequest(format!(
+                "Unknown pull request state: {other:?}"
+            )));
+        }
+    };
+    let url = parsed
+        .get("url")
+        .and_then(Value::as_str)
+        .and_then(pull_requests::normalize_url);
+    Ok(Some((
+        url,
+        PullRequestSnapshot {
+            state,
+            finished_at: parsed.get("finished_at").and_then(Value::as_i64),
+        },
+    )))
+}
+
 fn extract_web_url(output: &[u8]) -> Option<String> {
     String::from_utf8_lossy(output)
         .split_whitespace()
@@ -8619,8 +9044,9 @@ fn prepare_turn(
     text: &str,
     worktree_name: Option<&str>,
 ) -> Result<TurnSpec, StorageError> {
+    // Any turn picks a paused chat back up.
     transaction.execute(
-        "UPDATE chats SET turn_resumable = 0 WHERE id = ?",
+        "UPDATE chats SET turn_resumable = 0, paused = 0 WHERE id = ?",
         [chat_id],
     )?;
     let chat = transaction
@@ -9342,6 +9768,44 @@ fn ensure_draft_chunks(database: &Connection) -> Result<(), StorageError> {
             ordinal INTEGER NOT NULL, data BLOB NOT NULL,
             PRIMARY KEY(event_id, ordinal));
          UPDATE meta SET value = '26' WHERE key = 'schema_version';",
+    )?;
+    Ok(())
+}
+
+/// Every link of some chats, removed ones too, in a fixed order.
+fn read_link_state(database: &Connection, chats: &[String]) -> Result<LinkState, StorageError> {
+    let mut statement = database.prepare_cached(
+        "SELECT url, dismissed FROM chat_pull_requests WHERE chat_id = ? \
+         ORDER BY created_at, rowid",
+    )?;
+    let mut links = Vec::new();
+    for chat in chats {
+        for row in statement.query_map([chat], |row| Ok((row.get(0)?, row.get(1)?)))? {
+            let (url, dismissed) = row?;
+            links.push(LinkRow {
+                chat: chat.clone(),
+                url,
+                dismissed,
+            });
+        }
+    }
+    Ok(LinkState(links))
+}
+
+/// Pull requests linked to each chat. A link the user removed stays, marked
+/// `dismissed`, so automatic linking does not bring it back. `state` is the
+/// last state GitHub reported, if any: `open`, `closed` or `merged`, and
+/// `checked_at` when the host last asked, so refreshes take turns.
+fn ensure_chat_pull_requests(database: &Connection) -> Result<(), StorageError> {
+    database.execute_batch(
+        "CREATE TABLE IF NOT EXISTS chat_pull_requests (
+            chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            url TEXT NOT NULL, source TEXT NOT NULL, state TEXT,
+            dismissed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+            checked_at INTEGER,
+            PRIMARY KEY(chat_id, url));
+         CREATE INDEX IF NOT EXISTS chat_pull_requests_url ON chat_pull_requests (url);
+         UPDATE meta SET value = '27' WHERE key = 'schema_version';",
     )?;
     Ok(())
 }
@@ -11012,7 +11476,7 @@ mod tests {
                     |row| row.get::<_, String>(0)
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         let fts_exists: bool = database
             .query_row(
@@ -13452,6 +13916,60 @@ mod tests {
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_none());
         assert!(resumable());
+    }
+
+    #[test]
+    fn a_paused_chat_holds_its_queue_and_stays_out_of_settling() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let send = |text: &str| {
+            store
+                .prepare_send(&json!({"chat": "chat", "text": text}))
+                .unwrap()
+        };
+
+        assert_eq!(store.settlement_candidates().unwrap().len(), 1);
+        // Nothing at work: nothing to pause, unless background work says so.
+        assert!(!store.pause_chat("chat", false).unwrap());
+        send("first");
+        send("queued");
+        assert_eq!(store.working_chats().unwrap(), ["chat"]);
+        assert!(store.pause_chat("chat", false).unwrap());
+        assert!(!store.pause_chat("chat", false).unwrap());
+        assert!(store.chat_is_paused("chat").unwrap());
+        assert!(store.settlement_candidates().unwrap().is_empty());
+
+        let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
+        assert!(finish.next.is_none());
+        let chat = store.chat("chat").unwrap();
+        assert_eq!(chat["working"], false);
+        assert_eq!(chat["queue"], json!(["queued"]));
+        assert_eq!(chat["resumable"], true);
+        assert_eq!(store.tree().unwrap()["chats"][0]["paused"], true);
+        assert_eq!(store.paused_chats().unwrap(), ["chat"]);
+        assert!(store.settlement_candidates().unwrap().is_empty());
+        // Nothing the host does by itself picks a paused chat back up.
+        let latest = store.latest_user_message("chat").unwrap();
+        let go_on = json!({"chat": "chat", "text": "go on"});
+        assert!(store.prepare_after_limit(&go_on, latest).is_err());
+        assert!(store.prepare_continuation(&go_on, latest).is_err());
+        assert!(!store.begin_background_turn("chat").unwrap());
+        assert!(store.chat_is_paused("chat").unwrap());
+
+        // Resuming starts a turn, and any turn picks the chat back up.
+        store
+            .prepare_resume(&json!({"chat": "chat", "text": CONTINUE_PROMPT}))
+            .unwrap();
+        assert!(!store.chat_is_paused("chat").unwrap());
+        assert!(store.tree().unwrap()["chats"][0].get("paused").is_none());
+        let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
+        assert!(finish.next.is_some());
+        assert!(!store.unpause_chat("chat").unwrap());
     }
 
     /// Sessions from before accounts were kept are filed once, under the login
