@@ -1409,6 +1409,9 @@ struct PullRequestPanel {
     text: String,
     /// The link request still awaiting its answer.
     linking: Option<u64>,
+    /// The field's text when that request went out. Its answer rewrites the
+    /// field only if the user has not typed since.
+    sent: String,
     error: Option<String>,
 }
 
@@ -9913,6 +9916,7 @@ impl XdDesktop {
             chat_id,
             text: String::new(),
             linking: None,
+            sent: String::new(),
             error: None,
         });
         self.pull_request_input
@@ -9983,6 +9987,7 @@ impl XdDesktop {
             match sent {
                 Ok(()) => {
                     panel.linking = Some(generation);
+                    panel.sent = panel.text.clone();
                     panel.error = None;
                 }
                 Err(error) => panel.error = Some(error),
@@ -10048,9 +10053,13 @@ impl XdDesktop {
             })
             .unwrap_or_default();
         panel.error = (!invalid.is_empty()).then(|| NOT_A_PULL_REQUEST_LINK.to_owned());
-        panel.text = invalid.clone();
-        self.pull_request_input
-            .update(cx, |input, cx| input.set_text(invalid, cx));
+        // Text typed while the request was out is the user's next one, so
+        // it stays.
+        if panel.text == panel.sent {
+            panel.text = invalid.clone();
+            self.pull_request_input
+                .update(cx, |input, cx| input.set_text(invalid, cx));
+        }
         cx.notify();
     }
 
@@ -24645,6 +24654,7 @@ Binary files /dev/null and b/image.png differ\n";
                 Some("xd is not connected to a host.")
             );
             panel.linking = Some(7);
+            panel.sent = panel.text.clone();
             desktop.handle_reply(
                 RequestKind::LinkPullRequests {
                     chat_id: "pr-chat".into(),
@@ -24677,6 +24687,29 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(panel.linking, None);
             assert_eq!(panel.error.as_deref(), Some(NOT_A_PULL_REQUEST_LINK));
             assert_eq!(panel.text, "not-a-link", "the refused address stays");
+
+            panel.linking = Some(9);
+            panel.sent = "https://github.com/o/r/pull/8".into();
+            panel.text = "https://github.com/o/r/pull/9 typed meanwhile".into();
+            desktop.handle_reply(
+                RequestKind::LinkPullRequests {
+                    chat_id: "pr-chat".into(),
+                    generation: 9,
+                },
+                serde_json::from_value(serde_json::json!({
+                    "ok": true,
+                    "linked": ["https://github.com/o/r/pull/8"],
+                    "invalid": [],
+                }))
+                .unwrap(),
+                None,
+                cx,
+            );
+            let panel = desktop.pull_request_panel.as_mut().unwrap();
+            assert_eq!(
+                panel.text, "https://github.com/o/r/pull/9 typed meanwhile",
+                "what was typed while the request was out stays"
+            );
 
             panel.linking = Some(8);
             desktop.handle_reply(

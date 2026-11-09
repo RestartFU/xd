@@ -191,8 +191,9 @@ pub(crate) fn finished_in_background(id: &str, output_file: Option<&str>) -> Vec
 }
 
 /// The leading words of each simple command in a shell script, past variable
-/// assignments and wrappers such as `env` or `timeout 60`. Quoted text is
-/// left out, so `echo "gh pr create"` runs `echo` and nothing else.
+/// assignments and wrappers such as `env` or `timeout 60`. Separators inside
+/// quotes do not split commands, so `echo "a; gh pr create"` runs `echo` and
+/// nothing else, and quoted words count without their quotes.
 fn shell_commands(script: &str) -> Vec<Vec<&str>> {
     let mut segments = Vec::new();
     let mut start = 0;
@@ -240,8 +241,10 @@ fn shell_commands(script: &str) -> Vec<Vec<&str>> {
                     break;
                 }
             }
+            // A quoted word, such as the repository in `gh -R "o/r"`, counts
+            // without its quotes.
             let words = words
-                .take_while(|word| !word.starts_with(['\'', '"']))
+                .map(|word| word.trim_matches(['\'', '"']))
                 .collect::<Vec<_>>();
             (!words.is_empty()).then_some(words)
         })
@@ -312,6 +315,8 @@ mod tests {
             "gh --repo o/other pr create --fill",
             "gh -R o/other pr create --fill",
             "gh pr -R o/other create --fill",
+            "gh -R \"o/other\" pr create --title \"Fix it\"",
+            "gh --repo='o/other' pr create --fill",
         ] {
             assert_eq!(created_by(command, output).len(), 1, "{command}");
         }
