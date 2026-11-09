@@ -27,7 +27,6 @@ internal fun BackendIcon(
     val drawable = when (backend) {
         "claude" -> R.drawable.ic_backend_claude
         "codex" -> R.drawable.ic_backend_codex
-        "jcode" -> R.drawable.ic_backend_jcode
         "copilot" -> R.drawable.ic_backend_copilot
         else -> return
     }

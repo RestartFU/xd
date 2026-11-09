@@ -2811,7 +2811,7 @@ mod tests {
                     "id": "chat-1",
                     "folder": "folder-1",
                     "title": "Chat",
-                    "backend": "jcode",
+                    "backend": "claude",
                     "terminal_working": false
                 }],
                 "terminal_activity_epoch": "host-a",
@@ -2827,7 +2827,7 @@ mod tests {
                     "id": "chat-1",
                     "folder": "folder-1",
                     "title": "Chat",
-                    "backend": "jcode",
+                    "backend": "claude",
                     "terminal_working": false
                 }],
                 "terminal_activity_epoch": "host-a",

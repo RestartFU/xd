@@ -144,7 +144,6 @@ const EMBEDDED_UI_FONTS: [&[u8]; 7] = [
 pub(crate) const MONO: &str = "JetBrains Mono";
 const CLAUDE_ICON: &str = "icons/claude.svg";
 const CODEX_ICON: &str = "icons/codex.svg";
-const JCODE_ICON: &str = "icons/jcode.svg";
 const COPILOT_ICON: &str = "icons/copilot.svg";
 const XD_MARK_ICON: &str = "icons/xd-mark.svg";
 const SEND_ICON: &str = "icons/send.svg";
@@ -799,7 +798,7 @@ fn agent_icon(agent: AgentCli) -> &'static str {
     match agent {
         AgentCli::Codex => CODEX_ICON,
         AgentCli::Claude => CLAUDE_ICON,
-        AgentCli::Jcode => JCODE_ICON,
+        AgentCli::Other => TERMINAL_ICON,
     }
 }
 
@@ -1150,20 +1149,6 @@ impl TerminalPanel {
 #[allow(dead_code)]
 fn terminal_tab_title(agent: Option<AgentCli>) -> String {
     agent.map(AgentCli::label).unwrap_or("Terminal").to_owned()
-}
-
-fn jcode_terminal_screen_working(screen: &str) -> Option<bool> {
-    let prompt = screen
-        .lines()
-        .rev()
-        .map(str::trim_start)
-        .find(|line| !line.is_empty())?;
-    let marker = prompt.trim_start_matches(|character: char| character.is_ascii_digit());
-    match marker.chars().next()? {
-        '…' => Some(true),
-        '>' => Some(false),
-        _ => None,
-    }
 }
 
 fn terminal_runtime_event(event: SessionEvent) -> (ChatEndpoint, &'static str, Value) {
@@ -6063,18 +6048,6 @@ impl XdDesktop {
             "terminal-closed" => Self::apply_terminal_closed_event(panel, body),
             _ => false,
         };
-        let terminal_working = (name == "terminal-output" && changed)
-            .then(|| {
-                let terminal_id = terminal_id?;
-                let session = panel
-                    .sessions
-                    .iter()
-                    .find(|session| session.id == terminal_id)?;
-                (session.agent == Some(AgentCli::Jcode)).then(|| {
-                    jcode_terminal_screen_working(&session.screen.rendered_with_cursor().text)
-                })?
-            })
-            .flatten();
         if needs_hydration {
             panel.loading = false;
         }
@@ -6091,9 +6064,6 @@ impl XdDesktop {
             ) {
                 self.sync_terminal_input_mode(cx);
             }
-        }
-        if let (Some(terminal_id), Some(working)) = (terminal_id, terminal_working) {
-            self.apply_terminal_tab_activity(endpoint, &chat_id, terminal_id, Some(working));
         }
         if name == "terminal-closed"
             && let Some(terminal_id) = terminal_id
@@ -12338,7 +12308,11 @@ impl XdDesktop {
                             colors.muted,
                             colors,
                         ))
-                        .child(presentation::provider_name(agent.protocol_name())),
+                        .child(if agent == AgentCli::Other {
+                            "Unsupported assistant"
+                        } else {
+                            presentation::provider_name(agent.protocol_name())
+                        }),
                 )
             })
             .when_some(branch, |toolbar, branch| {
@@ -14110,7 +14084,7 @@ impl XdDesktop {
                             .line_height(px(21.0))
                             .text_color(rgb(colors.muted))
                             .child(
-                                "Create a workspace, then start a Codex, Claude, or JCode session in it. Sessions keep running when you close the window.",
+                                "Create a workspace, then start a Codex or Claude session in it. Sessions keep running when you close the window.",
                             ),
                     )
                     .child(
@@ -16307,7 +16281,7 @@ impl XdDesktop {
             .iter()
             .find(|backend| backend.id == self.model.backend)
             .map(|backend| !backend.efforts.is_empty())
-            .unwrap_or(self.model.backend != "jcode");
+            .unwrap_or(matches!(agent, Some(AgentCli::Codex | AgentCli::Claude)));
         let options = [
             ("model", self.model.selected_model_label()),
             (
@@ -19591,9 +19565,6 @@ impl AssetSource for EmbeddedIcons {
             CODEX_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/codex.svg").as_slice(),
             )),
-            JCODE_ICON => Some(Cow::Borrowed(
-                include_bytes!("../assets/icons/jcode.svg").as_slice(),
-            )),
             COPILOT_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/copilot.svg").as_slice(),
             )),
@@ -19734,7 +19705,6 @@ impl AssetSource for EmbeddedIcons {
         Ok(vec![
             CLAUDE_ICON.into(),
             CODEX_ICON.into(),
-            JCODE_ICON.into(),
             COPILOT_ICON.into(),
             XD_MARK_ICON.into(),
             SEND_ICON.into(),
@@ -24824,13 +24794,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[test]
     fn agent_marks_and_selection_icon_are_embedded_and_drawable() {
-        for path in [
-            CLAUDE_ICON,
-            CODEX_ICON,
-            JCODE_ICON,
-            COPILOT_ICON,
-            CHECK_ICON,
-        ] {
+        for path in [CLAUDE_ICON, CODEX_ICON, COPILOT_ICON, CHECK_ICON] {
             let bytes = EmbeddedIcons
                 .load(path)
                 .expect("embedded marks load")
@@ -25419,7 +25383,7 @@ Binary files /dev/null and b/image.png differ\n";
             &mut activity,
             ChatEndpoint::Local,
             chat,
-            "jcode",
+            "shell",
             Some(false),
         ));
         assert!(!update_terminal_activity_state(
@@ -25465,7 +25429,7 @@ Binary files /dev/null and b/image.png differ\n";
                 "terminal-activity",
                 serde_json::json!({
                     "chat": "chat-1",
-                    "terminal": "jcode",
+                    "terminal": "shell",
                     "working": false,
                     "terminal_working": true,
                 }),
@@ -25476,7 +25440,7 @@ Binary files /dev/null and b/image.png differ\n";
                 "terminal-closed",
                 serde_json::json!({
                     "chat": "chat-1",
-                    "terminal": "jcode",
+                    "terminal": "shell",
                 }),
                 None,
                 cx,
@@ -25503,7 +25467,7 @@ Binary files /dev/null and b/image.png differ\n";
                 auto_settle_disabled: false,
             }];
             let generation = desktop.remote_generation;
-            for (terminal, working, aggregate) in [("claude", true, true), ("jcode", false, true)] {
+            for (terminal, working, aggregate) in [("claude", true, true), ("shell", false, true)] {
                 desktop.handle_remote_update(
                     HostUpdate::Event {
                         name: "terminal-activity".into(),
@@ -25527,7 +25491,7 @@ Binary files /dev/null and b/image.png differ\n";
                     name: "terminal-closed".into(),
                     body: serde_json::json!({
                         "chat": "remote-chat",
-                        "terminal": "jcode",
+                        "terminal": "shell",
                     })
                     .as_object()
                     .unwrap()
@@ -26450,22 +26414,6 @@ Binary files /dev/null and b/image.png differ\n";
             .0;
         assert!(!interrupt.contains("TextSelection::selected"));
         assert!(interrupt.contains("self.terminal_bytes(vec![3], cx)"));
-    }
-
-    #[test]
-    fn jcode_prompt_marker_reports_working_and_idle_states() {
-        assert_eq!(
-            jcode_terminal_screen_working("history\n18… 󰌘\n"),
-            Some(true)
-        );
-        assert_eq!(
-            jcode_terminal_screen_working("history\n19> 󰖟\n"),
-            Some(false)
-        );
-        assert_eq!(
-            jcode_terminal_screen_working("ordinary shell output\n"),
-            None
-        );
     }
 
     #[gpui::test]

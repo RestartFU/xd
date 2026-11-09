@@ -675,7 +675,7 @@ private fun MinimalProjectsHome(
                 }
                 if (rows.isEmpty()) {
                     item("empty-projects") {
-                        EmptyCard("Create a workspace, then start a Codex, Claude, or JCode session.")
+                        EmptyCard("Create a workspace, then start a Codex or Claude session.")
                     }
                 } else {
                     items(rows, key = ProjectTreeRow::id) { row ->
@@ -1894,7 +1894,7 @@ private fun SessionRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        BackendIcon(session.agent.wire, size = 15.dp)
+        BackendIcon(session.backend, size = 15.dp)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
                 session.title,

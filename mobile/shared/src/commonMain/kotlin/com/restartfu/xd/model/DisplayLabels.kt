@@ -22,7 +22,6 @@ public object DisplayLabels {
             ?: when (id) {
                 "codex" -> "Codex"
                 "claude" -> "Claude Code"
-                "jcode" -> "JCode"
                 "copilot" -> "GitHub Copilot"
                 else -> id
             }

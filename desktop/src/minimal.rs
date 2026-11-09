@@ -4,7 +4,10 @@ use xd_desktop::model::{ChatSummary, Folder};
 pub(crate) enum AgentCli {
     Codex,
     Claude,
-    Jcode,
+    /// An assistant this build does not run, such as the retired JCode. Its
+    /// chats still list and open with their history, but the host refuses to
+    /// send to them, and nothing new starts on it.
+    Other,
 }
 
 impl AgentCli {
@@ -13,10 +16,10 @@ impl AgentCli {
             Some(Self::Codex)
         } else if backend.eq_ignore_ascii_case("claude") {
             Some(Self::Claude)
-        } else if backend.eq_ignore_ascii_case("jcode") {
-            Some(Self::Jcode)
-        } else {
+        } else if backend.is_empty() {
             None
+        } else {
+            Some(Self::Other)
         }
     }
 
@@ -24,7 +27,7 @@ impl AgentCli {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
-            Self::Jcode => "JCode",
+            Self::Other => "Assistant",
         }
     }
 
@@ -32,7 +35,8 @@ impl AgentCli {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
-            Self::Jcode => "jcode",
+            // Never sent: no chat or terminal starts on it.
+            Self::Other => "",
         }
     }
 
@@ -40,7 +44,6 @@ impl AgentCli {
         match agent {
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
-            "jcode" => Some(Self::Jcode),
             _ => None,
         }
     }
@@ -276,8 +279,11 @@ pub(crate) fn resumable_session(
     last_chat: Option<&str>,
     chats: &[ChatSummary],
 ) -> Option<(String, String, AgentCli)> {
+    // Only a chat the user can carry on with: one on an assistant this build
+    // runs.
     let supported = |chat: &&ChatSummary| {
-        chat.settled_at.is_none() && AgentCli::from_backend(&chat.backend).is_some()
+        chat.settled_at.is_none()
+            && AgentCli::from_backend(&chat.backend).is_some_and(|agent| agent != AgentCli::Other)
     };
     let chat = last_chat
         .and_then(|chat_id| {
@@ -661,17 +667,37 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_backends_never_become_direct_cli_sessions() {
+    fn sessions_on_an_unknown_assistant_still_list_and_open() {
         let folders = vec![folder("one", "Compiler")];
         let chats = vec![
             session("a", "one", "Supported", "codex", false),
-            session("b", "one", "Unsupported", "shell", true),
+            session("b", "one", "Old task", "jcode", false),
         ];
 
-        assert_eq!(project_sessions("one", &chats).len(), 1);
-        assert_eq!(project_sessions("one", &chats)[0].id, "a");
-        assert_eq!(project_cards(&folders, &chats)[0].sessions, 1);
-        assert_eq!(project_cards(&folders, &chats)[0].working, 0);
+        let sessions = project_sessions("one", &chats);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[1].id, "b");
+        assert_eq!(sessions[1].agent, AgentCli::Other);
+        assert_eq!(sessions[1].agent.label(), "Assistant");
+        assert_eq!(project_cards(&folders, &chats)[0].sessions, 2);
+        assert_eq!(
+            reconcile_route(
+                &MinimalRoute::Cli {
+                    project_id: "one".into(),
+                    chat_id: "b".into(),
+                    agent: AgentCli::Other,
+                },
+                &folders,
+                &chats,
+            ),
+            MinimalRoute::Cli {
+                project_id: "one".into(),
+                chat_id: "b".into(),
+                agent: AgentCli::Other,
+            }
+        );
+        assert_eq!(AgentCli::from_backend(""), None);
+        assert_eq!(AgentCli::from_protocol_name("jcode"), None);
     }
 
     #[test]

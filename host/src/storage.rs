@@ -100,14 +100,12 @@ const CLAUDE_MODELS: &[(&str, &str, i64)] = &[
     ("claude-haiku-4-5", "Claude Haiku 4.5", 0),
     ("claude-opus-4-8", "Claude Opus 4.8", 0),
 ];
-const JCODE_MODELS: &[(&str, &str, i64)] = &[("default", "Automatic", 0)];
 const BASE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const CHAT_TITLES_ENABLED_KEY: &str = "chat_titles_enabled";
 const MAX_CHAT_TITLE_MESSAGE_CHARS: usize = 2_000;
 /// The assistants that can title chats and name worktrees, each with its
 /// low-cost models, newest first. An older one serves a CLI that does not offer
 /// the newest yet. Codex keeps to GPT-6 Luna: an older Luna writes worse names.
-/// JCode has no model choice to make, so its chats keep the name they were given.
 const CHAT_TITLE_MODELS: &[(&str, &[&str])] = &[
     ("codex", &["gpt-6-luna"]),
     (
@@ -1424,15 +1422,6 @@ impl StateStore {
         let backends = [
             catalog_backend("claude", "Claude Code", CLAUDE_MODELS, "ultracode"),
             catalog_backend("codex", "Codex", CODEX_MODELS, "ultra"),
-            json!({
-                "id": "jcode",
-                "name": "JCode",
-                "default_model": "default",
-                "models": JCODE_MODELS.iter().map(|(id, name, context_window)| {
-                    json!({"id": id, "name": name, "context_window": context_window})
-                }).collect::<Vec<_>>(),
-                "efforts": [],
-            }),
         ];
         Ok(json!({"ok": true, "backends": backends}))
     }
@@ -1452,6 +1441,9 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        // A retired assistant's chat runs nothing, so it has nothing to set,
+        // and a change would make it the default new chats start on.
+        validate_backend(&previous.0)?;
         if matches!(option, "new-worktree" | "workspace")
             && !workspace_is_unused(&transaction, chat_id)?
         {
@@ -1630,6 +1622,11 @@ impl StateStore {
         let Some((backend, model, effort, used)) = chat else {
             return Ok(());
         };
+        // A chat on a retired assistant has nothing to settle; sending to it
+        // is refused instead.
+        if !supported_backend(&backend) {
+            return Ok(());
+        }
         if used && model.is_some() && effort.is_some() {
             return Ok(());
         }
@@ -1689,14 +1686,16 @@ impl StateStore {
         let mut message = self.materialize_message(request, text)?;
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let working = transaction
+        let (working, backend) = transaction
             .query_row(
-                "SELECT host_working FROM chats WHERE id = ?",
+                "SELECT host_working, backend FROM chats WHERE id = ?",
                 [chat_id],
-                |row| row.get::<_, bool>(0),
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        // Not even queued: no turn on a retired assistant would ever take it.
+        validate_backend(&backend)?;
         match continues {
             Some(Continuation::AfterRestart(last_message)) => {
                 let latest = transaction.query_row(
@@ -2036,8 +2035,8 @@ impl StateStore {
         // A name is a few words, so it goes to the low-cost model that titles
         // chats unless the user chose a Git writer model. When the CLI offers
         // none of those, the worktree is named from the message instead of by
-        // a costlier model. Only an assistant without such models (JCode) uses
-        // the chat's own.
+        // a costlier model. Only an assistant without such models uses the
+        // chat's own.
         let model = match optional_string(request, "worktree_model")? {
             Some(model) => {
                 validate_model(&backend, model)?;
@@ -4102,10 +4101,20 @@ impl StateStore {
             &self.workspace_root,
             folder_id,
         )?);
+        // A folder or the last chat may still name a retired assistant, which
+        // new chats no longer start on.
         let backend = backend_override
             .map(str::to_owned)
-            .or(folder_values.backend)
-            .unwrap_or(defaults.0);
+            .or(folder_values
+                .backend
+                .filter(|backend| supported_backend(backend)))
+            .unwrap_or_else(|| {
+                if supported_backend(&defaults.0) {
+                    defaults.0
+                } else {
+                    "codex".into()
+                }
+            });
         validate_backend(&backend)?;
         let (model, effort) = new_chat_model_and_effort(
             &transaction,
@@ -5467,6 +5476,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             remove_terminal_chats(database)?;
             ensure_workspace_sessions(database)?;
             ensure_backend_choices(database)?;
+            retire_jcode_defaults(database)?;
             ensure_draft_chunks(database)?;
             return Ok(());
         }
@@ -5563,6 +5573,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     remove_terminal_chats(database)?;
     ensure_workspace_sessions(database)?;
     ensure_backend_choices(database)?;
+    retire_jcode_defaults(database)?;
     ensure_draft_chunks(database)?;
     Ok(())
 }
@@ -5653,6 +5664,27 @@ fn remove_terminal_chats(database: &Connection) -> Result<(), StorageError> {
     )?;
     transaction.execute(
         "UPDATE agent_defaults SET backend = 'codex', model = 'gpt-5.6-sol' WHERE backend = 'copilot'",
+        [],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// New chats no longer start on JCode, so the settings that would start them
+/// there fall back to the usual defaults. JCode chats themselves stay, history
+/// and all, but refuse new messages.
+fn retire_jcode_defaults(database: &Connection) -> Result<(), StorageError> {
+    let transaction = database.unchecked_transaction()?;
+    transaction.execute(
+        "UPDATE workspace_folders SET backend = NULL, model = NULL WHERE backend = 'jcode'",
+        [],
+    )?;
+    transaction.execute(
+        "UPDATE agent_defaults SET backend = 'codex', model = 'gpt-5.6-sol' WHERE backend = 'jcode'",
+        [],
+    )?;
+    transaction.execute(
+        "DELETE FROM agent_backend_choices WHERE backend = 'jcode'",
         [],
     )?;
     transaction.commit()?;
@@ -6878,9 +6910,20 @@ fn catalog_backend(
     })
 }
 
+/// What a chat on an assistant xd no longer runs is told when asked to do
+/// anything. Its history still opens and lists like any other chat's.
+const JCODE_RETIRED: &str =
+    "JCode is no longer supported. Start a new chat with Codex or Claude Code.";
+
+fn supported_backend(backend: &str) -> bool {
+    matches!(backend, "codex" | "claude")
+}
+
 fn validate_backend(backend: &str) -> Result<(), StorageError> {
-    if matches!(backend, "codex" | "claude" | "jcode") {
+    if supported_backend(backend) {
         Ok(())
+    } else if backend == "jcode" {
+        Err(StorageError::InvalidRequest(JCODE_RETIRED.into()))
     } else {
         Err(StorageError::InvalidRequest("No such assistant.".into()))
     }
@@ -6904,7 +6947,6 @@ fn awaited_default_model(backend: &str) -> String {
 fn fallback_model(backend: &str) -> &'static str {
     match backend {
         "claude" => "claude-opus-5",
-        "jcode" => "default",
         _ => "gpt-5.6-sol",
     }
 }
@@ -7098,7 +7140,6 @@ fn backend_models(backend: &str) -> &'static [(&'static str, &'static str, i64)]
     match backend {
         "codex" => CODEX_MODELS,
         "claude" => CLAUDE_MODELS,
-        "jcode" => JCODE_MODELS,
         _ => &[],
     }
 }
@@ -9735,6 +9776,119 @@ mod tests {
     }
 
     #[test]
+    fn legacy_jcode_chats_keep_their_history_but_refuse_new_messages() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let legacy = store
+            .new_chat(&json!({"folder": folder, "title": "Old JCode task", "backend": "codex"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        {
+            let db = store.database.lock().unwrap();
+            db.execute(
+                "UPDATE chats SET backend = 'jcode', model = 'default', effort = NULL WHERE id = ?",
+                [&legacy],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO messages (chat_id, role, content, created_at) VALUES \
+                 (?1, 'user', 'earlier question', 1), (?1, 'assistant', 'earlier answer', 2)",
+                [&legacy],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE agent_defaults SET backend = 'jcode', model = 'default'",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE workspace_folders SET backend = 'jcode', model = 'default' WHERE id = ?",
+                [&folder],
+            )
+            .unwrap();
+        }
+        // Settings that still name JCode do not start new chats on it, even
+        // before the database is migrated.
+        let fresh = store.new_chat(&json!({"folder": folder})).unwrap();
+        assert_eq!(fresh["backend"], "codex");
+        store.delete_chat(&json!({"chat": fresh["id"]})).unwrap();
+        drop(store);
+
+        for _ in 0..2 {
+            let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+            {
+                let db = store.database.lock().unwrap();
+                let defaults: String = db
+                    .query_row(
+                        "SELECT backend FROM agent_defaults WHERE singleton = 1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(defaults, "codex");
+                let folder_backend: Option<String> = db
+                    .query_row(
+                        "SELECT backend FROM workspace_folders WHERE id = ?",
+                        [&folder],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(folder_backend, None);
+            }
+
+            // It still lists, opens, and shows its history.
+            assert!(store.tree().unwrap().to_string().contains(&legacy));
+            let chat = store.chat(&legacy).unwrap();
+            assert_eq!(chat["backend"], "jcode");
+            assert_eq!(chat["title"], "Old JCode task");
+            let history = store.messages(&json!({"chat": legacy})).unwrap();
+            assert_eq!(history["total_messages"], 2);
+            assert_eq!(history["messages"][1]["content"], "earlier answer");
+
+            // But a message to it is refused, not stored, and not queued.
+            store.await_chat_defaults(&legacy).unwrap();
+            let refused = store
+                .prepare_send(&json!({"chat": legacy, "text": "one more thing"}))
+                .err()
+                .expect("a JCode chat refuses new messages");
+            assert_eq!(refused.to_string(), JCODE_RETIRED);
+            assert_eq!(
+                JCODE_RETIRED,
+                "JCode is no longer supported. Start a new chat with Codex or Claude Code."
+            );
+            let after = store.messages(&json!({"chat": legacy})).unwrap();
+            assert_eq!(after["total_messages"], 2);
+            let chat = store.chat(&legacy).unwrap();
+            assert_eq!(chat["working"], false);
+            assert_eq!(chat["queue"], json!([]));
+            let refused = store
+                .set_option(&json!({"chat": legacy, "option": "access", "value": "full"}))
+                .expect_err("a JCode chat has no options to set");
+            assert_eq!(refused.to_string(), JCODE_RETIRED);
+
+            // New chats cannot pick it, and the catalog no longer offers it.
+            let refused = store
+                .new_chat(&json!({"folder": folder, "backend": "jcode"}))
+                .expect_err("new chats cannot start on JCode");
+            assert_eq!(refused.to_string(), JCODE_RETIRED);
+            let catalog = store.agent_catalog().unwrap();
+            assert!(
+                catalog["backends"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|backend| backend["id"] != "jcode")
+            );
+            let fresh = store.new_chat(&json!({"folder": folder})).unwrap();
+            assert_eq!(fresh["backend"], "codex");
+            store.delete_chat(&json!({"chat": fresh["id"]})).unwrap();
+        }
+    }
+
+    #[test]
     fn databases_without_session_mode_are_cleaned_up_as_terminal_chats() {
         let fixture = Fixture::new();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
@@ -11568,14 +11722,6 @@ mod tests {
         assert!(
             store
                 .prepare_chat_title(&first_message(&named))
-                .unwrap()
-                .is_none()
-        );
-
-        let jcode = new_chat_on(&store, &folder, "jcode");
-        assert!(
-            store
-                .prepare_chat_title(&first_message(&jcode))
                 .unwrap()
                 .is_none()
         );

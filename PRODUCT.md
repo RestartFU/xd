@@ -10,7 +10,7 @@ Two clients share one product: the desktop app (Rust + GPUI 0.2.2, custom window
 
 ## Users
 
-Primarily the author, using xd as a daily driver: a developer running several AI coding agents (Codex, Claude Code, JCode, GitHub Copilot CLI) at once across multiple projects and Git worktrees, for long working sessions. Public users installing from GitHub releases come second.
+Primarily the author, using xd as a daily driver: a developer running several AI coding agents (Codex, Claude Code, GitHub Copilot CLI) at once across multiple projects and Git worktrees, for long working sessions. Public users installing from GitHub releases come second.
 
 ## Product Purpose
 
@@ -23,7 +23,7 @@ xd does not ship its own model or agent. It wraps the user's own CLIs, authentic
 ## Operating Context
 
 - Many concurrent sessions across several projects (examples in the docs: Lunar, xd, decryptmypack, VPS, PotLounge), each on a branch or worktree.
-- Native chat for Codex, Claude Code, and JCode, with streamed replies, activity cards (tool calls, shell runs, token counts), queued prompts, approvals, and questions. Copilot and existing terminal sessions use the CLI in a terminal.
+- Native chat for Codex and Claude Code, with streamed replies, activity cards (tool calls, shell runs, token counts), queued prompts, approvals, and questions. Copilot and existing terminal sessions use the CLI in a terminal.
 - Side panes: changes/diff, files, shell terminal, and an integrated browser with per-session tabs.
 - Local mode, or paired remote mode (Settings, then Pair a device). Remote desktops and Android connect directly to the daemon.
 

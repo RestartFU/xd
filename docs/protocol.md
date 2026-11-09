@@ -296,7 +296,7 @@ and must be dropped; a higher one must be applied. An event carrying a lower
 `turn_id` is stale. Given the ordering caveat above, this is the only correct
 way to reconcile a snapshot against concurrent live output.
 
-`session_mode` is `chat` for Codex/Claude/JCode sessions. Tree chat summaries
+`session_mode` is `chat` for Codex/Claude sessions. Tree chat summaries
 include the same member. The host deletes legacy `terminal` chats and their
 history when opening the database, retaining their worktrees. `terminal-open`
 continues to open shell panes; `terminal-open-agent` is no longer supported.
@@ -697,7 +697,7 @@ index, and redirects the running turn to that message. The reply adds `steered`:
   and turn, and the message leaves the queue. Claude stops its reply and answers
   this message, after any running tool finishes. Codex takes it within the turn.
 - `false`: the turn could not take it, because its agent has no process to write
-  to (JCode) or it is waiting on an approval or question. The message moves to
+  to or it is waiting on an approval or question. The message moves to
   the front of the queue and the turn is stopped.
 
 A message the agent refuses or never reads returns to the front of the queue, in
@@ -848,6 +848,15 @@ desktop reads its own compiled-in catalog because it ships with the host; a
 separately released client must ask, since `set-option` validates the model id
 and a hard-coded list would be refused as soon as one is added or retired.
 
+JCode is no longer supported. Chats created with it keep `backend: "jcode"` and
+still appear in `tree`, open with `chat`, and page through `messages`, so their
+history stays readable. `send`, `resume-turn`, and `set-option` on such a chat,
+and `new-chat` with `backend: "jcode"`, fail with `JCode is no longer supported.
+Start a new chat with Codex or Claude Code.` Folder and host defaults that named
+JCode fall back to the usual defaults when the database opens. Clients should
+show any backend they do not recognize with a generic label and icon rather
+than hide or reject the chat.
+
 ### `set-usage-prices`
 
 Replaces the host's custom model prices and aliases. Takes `prices` and `aliases`
@@ -969,7 +978,7 @@ low-cost model in the background, `gpt-6-luna` for Codex and `claude-haiku-5-5`
 for Claude unless another was chosen, and then publishes `tree` and `changed`. The
 title replaces only a placeholder name such as `New Chat`, on the chat and on its
 session; a name given in the meantime stays. A failed attempt leaves the name as it
-was. JCode chats are not titled.
+was.
 
 `set-agent-secrets` replaces one secret set: the host-wide set, or a project's own
 with `folder`. It takes `entries:[{name, value}]` of at most 256 unique environment

@@ -78,7 +78,6 @@ pub fn provider_name(value: &str) -> &str {
     match value {
         "codex" => "Codex",
         "claude" => "Claude Code",
-        "jcode" => "JCode",
         "copilot" => "GitHub Copilot",
         _ => value,
     }

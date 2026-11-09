@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::{
     EventBus,
-    agent::{resolve_claude, resolve_codex, resolve_jcode},
+    agent::{resolve_claude, resolve_codex},
     background_process::command as background_command,
 };
 
@@ -39,24 +39,20 @@ struct CliSnapshot {
 
 impl CliVersions {
     pub(crate) fn new(events: Arc<EventBus>) -> Self {
-        let states = [
-            ("codex", "Codex"),
-            ("claude", "Claude Code"),
-            ("jcode", "JCode"),
-        ]
-        .into_iter()
-        .map(|(provider, display_name)| {
-            (
-                provider.to_owned(),
-                CliSnapshot {
-                    display_name: display_name.into(),
-                    state: "idle".into(),
-                    version: None,
-                    detail: None,
-                },
-            )
-        })
-        .collect();
+        let states = [("codex", "Codex"), ("claude", "Claude Code")]
+            .into_iter()
+            .map(|(provider, display_name)| {
+                (
+                    provider.to_owned(),
+                    CliSnapshot {
+                        display_name: display_name.into(),
+                        state: "idle".into(),
+                        version: None,
+                        detail: None,
+                    },
+                )
+            })
+            .collect();
         Self {
             inner: Arc::new(CliVersionsInner {
                 states: Mutex::new(states),
@@ -72,7 +68,7 @@ impl CliVersions {
             .states
             .lock()
             .map(|states| {
-                ["codex", "claude", "jcode"]
+                ["codex", "claude"]
                     .into_iter()
                     .filter_map(|provider| {
                         states
@@ -86,7 +82,7 @@ impl CliVersions {
     }
 
     fn refresh_all(&self) {
-        for provider in ["codex", "claude", "jcode"] {
+        for provider in ["codex", "claude"] {
             self.refresh(provider);
         }
     }
@@ -114,7 +110,6 @@ impl CliVersions {
             .spawn(move || {
                 let result = match checked_provider.as_str() {
                     "claude" => read_version(&resolve_claude(), CHECK_TIMEOUT),
-                    "jcode" => read_version(&resolve_jcode(), CHECK_TIMEOUT),
                     _ => read_version(&resolve_codex(), CHECK_TIMEOUT),
                 };
                 if let Ok(mut states) = versions.inner.states.lock()
