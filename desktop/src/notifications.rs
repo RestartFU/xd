@@ -36,6 +36,10 @@ const CLOSE_AFTER: Duration = Duration::from_secs(10);
 /// How long a `Notify` call may go unanswered, as D-Bus's own default
 /// method-call timeout: after that the notification is not shown late.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(25);
+/// How many `Notify` calls may await an answer, including those given up on.
+/// A server that has stopped answering would not show more, and each call is
+/// remembered until it is answered.
+const MAX_UNANSWERED: usize = 32;
 
 /// How long the worker waits before acting on its own; shorter in tests.
 #[derive(Clone, Copy)]
@@ -179,6 +183,9 @@ async fn serve<T>(
     while let Some(input) = inputs.next().await {
         match input {
             Input::Request(Request { body, target }) => {
+                if tracker.sent.len() + tracker.expired.len() >= MAX_UNANSWERED {
+                    continue;
+                }
                 let message = notify_message(&body, &desktop_entry)?;
                 let serial = message.primary_header().serial_num();
                 tracker.sent.insert(serial, target);
@@ -230,8 +237,7 @@ async fn serve<T>(
             // a server that has taken over the service never closes its own.
             // Not shown late as a click target, but remembered, so an answer
             // that does come still gets its notification closed.
-            // Every one is kept until answered: only a server that stopped
-            // answering adds to them, one per notification.
+            // Kept until answered; `MAX_UNANSWERED` bounds how many there are.
             Input::Due(Due::Unanswered(serial)) => {
                 if tracker.sent.remove(&serial).is_some() {
                     tracker.expired.insert(serial);
@@ -1023,6 +1029,38 @@ mod tests {
             since >= TEST_CLOSE_AFTER - Duration::from_millis(50),
             "{since:?}"
         );
+    }
+
+    #[test]
+    fn a_server_that_stopped_answering_is_not_sent_more_than_it_can_owe() {
+        let notified = on_a_private_bus(|address| {
+            zbus::block_on(async move {
+                let (_server, mut calls) = notification_server(&address).await?;
+                against_notifier(&address, |requests, _clicked| async move {
+                    for _ in 0..MAX_UNANSWERED + 8 {
+                        requests.send(request("chat")).await.unwrap();
+                    }
+                    let mut notified = 0;
+                    let mut window = Box::pin(sleep(TEST_TIMING.reply_timeout * 3));
+                    loop {
+                        match futures_util::future::select(Box::pin(calls.next()), window.as_mut())
+                            .await
+                        {
+                            futures_util::future::Either::Left((Some(message), _)) => {
+                                if message?.header().member().is_some_and(|m| m == "Notify") {
+                                    notified += 1;
+                                }
+                            }
+                            _ => return Ok(notified),
+                        }
+                    }
+                })
+                .await
+            })
+        });
+        if let Some(notified) = notified {
+            assert_eq!(notified, MAX_UNANSWERED);
+        }
     }
 
     #[test]
