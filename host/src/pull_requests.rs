@@ -122,9 +122,10 @@ pub(crate) fn created_by(command: &str, output: &str) -> Vec<String> {
 /// Whether a shell command runs `gh pr create` and nothing that prints the
 /// addresses of other pull requests, so the addresses it prints are new ones.
 pub(crate) fn creates(command: &str) -> bool {
-    let commands = shell_commands(command)
-        .into_iter()
-        .map(|words| without_gh_flags(&words))
+    let commands = shell_commands(command);
+    let commands = commands
+        .iter()
+        .map(|words| without_gh_flags(words))
         .collect::<Vec<_>>();
     let runs = |words: &[&str]| {
         commands
@@ -141,17 +142,17 @@ pub(crate) fn creates(command: &str) -> bool {
 
 /// A `gh` command's words without its flags, so `gh -R o/r pr create` reads
 /// as `gh pr create`. Other commands are left as they are.
-fn without_gh_flags<'a>(words: &[&'a str]) -> Vec<&'a str> {
-    if words.first() != Some(&"gh") {
-        return words.to_vec();
+fn without_gh_flags(words: &[String]) -> Vec<&str> {
+    let mut words = words.iter().map(String::as_str);
+    if words.clone().next() != Some("gh") {
+        return words.collect();
     }
     let mut kept = Vec::new();
-    let mut words = words.iter();
     while let Some(word) = words.next() {
-        if matches!(*word, "-R" | "--repo") {
+        if matches!(word, "-R" | "--repo") {
             words.next();
         } else if !word.starts_with('-') {
-            kept.push(*word);
+            kept.push(word);
         }
     }
     kept
@@ -190,62 +191,43 @@ pub(crate) fn finished_in_background(id: &str, output_file: Option<&str>) -> Vec
         .unwrap_or_default()
 }
 
-/// The leading words of each simple command in a shell script, past variable
-/// assignments and wrappers such as `env` or `timeout 60`. Separators inside
-/// quotes do not split commands, so `echo "a; gh pr create"` runs `echo` and
-/// nothing else, and quoted words count without their quotes.
-fn shell_commands(script: &str) -> Vec<Vec<&str>> {
-    let mut segments = Vec::new();
-    let mut start = 0;
-    let mut quote = None;
-    let bytes = script.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        match quote {
-            Some(open) if byte == open => quote = None,
-            Some(b'"') if byte == b'\\' => index += 1,
-            Some(_) => {}
-            None => match byte {
-                b'\'' | b'"' => quote = Some(byte),
-                b'\\' => index += 1,
-                b';' | b'&' | b'|' | b'\n' | b'(' | b')' | b'`' | b'{' | b'}' => {
-                    segments.push(&script[start..index]);
-                    start = index + 1;
-                }
-                _ => {}
-            },
-        }
-        index += 1;
-    }
-    if start <= script.len() {
-        segments.push(&script[start.min(script.len())..]);
-    }
-    segments
+/// The words of each simple command in a shell script, past variable
+/// assignments and wrappers such as `env` or `timeout 60`. The shell's
+/// quoting decides what is a command: `echo "a; gh pr create"` runs `echo`
+/// alone, and a heredoc's body runs nothing.
+fn shell_commands(script: &str) -> Vec<Vec<String>> {
+    crate::delegation::simple_commands(script)
         .into_iter()
-        .filter_map(|segment| {
-            let mut words = segment.split_whitespace().peekable();
+        .filter_map(|words| {
+            let mut words = words.into_iter().peekable();
             loop {
-                let word = *words.peek()?;
+                let word = words.peek()?;
                 let assignment = word.split_once('=').is_some_and(|(name, _)| {
                     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 });
-                if assignment || matches!(word, "env" | "time" | "nohup" | "command" | "exec") {
+                if assignment
+                    || matches!(
+                        word.as_str(),
+                        "env"
+                            | "time"
+                            | "nohup"
+                            | "command"
+                            | "exec"
+                            | "do"
+                            | "then"
+                            | "else"
+                            | "!"
+                    )
+                {
                     words.next();
                 } else if word == "timeout" {
                     words.next();
-                    words.next();
-                } else if matches!(word, "do" | "then" | "else" | "!") {
                     words.next();
                 } else {
                     break;
                 }
             }
-            // A quoted word, such as the repository in `gh -R "o/r"`, counts
-            // without its quotes.
-            let words = words
-                .map(|word| word.trim_matches(['\'', '"']))
-                .collect::<Vec<_>>();
+            let words = words.collect::<Vec<_>>();
             (!words.is_empty()).then_some(words)
         })
         .collect()
@@ -321,6 +303,12 @@ mod tests {
             assert_eq!(created_by(command, output).len(), 1, "{command}");
         }
         assert!(created_by("gh -R o/other pr list", output).is_empty());
+        let heredoc = "gh pr create --title \"Docs\" --body-file - <<'EOF'\nInspect it with:\ngh pr view\nEOF";
+        assert_eq!(
+            created_by(heredoc, output).len(),
+            1,
+            "a heredoc body runs nothing"
+        );
     }
 
     #[test]
