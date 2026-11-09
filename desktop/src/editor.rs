@@ -170,7 +170,8 @@ impl FileEditor {
         }
     }
 
-    #[cfg(test)]
+    /// Only the Unix-only agent tab test reads the box back.
+    #[cfg(all(test, unix))]
     pub fn text(&self) -> &str {
         &self.content
     }
