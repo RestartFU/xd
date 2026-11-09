@@ -175,6 +175,15 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
     let Some(_singleton) = singleton(&paths, LOCK_WAIT)? else {
         return Ok(());
     };
+    // Read now, while the path names this binary: an update replaces it there.
+    if let Ok(executable) = std::env::current_exe().and_then(fs::canonicalize) {
+        let database = paths
+            .data
+            .join(options.database.file_name().unwrap_or_default());
+        let workspaces =
+            fs::canonicalize(&options.workspaces).unwrap_or(options.workspaces.clone());
+        xd_host::offer_link_tool(executable, database, workspaces);
+    }
     let store =
         StateStore::open(&options.database, &options.workspaces).map_err(io::Error::other)?;
     store
@@ -246,7 +255,7 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
     Ok(())
 }
 
-fn connect(options: &HostOptions, start: bool) -> io::Result<UnixStream> {
+pub(super) fn connect(options: &HostOptions, start: bool) -> io::Result<UnixStream> {
     let paths = paths(options)?;
     if let Ok(stream) = UnixStream::connect(&paths.socket) {
         return Ok(stream);
@@ -443,7 +452,7 @@ fn stop_command(options: &HostOptions) -> String {
 fn rpc(stream: &mut UnixStream, operation: &str) -> io::Result<Value> {
     request(stream, json!({"op": operation}))
 }
-fn request(stream: &mut UnixStream, mut body: Value) -> io::Result<Value> {
+pub(super) fn request(stream: &mut UnixStream, mut body: Value) -> io::Result<Value> {
     body["_xd_request"] = json!(0);
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     writeln!(stream, "{body}")?;

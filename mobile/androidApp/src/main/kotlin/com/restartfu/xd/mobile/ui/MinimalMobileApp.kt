@@ -335,7 +335,7 @@ internal fun MinimalMobileApp(
                             }
                             hiddenChatIds = hiddenChatIds + id
                         }
-                        val tabStrip: @Composable (AgentTabs) -> Unit = { agents ->
+                        val tabStrip: @Composable (AgentTabs, (() -> Unit)?) -> Unit = { agents, showPullRequests ->
                             SessionTabStrip(
                                 compact = !expanded,
                                 chats = sessionChats,
@@ -349,6 +349,7 @@ internal fun MinimalMobileApp(
                                 session = activeSession,
                                 actions = sessionActions,
                                 agents = agents,
+                                showPullRequests = showPullRequests,
                             )
                         }
                         if (activeChat != null) {
@@ -383,12 +384,13 @@ internal fun MinimalMobileApp(
                                             .takeIf { sessionActions.settlement && !activeSession.settled },
                                         renameSession = { sessionActions.rename(activeSession) },
                                     ),
+                                    linkedPullRequests = activeChat.pullRequests.takeIf { tree.linkedPullRequests },
                                 )
                             }
                         } else {
                             Column(Modifier.fillMaxSize()) {
                                 ProductHeader(link, activeSession.title, onSettings = { settingsOpen = true })
-                                tabStrip(AgentTabs())
+                                tabStrip(AgentTabs(), null)
                                 Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                         Text("Your chats are saved", style = MaterialTheme.typography.titleLarge)
@@ -1027,6 +1029,8 @@ private fun SessionTabStrip(
     actions: SessionActions,
     /** The open chat's agent tabs, after its chat tabs. */
     agents: AgentTabs = AgentTabs(),
+    /** Opens the open chat's Pull requests list; null where the host cannot link them. */
+    showPullRequests: (() -> Unit)? = null,
 ) {
     var openMenu by remember { mutableStateOf(false) }
     Row(
@@ -1102,6 +1106,12 @@ private fun SessionTabStrip(
                         text = { Text("Rename chat") },
                         onClick = { openMenu = false; renameChat(active) },
                     )
+                    showPullRequests?.let { show ->
+                        DropdownMenuItem(
+                            text = { Text("Pull requests") },
+                            onClick = { openMenu = false; show() },
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("Delete chat…", color = MaterialTheme.colorScheme.error) },
                         onClick = { openMenu = false; deleteChat(active) },

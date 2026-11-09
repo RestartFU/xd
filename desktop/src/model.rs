@@ -277,6 +277,61 @@ pub struct ChatSummary {
     /// The session is kept out of automatic settling.
     #[serde(default)]
     pub auto_settle_disabled: bool,
+    /// Pull requests linked to the chat, oldest first. Only a host with
+    /// `linked_pull_requests` sends these.
+    #[serde(
+        default,
+        deserialize_with = "linked_pull_requests",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub pull_requests: Vec<LinkedPullRequest>,
+}
+
+/// What GitHub last said about a linked pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PullRequestState {
+    Open,
+    Closed,
+    Merged,
+}
+
+/// A pull request linked to a chat, by its canonical web address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedPullRequest {
+    pub url: String,
+    /// Absent until the host has asked GitHub, or when it says something new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<PullRequestState>,
+}
+
+impl LinkedPullRequest {
+    /// `owner/repo` from `https://host/owner/repo/pull/N`.
+    pub fn repository(&self) -> Option<&str> {
+        let path = self.url.split_once("://")?.1.split_once('/')?.1;
+        let (repository, _) = path.split_once("/pull/")?;
+        (repository.matches('/').count() == 1).then_some(repository)
+    }
+}
+
+/// Keeps every entry the client can use, so one it cannot read (a newer
+/// state, say) never costs the whole tree.
+fn linked_pull_requests<'de, D>(deserializer: D) -> Result<Vec<LinkedPullRequest>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries = Option::<Vec<Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(entries
+        .into_iter()
+        .filter_map(|entry| {
+            let url = entry.get("url")?.as_str()?.to_owned();
+            let state = entry
+                .get("state")
+                .cloned()
+                .and_then(|state| serde_json::from_value(state).ok());
+            Some(LinkedPullRequest { url, state })
+        })
+        .collect())
 }
 
 impl ChatSummary {
@@ -633,6 +688,9 @@ pub struct AppModel {
     /// The connected host keeps folders of projects. An older one ignores the
     /// request and makes a project instead.
     pub folder_groups_supported: bool,
+    /// The connected host keeps pull requests linked to chats and lists them
+    /// in the tree. An older one knows only the branch's pull request.
+    pub linked_pull_requests_supported: bool,
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
@@ -704,6 +762,9 @@ struct TreeSnapshot {
     /// The host keeps folders of projects; older hosts leave this out.
     #[serde(default)]
     folder_groups: bool,
+    /// The host keeps pull requests linked to chats; older hosts leave this out.
+    #[serde(default)]
+    linked_pull_requests: bool,
     #[serde(default)]
     terminal_activity_epoch: Option<String>,
     #[serde(default)]
@@ -980,6 +1041,7 @@ impl AppModel {
         self.settlement_supported = snapshot.settlement;
         self.folder_reorder_supported = snapshot.folder_reorder;
         self.folder_groups_supported = snapshot.folder_groups;
+        self.linked_pull_requests_supported = snapshot.linked_pull_requests;
         self.refresh_session_activity();
         self.connected = true;
         self.unread_chats
@@ -1858,6 +1920,7 @@ impl AppModel {
             settlement_supported: true,
             folder_reorder_supported: true,
             folder_groups_supported: true,
+            linked_pull_requests_supported: false,
             folders: vec![Folder {
                 id: "workspace-xd".into(),
                 name: "xd".into(),
@@ -1877,6 +1940,7 @@ impl AppModel {
                     background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
+                    pull_requests: Vec::new(),
                 },
                 ChatSummary {
                     id: "chat-scroll".into(),
@@ -1889,6 +1953,7 @@ impl AppModel {
                     background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
+                    pull_requests: Vec::new(),
                 },
             ],
             sessions: Vec::new(),
@@ -2042,6 +2107,82 @@ mod tests {
         tree["folder_groups"] = json!(true);
         model.apply_tree(&tree).unwrap();
         assert!(model.folder_groups_supported);
+    }
+
+    #[test]
+    fn the_tree_lists_each_chats_linked_pull_requests() {
+        let mut model = AppModel::default();
+        model.apply_tree(&grouped_tree()).unwrap();
+        assert!(
+            !model.linked_pull_requests_supported,
+            "an older host leaves it out"
+        );
+        assert!(model.chats[0].pull_requests.is_empty());
+
+        let mut tree = grouped_tree();
+        tree["linked_pull_requests"] = json!(true);
+        tree["chats"][0]["pull_requests"] = json!([
+            {"url": "https://github.com/o/r/pull/7", "state": "merged"},
+            {"url": "https://github.com/o/r/pull/9", "state": "closed"},
+            {"url": "https://github.com/o/other/pull/12", "state": "open"},
+            {"url": "https://github.com/o/r/pull/13"},
+            {"url": "https://github.com/o/r/pull/14", "state": "draft"},
+            {"state": "open"},
+        ]);
+        model.apply_tree(&tree).unwrap();
+        assert!(model.linked_pull_requests_supported);
+        let links = &model.chats[0].pull_requests;
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| (link.url.as_str(), link.state))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "https://github.com/o/r/pull/7",
+                    Some(PullRequestState::Merged)
+                ),
+                (
+                    "https://github.com/o/r/pull/9",
+                    Some(PullRequestState::Closed)
+                ),
+                (
+                    "https://github.com/o/other/pull/12",
+                    Some(PullRequestState::Open)
+                ),
+                ("https://github.com/o/r/pull/13", None),
+                ("https://github.com/o/r/pull/14", None),
+            ],
+            "oldest first; an unknown state reads as unknown and an entry without an address is skipped"
+        );
+        assert_eq!(links[2].repository(), Some("o/other"));
+        assert!(model.chats[1].pull_requests.is_empty(), "absent when none");
+
+        let mut unlinked = tree.clone();
+        unlinked["chats"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("pull_requests");
+        model.apply_tree(&unlinked).unwrap();
+        assert!(model.chats[0].pull_requests.is_empty());
+    }
+
+    #[test]
+    fn a_linked_pull_request_names_its_repository() {
+        let link = |url: &str| LinkedPullRequest {
+            url: url.into(),
+            state: None,
+        };
+        assert_eq!(
+            link("https://github.com/restartfu/xd/pull/180").repository(),
+            Some("restartfu/xd")
+        );
+        assert_eq!(
+            link("https://github.example/o/r/pull/9").repository(),
+            Some("o/r")
+        );
+        assert_eq!(link("https://github.com/o/pull/9").repository(), None);
+        assert_eq!(link("not a link").repository(), None);
     }
 
     #[test]
@@ -3184,6 +3325,7 @@ mod tests {
                 background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
+                pull_requests: Vec::new(),
             }],
             ..Default::default()
         };

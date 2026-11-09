@@ -104,6 +104,7 @@ import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
 import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.model.AskBlock
+import com.restartfu.xd.model.LinkedPullRequest
 import com.restartfu.xd.model.AssistantSection
 import com.restartfu.xd.model.AssistantSectionKind
 import com.restartfu.xd.model.AssistantSections
@@ -152,10 +153,19 @@ internal fun ChatScreen(
     terminalChatId: String = model.state.value.chatId,
     workspaceOwner: ViewModelStoreOwner? = null,
     productHeader: @Composable () -> Unit = {},
-    /** The tablet's chat tabs, given the open chat's agent tabs to show after them. */
-    sessionTabs: @Composable (AgentTabs) -> Unit = {},
+    /**
+     * The tablet's chat tabs, given the open chat's agent tabs to show after
+     * them and what opens its Pull requests list, null where the host cannot
+     * link them.
+     */
+    sessionTabs: @Composable (AgentTabs, (() -> Unit)?) -> Unit = { _, _ -> },
     /** The session's chats; given on phones, where one header bar holds them. */
     sessionChats: SessionChats? = null,
+    /**
+     * The chat's linked pull requests from the tree, on a host that keeps
+     * them; null on an older one, which shows the branch's pull request alone.
+     */
+    linkedPullRequests: List<LinkedPullRequest>? = null,
 ) {
     val state by model.state.collectAsStateWithLifecycle()
     val sending by model.sending.collectAsStateWithLifecycle()
@@ -199,6 +209,31 @@ internal fun ChatScreen(
     }
     val pullRequest by model.pullRequest.collectAsStateWithLifecycle()
     val openLink = rememberLinkOpener()
+    var showingPullRequests by rememberSaveable(state.chatId) { mutableStateOf(false) }
+    val showPullRequests: (() -> Unit)? = if (linkedPullRequests != null) {
+        { showingPullRequests = true }
+    } else {
+        null
+    }
+    if (showingPullRequests && linkedPullRequests != null) {
+        val links by model.pullRequestLinks.collectAsStateWithLifecycle()
+        val close = {
+            showingPullRequests = false
+            model.closePullRequests()
+        }
+        PullRequestsDialog(
+            pullRequests = linkedPullRequests,
+            draft = links.draft,
+            onDraft = model::editPullRequestDraft,
+            linking = links.linking,
+            removing = links.removing,
+            error = links.error,
+            open = openLink,
+            link = model::linkPullRequests,
+            remove = model::unlinkPullRequest,
+            onDismiss = close,
+        )
+    }
     // A finished turn may have pushed a branch or opened its pull request.
     // A sibling chat's turn shares the checkout, so the whole session counts,
     // and so does a branch switched under an idle session.
@@ -335,6 +370,8 @@ internal fun ChatScreen(
                         onChatSettings = { choosingOptions = true },
                         chats = sessionChats,
                         agents = agents,
+                        linkedPullRequests = linkedPullRequests,
+                        showPullRequests = showPullRequests,
                     )
                 }
             } else Column {
@@ -358,15 +395,26 @@ internal fun ChatScreen(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
-                                    // The branch's pull request, as the desktop's session header shows it.
-                                    pullRequest?.let { url ->
-                                        Text(
-                                            pullRequestLabel(url),
-                                            modifier = Modifier.clickable(role = Role.Button) { openLink(url) },
+                                    if (linkedPullRequests != null) {
+                                        // Every pull request linked to the chat, as the desktop's header lists them.
+                                        LinkedPullRequestChips(
+                                            pullRequests = linkedPullRequests,
+                                            limit = PullRequestChipLimit.TABLET,
                                             style = MaterialTheme.typography.labelMedium,
-                                            color = LocalXdSignals.current.link,
-                                            textDecoration = TextDecoration.Underline,
+                                            open = openLink,
+                                            showAll = { showingPullRequests = true },
                                         )
+                                    } else {
+                                        // The branch's pull request, as the desktop's session header shows it.
+                                        pullRequest?.let { url ->
+                                            Text(
+                                                pullRequestLabel(url),
+                                                modifier = Modifier.clickable(role = Role.Button) { openLink(url) },
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = LocalXdSignals.current.link,
+                                                textDecoration = TextDecoration.Underline,
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -401,7 +449,7 @@ internal fun ChatScreen(
                         }
                     },
                 )
-                sessionTabs(agents)
+                sessionTabs(agents, showPullRequests)
                 TabRow(
                     selectedTabIndex = pane.ordinal,
                     containerColor = MaterialTheme.colorScheme.surface,

@@ -21,6 +21,7 @@ use crate::{
     database::{self, Checkpointer, Reader, ReaderPool},
     deletion::{self, AutoDeleteSettings, AutoDeletion},
     private_fs::{create_private_file, open_without_waiting, secure_directory},
+    pull_requests::{self, LinkSource},
     reply_images,
     settlement::{
         self, AutoSettleSettings, PullRequestSnapshot, PullRequestState, SettlementCandidate,
@@ -237,6 +238,51 @@ pub struct TurnSpec {
     pub carries_cut_off_note: bool,
     pub label: String,
     pub environment: Vec<(String, String)>,
+}
+
+/// One link of a chat, as settling reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LinkRow {
+    pub(crate) chat: String,
+    pub(crate) url: String,
+    pub(crate) dismissed: bool,
+}
+
+/// Every link of a session's chats, removed ones too. A settling decision is
+/// made from one of these and holds only while the links still read the same.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LinkState(pub(crate) Vec<LinkRow>);
+
+impl LinkState {
+    /// The linked pull requests, each once, oldest first per chat.
+    pub(crate) fn linked(&self) -> Vec<String> {
+        let mut urls = Vec::new();
+        for link in &self.0 {
+            if !link.dismissed && !urls.contains(&link.url) {
+                urls.push(link.url.clone());
+            }
+        }
+        urls
+    }
+
+    /// Whether the user removed `url` and none of the chats links it now.
+    /// A chat that never had it says nothing either way, so removing it
+    /// from the one chat that showed it is enough.
+    pub(crate) fn removed(&self, url: &str) -> bool {
+        let rows = self.0.iter().filter(|link| link.url == url);
+        rows.clone().any(|link| link.dismissed) && rows.clone().all(|link| link.dismissed)
+    }
+}
+
+/// What linking pull requests to a chat did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct PullRequestLinks {
+    /// Canonical addresses of the pull requests named, each once.
+    pub(crate) linked: Vec<String>,
+    /// What was named that is not a pull request address.
+    pub(crate) invalid: Vec<String>,
+    /// Whether the chat's list changed.
+    pub(crate) changed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -783,6 +829,28 @@ impl StateStore {
             }
             visible_chats.push((chat, workdir));
         }
+        let mut linked_pull_requests = HashMap::<String, Vec<Value>>::new();
+        {
+            let mut statement = database.prepare(
+                "SELECT chat_id, url, state FROM chat_pull_requests WHERE dismissed = 0 \
+                 ORDER BY created_at, rowid",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (chat, url, state) = row?;
+                let mut link = json!({"url": url});
+                if let Some(state) = state {
+                    link["state"] = Value::String(state);
+                }
+                linked_pull_requests.entry(chat).or_default().push(link);
+            }
+        }
         drop(database);
 
         let mut branches = HashMap::<String, Option<String>>::new();
@@ -828,6 +896,9 @@ impl StateStore {
             if let Some(branch) = branch {
                 chat["branch"] = Value::String(branch);
             }
+            if let Some(links) = linked_pull_requests.remove(&id) {
+                chat["pull_requests"] = Value::Array(links);
+            }
             let (settled_at, auto_settle_disabled) =
                 settlement.get(&session).copied().unwrap_or((None, false));
             if let Some(settled_at) = settled_at {
@@ -867,6 +938,7 @@ impl StateStore {
             "chats": chats,
             "sessions": sessions,
             "settlement": true,
+            "linked_pull_requests": true,
             "folder_reorder": true,
             // The host keeps folders of projects; older hosts ignore `group`
             // and `owner` and would make a project instead.
@@ -3480,6 +3552,234 @@ impl StateStore {
         Ok(json!({"ok": true, "url": url}))
     }
 
+    /// Links pull requests to a chat. Returns the addresses linked, in their
+    /// canonical form, those that are not pull requests, and whether anything
+    /// changed. Automatic sources leave alone a link the user removed.
+    pub(crate) fn link_pull_requests(
+        &self,
+        chat_id: &str,
+        urls: &[String],
+        source: LinkSource,
+    ) -> Result<PullRequestLinks, StorageError> {
+        if urls.len() > pull_requests::MAX_PER_REQUEST {
+            return Err(StorageError::InvalidRequest(format!(
+                "Link at most {} pull requests at once.",
+                pull_requests::MAX_PER_REQUEST
+            )));
+        }
+        let mut outcome = PullRequestLinks::default();
+        for url in urls {
+            match pull_requests::normalize_url(url) {
+                Some(url) if !outcome.linked.contains(&url) => outcome.linked.push(url),
+                Some(_) => {}
+                None => outcome.invalid.push(url.chars().take(200).collect()),
+            }
+        }
+        if outcome.linked.is_empty() {
+            return Ok(outcome);
+        }
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let exists = transaction
+            .query_row("SELECT 1 FROM chats WHERE id = ?", [chat_id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(StorageError::NoChat(chat_id.into()));
+        }
+        let now = now_seconds();
+        for url in &outcome.linked {
+            let known = transaction
+                .query_row(
+                    "SELECT dismissed FROM chat_pull_requests WHERE chat_id = ? AND url = ?",
+                    params![chat_id, url],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?;
+            let full = || -> Result<bool, StorageError> {
+                let count: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM chat_pull_requests WHERE chat_id = ? AND dismissed = 0",
+                    [chat_id],
+                    |row| row.get(0),
+                )?;
+                Ok(count as usize >= pull_requests::MAX_PER_CHAT)
+            };
+            let refuse = || {
+                StorageError::InvalidRequest(format!(
+                    "A chat can link at most {} pull requests.",
+                    pull_requests::MAX_PER_CHAT
+                ))
+            };
+            match known {
+                Some(false) => {}
+                Some(true) if source.restores() => {
+                    if full()? {
+                        return Err(refuse());
+                    }
+                    transaction.execute(
+                        "UPDATE chat_pull_requests SET dismissed = 0, source = ?, created_at = ? \
+                         WHERE chat_id = ? AND url = ?",
+                        params![source.as_str(), now, chat_id, url],
+                    )?;
+                    outcome.changed = true;
+                }
+                Some(true) => {}
+                None => {
+                    if full()? {
+                        return Err(refuse());
+                    }
+                    transaction.execute(
+                        "INSERT INTO chat_pull_requests (chat_id, url, source, created_at) \
+                         VALUES (?, ?, ?, ?)",
+                        params![chat_id, url, source.as_str(), now],
+                    )?;
+                    outcome.changed = true;
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
+    /// Removes a pull request from a chat. The link is kept as removed, so the
+    /// branch lookup and command detection do not bring it back.
+    pub(crate) fn unlink_pull_request(
+        &self,
+        chat_id: &str,
+        url: &str,
+    ) -> Result<bool, StorageError> {
+        let url = pull_requests::normalize_url(url).ok_or_else(|| {
+            StorageError::InvalidRequest("That is not a pull request address.".into())
+        })?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chat_pull_requests SET dismissed = 1 \
+             WHERE chat_id = ? AND url = ? AND dismissed = 0",
+            params![chat_id, url],
+        )?;
+        if changed == 0
+            && database
+                .query_row("SELECT 1 FROM chats WHERE id = ?", [chat_id], |_| Ok(()))
+                .optional()?
+                .is_none()
+        {
+            return Err(StorageError::NoChat(chat_id.into()));
+        }
+        Ok(changed > 0)
+    }
+
+    /// The pull requests linked to any of these chats, each once.
+    #[cfg(test)]
+    pub(crate) fn linked_pull_request_urls(
+        &self,
+        chats: &[String],
+    ) -> Result<Vec<String>, StorageError> {
+        Ok(self.link_state(chats)?.linked())
+    }
+
+    /// Every link of these chats, removed ones too, as a settling decision
+    /// reads them. See [`LinkState`].
+    pub(crate) fn link_state(&self, chats: &[String]) -> Result<LinkState, StorageError> {
+        let database = self.reader()?;
+        read_link_state(&database, chats)
+    }
+
+    /// Records a pull request's state on every chat that links it. Returns
+    /// whether any of them changed.
+    pub(crate) fn set_pull_request_state(
+        &self,
+        url: &str,
+        state: PullRequestState,
+    ) -> Result<bool, StorageError> {
+        let state = match state {
+            PullRequestState::Open => "open",
+            PullRequestState::Closed => "closed",
+            PullRequestState::Merged => "merged",
+        };
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chat_pull_requests SET state = ? WHERE url = ? AND state IS NOT ?",
+            params![state, url, state],
+        )?;
+        database.execute(
+            "UPDATE chat_pull_requests SET checked_at = ? WHERE url = ?",
+            params![now_seconds(), url],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Asks GitHub again about the pull requests linked to a chat that have
+    /// not merged and were not asked about in the last minute, a few at a
+    /// time, longest unchecked first, and records what
+    /// changed. Merged ones cannot change, so they are left alone. Returns
+    /// whether any state changed.
+    /// Also returns whether it asked about as many as it may at once, so
+    /// more may be waiting.
+    pub(crate) fn refresh_linked_pull_request_states(
+        &self,
+        chat_id: &str,
+    ) -> Result<(bool, bool), StorageError> {
+        const MAX_REFRESHED: i64 = 8;
+        // A link asked about this recently is not asked about again.
+        const FRESH_SECONDS: i64 = 60;
+        let (urls, workdir) = {
+            let database = self.reader()?;
+            let mut statement = database.prepare(
+                "SELECT url FROM chat_pull_requests \
+                 WHERE chat_id = ? AND dismissed = 0 AND state IS NOT 'merged' \
+                 AND (checked_at IS NULL OR checked_at <= ?) \
+                 ORDER BY checked_at IS NOT NULL, checked_at, created_at, rowid LIMIT ?",
+            )?;
+            let urls = statement
+                .query_map(
+                    params![chat_id, now_seconds() - FRESH_SECONDS, MAX_REFRESHED],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            let workdir = resolve_chat_workdir(&database, &self.workspace_root, chat_id)
+                .map(PathBuf::from)
+                .ok()
+                .filter(|workdir| workdir.is_dir())
+                .unwrap_or_else(|| self.workspace_root.clone());
+            (urls, workdir)
+        };
+        let full = urls.len() as i64 == MAX_REFRESHED;
+        let mut changed = false;
+        for url in urls {
+            match self.pull_request_snapshot_at(&workdir, &url) {
+                Ok(Some(snapshot)) => {
+                    changed |= self.set_pull_request_state(&url, snapshot.state)?
+                }
+                Ok(None) => self.mark_pull_request_checked(&url)?,
+                Err(error) => {
+                    self.mark_pull_request_checked(&url)?;
+                    eprintln!("xd: cannot read pull request {url}: {error}");
+                }
+            }
+        }
+        Ok((changed, full))
+    }
+
+    fn mark_pull_request_checked(&self, url: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE chat_pull_requests SET checked_at = ? WHERE url = ?",
+            params![now_seconds(), url],
+        )?;
+        Ok(())
+    }
+
+    /// What GitHub says about a pull request named by its address. Answers
+    /// from `workdir`, so gh picks the same host and account as the chat's.
+    pub(crate) fn pull_request_snapshot_at(
+        &self,
+        workdir: &Path,
+        url: &str,
+    ) -> Result<Option<PullRequestSnapshot>, StorageError> {
+        Ok(read_pull_request(workdir, Some(url))?.map(|(_, snapshot)| snapshot))
+    }
+
     pub(crate) fn prepare_git_draft(&self, request: &Value) -> Result<GitDraftSpec, StorageError> {
         let chat_id = required_string(request, "chat", "git-draft needs a chat.")?;
         let kind = required_string(request, "kind", "git-draft needs a draft kind.")?;
@@ -4783,14 +5083,22 @@ impl StateStore {
     /// the sweep looked: what the user does always outranks the rules. One
     /// statement both checks and updates, so no message can land between them,
     /// and the rules the sweep decided under must still be the ones in force.
+    /// `links_seen`, when given, is the session's links as the decision read
+    /// them. A link added, removed or restored since then voids it.
     pub(crate) fn auto_settle_session(
         &self,
         candidate: &SettlementCandidate,
         settled_at: i64,
         decided_under: &AutoSettleSettings,
+        links_seen: Option<&LinkState>,
     ) -> Result<bool, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         if read_auto_settle_settings(&database)? != *decided_under {
+            return Ok(false);
+        }
+        if let Some(links_seen) = links_seen
+            && read_link_state(&database, &candidate.chats)? != *links_seen
+        {
             return Ok(false);
         }
         let changed = database.execute(
@@ -4978,49 +5286,21 @@ impl StateStore {
 
     /// The pull request of the branch checked out in `workdir`, if it has one.
     /// An error means GitHub could not say, which is not the same as no.
+    #[cfg(test)]
     pub(crate) fn pull_request_snapshot(
         &self,
         workdir: &Path,
     ) -> Result<Option<PullRequestSnapshot>, StorageError> {
-        let (status, stdout, stderr) = run_gh(
-            workdir,
-            &[
-                "pr",
-                "view",
-                "--json",
-                "state,mergedAt,closedAt",
-                "--jq",
-                "{state, finished_at: ((.mergedAt // .closedAt) | if . then fromdate else null end)}",
-            ],
-        )?;
-        if !status.success() {
-            let complaint = String::from_utf8_lossy(&stderr);
-            if complaint.contains("no pull requests found") {
-                return Ok(None);
-            }
-            return Err(command_failure(
-                &stdout,
-                &stderr,
-                "The GitHub CLI could not read this pull request.",
-            ));
-        }
-        let parsed: Value = serde_json::from_slice(&stdout).map_err(|error| {
-            StorageError::InvalidRequest(format!("Unreadable pull request: {error}"))
-        })?;
-        let state = match parsed.get("state").and_then(Value::as_str) {
-            Some("OPEN") => PullRequestState::Open,
-            Some("CLOSED") => PullRequestState::Closed,
-            Some("MERGED") => PullRequestState::Merged,
-            other => {
-                return Err(StorageError::InvalidRequest(format!(
-                    "Unknown pull request state: {other:?}"
-                )));
-            }
-        };
-        Ok(Some(PullRequestSnapshot {
-            state,
-            finished_at: parsed.get("finished_at").and_then(Value::as_i64),
-        }))
+        Ok(read_pull_request(workdir, None)?.map(|(_, snapshot)| snapshot))
+    }
+
+    /// As [`Self::pull_request_snapshot`], with the pull request's address
+    /// when GitHub gave one.
+    pub(crate) fn branch_pull_request(
+        &self,
+        workdir: &Path,
+    ) -> Result<Option<(Option<String>, PullRequestSnapshot)>, StorageError> {
+        read_pull_request(workdir, None)
     }
 
     pub fn rename_chat(&self, request: &Value) -> Result<Value, StorageError> {
@@ -5583,7 +5863,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             .optional()?
             .and_then(|version| version.parse::<u32>().ok())
             .unwrap_or(0);
-        if version > 26 {
+        if version > 27 {
             return Err(StorageError::InvalidRequest(format!(
                 "The chat database requires a newer xd version (schema {version})."
             )));
@@ -5603,6 +5883,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_backend_choices(database)?;
             retire_jcode_defaults(database)?;
             ensure_draft_chunks(database)?;
+            ensure_chat_pull_requests(database)?;
             return Ok(());
         }
     }
@@ -5700,6 +5981,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_backend_choices(database)?;
     retire_jcode_defaults(database)?;
     ensure_draft_chunks(database)?;
+    ensure_chat_pull_requests(database)?;
     Ok(())
 }
 
@@ -7756,6 +8038,58 @@ fn head_move_count(workdir: &Path) -> Option<u64> {
         .flatten()
 }
 
+/// What GitHub says about the pull request at `target`, or about the branch
+/// checked out in `workdir` without one: its address when given, and its state.
+fn read_pull_request(
+    workdir: &Path,
+    target: Option<&str>,
+) -> Result<Option<(Option<String>, PullRequestSnapshot)>, StorageError> {
+    let mut arguments = vec!["pr", "view"];
+    arguments.extend(target);
+    arguments.extend([
+        "--json",
+        "url,state,mergedAt,closedAt",
+        "--jq",
+        "{url, state, finished_at: ((.mergedAt // .closedAt) | if . then fromdate else null end)}",
+    ]);
+    let (status, stdout, stderr) = run_gh(workdir, &arguments)?;
+    if !status.success() {
+        let complaint = String::from_utf8_lossy(&stderr);
+        if complaint.contains("no pull requests found") {
+            return Ok(None);
+        }
+        return Err(command_failure(
+            &stdout,
+            &stderr,
+            "The GitHub CLI could not read this pull request.",
+        ));
+    }
+    let parsed: Value = serde_json::from_slice(&stdout).map_err(|error| {
+        StorageError::InvalidRequest(format!("Unreadable pull request: {error}"))
+    })?;
+    let state = match parsed.get("state").and_then(Value::as_str) {
+        Some("OPEN") => PullRequestState::Open,
+        Some("CLOSED") => PullRequestState::Closed,
+        Some("MERGED") => PullRequestState::Merged,
+        other => {
+            return Err(StorageError::InvalidRequest(format!(
+                "Unknown pull request state: {other:?}"
+            )));
+        }
+    };
+    let url = parsed
+        .get("url")
+        .and_then(Value::as_str)
+        .and_then(pull_requests::normalize_url);
+    Ok(Some((
+        url,
+        PullRequestSnapshot {
+            state,
+            finished_at: parsed.get("finished_at").and_then(Value::as_i64),
+        },
+    )))
+}
+
 fn extract_web_url(output: &[u8]) -> Option<String> {
     String::from_utf8_lossy(output)
         .split_whitespace()
@@ -9342,6 +9676,44 @@ fn ensure_draft_chunks(database: &Connection) -> Result<(), StorageError> {
             ordinal INTEGER NOT NULL, data BLOB NOT NULL,
             PRIMARY KEY(event_id, ordinal));
          UPDATE meta SET value = '26' WHERE key = 'schema_version';",
+    )?;
+    Ok(())
+}
+
+/// Every link of some chats, removed ones too, in a fixed order.
+fn read_link_state(database: &Connection, chats: &[String]) -> Result<LinkState, StorageError> {
+    let mut statement = database.prepare_cached(
+        "SELECT url, dismissed FROM chat_pull_requests WHERE chat_id = ? \
+         ORDER BY created_at, rowid",
+    )?;
+    let mut links = Vec::new();
+    for chat in chats {
+        for row in statement.query_map([chat], |row| Ok((row.get(0)?, row.get(1)?)))? {
+            let (url, dismissed) = row?;
+            links.push(LinkRow {
+                chat: chat.clone(),
+                url,
+                dismissed,
+            });
+        }
+    }
+    Ok(LinkState(links))
+}
+
+/// Pull requests linked to each chat. A link the user removed stays, marked
+/// `dismissed`, so automatic linking does not bring it back. `state` is the
+/// last state GitHub reported, if any: `open`, `closed` or `merged`, and
+/// `checked_at` when the host last asked, so refreshes take turns.
+fn ensure_chat_pull_requests(database: &Connection) -> Result<(), StorageError> {
+    database.execute_batch(
+        "CREATE TABLE IF NOT EXISTS chat_pull_requests (
+            chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            url TEXT NOT NULL, source TEXT NOT NULL, state TEXT,
+            dismissed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+            checked_at INTEGER,
+            PRIMARY KEY(chat_id, url));
+         CREATE INDEX IF NOT EXISTS chat_pull_requests_url ON chat_pull_requests (url);
+         UPDATE meta SET value = '27' WHERE key = 'schema_version';",
     )?;
     Ok(())
 }
@@ -11012,7 +11384,7 @@ mod tests {
                     |row| row.get::<_, String>(0)
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         let fts_exists: bool = database
             .query_row(
