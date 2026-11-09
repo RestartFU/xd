@@ -43,6 +43,12 @@ pub enum AgentEvent {
     /// The error that follows left work unfinished rather than failing it: a
     /// usage limit or an interruption. Offered to the user as something to resume.
     Resumable,
+    /// The account's usage limit turned the turn away. Comes with `Resumable`.
+    /// Says when the limit resets and which one it was, where the agent says.
+    UsageLimit {
+        resets_at_ms: Option<i64>,
+        limit: Option<String>,
+    },
     Usage {
         input: u64,
         output: u64,
@@ -638,6 +644,9 @@ pub struct ClaudeParser {
     saw_text: bool,
     /// The account's limit turned this turn away, as far as Claude has said.
     limit_rejected: bool,
+    /// What Claude last said about the limit that turned the turn away.
+    limit_resets_at_ms: Option<i64>,
+    limit_kind: Option<String>,
     /// Newlines the text so far already ends with, so a new block is separated
     /// by a blank line rather than running into the previous one.
     trailing_newlines: usize,
@@ -671,6 +680,19 @@ fn claude_limit_rejected(root: &Value) -> Option<bool> {
     ) || info.get("isUsingOverage").and_then(Value::as_bool) == Some(true)
         || info.get("overageInUse").and_then(Value::as_bool) == Some(true);
     Some(status == "rejected" && !overage)
+}
+
+/// How Claude's `rateLimitType` reads in a sentence.
+fn claude_limit_name(kind: &str) -> String {
+    match kind {
+        "five_hour" => "5-hour limit".into(),
+        "seven_day" => "weekly limit".into(),
+        "overage" => "extra usage limit".into(),
+        other => match other.strip_prefix("seven_day_") {
+            Some(model) => format!("weekly {model} limit"),
+            None => "usage limit".into(),
+        },
+    }
 }
 
 /// Whether a failed result was the usage limit. A rejected limit only explains
@@ -751,6 +773,14 @@ impl ClaudeParser {
             Some("rate_limit_event") => {
                 if let Some(rejected) = claude_limit_rejected(&root) {
                     self.limit_rejected = rejected;
+                    if rejected {
+                        let info = &root["rate_limit_info"];
+                        self.limit_resets_at_ms = info["resetsAt"]
+                            .as_f64()
+                            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                            .map(|seconds| (seconds * 1000.0) as i64);
+                        self.limit_kind = info["rateLimitType"].as_str().map(claude_limit_name);
+                    }
                 }
                 Vec::new()
             }
@@ -827,6 +857,10 @@ impl ClaudeParser {
                 }
                 if failed {
                     if claude_usage_limited(&root, limit_rejected) {
+                        events.push(AgentEvent::UsageLimit {
+                            resets_at_ms: self.limit_resets_at_ms.take(),
+                            limit: self.limit_kind.take(),
+                        });
                         events.push(AgentEvent::Resumable);
                     }
                     events.push(AgentEvent::Error(

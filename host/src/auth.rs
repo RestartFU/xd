@@ -14,12 +14,16 @@ use serde_json::{Value, json};
 
 use crate::{
     EventBus,
+    accounts::{Accounts, Choice, DEFAULT_ACCOUNT, PROVIDERS, now_ms, provider_name},
     agent::{resolve_claude, resolve_codex},
     background_process::command as background_command,
 };
 
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often accounts are read again while an assistant has several, so a
+/// spent one is passed over before a turn has to fail on it.
+const WATCH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone)]
 pub struct AuthManager {
@@ -27,8 +31,13 @@ pub struct AuthManager {
 }
 
 struct AuthInner {
-    states: Mutex<HashMap<String, AuthSnapshot>>,
+    accounts: Accounts,
+    /// By provider, then account.
+    states: Mutex<HashMap<(String, String), AuthSnapshot>>,
+    /// At most one sign-in per provider, so its code and input are unambiguous.
     sessions: Mutex<HashMap<String, AuthSession>>,
+    /// The outcome of the last attempt to add an account, by provider.
+    notices: Mutex<HashMap<String, String>>,
     next_session: AtomicU64,
     events: Arc<EventBus>,
 }
@@ -42,53 +51,96 @@ struct AuthSnapshot {
     needs_input: bool,
 }
 
+impl AuthSnapshot {
+    fn unknown() -> Self {
+        Self {
+            state: "unknown".into(),
+            detail: None,
+            login_url: None,
+            device_code: None,
+            needs_input: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionKind {
+    SignIn,
+    Add,
+    SignOut,
+    Remove,
+}
+
 struct AuthSession {
     serial: u64,
+    account: String,
+    kind: SessionKind,
     pid: Option<u32>,
     input: Option<Arc<Mutex<ChildStdin>>>,
     output: String,
     cancelled: bool,
 }
 
+fn key(provider: &str, account: &str) -> (String, String) {
+    (provider.to_owned(), account.to_owned())
+}
+
+fn known_provider(provider: &str) -> Result<&'static str, String> {
+    PROVIDERS
+        .iter()
+        .find(|known| **known == provider)
+        .copied()
+        .ok_or_else(|| "No such assistant.".to_owned())
+}
+
 impl AuthManager {
-    pub(crate) fn new(events: Arc<EventBus>) -> Self {
-        let states = ["codex", "claude"]
-            .into_iter()
-            .map(|provider| {
-                (
-                    provider.to_owned(),
-                    AuthSnapshot {
-                        state: "unknown".into(),
-                        detail: None,
-                        login_url: None,
-                        device_code: None,
-                        needs_input: false,
-                    },
-                )
+    pub(crate) fn new(events: Arc<EventBus>, accounts: Accounts) -> Self {
+        let states = PROVIDERS
+            .iter()
+            .flat_map(|provider| {
+                accounts
+                    .ids(provider)
+                    .into_iter()
+                    .map(|id| (key(provider, &id), AuthSnapshot::unknown()))
             })
             .collect();
         Self {
             inner: Arc::new(AuthInner {
+                accounts,
                 states: Mutex::new(states),
                 sessions: Mutex::new(HashMap::new()),
+                notices: Mutex::new(HashMap::new()),
                 next_session: AtomicU64::new(1),
                 events,
             }),
         }
     }
 
-    pub(crate) fn refresh_all(&self) {
-        self.refresh("codex");
-        self.refresh("claude");
+    pub(crate) fn accounts(&self) -> &Accounts {
+        &self.inner.accounts
     }
 
+    pub(crate) fn refresh_all(&self) {
+        for provider in PROVIDERS {
+            self.refresh(provider);
+        }
+    }
+
+    /// Checks every account of one assistant.
     pub(crate) fn refresh(&self, provider: &str) -> bool {
-        let provider = provider.to_owned();
+        let mut started = true;
+        for id in self.inner.accounts.ids(provider) {
+            started &= self.refresh_account(provider, &id);
+        }
+        started
+    }
+
+    fn refresh_account(&self, provider: &str, account: &str) -> bool {
         if self
             .inner
             .sessions
             .lock()
-            .is_ok_and(|sessions| sessions.contains_key(&provider))
+            .is_ok_and(|sessions| sessions.contains_key(provider))
         {
             return true;
         }
@@ -96,9 +148,9 @@ impl AuthManager {
             let Ok(mut states) = self.inner.states.lock() else {
                 return false;
             };
-            let Some(snapshot) = states.get_mut(&provider) else {
-                return false;
-            };
+            let snapshot = states
+                .entry(key(provider, account))
+                .or_insert_with(AuthSnapshot::unknown);
             if snapshot.state == "checking" {
                 return true;
             }
@@ -108,46 +160,204 @@ impl AuthManager {
             snapshot.device_code = None;
             snapshot.needs_input = false;
         }
-        self.publish(&provider);
+        self.publish(provider);
         let manager = self.clone();
-        let checked_provider = provider.clone();
+        let checked_provider = provider.to_owned();
+        let checked_account = account.to_owned();
         let spawned = thread::Builder::new()
             .name(format!("xd-auth-{provider}"))
             .spawn(move || {
-                let snapshot = check_status(&checked_provider);
+                let environment = manager
+                    .inner
+                    .accounts
+                    .environment(&checked_provider, &checked_account);
+                let snapshot = check_status(&checked_provider, &environment);
                 if let Ok(mut states) = manager.inner.states.lock() {
-                    states.insert(checked_provider.clone(), snapshot);
+                    states.insert(key(&checked_provider, &checked_account), snapshot);
                 }
                 manager.publish(&checked_provider);
             });
         if let Err(error) = spawned {
-            if let Ok(mut states) = self.inner.states.lock() {
-                states.insert(
-                    provider.clone(),
-                    failed(format!("Cannot check sign-in status: {error}")),
-                );
-            }
-            self.publish(&provider);
+            self.set_snapshot(
+                provider,
+                account,
+                failed(format!("Cannot check sign-in status: {error}")),
+            );
             return false;
         }
         true
     }
 
-    pub(crate) fn state(&self, provider: &str) -> String {
+    fn snapshot(&self, provider: &str, account: &str) -> AuthSnapshot {
         self.inner
             .states
             .lock()
             .ok()
-            .and_then(|states| states.get(provider).map(|snapshot| snapshot.state.clone()))
-            .unwrap_or_else(|| "unknown".into())
+            .and_then(|states| states.get(&key(provider, account)).cloned())
+            .unwrap_or_else(AuthSnapshot::unknown)
     }
 
-    pub(crate) fn login(&self, provider: &str) -> Result<(), String> {
-        self.begin_session(provider, true)
+    /// Whether a turn may run on the account. One whose check has not come
+    /// back yet gets the benefit of the doubt; the CLI says so if it is wrong.
+    pub(crate) fn signed_in(&self, provider: &str, account: &str) -> bool {
+        !matches!(
+            self.snapshot(provider, account).state.as_str(),
+            "signed-out" | "failed" | "signing-out"
+        )
     }
 
-    pub(crate) fn logout(&self, provider: &str) -> Result<(), String> {
-        self.begin_session(provider, false)
+    /// The account the chat's next turn runs on; see [`Accounts::choose`].
+    pub(crate) fn choose(&self, provider: &str, chat_account: Option<&str>) -> Choice {
+        self.inner.accounts.choose(
+            provider,
+            chat_account,
+            |account| self.signed_in(provider, account),
+            now_ms(),
+        )
+    }
+
+    /// Sign-in state as a chat shows it: that of the account a new turn would use.
+    pub(crate) fn state(&self, provider: &str) -> String {
+        let account = self
+            .inner
+            .accounts
+            .choose(
+                provider,
+                None,
+                |account| self.signed_in(provider, account),
+                now_ms(),
+            )
+            .account;
+        self.snapshot(provider, &account).state
+    }
+
+    /// Signs in the user's own CLI, or an account already in the list again.
+    pub(crate) fn login(&self, provider: &str, account: Option<&str>) -> Result<(), String> {
+        let provider = known_provider(provider)?;
+        let account = account.unwrap_or(DEFAULT_ACCOUNT);
+        if !self.inner.accounts.exists(provider, account) {
+            return Err("No such account.".into());
+        }
+        self.begin_session(provider, account, SessionKind::SignIn)
+    }
+
+    /// Signs in another account, in a home of its own.
+    pub(crate) fn add(&self, provider: &str) -> Result<(), String> {
+        let provider = known_provider(provider)?;
+        if self
+            .inner
+            .sessions
+            .lock()
+            .map_err(|_| "Authentication service is unavailable.".to_owned())?
+            .contains_key(provider)
+        {
+            return Err(format!(
+                "{} is already signing in. Finish or cancel that first.",
+                provider_name(provider)
+            ));
+        }
+        let account = self.inner.accounts.begin_adding(provider)?;
+        if let Ok(mut notices) = self.inner.notices.lock() {
+            notices.remove(provider);
+        }
+        let started = self.begin_session(provider, &account, SessionKind::Add);
+        if started.is_err() {
+            self.inner.accounts.forget(provider, &account);
+            self.publish(provider);
+        }
+        started
+    }
+
+    /// Signs the user's own CLI out, or removes an added account: its CLI signs
+    /// out and its home, credentials included, is deleted.
+    pub(crate) fn logout(&self, provider: &str, account: Option<&str>) -> Result<(), String> {
+        let provider = known_provider(provider)?;
+        let account = account.unwrap_or(DEFAULT_ACCOUNT);
+        if !self.inner.accounts.exists(provider, account) {
+            return Err("No such account.".into());
+        }
+        let kind = if account == DEFAULT_ACCOUNT {
+            SessionKind::SignOut
+        } else {
+            SessionKind::Remove
+        };
+        self.begin_session(provider, account, kind)
+    }
+
+    pub(crate) fn reorder(&self, provider: &str, order: &[String]) -> Result<(), String> {
+        let provider = known_provider(provider)?;
+        self.inner.accounts.reorder(provider, order)?;
+        self.publish(provider);
+        Ok(())
+    }
+
+    pub(crate) fn set_auto_switch(&self, provider: &str, enabled: bool) -> Result<(), String> {
+        let provider = known_provider(provider)?;
+        self.inner.accounts.set_auto_switch(provider, enabled)?;
+        self.publish(provider);
+        Ok(())
+    }
+
+    /// A turn on this account was turned away for usage. Reads the account
+    /// again to learn when it resets.
+    pub(crate) fn note_limited(
+        &self,
+        provider: &str,
+        account: &str,
+        resets_at_ms: Option<i64>,
+        label: Option<&str>,
+    ) {
+        self.inner
+            .accounts
+            .note_limited(provider, account, resets_at_ms, label, now_ms());
+        self.publish(provider);
+        let manager = self.clone();
+        let provider = provider.to_owned();
+        let account = account.to_owned();
+        let _ = thread::Builder::new()
+            .name("xd-account-check".into())
+            .spawn(move || {
+                crate::usage::check_account(&manager.inner.accounts, &provider, &account);
+                manager.publish(&provider);
+            });
+    }
+
+    /// Reads every account's limits now and then while an assistant has
+    /// several. Only the daemon runs this.
+    pub(crate) fn start_watch(&self) {
+        let manager = Arc::downgrade(&self.inner);
+        let _ = thread::Builder::new()
+            .name("xd-account-watch".into())
+            .spawn(move || {
+                loop {
+                    let Some(inner) = manager.upgrade() else {
+                        return;
+                    };
+                    let auth = AuthManager { inner };
+                    for provider in PROVIDERS {
+                        if !auth.inner.accounts.has_several(provider) {
+                            continue;
+                        }
+                        for id in auth.inner.accounts.ids(provider) {
+                            if auth.signed_in(provider, &id) {
+                                crate::usage::check_account(&auth.inner.accounts, provider, &id);
+                            }
+                        }
+                        auth.publish(provider);
+                    }
+                    drop(auth);
+                    thread::sleep(WATCH_INTERVAL);
+                }
+            });
+    }
+
+    fn session_account(&self, provider: &str) -> Option<String> {
+        self.inner
+            .sessions
+            .lock()
+            .ok()?
+            .get(provider)
+            .map(|session| session.account.clone())
     }
 
     pub(crate) fn input(&self, provider: &str, text: &str) -> Result<(), String> {
@@ -191,10 +401,12 @@ impl AuthManager {
         Ok(())
     }
 
-    fn begin_session(&self, provider: &str, login: bool) -> Result<(), String> {
-        if !matches!(provider, "codex" | "claude") {
-            return Err("No such assistant.".into());
-        }
+    fn begin_session(
+        &self,
+        provider: &str,
+        account: &str,
+        kind: SessionKind,
+    ) -> Result<(), String> {
         let serial = self.inner.next_session.fetch_add(1, Ordering::Relaxed);
         {
             let mut sessions = self
@@ -203,12 +415,17 @@ impl AuthManager {
                 .lock()
                 .map_err(|_| "Authentication service is unavailable.".to_owned())?;
             if sessions.contains_key(provider) {
-                return Err(format!("{provider} authentication is already busy."));
+                return Err(format!(
+                    "{} is already signing in. Finish or cancel that first.",
+                    provider_name(provider)
+                ));
             }
             sessions.insert(
                 provider.to_owned(),
                 AuthSession {
                     serial,
+                    account: account.to_owned(),
+                    kind,
                     pid: None,
                     input: None,
                     output: String::new(),
@@ -216,14 +433,16 @@ impl AuthManager {
                 },
             );
         }
+        let login = matches!(kind, SessionKind::SignIn | SessionKind::Add);
         self.set_snapshot(
             provider,
+            account,
             AuthSnapshot {
                 state: if login { "signing-in" } else { "signing-out" }.into(),
-                detail: Some(if login {
-                    "Waiting for sign-in…".into()
-                } else {
-                    "Signing out…".into()
+                detail: Some(match kind {
+                    SessionKind::SignIn | SessionKind::Add => "Starting sign-in…".into(),
+                    SessionKind::SignOut => "Signing out…".into(),
+                    SessionKind::Remove => "Removing the account…".into(),
                 }),
                 login_url: None,
                 device_code: None,
@@ -233,15 +452,17 @@ impl AuthManager {
         let manager = self.clone();
         let provider = provider.to_owned();
         let session_provider = provider.clone();
+        let session_account = account.to_owned();
         if let Err(error) = thread::Builder::new()
             .name(format!("xd-auth-session-{provider}"))
-            .spawn(move || manager.run_session(&session_provider, serial, login))
+            .spawn(move || manager.run_session(&session_provider, &session_account, serial, kind))
         {
             if let Ok(mut sessions) = self.inner.sessions.lock() {
                 sessions.remove(&provider);
             }
             self.set_snapshot(
                 &provider,
+                account,
                 failed(format!("Cannot start authentication: {error}")),
             );
             return Err(format!("Cannot start authentication: {error}"));
@@ -249,7 +470,8 @@ impl AuthManager {
         Ok(())
     }
 
-    fn run_session(&self, provider: &str, serial: u64, login: bool) {
+    fn run_session(&self, provider: &str, account: &str, serial: u64, kind: SessionKind) {
+        let login = matches!(kind, SessionKind::SignIn | SessionKind::Add);
         let mut command = match provider {
             "claude" => {
                 let mut command = background_command(resolve_claude());
@@ -271,6 +493,7 @@ impl AuthManager {
             }
         };
         command
+            .envs(self.inner.accounts.environment(provider, account))
             .env("NO_COLOR", "1")
             .env("TERM", "dumb")
             .stdin(if login { Stdio::piped() } else { Stdio::null() })
@@ -347,7 +570,7 @@ impl AuthManager {
     }
 
     fn append_login_output(&self, provider: &str, serial: u64, bytes: &[u8]) {
-        let output = {
+        let (output, account) = {
             let Ok(mut sessions) = self.inner.sessions.lock() else {
                 return;
             };
@@ -361,17 +584,24 @@ impl AuthManager {
             if session.output.len() > OUTPUT_LIMIT {
                 session.output.drain(..session.output.len() - OUTPUT_LIMIT);
             }
-            session.output.clone()
+            (session.output.clone(), session.account.clone())
         };
         let (login_url, device_code, needs_input) = login_instructions(provider, &output);
         if let Ok(mut states) = self.inner.states.lock()
-            && let Some(snapshot) = states.get_mut(provider)
+            && let Some(snapshot) = states.get_mut(&key(provider, &account))
             && (
                 snapshot.login_url.as_ref(),
                 snapshot.device_code.as_ref(),
                 snapshot.needs_input,
             ) != (login_url.as_ref(), device_code.as_ref(), needs_input)
         {
+            snapshot.detail = Some(if needs_input {
+                "Sign in in your browser, then paste the code it shows.".into()
+            } else if device_code.is_some() {
+                "Sign in in your browser and enter this code.".into()
+            } else {
+                "Waiting for sign-in…".into()
+            });
             snapshot.login_url = login_url;
             snapshot.device_code = device_code;
             snapshot.needs_input = needs_input;
@@ -381,67 +611,172 @@ impl AuthManager {
     }
 
     fn finish_session(&self, provider: &str, serial: u64, result: Result<(), String>) {
-        let cancelled = self
-            .inner
-            .sessions
-            .lock()
-            .ok()
-            .and_then(|mut sessions| {
-                sessions
-                    .remove(provider)
-                    .filter(|session| session.serial == serial)
-                    .map(|session| session.cancelled)
-            })
-            .unwrap_or(false);
-        match result {
-            Ok(()) | Err(_) if cancelled => {
-                self.set_snapshot(provider, failed("Sign-in canceled.".into()));
-                self.refresh(provider);
+        let session = self.inner.sessions.lock().ok().and_then(|mut sessions| {
+            sessions
+                .remove(provider)
+                .filter(|session| session.serial == serial)
+        });
+        let Some(session) = session else {
+            return;
+        };
+        let account = session.account.as_str();
+        let accounts = &self.inner.accounts;
+        match (session.kind, result) {
+            (SessionKind::Add, _) if session.cancelled => {
+                accounts.forget(provider, account);
+                self.forget_snapshot(provider, account);
             }
-            Ok(()) => {
-                self.refresh(provider);
+            (SessionKind::Add, Err(error)) => {
+                accounts.forget(provider, account);
+                self.forget_snapshot(provider, account);
+                self.set_notice(provider, format!("Sign-in failed: {error}"));
             }
-            Err(error) => self.set_snapshot(provider, failed(error)),
+            (SessionKind::Add, Ok(())) => self.adopt(provider, account),
+            (SessionKind::Remove, outcome) => {
+                // The home goes even if the CLI could not sign out, so no
+                // credential is left behind.
+                if let Err(error) = outcome {
+                    eprintln!("xd: {provider} sign-out before removal failed: {error}");
+                }
+                accounts.forget(provider, account);
+                self.forget_snapshot(provider, account);
+                self.publish(provider);
+            }
+            (_, Ok(())) | (_, Err(_)) if session.cancelled => {
+                self.set_snapshot(provider, account, failed("Sign-in canceled.".into()));
+                self.refresh_account(provider, account);
+            }
+            (_, Ok(())) => {
+                self.refresh_account(provider, account);
+                self.check_soon(provider, account);
+            }
+            (_, Err(error)) => self.set_snapshot(provider, account, failed(error)),
         }
     }
 
-    fn set_snapshot(&self, provider: &str, snapshot: AuthSnapshot) {
+    /// Checks who a new sign-in belongs to before it joins the list.
+    fn adopt(&self, provider: &str, account: &str) {
+        self.set_snapshot(
+            provider,
+            account,
+            AuthSnapshot {
+                state: "checking".into(),
+                detail: Some("Checking the account…".into()),
+                login_url: None,
+                device_code: None,
+                needs_input: false,
+            },
+        );
+        let accounts = &self.inner.accounts;
+        let identity = crate::usage::check_account(accounts, provider, account).unwrap_or_default();
+        match accounts.finish_adding(provider, account, &identity) {
+            Ok(Ok(())) => {
+                self.set_notice(
+                    provider,
+                    format!("Added {}.", accounts.label(provider, account)),
+                );
+                self.refresh_account(provider, account);
+            }
+            Ok(Err(existing)) => {
+                // Signing the duplicate out could sign the original out too,
+                // where the CLI shares a keychain entry. Delete the home only.
+                accounts.forget(provider, account);
+                self.forget_snapshot(provider, account);
+                self.set_notice(
+                    provider,
+                    format!("{existing} is already in the list, so it was not added again."),
+                );
+            }
+            Err(error) => {
+                accounts.forget(provider, account);
+                self.forget_snapshot(provider, account);
+                self.set_notice(provider, error);
+            }
+        }
+    }
+
+    fn check_soon(&self, provider: &str, account: &str) {
+        let manager = self.clone();
+        let provider = provider.to_owned();
+        let account = account.to_owned();
+        let _ = thread::Builder::new()
+            .name("xd-account-check".into())
+            .spawn(move || {
+                crate::usage::check_account(&manager.inner.accounts, &provider, &account);
+                manager.publish(&provider);
+            });
+    }
+
+    fn set_notice(&self, provider: &str, notice: String) {
+        if let Ok(mut notices) = self.inner.notices.lock() {
+            notices.insert(provider.to_owned(), notice);
+        }
+        self.publish(provider);
+    }
+
+    fn forget_snapshot(&self, provider: &str, account: &str) {
         if let Ok(mut states) = self.inner.states.lock() {
-            states.insert(provider.to_owned(), snapshot);
+            states.remove(&key(provider, account));
+        }
+    }
+
+    fn set_snapshot(&self, provider: &str, account: &str, snapshot: AuthSnapshot) {
+        if let Ok(mut states) = self.inner.states.lock() {
+            states.insert(key(provider, account), snapshot);
         }
         self.publish(provider);
     }
 
     pub(crate) fn snapshots(&self) -> Value {
-        let providers = self
+        let providers = PROVIDERS
+            .iter()
+            .map(|provider| self.provider_value(provider))
+            .collect::<Vec<_>>();
+        json!({"ok": true, "providers": providers, "multiple_accounts": self.inner.accounts.supports_more()})
+    }
+
+    /// One assistant with each of its accounts. The top-level sign-in fields
+    /// are the user's own CLI sign-in, as clients before accounts read them.
+    fn provider_value(&self, provider: &str) -> Value {
+        let mut value = snapshot_value(provider, &self.snapshot(provider, DEFAULT_ACCOUNT));
+        let now = now_ms();
+        let in_use = self.choose(provider, None).account;
+        let busy = self.session_account(provider);
+        let accounts = self
             .inner
-            .states
-            .lock()
-            .map(|states| {
-                ["codex", "claude"]
-                    .into_iter()
-                    .filter_map(|provider| {
-                        states
-                            .get(provider)
-                            .map(|snapshot| snapshot_value(provider, snapshot))
-                    })
-                    .collect::<Vec<_>>()
+            .accounts
+            .describe(provider, now)
+            .into_iter()
+            .map(|mut account| {
+                let id = account["id"].as_str().unwrap_or_default().to_owned();
+                let snapshot = snapshot_value(provider, &self.snapshot(provider, &id));
+                for field in ["state", "detail", "login_url", "device_code", "needs_input"] {
+                    if let Some(found) = snapshot.get(field) {
+                        account[field] = found.clone();
+                    }
+                }
+                account["in_use"] = json!(id == in_use);
+                account["busy"] = json!(busy.as_deref() == Some(id.as_str()));
+                account
             })
-            .unwrap_or_default();
-        json!({"ok": true, "providers": providers})
+            .collect::<Vec<_>>();
+        value["accounts"] = Value::Array(accounts);
+        value["auto_switch"] = json!(self.inner.accounts.auto_switch(provider));
+        value["adding"] = json!(self.inner.accounts.pending(provider).is_some());
+        if let Some(notice) = self
+            .inner
+            .notices
+            .lock()
+            .ok()
+            .and_then(|notices| notices.get(provider).cloned())
+        {
+            value["notice"] = Value::String(notice);
+        }
+        value
     }
 
     fn publish(&self, provider: &str) {
-        let Some(snapshot) = self
-            .inner
-            .states
-            .lock()
-            .ok()
-            .and_then(|states| states.get(provider).cloned())
-        else {
-            return;
-        };
-        let mut event = snapshot_value(provider, &snapshot);
+        let mut event = self.provider_value(provider);
         event["event"] = Value::String("agent-auth-changed".into());
         self.inner.events.publish(event);
     }
@@ -450,10 +785,7 @@ impl AuthManager {
 fn snapshot_value(provider: &str, snapshot: &AuthSnapshot) -> Value {
     let mut value = json!({
         "provider": provider,
-        "display_name": match provider {
-            "claude" => "Claude Code",
-            _ => "Codex",
-        },
+        "display_name": provider_name(provider),
         "state": snapshot.state,
         "needs_input": snapshot.needs_input,
     });
@@ -469,7 +801,7 @@ fn snapshot_value(provider: &str, snapshot: &AuthSnapshot) -> Value {
     value
 }
 
-fn check_status(provider: &str) -> AuthSnapshot {
+fn check_status(provider: &str, environment: &[(String, String)]) -> AuthSnapshot {
     let mut command = match provider {
         "claude" => {
             let mut command = background_command(resolve_claude());
@@ -483,6 +815,7 @@ fn check_status(provider: &str) -> AuthSnapshot {
         }
     };
     command
+        .envs(environment.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

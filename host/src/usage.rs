@@ -21,7 +21,11 @@ use chrono_tz::Tz;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{EventBus, model_catalog::Probe};
+use crate::{
+    EventBus,
+    accounts::{Accounts, Headroom, Identity, PROVIDERS},
+    model_catalog::Probe,
+};
 
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
@@ -2201,6 +2205,8 @@ fn claude_limits(mut command: std::process::Command, now: i64, zone: Tz) -> Opti
             }
             let mut account = claude_account(&response["response"], identity.as_deref(), now, zone);
             account["checked_at_ms"] = json!(now_ms());
+            // Read by the host's account list and removed before it is sent.
+            account["email"] = json!(identity);
             return Some(account);
         }
     }
@@ -2278,8 +2284,11 @@ fn codex_limits(command: std::process::Command, now: i64, zone: Tz) -> Option<Va
     let Some(limits) = limits else {
         return Some(failed("Codex did not answer the usage request."));
     };
-    let mut account = codex_account(&limits, &profile.unwrap_or(Value::Null), now, zone);
+    let profile = profile.unwrap_or(Value::Null);
+    let mut account = codex_account(&limits, &profile, now, zone);
     account["checked_at_ms"] = json!(read_at);
+    // Read by the host's account list and removed before it is sent.
+    account["email"] = json!(profile["account"]["email"].as_str());
     Some(account)
 }
 
@@ -2391,10 +2400,81 @@ fn consume_codex_reset_credit(
     }
 }
 
+/// Reads one account's limits by running its CLI as that account. `None`
+/// means the CLI is not installed.
+pub(crate) fn probe_account(
+    provider: &str,
+    environment: &[(String, String)],
+    now: i64,
+    zone: Tz,
+) -> Option<Value> {
+    let program = if provider == "claude" {
+        crate::agent::resolve_claude()
+    } else {
+        crate::agent::resolve_codex()
+    };
+    let mut command = crate::background_process::command(program);
+    command.envs(environment.iter().map(|(name, value)| (name, value)));
+    if provider == "claude" {
+        if which_missing(&command) {
+            None
+        } else {
+            claude_limits(command, now, zone)
+        }
+    } else {
+        codex_limits(command, now, zone)
+    }
+}
+
+/// Who a probe found signed in and how much of each limit is used, or `None`
+/// when the probe could not read the account.
+pub(crate) fn probe_reading(account: &Value) -> Option<(Identity, Vec<Headroom>)> {
+    if account
+        .get("unavailable")
+        .is_some_and(|value| !value.is_null())
+    {
+        return None;
+    }
+    let text = |name: &str| account[name].as_str().map(str::to_owned);
+    let windows = account["windows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|window| {
+            Some(Headroom {
+                kind: window["kind"].as_str()?.to_owned(),
+                label: window["label"].as_str().unwrap_or_default().to_owned(),
+                used_percent: window["used_percent"].as_f64()?,
+                resets_at_ms: window["resets_at_ms"].as_i64(),
+            })
+        })
+        .collect();
+    Some((
+        Identity {
+            email: text("email"),
+            plan: text("plan"),
+            account_key: text("account_key"),
+        },
+        windows,
+    ))
+}
+
+/// Probes an account and records what it found. Returns who is signed in.
+pub(crate) fn check_account(accounts: &Accounts, provider: &str, id: &str) -> Option<Identity> {
+    let now = now_ms();
+    let environment = accounts.environment(provider, id);
+    let account = probe_account(provider, &environment, now, Tz::UTC)?;
+    let (identity, windows) = probe_reading(&account)?;
+    let checked = account["checked_at_ms"].as_i64().unwrap_or(now);
+    accounts.record_probe(provider, id, &identity, windows, checked);
+    Some(identity)
+}
+
 /// Answers the Usage page's reads off the connection thread: a cold scan or a
 /// provider probe can take seconds, and each answer arrives as an event.
 pub(crate) struct UsageService {
     events: Arc<EventBus>,
+    accounts: Accounts,
     shared: Arc<Shared>,
     summaries: Coalescer,
     limits: Coalescer,
@@ -2504,6 +2584,7 @@ impl UsageService {
     ) -> Self {
         Self {
             events,
+            accounts: Accounts::new(None),
             summaries: Coalescer::new("xd-usage-scan"),
             limits: Coalescer::new("xd-usage-limits"),
             shared: Arc::new(Shared {
@@ -2520,6 +2601,12 @@ impl UsageService {
                 data_directory,
             }),
         }
+    }
+
+    /// Reads limits for each of these accounts instead of the user's own only.
+    pub(crate) fn with_accounts(mut self, accounts: Accounts) -> Self {
+        self.accounts = accounts;
+        self
     }
 
     fn spawn(&self, name: &str, work: impl FnOnce() + Send + 'static) -> Result<(), String> {
@@ -2559,27 +2646,47 @@ impl UsageService {
         let zone = parse_zone(request);
         let generation = request["generation"].clone();
         let events = self.events.clone();
+        let known = self.accounts.clone();
         self.limits.submit(owner, Box::new(move || {
             let now = now_ms();
-            let codex = thread::spawn(move || {
-                codex_limits(
-                    crate::background_process::command(crate::agent::resolve_codex()),
-                    now,
-                    zone,
-                )
-            });
-            let claude = thread::spawn(move || {
-                let command = crate::background_process::command(crate::agent::resolve_claude());
-                if which_missing(&command) {
-                    None
-                } else {
-                    claude_limits(command, now, zone)
-                }
-            });
-            let accounts: Vec<Value> = [codex.join().ok().flatten(), claude.join().ok().flatten()]
-                .into_iter()
-                .flatten()
+            // Every account of every assistant, read at once.
+            let probes: Vec<_> = PROVIDERS
+                .iter()
+                .flat_map(|provider| {
+                    known.ids(provider).into_iter().map(move |id| (*provider, id))
+                })
+                .map(|(provider, id)| {
+                    let environment = known.environment(provider, &id);
+                    let probe = thread::spawn(move || {
+                        probe_account(provider, &environment, now, zone)
+                    });
+                    (provider, id, probe)
+                })
                 .collect();
+            let mut accounts = Vec::new();
+            for (provider, id, probe) in probes {
+                let Some(mut account) = probe.join().ok().flatten() else {
+                    continue;
+                };
+                if let Some((identity, windows)) = probe_reading(&account) {
+                    let checked = account["checked_at_ms"].as_i64().unwrap_or(now);
+                    known.record_probe(provider, &id, &identity, windows, checked);
+                }
+                // `account_key` is a hash, so no address crosses the wire.
+                if let Some(fields) = account.as_object_mut() {
+                    fields.remove("email");
+                }
+                // Two accounts can read as one when a login was repeated.
+                if account["account_key"].is_string()
+                    && accounts.iter().any(|seen: &Value| {
+                        seen["provider"] == account["provider"]
+                            && seen["account_key"] == account["account_key"]
+                    })
+                {
+                    continue;
+                }
+                accounts.push(account);
+            }
             events.publish_to(
                 owner,
                 json!({"event":"usage-limits", "generation":generation, "accounts":accounts, "host_now_ms":now_ms()}),
@@ -2607,8 +2714,14 @@ impl UsageService {
             .ok_or_else(|| "A reset needs the account it was confirmed for.".to_owned())?
             .to_owned();
         let events = self.events.clone();
+        let environment = self
+            .accounts
+            .with_key("codex", &expected)
+            .map(|id| self.accounts.environment("codex", &id))
+            .unwrap_or_default();
         self.spawn("xd-usage-reset", move || {
-            let command = crate::background_process::command(crate::agent::resolve_codex());
+            let mut command = crate::background_process::command(crate::agent::resolve_codex());
+            command.envs(environment.iter().map(|(name, value)| (name, value)));
             let event = match consume_codex_reset_credit(command, &key, Some(&expected)) {
                 Ok(outcome) => {
                     json!({"event":"usage-reset-credit", "provider":"codex", "outcome":outcome, "idempotency_key":key})

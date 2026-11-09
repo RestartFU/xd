@@ -372,6 +372,7 @@ boundary, not an event cursor.
 | `file-browse` | `chat`, `action`, optional relative `path`, `content`, and `original` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB; `action:"write"` saves bounded UTF-8 text and rejects a stale optional `original` |
 | `agent-secrets` | optional `folder` | `names: string[]` for that project's own set, or the host-wide set without `folder`; values never cross the wire |
 | `agent-clis` | none | detected assistant versions |
+| `agent-auth` | none | `providers:[…]` as in [Assistant accounts](#assistant-accounts), and `multiple_accounts: boolean`, false on a host that keeps only the user's own sign-in; checks every account again |
 | `host-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-cli-updates` | optional `action` of `status`, `check`, `install`; `install` requires `provider` | `providers:[{provider,display_name,state,available,updatable, optional version, latest, detail}]`; `state` is `idle`, `updating`, `updated`, or `failed`; each change is also sent as an `agent-cli-update` event holding one provider |
 | `resume-interrupted` | `resume: boolean` | `resumed: string[]`. Answers for every chat cut off since the last answer, which wait in storage until then. Local and authenticated remote clients may answer, and the first answer settles them: `true` sends a visible continuation message to each, unless the chat has moved on, and `false` discards them |
@@ -379,7 +380,7 @@ boundary, not an event cursor.
 | `owner-icon` | `owner: string` GitHub login from a folder's `owner` | `owner`, and either `mime` of `image/png` or `image/jpeg` with base64 `data`, `pending: true` while the host fetches, `retry: true` when the last fetch failed, or none of these when the account has no avatar; an uncached avatar is answered as pending and sent to the asking connection as an `owner-icon` event |
 | `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the host |
 | `usage-summary` | `days` of `1`, `7`, `30`, or `90`, optional IANA `time_zone`, optional `now_ms`, optional `refresh: boolean`, optional `generation` | `pending: true`; the asking connection then receives a `usage-summary` event with `generation` and either `error` or `summary:{read_at_ms,resolution,window_label,periods,buckets,sessions,sources,pricing}`, read from the host's Claude Code and Codex transcripts and priced from a daily LiteLLM price list |
-| `usage-limits` | optional IANA `time_zone`, optional `generation` | `pending: true`; the asking connection then receives a `usage-limits` event with `generation`, `host_now_ms`, and `accounts:[{provider,account_key,plan,checked_at_ms,windows,reset_credits,unavailable}]`, asked of each installed assistant; `account_key` is a hash, so no address crosses the wire |
+| `usage-limits` | optional IANA `time_zone`, optional `generation` | `pending: true`; the asking connection then receives a `usage-limits` event with `generation`, `host_now_ms`, and `accounts:[{provider,account_key,plan,checked_at_ms,windows,reset_credits,unavailable}]`, asked of each account of each installed assistant; `account_key` is a hash, so no address crosses the wire |
 | `usage-prices` | none | saved `prices:{model:{input,output,cache_read,cache_write}}` in USD per million tokens, and `aliases:{model:target}` |
 | `image-read` | absolute host `path`, optional `preview: boolean` | `mime` of `image/png`, `image/jpeg`, `image/gif`, or `image/webp`, and base64 `data`; only images the host stored itself: remote pastes and [images in replies](#images-in-replies) |
 | `search` | `query` | matching stored messages |
@@ -855,12 +856,70 @@ client that edits only prices cannot revert another client's mappings. Hosts tha
 answer `usage-prices` and `set-usage-prices` with `aliases_optional: true`; `input` and `output` are required, and a blank
 cache rate uses the input rate. Answers with the saved values.
 
+### Assistant accounts
+
+Codex and Claude Code can each have several accounts. `default` is the user's
+own CLI sign-in and runs in the CLI's usual home, as before accounts existed.
+Each account added in xd gets a private home under the host's data directory
+(`CODEX_HOME` or `CLAUDE_CONFIG_DIR`), where the CLI keeps its own credentials;
+the host never reads or sends a token. Everything else in the user's home
+(configuration, MCP servers, skills, session transcripts) is linked in and shared.
+
+Each provider in `agent-auth` and each `agent-auth-changed` event has the
+pre-accounts members `provider`, `display_name`, `state`, `needs_input`, and
+optional `detail`, `login_url`, `device_code`, all describing the `default`
+account, plus:
+
+- `accounts:[{id, default, pending, label, email, plan, state, detail, login_url, device_code, needs_input, in_use, busy, problem, limited_until_ms, limited_reason, checked_at_ms, windows:[{kind,label,used_percent,resets_at_ms}]}]`
+  in priority order. `label` is the address when the host knows it. `pending`
+  marks an account still signing in for the first time. `in_use` marks the
+  account a new chat would start on. `busy` marks the account the provider's
+  one sign-in or sign-out is running for. `problem` is `mismatch` when the
+  account's home is now signed in to a different login, or `duplicate` when an
+  earlier account is the same login; either keeps it from taking turns.
+  `limited_until_ms` and `limited_reason` (such as `5-hour limit`) say when an
+  account that is out of usage is back.
+- `auto_switch: boolean`, `adding: boolean`, and optional `notice`, the outcome
+  of the last attempt to add an account.
+
+Unlike `usage-limits`, these carry addresses: they go only to the user's own
+authenticated devices, which need them to tell accounts apart.
+
+| Op | Request | Effect |
+|---|---|---|
+| `agent-auth-start` | `provider`, optional `account` (default `default`) | Signs that account in again in its own home |
+| `agent-auth-add` | `provider` | Signs in a new account in a new home. It joins the list once the CLI succeeds and the host has read who it is; a login already in the list is refused and its home deleted. |
+| `agent-auth-input` | `provider`, `input` | Sends a code the CLI asked for to the provider's running sign-in |
+| `agent-auth-cancel` | `provider` | Stops the provider's running sign-in; a new account being added is discarded |
+| `agent-auth-logout` | `provider`, optional `account` | Signs the `default` account out. Any other account is signed out and removed, its home deleted. |
+| `agent-accounts-order` | `provider`, `accounts: string[]` naming each account once | Sets the priority order |
+| `agent-accounts-auto-switch` | `provider`, `enabled: boolean` | Turns automatic switching on or off |
+
+A provider runs one sign-in or sign-out at a time. Each answers `ok: true` and
+reports progress through `agent-auth-changed`.
+
+Each turn runs on one account, chosen when it starts. A chat stays on the
+account its session belongs to while that account is signed in, is still the
+login it was added as, and has usage left; otherwise the turn runs on the first
+such account in priority order. With switching off, turns run on the first
+signed-in account. When a turn is turned away for usage and switching is on,
+the host holds the account back until its limit resets, adds an
+`account_switch` tool row to the chat, and continues it on the next account as
+`resume-turn` would. A Claude Code session moves with the chat. A Codex session
+cannot open on another account, so the new account starts a session given the
+chat's messages as text, and the row says so.
+
+The row's text is `account_switch\n` followed by one sentence, such as
+`Switched to b@example.com: a@example.com reached its 5-hour limit (back in 2 h 5 min). Continuing there.`
+or, when every account is out, `Every Codex account is out of usage. The first is back in 3 h.`
+
 ### `usage-consume-reset-credit`
 
 Spends one banked reset credit on the host's signed-in account. Takes `provider`
 (`codex`), an `idempotency_key` naming the attempt, which is reused when retrying
-it, and the `account_key` from `usage-limits`; the host refuses if that is missing
-or no longer the signed-in account. Answers `pending: true`, then sends the asking connection a `usage-reset-credit`
+it, and the `account_key` from `usage-limits`; the host spends it as the account
+last seen signed in as that login, and refuses if the key is missing or that
+account is no longer signed in to it. Answers `pending: true`, then sends the asking connection a `usage-reset-credit`
 event with `outcome` of `reset`, `nothingToReset`, `noCredit`, or `alreadyRedeemed`
 or `error`, and in both cases the `idempotency_key` of the attempt it answers. This cannot be undone, so clients must confirm first.
 

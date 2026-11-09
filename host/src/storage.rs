@@ -219,6 +219,10 @@ pub struct TurnSpec {
     pub context_window: i64,
     pub session_backend: String,
     pub session_id: Option<String>,
+    /// The account `session_id` belongs to.
+    pub session_account: Option<String>,
+    /// The account the turn runs on, chosen when it starts.
+    pub account: String,
     /// What the user sent, without the note `prompt` may open with.
     pub request: String,
     pub carries_cut_off_note: bool,
@@ -2422,6 +2426,58 @@ impl StateStore {
         Ok(database.last_insert_rowid())
     }
 
+    /// The conversation so far as plain text, newest kept when it is long, for
+    /// an agent that has to start a new session on another account. Leaves out
+    /// the newest user message, which the turn itself carries.
+    pub fn conversation_for_handoff(
+        &self,
+        chat_id: &str,
+        limit: usize,
+    ) -> Result<Option<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(
+            "SELECT role, content FROM messages WHERE chat_id = ? \
+             AND role IN ('user', 'assistant') ORDER BY id DESC LIMIT 400",
+        )?;
+        let rows = statement
+            .query_map([chat_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut kept = Vec::new();
+        let mut size = 0;
+        let mut skipped_request = false;
+        for (role, content) in rows {
+            if !skipped_request && role == "user" {
+                skipped_request = true;
+                continue;
+            }
+            let content = content.trim();
+            if content.is_empty() {
+                continue;
+            }
+            let speaker = if role == "user" { "User" } else { "Assistant" };
+            let entry = format!("{speaker}:\n{content}");
+            if size + entry.len() > limit {
+                if kept.is_empty() {
+                    let mut end = limit.min(entry.len());
+                    while !entry.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    kept.push(format!("{}…", &entry[..end]));
+                }
+                break;
+            }
+            size += entry.len() + 2;
+            kept.push(entry);
+        }
+        if kept.is_empty() {
+            return Ok(None);
+        }
+        kept.reverse();
+        Ok(Some(kept.join("\n\n")))
+    }
+
     pub fn latest_todo_snapshot(&self, chat_id: &str) -> Result<Option<String>, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         database
@@ -2441,12 +2497,14 @@ impl StateStore {
         chat_id: &str,
         backend: &str,
         session_id: &str,
+        account: &str,
     ) -> Result<(), StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         database.execute(
-            "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, ?, ?) \
-             ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id",
-            params![chat_id, backend, session_id],
+            "INSERT INTO chat_sessions (chat_id, backend, session_id, account) VALUES (?, ?, ?, ?) \
+             ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id, \
+             account = excluded.account",
+            params![chat_id, backend, session_id, account],
         )?;
         // The agent reports its session once it has the turn's request.
         database.execute(
@@ -5443,7 +5501,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
          CREATE TABLE IF NOT EXISTS chat_sessions (chat_id TEXT NOT NULL, backend TEXT NOT NULL, \
            session_id TEXT, last_message_id INTEGER NOT NULL DEFAULT 0, \
            context_used INTEGER NOT NULL DEFAULT 0, context_window INTEGER NOT NULL DEFAULT 0, \
-           context_model TEXT, PRIMARY KEY(chat_id, backend), \
+           context_model TEXT, account TEXT, PRIMARY KEY(chat_id, backend), \
            FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE); \
          CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, \
            chat_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, raw_json TEXT, \
@@ -5775,6 +5833,11 @@ fn ensure_chat_session_context_columns(database: &Connection) -> Result<(), Stor
             "ALTER TABLE chat_sessions ADD COLUMN context_model TEXT",
             [],
         )?;
+    }
+    // The account a session was started on. Older rows have none, meaning
+    // the user's own sign-in.
+    if !columns.contains("account") {
+        database.execute("ALTER TABLE chat_sessions ADD COLUMN account TEXT", [])?;
     }
     Ok(())
 }
@@ -8442,14 +8505,19 @@ fn prepare_turn(
         chat.5.unwrap_or_else(|| "read-only".into())
     };
     let session_backend = &chat.1;
-    let session_id = transaction
+    let (session_id, session_account) = transaction
         .query_row(
-            "SELECT session_id FROM chat_sessions WHERE chat_id = ? AND backend = ?",
+            "SELECT session_id, account FROM chat_sessions WHERE chat_id = ? AND backend = ?",
             params![chat_id, session_backend],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
         .optional()?
-        .flatten();
+        .unwrap_or_default();
     let system_prompt = effective_instructions(transaction, workspace_root, &chat.0)?
         .map(|instructions| format!("{instructions}\n\n{AGENT_UI_INSTRUCTIONS}"))
         .or_else(|| Some(AGENT_UI_INSTRUCTIONS.into()));
@@ -8488,7 +8556,12 @@ fn prepare_turn(
             .map(|known| known.2)
             .unwrap_or(0),
         session_backend: session_backend.into(),
+        // A session from before accounts ran on the user's own sign-in.
+        session_account: session_id
+            .as_ref()
+            .map(|_| session_account.unwrap_or_else(|| "default".into())),
         session_id,
+        account: "default".into(),
         label: format!(
             "{} · {}{}",
             model_label(&chat.1, &model),
@@ -10209,10 +10282,10 @@ mod tests {
 
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         store
-            .set_session("chat-1", "codex", "codex-session")
+            .set_session("chat-1", "codex", "codex-session", "default")
             .unwrap();
         store
-            .set_session("chat-1", "claude", "claude-session")
+            .set_session("chat-1", "claude", "claude-session", "default")
             .unwrap();
         let turn = match store
             .prepare_send(&json!({"chat": "chat-1", "text": "hello"}))
@@ -10269,10 +10342,10 @@ mod tests {
 
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         store
-            .set_session("chat-1", "codex", "codex-session")
+            .set_session("chat-1", "codex", "codex-session", "default")
             .unwrap();
         store
-            .set_session("chat-1", "claude-mode", "proxy-session")
+            .set_session("chat-1", "claude-mode", "proxy-session", "default")
             .unwrap();
         let SendDisposition::Start { turn, .. } = store
             .prepare_send(&json!({"chat": "chat-1", "text": "hello"}))
@@ -10375,7 +10448,9 @@ mod tests {
         store
             .set_context_usage("chat-1", "codex", Some("gpt-5"), 16_948, 272_000)
             .unwrap();
-        store.set_session("chat-1", "codex", "thread-1").unwrap();
+        store
+            .set_session("chat-1", "codex", "thread-1", "default")
+            .unwrap();
         let chat = store.chat("chat-1").unwrap();
         assert_eq!(chat["queue"], json!(["First", "Second"]));
         assert_eq!(chat["queued"], "First");
@@ -14634,7 +14709,9 @@ mod tests {
         store.clear_cut_off_turn("chat-1").unwrap();
 
         // Once Claude reports the session it has the request, so nothing is lost.
-        store.set_session("chat-1", "claude", "session").unwrap();
+        store
+            .set_session("chat-1", "claude", "session", "default")
+            .unwrap();
         assert_eq!(store.recover_interrupted_turns().unwrap(), ["chat-1"]);
         let next = start("chat-1", "recorded");
         assert_eq!(next.prompt, "recorded");
