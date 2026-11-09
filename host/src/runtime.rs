@@ -661,6 +661,14 @@ impl TurnRuntime {
         if !moved {
             return Ok(());
         }
+        // A Claude session begun before its login was known can resume as any
+        // login, so learning it is not news. A Codex one cannot be trusted to.
+        let learned_login = turn.session_account.as_deref().is_some_and(|stored| {
+            stored.strip_suffix("#?") == Some(crate::accounts::tag_account(&turn.account))
+        });
+        if learned_login && turn.backend != "codex" && !unconfirmed {
+            return Ok(());
+        }
         let explained = self
             .inner
             .explained_switches
@@ -4329,7 +4337,7 @@ done
         };
         assert_eq!(turn.session_id.as_deref(), Some("thread-a"));
         runtime.place_on_account(&mut turn).unwrap();
-        assert_eq!(turn.account, second);
+        assert_eq!(crate::accounts::tag_account(&turn.account), second);
         assert_eq!(turn.session_id, None);
         assert_eq!(
             turn.environment,

@@ -448,7 +448,9 @@ impl Accounts {
                 .and_then(|account| account.account_key.clone())
         })
         .flatten()
-        .map_or_else(|| id.to_owned(), |key| format!("{id}#{key}"))
+        // `?`: the login was not known when the session began. Unlike a session
+        // from before logins were kept, which matches any, it matches only `?`.
+        .map_or_else(|| format!("{id}#?"), |key| format!("{id}#{key}"))
     }
 
     /// When the account's login was last read, by a usage probe or on its own.
@@ -522,6 +524,7 @@ impl Accounts {
                 // which is not known again until it is read.
                 if id == DEFAULT_ACCOUNT {
                     account.account_key = None;
+                    account.live.forget_usage();
                 }
             }
             Ok(())
@@ -1390,7 +1393,7 @@ mod tests {
     fn a_session_is_filed_under_its_account_and_login() {
         let data = temp("tags");
         let accounts = Accounts::with_homes(&data, &[]);
-        assert_eq!(accounts.session_tag("codex", DEFAULT_ACCOUNT), "default");
+        assert_eq!(accounts.session_tag("codex", DEFAULT_ACCOUNT), "default#?");
         accounts.record_probe(
             "codex",
             DEFAULT_ACCOUNT,
@@ -1774,6 +1777,23 @@ mod tests {
         // Signed out through xd, it no longer counts as that login at all.
         accounts.forget_login_reading("codex", DEFAULT_ACCOUNT);
         assert_eq!(accounts.describe("codex", 4)[1]["problem"], Value::Null);
+    }
+
+    #[test]
+    fn a_session_begun_before_its_login_was_known_matches_no_known_login() {
+        assert!(same_login("default#?", "default#?"));
+        assert!(!same_login("default#?", "default#key-b@example.com"));
+        assert!(
+            same_login("default", "default#key-b@example.com"),
+            "from before logins were kept"
+        );
+        let data = temp("unknown-login");
+        let accounts = Accounts::with_homes(&data, &[]);
+        accounts.record_login("codex", DEFAULT_ACCOUNT, &identity("a@example.com"), 1);
+        accounts.note_limited("codex", DEFAULT_ACCOUNT, Some(5 * HOUR), None, 2);
+        accounts.forget_login_reading("codex", DEFAULT_ACCOUNT);
+        assert_eq!(accounts.session_tag("codex", DEFAULT_ACCOUNT), "default#?");
+        assert!(accounts.describe("codex", 3)[0]["limited_until_ms"].is_null());
     }
 
     #[test]
