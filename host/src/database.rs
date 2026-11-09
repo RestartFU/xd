@@ -17,7 +17,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rusqlite::{Connection, OpenFlags};
@@ -36,6 +36,8 @@ const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
 /// while commits land can keep a passive checkpoint from ever letting the
 /// log start over, so past this size it resets the log on the writer.
 pub(crate) const PRESSURE_FRAMES: i64 = 16_384;
+/// Longest a pressure reset keeps writes waiting for older reads to finish.
+const PRESSURE_WAIT: Duration = Duration::from_secs(30);
 
 /// Switches a freshly opened writable connection to write-ahead logging and
 /// reports whether that worked. Opening the database first replays any
@@ -311,9 +313,11 @@ impl Checkpointer {
 /// One background checkpoint. A PASSIVE checkpoint copies what it can
 /// without blocking the writer or readers; a busy result just means trying
 /// again. Once the log has grown past `pressure_frames` anyway, it is reset
-/// from the writer connection: holding the writer's own lock makes writes
-/// wait for it instead of failing as busy, and a TRUNCATE checkpoint waits
-/// for the reads still using the old log, while new reads keep starting.
+/// from the writer connection. Holding the writer's own lock makes writes
+/// wait instead of failing as busy, and stops the log growing, so retrying
+/// TRUNCATE only has to outlast the reads that began before the log was
+/// copied back: reads that start after that no longer use it, and new reads
+/// keep starting throughout. Writes wait at most [`PRESSURE_WAIT`].
 /// Reports whether the log was reset that way.
 pub(crate) fn checkpoint_round(
     connection: &Connection,
@@ -331,11 +335,18 @@ pub(crate) fn checkpoint_round(
     let Ok(writer) = writer.lock() else {
         return false;
     };
-    writer
-        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+    let started = Instant::now();
+    loop {
+        // Each busy attempt has already waited out the connection's busy
+        // timeout for the reads still on the old log.
+        match writer.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
             row.get::<_, i64>(0)
-        })
-        .is_ok_and(|busy| busy == 0)
+        }) {
+            Ok(0) => return true,
+            Ok(_) if started.elapsed() < PRESSURE_WAIT => {}
+            _ => return false,
+        }
+    }
 }
 
 impl Drop for Checkpointer {

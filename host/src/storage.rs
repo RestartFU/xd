@@ -10136,21 +10136,40 @@ mod tests {
             sizes.windows(2).all(|pair| pair[1] > pair[0]),
             "passive checkpoints alone let the log keep growing: {sizes:?}"
         );
+        let started = Instant::now();
         thread::scope(|scope| {
-            // The last read finishes while the reset is waiting for it.
-            scope.spawn(move || {
-                thread::sleep(Duration::from_millis(100));
+            // Reads outlasting the writer's one-second busy wait keep
+            // overlapping while the reset runs, and a write arrives too.
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(300));
+                let during = open_snapshot();
+                thread::sleep(Duration::from_millis(1200));
                 drop(older);
+                thread::sleep(Duration::from_millis(1200));
+                drop(during);
+            });
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(500));
+                store
+                    .append_turn_message(&chat, "user", "during the reset", None)
+                    .unwrap();
             });
             assert!(database::checkpoint_round(&checkpoints, &store.database, 1));
         });
-        assert_eq!(fs::metadata(&wal).unwrap().len(), 0, "the log starts over");
+        assert!(
+            started.elapsed() >= Duration::from_millis(2500),
+            "the reset waited for every older read"
+        );
         let count: i64 = store
             .reader()
             .unwrap()
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 201, "resetting the log loses nothing");
+        assert_eq!(count, 202, "resetting the log loses nothing");
+        assert!(
+            fs::metadata(&wal).unwrap().len() < sizes[0],
+            "the log started over and holds only the write made after it"
+        );
     }
 
     #[test]
