@@ -317,6 +317,12 @@ public object Ops {
     /** Continues a cut-short turn; the host refuses if the chat moved on. */
     public fun resumeTurn(chatId: String): JsonObject = withChat("resume-turn", chatId)
 
+    /** Stops every working chat, and every one waiting on background tasks, marking them paused. */
+    public fun pauseAll(): JsonObject = op("pause-all")
+
+    /** Continues every chat [pauseAll] stopped. */
+    public fun resumeAll(): JsonObject = op("resume-all")
+
     /**
      * Moves queued message [source] before or [after] [anchor]. Both texts are
      * what the client saw there, so a queue another device changed is refused

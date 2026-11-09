@@ -41,6 +41,8 @@ public data class MinimalSession(
     val autoSettleDisabled: Boolean = false,
     /** The host's backend id, kept when [agent] is null so the chat still lists. */
     val backend: String = agent?.wire.orEmpty(),
+    /** One of its chats was stopped by pausing every chat and has not resumed. */
+    val paused: Boolean = false,
 ) {
     val settled: Boolean get() = settledAt != null
 
@@ -105,6 +107,7 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
             settledAt = workspace?.settledAt,
             autoSettleDisabled = workspace?.autoSettleDisabled ?: false,
             backend = first.backend,
+            paused = grouped.any(ChatSummary::paused),
         )
     }
 }

@@ -54,7 +54,7 @@ use xd_desktop::{
     model::{
         AppModel, Attachment, AutoDeleteRules, AutoSettleRules, BackgroundTaskOutput, ChatSummary,
         Folder, LinkedPullRequest, MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage,
-        MessagePageDirection, PullRequestState, SentFrom, ToolView, Worktree,
+        MessagePageDirection, PauseAllAction, PullRequestState, SentFrom, ToolView, Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -148,6 +148,7 @@ const XD_MARK_ICON: &str = "icons/xd-mark.svg";
 const SEND_ICON: &str = "icons/send.svg";
 const STOP_ICON: &str = "icons/stop.svg";
 const PLAY_ICON: &str = "icons/play.svg";
+const PAUSE_ICON: &str = "icons/pause.svg";
 const FOLDER_ICON: &str = "icons/folder.svg";
 const FOLDERS_ICON: &str = "icons/folders.svg";
 const FILE_ICON: &str = "icons/file.svg";
@@ -347,6 +348,8 @@ enum SessionSignal {
     Background(u32),
     /// A finished turn the user has not opened yet.
     Done,
+    /// Pausing every chat stopped it, and it waits to resume.
+    Paused,
 }
 
 impl SessionSignal {
@@ -366,9 +369,19 @@ impl SessionSignal {
         }
     }
 
+    /// A paused session says so until something else needs saying: it is
+    /// stopped, so nothing runs, and a pause outranks a finished turn.
+    fn or_paused(self, paused: bool) -> Self {
+        match self {
+            Self::Idle | Self::Done if paused => Self::Paused,
+            signal => signal,
+        }
+    }
+
     fn color(self, colors: ThemeColors) -> u32 {
         match self {
             Self::Idle => colors.faint,
+            Self::Paused => colors.muted,
             Self::Working | Self::Background(_) => colors.working,
             Self::Waiting => colors.waiting,
             Self::Done => colors.done,
@@ -382,6 +395,7 @@ impl SessionSignal {
             Self::Waiting => "Waiting on you".into(),
             Self::Background(count) => background_label(count).into(),
             Self::Done => "Done".into(),
+            Self::Paused => "Paused".into(),
         }
     }
 }
@@ -455,6 +469,7 @@ fn signal_tab(signal: SessionSignal, colors: ThemeColors) -> Option<gpui::AnyEle
                 .into_any_element(),
         ),
         SessionSignal::Done => Some(dot(7.0).into_any_element()),
+        SessionSignal::Paused => Some(icon(PAUSE_ICON, 9.0, color)),
     }
 }
 
@@ -2278,6 +2293,8 @@ struct XdDesktop {
     sidebar_edit: Option<SidebarEdit>,
     sidebar_context_menu: Option<SidebarContextMenu>,
     settle_undo: Option<SettleUndo>,
+    /// A `pause-all` or `resume-all` is on its way, so the button waits.
+    pause_all_pending: bool,
     settle_undo_generation: u64,
     /// Where to go once a settle of the open session succeeds, by session:
     /// the next row chosen before the list changed, or the project page.
@@ -2978,6 +2995,7 @@ impl XdDesktop {
             sidebar_edit: None,
             sidebar_context_menu: None,
             settle_undo: None,
+            pause_all_pending: false,
             settle_undo_generation: 0,
             settle_advances: HashMap::new(),
             settled_visible: SETTLED_INITIAL_ROWS,
@@ -3327,6 +3345,7 @@ impl XdDesktop {
                 | RequestKind::QueueMutation { .. }
                 | RequestKind::EditQueue { .. }
                 | RequestKind::Cancel { .. }
+                | RequestKind::PauseAll { .. }
                 | RequestKind::SetOption { .. }
                 | RequestKind::SetShortcuts { .. }
                 | RequestKind::ChatTitleSettings
@@ -3491,6 +3510,7 @@ impl XdDesktop {
             .update(cx, |input, cx| input.set_text("", cx));
         self.pending_send = None;
         self.sending = false;
+        self.pause_all_pending = false;
         self.clear_question(cx);
         self.cancel_queue_edit(cx);
         Arc::make_mut(&mut self.workflow_statuses).clear();
@@ -3744,6 +3764,7 @@ impl XdDesktop {
                     self.new_chat_submitted_prompt = None;
                     self.new_chat_submitted_attachments.clear();
                     self.sending = false;
+                    self.pause_all_pending = false;
                     self.transcript_loading = false;
                     self.transcript_page_loading = false;
                     self.transcript_refresh_pending = false;
@@ -4090,6 +4111,7 @@ impl XdDesktop {
                 self.model.connection_error = Some(format!("{message} Reconnecting…"));
                 self.background_reading = false;
                 self.sending = false;
+                self.pause_all_pending = false;
                 self.transcript_loading = false;
                 self.transcript_page_loading = false;
                 self.transcript_refresh_pending = false;
@@ -4278,6 +4300,7 @@ impl XdDesktop {
                 RequestKind::SettleSession { session_id } => {
                     self.settle_advances.remove(session_id);
                 }
+                RequestKind::PauseAll { .. } => self.pause_all_pending = false,
                 RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
                 RequestKind::SetAutoDeleteSettings => self.request_auto_delete_settings(),
                 RequestKind::Send { chat_id, .. } => {
@@ -4915,6 +4938,10 @@ impl XdDesktop {
             RequestKind::AgentClis => self.apply_cli_versions(&value),
             RequestKind::AgentCliUpdates => self.apply_cli_updates(&value),
             RequestKind::ResumeInterrupted => {}
+            RequestKind::PauseAll { .. } => {
+                self.pause_all_pending = false;
+                self.request_tree();
+            }
             RequestKind::HostUpdate { action } => {
                 self.apply_self_update(&value);
                 if action == "restart" && !cfg!(test) {
@@ -12641,6 +12668,7 @@ impl XdDesktop {
                     false,
                     chat.waiting_on(),
                 )
+                .or_paused(chat.paused)
             })
             .unwrap_or(SessionSignal::Idle);
         let selected_agent = self
@@ -13179,6 +13207,9 @@ impl XdDesktop {
                 .unwrap_or_else(|| self.model.unread_chats.contains(&session.id)),
             session.background_tasks,
         )
+        .or_paused(self.model.chats.iter().any(|chat| {
+            chat.paused && members.map_or(chat.id == session.id, |ids| ids.contains(&chat.id))
+        }))
     }
 
     /// `(settled, auto-settle disabled)`, when the host can settle at all.
@@ -13691,6 +13722,60 @@ impl XdDesktop {
                 )
             })
             .into_any_element()
+    }
+
+    /// The button beside "Projects": pauses every chat at work, for checking
+    /// out, then resumes the paused ones with one more press.
+    fn render_pause_all_button(
+        &self,
+        action: PauseAllAction,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (label, path, ready) = match action {
+            PauseAllAction::Pause { ready } => ("Pause all chats", PAUSE_ICON, ready),
+            PauseAllAction::Resume => ("Resume paused chats", PLAY_ICON, true),
+        };
+        let ready = ready && !self.pause_all_pending;
+        let color = match action {
+            _ if !ready => colors.faint,
+            PauseAllAction::Resume => colors.accent,
+            PauseAllAction::Pause { .. } => colors.muted,
+        };
+        div()
+            .id("minimal-pause-all")
+            .size(px(26.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.0))
+            .tooltip(move |_, cx| cx.new(|_| PaneTooltip { label, colors }).into())
+            .when(ready, |button| {
+                button
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.pause_all(action == PauseAllAction::Resume, cx)
+                    }))
+            })
+            .child(icon(path, 12.0, color))
+            .into_any_element()
+    }
+
+    fn pause_all(&mut self, resume: bool, cx: &mut Context<Self>) {
+        if self.pause_all_pending {
+            return;
+        }
+        let Some(host) = self.active_host().cloned() else {
+            self.model.connection_error = Some("xd is not connected to a host.".into());
+            cx.notify();
+            return;
+        };
+        match host.pause_all(resume) {
+            Ok(()) => self.pause_all_pending = true,
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
     }
 
     /// The Settled shelf, pinned between the projects and the footer: collapsed
@@ -14497,6 +14582,7 @@ impl XdDesktop {
             });
         let terminal_active = matches!(self.minimal_route, MinimalRoute::Terminal);
         let settings_open = self.minimal_theme_open;
+        let pause_all = self.model.pause_all_action();
         let offers_update = self
             .self_update_panel
             .as_ref()
@@ -14533,6 +14619,9 @@ impl XdDesktop {
                             .text_color(rgb(colors.faint))
                             .child("Projects"),
                     )
+                    .when_some(pause_all, |header, action| {
+                        header.child(self.render_pause_all_button(action, colors, cx))
+                    })
                     .child(
                         div()
                             .id("minimal-new-project")
@@ -21011,6 +21100,9 @@ impl AssetSource for EmbeddedIcons {
             PLAY_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/play.svg").as_slice(),
             )),
+            PAUSE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/pause.svg").as_slice(),
+            )),
             FOLDER_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/folder.svg").as_slice(),
             )),
@@ -25122,6 +25214,32 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[test]
+    fn a_paused_session_says_so_until_it_needs_more() {
+        assert_eq!(
+            SessionSignal::of(false, false, true, 0).or_paused(true),
+            SessionSignal::Paused
+        );
+        assert_eq!(
+            SessionSignal::of(false, false, false, 0).or_paused(true),
+            SessionSignal::Paused
+        );
+        assert_eq!(
+            SessionSignal::of(true, false, false, 0).or_paused(true),
+            SessionSignal::Working
+        );
+        assert_eq!(
+            SessionSignal::of(false, true, false, 0).or_paused(true),
+            SessionSignal::Waiting
+        );
+        assert_eq!(
+            SessionSignal::of(false, false, false, 0).or_paused(false),
+            SessionSignal::Idle
+        );
+        assert_eq!(SessionSignal::Paused.label().to_string(), "Paused");
+        assert!(signal_tab(SessionSignal::Paused, ThemePreset::Dark.colors()).is_some());
+    }
+
+    #[test]
     fn a_chat_waiting_on_background_work_says_how_much() {
         assert_eq!(
             SessionSignal::Background(1).label().to_string(),
@@ -25227,6 +25345,7 @@ Binary files /dev/null and b/image.png differ\n";
                     background_tasks: 0,
                     settled_at: Some(index),
                     auto_settle_disabled: false,
+                    paused: false,
                     pull_requests: Vec::new(),
                 })
                 .collect();
@@ -25576,6 +25695,7 @@ Binary files /dev/null and b/image.png differ\n";
                 background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
+                paused: false,
                 pull_requests: Vec::new(),
             }];
             for chat_id in ["kept", "removed"] {
@@ -25859,6 +25979,7 @@ Binary files /dev/null and b/image.png differ\n";
                     background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
+                    paused: false,
                     pull_requests: Vec::new(),
                 },
                 ChatSummary {
@@ -25872,6 +25993,7 @@ Binary files /dev/null and b/image.png differ\n";
                     background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
+                    paused: false,
                     pull_requests: Vec::new(),
                 },
             ];
@@ -26035,6 +26157,7 @@ Binary files /dev/null and b/image.png differ\n";
                 background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
+                paused: false,
                 pull_requests: Vec::new(),
             }];
 
@@ -26225,6 +26348,7 @@ Binary files /dev/null and b/image.png differ\n";
                 background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
+                paused: false,
                 pull_requests: Vec::new(),
             }];
 
@@ -27073,6 +27197,7 @@ Binary files /dev/null and b/image.png differ\n";
             background_tasks: 0,
             settled_at: None,
             auto_settle_disabled: false,
+            paused: false,
             pull_requests: Vec::new(),
         };
         let mut chats = vec![
@@ -27153,6 +27278,7 @@ Binary files /dev/null and b/image.png differ\n";
                     background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
+                    paused: false,
                     pull_requests: Vec::new(),
                 },
                 ChatSummary {
@@ -27166,6 +27292,7 @@ Binary files /dev/null and b/image.png differ\n";
                     background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
+                    paused: false,
                     pull_requests: Vec::new(),
                 },
             ];
@@ -27207,6 +27334,7 @@ Binary files /dev/null and b/image.png differ\n";
                     background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
+                    paused: false,
                     pull_requests: Vec::new(),
                 },
                 ChatSummary {
@@ -27220,6 +27348,7 @@ Binary files /dev/null and b/image.png differ\n";
                     background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
+                    paused: false,
                     pull_requests: Vec::new(),
                 },
             ];
@@ -27312,6 +27441,7 @@ Binary files /dev/null and b/image.png differ\n";
                 background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
+                paused: false,
                 pull_requests: Vec::new(),
             }];
 
@@ -27366,6 +27496,7 @@ Binary files /dev/null and b/image.png differ\n";
                 background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
+                paused: false,
                 pull_requests: Vec::new(),
             }];
             let generation = desktop.remote_generation;
@@ -27429,6 +27560,7 @@ Binary files /dev/null and b/image.png differ\n";
                 background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
+                paused: false,
                 pull_requests: Vec::new(),
             }],
             ..Default::default()

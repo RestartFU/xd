@@ -126,6 +126,7 @@ class MainViewModel @JvmOverloads constructor(
     private val _createdDirectSession = MutableStateFlow<CreatedDirectSession?>(null)
     private val _deletingChat = MutableStateFlow(false)
     private val _renamingChat = MutableStateFlow(false)
+    private val _pausingAll = MutableStateFlow(false)
     private val _error = MutableStateFlow<String?>(null)
     private val _shortcutEditor = MutableStateFlow<ShortcutEditorState?>(null)
 
@@ -138,6 +139,8 @@ class MainViewModel @JvmOverloads constructor(
     val creatingWorkspace: StateFlow<Boolean> = _creatingWorkspace.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
     val renamingChat: StateFlow<Boolean> = _renamingChat.asStateFlow()
+    /** A pause-all or resume-all request is on its way, so the button waits. */
+    val pausingAll: StateFlow<Boolean> = _pausingAll.asStateFlow()
     private val _settledNotice = MutableStateFlow<SettledNotice?>(null)
     private var settledSerial = 0L
     val settledNotice: StateFlow<SettledNotice?> = _settledNotice.asStateFlow()
@@ -751,6 +754,29 @@ class MainViewModel @JvmOverloads constructor(
 
     fun deleteSession(sessionId: String) = treeAction("Could not delete the session") {
         client.deleteSession(sessionId)
+    }
+
+    /** Stops every working chat on the host, for stepping away from work. */
+    fun pauseAll() = pauseOrResumeAll("Could not pause the chats") { client.pauseAll() }
+
+    /** Continues every chat [pauseAll] stopped. */
+    fun resumeAll() = pauseOrResumeAll("Could not resume the chats") { client.resumeAll() }
+
+    private fun pauseOrResumeAll(failure: String, action: suspend () -> Unit) {
+        if (_pausingAll.value) return
+        _pausingAll.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                action()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: failure
+            } finally {
+                _pausingAll.value = false
+            }
+        }
     }
 
     fun renameProject(folderId: String, name: String) = treeAction("Could not rename the project") {

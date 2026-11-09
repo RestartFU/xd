@@ -31,6 +31,8 @@ public data class ChatSummaryReply(
     @SerialName("session_mode")
     val sessionMode: String = "chat",
     val session: String? = null,
+    /** Stopped by `pause-all` and not resumed or started again since. */
+    val paused: Boolean = false,
     /** Linked pull requests, oldest first, on hosts with `linked_pull_requests`. */
     @SerialName("pull_requests")
     val pullRequests: List<LinkedPullRequestReply> = emptyList(),
@@ -82,6 +84,8 @@ public data class TreeReply(
     val settlement: Boolean = false,
     /** True when the host keeps folders of projects; older hosts make a project instead. */
     @SerialName("folder_groups") val folderGroups: Boolean = false,
+    /** True when the host can pause every chat at once; hide the pause button otherwise. */
+    @SerialName("pause_all") val pauseAll: Boolean = false,
     /** True when the host keeps pull requests linked to chats and lists them per chat. */
     @SerialName("linked_pull_requests") val linkedPullRequests: Boolean = false,
 )
@@ -334,6 +338,20 @@ public data class FolderContextReply(
 public data class AgentSecretsReply(
     val ok: Boolean = true,
     val names: List<String> = emptyList(),
+)
+
+/** The chats `pause-all` stopped. */
+@Serializable
+public data class PauseAllReply(
+    val ok: Boolean = true,
+    val paused: List<String> = emptyList(),
+)
+
+/** The paused chats `resume-all` continued. */
+@Serializable
+public data class ResumeAllReply(
+    val ok: Boolean = true,
+    val resumed: List<String> = emptyList(),
 )
 
 @Serializable
