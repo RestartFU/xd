@@ -53,7 +53,7 @@ impl GitWriter {
 
 /// How a project's last new chat was set up, so the next one starts the same
 /// way: the agent and model, and the worktree and branch it runs in.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default)]
 pub struct NewChatChoices {
     /// The agent's protocol name, such as `codex` or `claude`.
@@ -66,6 +66,19 @@ pub struct NewChatChoices {
     /// The ref a new worktree branches from.
     pub base: Option<String>,
     pub start_from_remote: bool,
+}
+
+impl Default for NewChatChoices {
+    fn default() -> Self {
+        Self {
+            agent: None,
+            model: None,
+            new_worktree: false,
+            checkout: None,
+            base: None,
+            start_from_remote: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -427,6 +440,21 @@ mod tests {
         .unwrap();
         assert_eq!(load_from(&path).unwrap().accent, AccentPreset::Green);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn remote_start_defaults_on_and_preserves_saved_choices() {
+        assert!(NewChatChoices::default().start_from_remote);
+        let legacy: NewChatChoices = serde_json::from_str(r#"{"new_worktree":true}"#).unwrap();
+        assert!(legacy.start_from_remote);
+        for enabled in [false, true] {
+            let saved: NewChatChoices =
+                serde_json::from_value(serde_json::json!({"start_from_remote": enabled})).unwrap();
+            assert_eq!(saved.start_from_remote, enabled);
+            let restored: NewChatChoices =
+                serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+            assert_eq!(restored, saved);
+        }
     }
 
     #[test]

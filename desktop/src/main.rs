@@ -2812,7 +2812,7 @@ impl XdDesktop {
             new_chat_generation: 0,
             new_chat_reading: 0,
             new_chat_submitted_prompt: None,
-            new_chat_remote: false,
+            new_chat_remote: settings::NewChatChoices::default().start_from_remote,
             new_chat_default_branch: None,
             new_chat_search,
             new_chat_query: String::new(),

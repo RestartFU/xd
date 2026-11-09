@@ -823,8 +823,9 @@ public class XdClient(
         backend: String? = null,
         sessionId: String? = null,
         worktree: Ops.NewSessionWorktree? = null,
+        startFromRemote: Boolean = true,
     ): String {
-        val value = actor.call(Ops.newChat(folderId, title, backend, sessionId, worktree))
+        val value = actor.call(Ops.newChat(folderId, title, backend, sessionId, worktree, startFromRemote))
         val id = actor.decodeReply(value) {
             val reply = it.decodeReply<DoneReply>()
             reply.id?.takeIf(String::isNotBlank)
