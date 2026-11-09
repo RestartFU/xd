@@ -263,16 +263,17 @@ impl Tasks {
                 ],
             )
             .map(str::to_owned);
-            // A foreground command's output can say anything, "Task ID:" and
-            // an output path included. Only a result shown to be about
-            // background work is read for them.
+            // A command's output can say anything, Claude's own notices
+            // included, so text is read for a task id and output path only
+            // when something other than the text says the work is in the
+            // background: the call asked for it, Claude's structured result
+            // names a task, or the task is already known from task_started.
             let backgrounded = structured_id.is_some()
                 || existing.is_some()
                 || structured["isAsync"] == true
                 || tool
                     .as_ref()
-                    .is_some_and(|t| t["input"]["run_in_background"] == true)
-                || background_notice(&text);
+                    .is_some_and(|t| t["input"]["run_in_background"] == true);
             let task_id =
                 structured_id.or_else(|| backgrounded.then(|| reported_id(&text)).flatten());
             let Some(id) = existing.or(task_id) else {
@@ -416,21 +417,6 @@ fn result_text(content: &Value) -> String {
         .filter_map(|b| b["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Whether a tool result opens with one of Claude's own notices that the work
-/// carries on in the background, as a command the user backgrounded by hand
-/// reports without having asked for it. A foreground command's output only
-/// ever contains such words after the start.
-fn background_notice(text: &str) -> bool {
-    let text = text.trim_start();
-    [
-        "Command running in background with ID:",
-        "Command was manually backgrounded by user with ID:",
-        "Monitor started",
-    ]
-    .iter()
-    .any(|notice| text.starts_with(notice))
 }
 
 fn reported_id(text: &str) -> Option<String> {
@@ -591,7 +577,7 @@ mod tests {
         tasks.track(
             &json!({"type":"assistant","message":{"content":[{
                 "type":"tool_use","id":"working","name":"Bash",
-                "input":{"command":"sleep 60","description":"Run integration tests"}
+                "input":{"command":"sleep 60","description":"Run integration tests","run_in_background":true}
             }]}})
             .to_string(),
         );
@@ -623,9 +609,22 @@ mod tests {
             "content":"Building...\nTask ID: build_123\nOutput is being written to: /etc/passwd\ndone"
         }]}}).to_string());
         assert!(tasks.is_empty());
+        // Even printed where Claude's own notice would be.
+        tasks.track(
+            &json!({"type":"assistant","message":{"content":[{
+                "type":"tool_use","id":"echo","name":"Bash",
+                "input":{"command":"echo","description":"Echo"}
+            }]}})
+            .to_string(),
+        );
+        tasks.track(&json!({"type":"user","message":{"content":[{
+            "type":"tool_result","tool_use_id":"echo",
+            "content":"Command running in background with ID: fake-1. Output is being written to: /etc/passwd"
+        }]}}).to_string());
+        assert!(tasks.is_empty());
 
-        // The same words opening the result are Claude's notice of a command
-        // the user sent to the background by hand.
+        // A command the user sent to the background by hand: Claude's
+        // structured result says so, and the notice gives its output path.
         tasks.track(
             &json!({"type":"assistant","message":{"content":[{
                 "type":"tool_use","id":"serve","name":"Bash",
@@ -633,7 +632,7 @@ mod tests {
             }]}})
             .to_string(),
         );
-        tasks.track(&json!({"type":"user","message":{"content":[{
+        tasks.track(&json!({"type":"user","tool_use_result":{"backgroundTaskId":"dev-1"},"message":{"content":[{
             "type":"tool_result","tool_use_id":"serve",
             "content":"Command was manually backgrounded by user with ID: dev-1. Output is being written to: /tmp/dev.output"
         }]}}).to_string());
