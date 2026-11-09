@@ -147,16 +147,18 @@ wrap_browser_process_handler! {
 
 /// Chromium lets one process at a time use a profile. Another that tries is
 /// refused, and CEF passes its launch to the one holding the profile. The
-/// holder is named by the profile's `SingletonLock` symlink as `host-pid`.
-/// Returns the holder's PID while that process is alive on this machine.
+/// profile's `SingletonLock` symlink names the holder as `host-pid`, and its
+/// `SingletonSocket` leads to the socket the holder listens on. A lock left by
+/// a process that died stays behind, and its PID may since belong to another
+/// process, so the holder counts only while its socket still accepts.
 fn profile_holder(directory: &Path) -> Option<u32> {
     let target = std::fs::read_link(directory.join("SingletonLock")).ok()?;
-    let (host, pid) = target.to_str()?.rsplit_once('-')?;
+    let (_, pid) = target.to_str()?.rsplit_once('-')?;
     let pid = pid.parse::<u32>().ok()?;
-    let this_host = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
+    // The holder takes a connection that sends nothing as a bad message and
+    // drops it.
     (pid != std::process::id()
-        && host == this_host.trim()
-        && Path::new("/proc").join(pid.to_string()).exists())
+        && std::os::unix::net::UnixStream::connect(directory.join("SingletonSocket")).is_ok())
     .then_some(pid)
 }
 
@@ -164,6 +166,15 @@ fn profile_in_use(pid: u32) -> String {
     format!(
         "The browser is already open in another xd (process {pid}). \
          Quit that xd, then open the browser again."
+    )
+}
+
+/// CEF allows one initialization per process, so after a refused one only a
+/// restart helps.
+fn profile_taken(pid: u32) -> String {
+    format!(
+        "The browser is already open in another xd (process {pid}). \
+         Quit that xd, then restart this one."
     )
 }
 
@@ -217,10 +228,8 @@ fn ensure_initialized(scale: f32) -> Result<(), String> {
             ) != 1
             {
                 // Another process may have taken the profile since the check.
-                return Err(profile_holder(&directory).map_or_else(
-                    || "Could not initialize the browser.".into(),
-                    profile_in_use,
-                ));
+                return Err(profile_holder(&directory)
+                    .map_or_else(|| "Could not initialize the browser.".into(), profile_taken));
             }
             Ok(())
         })
@@ -1280,37 +1289,35 @@ mod tests {
     }
 
     #[test]
-    fn only_a_live_process_on_this_machine_holds_the_profile() {
+    fn only_a_listening_holder_holds_the_profile() {
         let directory = std::env::temp_dir().join(format!("xd-profile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
-        let lock = directory.join("SingletonLock");
-        let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
-        let host = host.trim();
-        let lock_to = |target: &str| {
-            let _ = std::fs::remove_file(&lock);
-            std::os::unix::fs::symlink(target, &lock).unwrap();
+        let socket = directory.join("socket");
+        let link = |name: &str, target: &Path| {
+            let path = directory.join(name);
+            let _ = std::fs::remove_file(&path);
+            std::os::unix::fs::symlink(target, path).unwrap();
         };
         assert_eq!(profile_holder(&directory), None, "no lock");
 
-        let mut other = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        let pid = other.id();
-        lock_to(&format!("{host}-{pid}"));
-        assert_eq!(profile_holder(&directory), Some(pid));
-        lock_to(&format!("not-{host}-{pid}"));
-        assert_eq!(profile_holder(&directory), None, "another machine's lock");
-        lock_to(&format!("{host}-{}", std::process::id()));
+        link("SingletonLock", Path::new("some-host-1"));
+        link("SingletonSocket", &socket);
+        assert_eq!(profile_holder(&directory), None, "nothing listening");
+
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert_eq!(profile_holder(&directory), Some(1));
+        let own = format!("some-host-{}", std::process::id());
+        link("SingletonLock", Path::new(&own));
         assert_eq!(profile_holder(&directory), None, "this process's own lock");
 
-        other.kill().unwrap();
-        other.wait().unwrap();
-        lock_to(&format!("{host}-{pid}"));
+        link("SingletonLock", Path::new("some-host-1"));
+        drop(listener);
+        std::fs::remove_file(&socket).unwrap();
         assert_eq!(
             profile_holder(&directory),
             None,
-            "left by a process that exited"
+            "left by a holder that exited"
         );
         std::fs::remove_dir_all(&directory).unwrap();
     }
