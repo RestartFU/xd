@@ -1099,7 +1099,20 @@ impl XdDesktop {
             {
                 self.minimal_new_session_agent = agent;
             }
-            self.new_chat_model = choices.model.clone();
+            // A saved draft must follow the same catalog validation as remembered choices.
+            self.new_chat_model = choices.model.clone().filter(|model| {
+                self.model
+                    .agent_backends
+                    .iter()
+                    .find(|backend| backend.id == self.minimal_new_session_agent.protocol_name())
+                    .is_some_and(|backend| {
+                        backend
+                            .models
+                            .iter()
+                            .any(|candidate| &candidate.id == model)
+                    })
+            });
+            self.new_chat_remote = choices.start_from_remote;
             self.new_chat_remembered = choices;
         }
         let text = self.new_chat_prompt.clone();
