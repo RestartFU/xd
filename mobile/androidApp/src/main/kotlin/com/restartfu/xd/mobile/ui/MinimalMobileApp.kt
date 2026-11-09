@@ -39,7 +39,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.width
 import androidx.activity.compose.BackHandler
 import androidx.compose.material3.DropdownMenu
@@ -56,9 +55,15 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.ViewModel
 import com.restartfu.xd.model.ChatSummary
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.ui.unit.Dp
 import androidx.compose.material3.MaterialTheme
@@ -266,6 +271,8 @@ internal fun MinimalMobileApp(
     val imeVisible = WindowInsets.isImeVisible
     val chatOpen = mobileDestination == MobileDestination.SESSIONS && activeChat != null
     val showBottomNavigation = !expanded && !imeVisible && !chatOpen
+    // The floating bar is drawn over the page, which keeps this much of its bottom clear.
+    val barInset = if (showBottomNavigation) FloatingBarClearance else 0.dp
 
     LaunchedEffect(operationError) {
         operationError?.let { snackbar.showSnackbar(it) }
@@ -293,7 +300,7 @@ internal fun MinimalMobileApp(
             Box(Modifier.weight(1f)) {
                 when {
                     mobileDestination == MobileDestination.TERMINAL -> MinimalGlobalTerminal(
-                        model, settings, link, showProjects,
+                        model, settings, link, showProjects, barInset,
                     )
                     mobileDestination == MobileDestination.USAGE -> Column(
                         Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
@@ -305,7 +312,7 @@ internal fun MinimalMobileApp(
                             viewModelStoreOwner = stores.usage(),
                             factory = UsageViewModel.Factory(model.client, settings),
                         )
-                        UsageContent(usage)
+                        UsageContent(usage, bottomInset = barInset)
                     }
                     mobileDestination == MobileDestination.SESSIONS && activeSession != null -> {
                         val selectTab = { id: String ->
@@ -385,6 +392,7 @@ internal fun MinimalMobileApp(
                     }
                     else -> MinimalProjectsHome(
                         model, settings, link, projects, tree.loading, tree.error, showTerminal,
+                        newSessionBesideBar = showBottomNavigation,
                         actions = sessionActions,
                         onRenameProject = { renamingProjectId = it.id },
                         onDeleteProject = { deletingProject = it },
@@ -398,13 +406,22 @@ internal fun MinimalMobileApp(
                         },
                     )
                 }
-            }
-            if (showBottomNavigation) {
-                XdNavigationBar(mobileDestination, showProjects, showTerminal, showUsage)
+                if (showBottomNavigation) {
+                    XdNavigationBar(
+                        mobileDestination, showProjects, showTerminal, showUsage,
+                        Modifier.align(Alignment.BottomCenter),
+                    )
+                }
             }
         }
     }
-    SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = if (showBottomNavigation) 96.dp else 24.dp))
+    SnackbarHost(
+        snackbar,
+        Modifier
+            .align(Alignment.BottomCenter)
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp, vertical = if (showBottomNavigation) FloatingBarClearance else 24.dp),
+    )
     }
     if (settingsOpen) {
         MinimalSettingsDialog(model, settings, onDismiss = { settingsOpen = false }, onDisconnect = {
@@ -536,6 +553,7 @@ private fun MinimalProjectsHome(
     loading: Boolean,
     treeError: String?,
     onTerminal: () -> Unit,
+    newSessionBesideBar: Boolean,
     actions: SessionActions,
     onRenameProject: (MinimalProject) -> Unit,
     onDeleteProject: (MinimalProject) -> Unit,
@@ -713,7 +731,23 @@ private fun MinimalProjectsHome(
                     }
                 }
             }
-            if (selected != null) {
+            if (selected != null && newSessionBesideBar) {
+                // Level with the floating bar, so the page keeps one row of controls at its foot.
+                // The tooltip's own layout drops alignment, so a plain box places it.
+                Box(Modifier.align(Alignment.BottomEnd).padding(16.dp)) {
+                    IconTooltip("New session") {
+                        FloatingActionButton(
+                            onClick = { createSessionIn = selected.id },
+                            modifier = Modifier.size(FloatingBarHeight),
+                            shape = CircleShape,
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                        ) {
+                            Icon(painterResource(R.drawable.ic_add), contentDescription = "New session")
+                        }
+                    }
+                }
+            } else if (selected != null) {
                 ExtendedFloatingActionButton(
                     onClick = { createSessionIn = selected.id },
                     modifier = Modifier
@@ -848,6 +882,7 @@ private fun MinimalGlobalTerminal(
     settings: MobileSettings,
     link: Link,
     onProjects: () -> Unit,
+    bottomInset: Dp,
 ) {
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     val terminalOwner = remember { SessionViewModelOwner() }
@@ -887,6 +922,7 @@ private fun MinimalGlobalTerminal(
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .padding(bottom = bottomInset)
                 .padding(10.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp)),
@@ -1071,19 +1107,75 @@ private fun ProductHeader(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
-/** Material navigation between the top-level places. Sessions open from Projects. */
+/** Height of the floating bar and of the New session button beside it. */
+private val FloatingBarHeight = 60.dp
+
+/** What the floating bar covers at the foot of a page: its margin, its height, and a gap above it. */
+private val FloatingBarClearance = 16.dp + FloatingBarHeight + 12.dp
+
+/**
+ * Icon tabs between the top-level places, floating over the page on phones.
+ * Sessions open from Projects. A long press names each tab.
+ */
 @Composable
 private fun XdNavigationBar(
     active: MobileDestination,
     onProjects: () -> Unit,
     onTerminal: () -> Unit,
     onUsage: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-        NavItem("Projects", R.drawable.ic_projects, active = active == MobileDestination.PROJECTS, onClick = onProjects)
-        NavItem("Terminal", R.drawable.ic_terminal, active = active == MobileDestination.TERMINAL, onClick = onTerminal)
-        NavItem("Usage", R.drawable.ic_usage, active = active == MobileDestination.USAGE, onClick = onUsage)
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        modifier = modifier.navigationBarsPadding().padding(bottom = 16.dp).height(FloatingBarHeight),
+        shape = CircleShape,
+        color = colors.surfaceContainer,
+        border = BorderStroke(1.dp, colors.outlineVariant),
+        shadowElevation = 6.dp,
+    ) {
+        Row(
+            Modifier.selectableGroup().padding(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            listOf(
+                Triple(MobileDestination.PROJECTS, "Projects", R.drawable.ic_projects) to onProjects,
+                Triple(MobileDestination.TERMINAL, "Terminal", R.drawable.ic_terminal) to onTerminal,
+                Triple(MobileDestination.USAGE, "Usage", R.drawable.ic_usage) to onUsage,
+            ).forEach { (item, onClick) ->
+                val (destination, label, icon) = item
+                val selected = active == destination
+                IconTooltip(label) {
+                    Box(
+                        Modifier
+                            .size(width = 56.dp, height = 48.dp)
+                            .clip(CircleShape)
+                            .background(if (selected) colors.surfaceContainerHighest else Color.Transparent)
+                            .selectable(selected = selected, role = Role.Tab, onClick = onClick)
+                            .semantics { contentDescription = label },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            painterResource(icon),
+                            contentDescription = null,
+                            tint = if (selected) colors.onSurface else colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
     }
+}
+
+/** Names an unlabelled control when it is long-pressed. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun IconTooltip(label: String, content: @Composable () -> Unit) {
+    TooltipBox(
+        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+        tooltip = { PlainTooltip { Text(label) } },
+        state = rememberTooltipState(),
+        content = content,
+    )
 }
 
 @Composable
@@ -1110,19 +1202,6 @@ private fun XdNavigationRail(
             Spacer(Modifier.height(8.dp))
         }
     }
-}
-
-@Composable
-private fun RowScope.NavItem(label: String, icon: Int, active: Boolean, onClick: () -> Unit) {
-    NavigationBarItem(
-        selected = active,
-        onClick = onClick,
-        icon = { Icon(painterResource(icon), contentDescription = null) },
-        label = { Text(label) },
-        colors = NavigationBarItemDefaults.colors(
-            indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
-        ),
-    )
 }
 
 @Composable

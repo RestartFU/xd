@@ -15,7 +15,7 @@ The user selected a T3 Code-like workspace, neutral charcoal, a neutral silver L
 
 Desktop uses a compact project/session sidebar and a generous conversation column. Separate chat tabs sit below the session header. Context and empty-state text are centered above a naturally sized composer. Settings has section navigation. Files, Changes, Browser and Terminal stay accessible alongside the conversation.
 
-Android carries the same palette and session/chat hierarchy through Material 3. Phones use bottom navigation outside chat and give an open chat a single header row (chat-title switcher, named workspace view button, More menu) over a one-row composer; tablets use a rail and keep scrollable chat tabs. The active conversation is always reachable, each chat restores its own draft and agent settings, and workspace tools remain shared.
+Android carries the same palette and session/chat hierarchy through Material 3. Phones use a floating bottom bar of icon tabs outside chat and give an open chat a single header row (chat-title switcher, named workspace view button, More menu) over a one-row composer; tablets use a rail and keep scrollable chat tabs. The active conversation is always reachable, each chat restores its own draft and agent settings, and workspace tools remain shared.
 
 ## Verification contract
 

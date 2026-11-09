@@ -82,6 +82,39 @@ class ProjectsScreenshotTest {
         check(shows("Projects") && shows("Terminal") && shows("Usage") && !shows("Sessions"))
     }
 
+    @Test @Config(qualifiers = "w840dp-h1200dp-320dpi")
+    fun tabletKeepsTheLabelledNewSessionButton() = shoot("rail-new-session-dark", MinimalThemePreset.DARK) {
+        check(this@ProjectsScreenshotTest.compose.onAllNodes(hasText("New session"), useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())
+    }
+
+    @Test fun phoneNewSessionIsTheRoundButton() = shoot("phone-new-session-dark", MinimalThemePreset.DARK) {
+        // Named for screen readers, with no visible label beside the floating bar.
+        check(shows("New session"))
+        check(this@ProjectsScreenshotTest.compose.onAllNodes(hasText("New session"), useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
+    }
+
+    /** The narrowest common phone still fits the bar and the round button side by side. */
+    @Test @Config(qualifiers = "w360dp-h780dp-420dpi")
+    fun narrowPhone() = longList("narrow-dark", MinimalThemePreset.DARK)
+
+    @Test fun longListDark() = longList("long-list-dark", MinimalThemePreset.DARK)
+
+    @Test fun longListLight() = longList("long-list-light", MinimalThemePreset.LIGHT)
+
+    @Test fun terminalTab() = shoot("terminal-dark", MinimalThemePreset.DARK) { click("Terminal") }
+
+    @Test fun usageTab() = shoot("usage-dark", MinimalThemePreset.DARK) { click("Usage") }
+
+    /** A list longer than the screen, to show what the bottom bar covers. */
+    private fun longList(name: String, theme: MinimalThemePreset) {
+        longTree = true
+        try {
+            shoot(name, theme) { check(shows("Quota bars") && shows("New session")) }
+        } finally {
+            longTree = false
+        }
+    }
+
     @Test fun newMenu() = shoot("new-menu-dark", MinimalThemePreset.DARK) {
         click("New")
         check(shows("New project") && shows("New folder"))
@@ -296,7 +329,7 @@ class ProjectsScreenshotTest {
         override fun close() = Unit
 
         private fun reply(op: String?, owner: String?): String = when (op) {
-            "tree" -> TREE
+            "tree" -> if (longTree) TREE_LONG else TREE
             "owner-icon" -> """{"ok":true,"owner":"$owner","mime":"image/png","data":"${avatar(owner.orEmpty())}"}"""
             else -> """{"ok":true}"""
         }
@@ -304,6 +337,26 @@ class ProjectsScreenshotTest {
 
     private companion object {
         /** Every request the app sent, in order. */
+        /** Whether the scripted host answers with [TREE_LONG]. */
+        @Volatile var longTree = false
+
+        /** [TREE] with a dozen more sessions, so the list runs past the bottom of the screen. */
+        val TREE_LONG by lazy {
+            val names = listOf(
+                "Pairing flow", "Diff pane", "Terminal resize", "Model picker", "Settle shelf", "Folder moves",
+                "Push notices", "Draft sync", "Image viewer", "Theme tokens", "Quota bars", "Host update",
+            )
+            val sessions = names.mapIndexed { i, title ->
+                """{"id":"x$i","folder":"xd","title":"$title","chats":["y$i"],"terminal_chat":"session:x$i"}"""
+            }
+            val chats = names.mapIndexed { i, title ->
+                val backend = if (i % 2 == 0) "claude" else "codex"
+                """{"id":"y$i","folder":"xd","title":"$title","backend":"$backend","working":false,"session":"x$i"}"""
+            }
+            TREE.replace("\"sessions\":[", "\"sessions\":[" + sessions.joinToString(",") + ",")
+                .replace("\"chats\":[{", "\"chats\":[" + chats.joinToString(",") + ",{")
+        }
+
         val SENT: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
 
         /** An organization holding a project and a folder of client sites, beside two plain projects. */

@@ -30,7 +30,7 @@ fi
 
 grep -Fq 'SessionTabStrip(' "$source_file" \
   || { echo "Mobile sessions must expose separate closable tabs." >&2; exit 1; }
-grep -Fq 'active = active == MobileDestination.TERMINAL' "$source_file" \
+grep -Fq 'Triple(MobileDestination.TERMINAL, "Terminal", R.drawable.ic_terminal) to onTerminal' "$source_file" \
   || { echo "Mobile navigation must expose a global Terminal destination." >&2; exit 1; }
 grep -Fq 'MinimalGlobalTerminal(' "$source_file" \
   || { echo "The global Terminal destination must render its own shell pane." >&2; exit 1; }
