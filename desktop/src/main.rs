@@ -2170,6 +2170,9 @@ struct XdDesktop {
     transcript_loading: bool,
     transcript_page_loading: bool,
     transcript_refresh_pending: bool,
+    /// A request for the newest page made while another page was loading,
+    /// sent once that page lands.
+    transcript_tail_pending: bool,
     transcript_has_older: bool,
     transcript_has_newer: bool,
     composer_input: Entity<FileEditor>,
@@ -2841,6 +2844,7 @@ impl XdDesktop {
             transcript_loading: false,
             transcript_page_loading: false,
             transcript_refresh_pending: false,
+            transcript_tail_pending: false,
             transcript_has_older: false,
             transcript_has_newer: false,
             composer_input,
@@ -4199,6 +4203,7 @@ impl XdDesktop {
                     self.transcript_loading = false;
                     self.transcript_page_loading = false;
                     self.transcript_refresh_pending = false;
+                    self.transcript_tail_pending = false;
                     if self
                         .pending_speech
                         .as_ref()
@@ -5549,6 +5554,7 @@ impl XdDesktop {
                         self.transcript_loading = false;
                         self.transcript_page_loading = false;
                         self.transcript_refresh_pending = false;
+                        self.transcript_tail_pending = false;
                         return;
                     }
                 };
@@ -5618,7 +5624,11 @@ impl XdDesktop {
                 self.transcript_page_loading = false;
                 self.transcript_loaded = true;
                 self.request_workflow_statuses();
-                if std::mem::take(&mut self.transcript_refresh_pending) {
+                if std::mem::take(&mut self.transcript_tail_pending) {
+                    // The newest page brings whatever a refresh would have.
+                    self.transcript_refresh_pending = false;
+                    self.request_message_page(&chat_id, MessageCursor::Tail);
+                } else if std::mem::take(&mut self.transcript_refresh_pending) {
                     self.request_messages(&chat_id);
                 }
             }
@@ -9693,7 +9703,12 @@ impl XdDesktop {
         self.transcript_refresh_pending = false;
         self.transcript_loading = !self.transcript_loaded;
         self.request_chat(&chat_id);
-        self.request_messages(&chat_id);
+        if std::mem::take(&mut self.transcript_tail_pending) {
+            // Asked for before the connection dropped, and still wanted.
+            self.request_message_page(&chat_id, MessageCursor::Tail);
+        } else {
+            self.request_messages(&chat_id);
+        }
         let mut file_requests = self.file_tree.loading_paths();
         if !self.file_tree.is_loaded("") && !file_requests.iter().any(String::is_empty) {
             file_requests.insert(0, String::new());
@@ -9760,6 +9775,16 @@ impl XdDesktop {
             return;
         };
         self.request_message_page(&chat_id, cursor);
+    }
+
+    /// Asks for the newest page. While another page loads it waits for that
+    /// page to land instead of being dropped.
+    fn request_tail_page(&mut self, chat_id: &str) {
+        if self.transcript_page_loading {
+            self.transcript_tail_pending = true;
+            return;
+        }
+        self.request_message_page(chat_id, MessageCursor::Tail);
     }
 
     fn request_message_page(&mut self, chat_id: &str, cursor: MessageCursor) {
@@ -11119,7 +11144,7 @@ impl XdDesktop {
         if self.transcript_has_newer {
             // The newest page is not loaded; the tail request lands pinned.
             if let Some(chat_id) = self.model.selected_chat.clone() {
-                self.request_message_page(&chat_id, MessageCursor::Tail);
+                self.request_tail_page(&chat_id);
             }
         }
         self.pin_transcript();
@@ -11429,6 +11454,7 @@ impl XdDesktop {
             self.transcript_loaded = false;
             self.transcript_loading = false;
             self.transcript_page_loading = false;
+            self.transcript_tail_pending = false;
             self.transcript.reset(0);
         }
         self.minimal_route = MinimalRoute::Cli {
@@ -11445,7 +11471,7 @@ impl XdDesktop {
         if land_on_newest && self.transcript_has_newer {
             // The reader paged back far enough to drop the newest rows; going
             // into the chat shows them again, and the tail page lands pinned.
-            self.request_message_page(&chat_id, MessageCursor::Tail);
+            self.request_tail_page(&chat_id);
         } else {
             self.request_messages(&chat_id);
         }
@@ -21372,6 +21398,111 @@ Binary files /dev/null and b/image.png differ\n";
                 AgentCli::Codex,
                 window,
                 cx,
+            );
+            assert!(desktop.transcript_pinned());
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn reopening_a_chat_paged_back_asks_for_the_newest_page_after_the_one_loading(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::{io::BufRead, os::unix::net::UnixStream};
+
+        let (client, server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let (host, _updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            PathBuf::from("tail-after-page-test"),
+        );
+        let mut requests = std::io::BufReader::new(server);
+        let mut next_messages_request = || loop {
+            let mut line = String::new();
+            requests
+                .read_line(&mut line)
+                .expect("a messages request must be sent");
+            let request: Value = serde_json::from_str(&line).unwrap();
+            if request["op"] == "messages" {
+                return request;
+            }
+        };
+        let page = |ids: std::ops::RangeInclusive<i64>, has_older: bool, has_newer: bool| {
+            let messages = ids
+                .map(|id| serde_json::json!({"id": id, "role": "assistant", "content": format!("Message {id}")}))
+                .collect::<Vec<_>>();
+            serde_json::json!({"ok": true, "messages": messages, "has_older": has_older, "has_newer": has_newer})
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.connected = true;
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.host = Some(host.clone());
+            // A window of older messages, the newest of them dropped.
+            desktop.handle_reply(
+                RequestKind::Messages {
+                    chat_id: "implementation".into(),
+                    cursor: MessageCursor::Tail,
+                },
+                page(10..=19, true, true),
+                None,
+                cx,
+            );
+            assert!(desktop.transcript_has_newer);
+            // The reader pages further back.
+            desktop.request_older_messages();
+            assert!(desktop.transcript_page_loading);
+            assert_eq!(next_messages_request()["before"], 10);
+        });
+
+        // Going into the chat while that page loads still asks for the newest.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_minimal_session(
+                "atlas".into(),
+                "implementation".into(),
+                AgentCli::Codex,
+                window,
+                cx,
+            );
+            assert!(desktop.transcript_tail_pending);
+        });
+        desktop.update(cx, |desktop, cx| {
+            desktop.handle_reply(
+                RequestKind::Messages {
+                    chat_id: "implementation".into(),
+                    cursor: MessageCursor::Before(10),
+                },
+                page(5..=9, false, true),
+                None,
+                cx,
+            );
+            let tail = next_messages_request();
+            assert!(tail.get("before").is_none() && tail.get("after").is_none());
+            desktop.handle_reply(
+                RequestKind::Messages {
+                    chat_id: "implementation".into(),
+                    cursor: MessageCursor::Tail,
+                },
+                page(30..=39, true, false),
+                None,
+                cx,
+            );
+            assert!(!desktop.transcript_has_newer);
+            assert_eq!(
+                desktop.model.messages.last().and_then(|message| message.id),
+                Some(39)
             );
             assert!(desktop.transcript_pinned());
         });
