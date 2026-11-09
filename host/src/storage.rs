@@ -502,14 +502,18 @@ impl StateStore {
             initialize_generated_worktrees(&database)?;
         }
         let database = Arc::new(Mutex::new(database));
+        let checkpointer = write_ahead_log
+            .then(|| Checkpointer::start(database_path, DATABASE_BUSY_TIMEOUT, database.clone()))
+            .flatten();
+        // Without the checkpointer nothing would reset a log that overlapping
+        // reads keep growing, so reads then share the writer as before.
+        let readers = checkpointer
+            .is_some()
+            .then(|| ReaderPool::new(database_path, DATABASE_BUSY_TIMEOUT));
         Ok(Self {
-            _checkpointer: write_ahead_log
-                .then(|| {
-                    Checkpointer::start(database_path, DATABASE_BUSY_TIMEOUT, database.clone())
-                })
-                .flatten(),
+            _checkpointer: checkpointer,
             database,
-            readers: write_ahead_log.then(|| ReaderPool::new(database_path, DATABASE_BUSY_TIMEOUT)),
+            readers,
             workspace_root: workspace_root.into(),
             paste_root: database_path
                 .parent()
@@ -10136,36 +10140,60 @@ mod tests {
             sizes.windows(2).all(|pair| pair[1] > pair[0]),
             "passive checkpoints alone let the log keep growing: {sizes:?}"
         );
+        // A second read, also on a snapshot older than the latest commit.
+        let middle = open_snapshot();
+        for index in 0..20 {
+            store
+                .append_turn_message(&chat, "user", &format!("last-{index}"), None)
+                .unwrap();
+        }
         let started = Instant::now();
-        thread::scope(|scope| {
-            // Reads outlasting the writer's one-second busy wait keep
-            // overlapping while the reset runs, and a write arrives too.
-            scope.spawn(|| {
-                thread::sleep(Duration::from_millis(300));
-                let during = open_snapshot();
+        let (reset, write, new_read) = thread::scope(|scope| {
+            // Both older reads outlast the writer's one-second busy wait.
+            scope.spawn(move || {
                 thread::sleep(Duration::from_millis(1200));
                 drop(older);
                 thread::sleep(Duration::from_millis(1200));
-                drop(during);
+                drop(middle);
             });
-            scope.spawn(|| {
-                thread::sleep(Duration::from_millis(500));
+            let write = scope.spawn(|| {
+                thread::sleep(Duration::from_millis(300));
                 store
                     .append_turn_message(&chat, "user", "during the reset", None)
                     .unwrap();
+                started.elapsed()
+            });
+            let new_read = scope.spawn(|| {
+                thread::sleep(Duration::from_millis(600));
+                let opening = Instant::now();
+                drop(open_snapshot());
+                opening.elapsed()
             });
             assert!(database::checkpoint_round(&checkpoints, &store.database, 1));
+            (
+                started.elapsed(),
+                write.join().unwrap(),
+                new_read.join().unwrap(),
+            )
         });
         assert!(
-            started.elapsed() >= Duration::from_millis(2500),
-            "the reset waited for every older read"
+            reset >= Duration::from_millis(2400),
+            "the reset waited for both older reads: {reset:?}"
+        );
+        assert!(
+            write >= reset,
+            "writes stayed held until the reset finished: {write:?} < {reset:?}"
+        );
+        assert!(
+            new_read < Duration::from_millis(500),
+            "new reads kept starting during the reset: {new_read:?}"
         );
         let count: i64 = store
             .reader()
             .unwrap()
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 202, "resetting the log loses nothing");
+        assert_eq!(count, 222, "resetting the log loses nothing");
         assert!(
             fs::metadata(&wal).unwrap().len() < sizes[0],
             "the log started over and holds only the write made after it"
