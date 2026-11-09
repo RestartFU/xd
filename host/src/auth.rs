@@ -757,6 +757,9 @@ impl AuthManager {
                     provider,
                     format!("Added {}.", accounts.label(provider, account)),
                 );
+                // Nothing runs as the new account yet, so its settings can be
+                // shared without racing Claude's own writes.
+                accounts.share_settings(provider, account);
                 // Clears "checking" so the status check below really runs.
                 self.set_snapshot(provider, account, AuthSnapshot::unknown());
                 self.refresh_account(provider, account);

@@ -544,12 +544,28 @@ impl TurnRuntime {
         // A new chat reads it too, so its session is filed under a known login.
         let mut unconfirmed = false;
         if turn.backend == "codex" {
-            let confirmed = self
-                .inner
+            // Until the account chosen is the one whose login was just read:
+            // reading can take long enough for the choice to change.
+            for _ in 0..3 {
+                let confirmed = self
+                    .inner
+                    .auth
+                    .confirm_login(&turn.backend, &choice.account);
+                unconfirmed = !confirmed && turn.session_id.is_some();
+                let again = self.inner.auth.choose(&turn.backend, chat_account);
+                let settled = again.account == choice.account;
+                choice = again;
+                if settled {
+                    break;
+                }
+                unconfirmed = turn.session_id.is_some();
+            }
+        }
+        if turn.backend == "claude" && !self.runs_as(&choice.account) {
+            self.inner
                 .auth
-                .confirm_login(&turn.backend, &choice.account);
-            unconfirmed = !confirmed && turn.session_id.is_some();
-            choice = self.inner.auth.choose(&turn.backend, chat_account);
+                .accounts()
+                .share_settings(&turn.backend, &choice.account);
         }
         // The account decides the home; a secret cannot point a turn at another
         // one, where it would run as a login nothing here has checked.
@@ -607,6 +623,15 @@ impl TurnRuntime {
                 turn.prompt
             );
         }
+    }
+
+    /// Whether a kept agent process runs as this account.
+    fn runs_as(&self, account: &str) -> bool {
+        self.inner.sessions.lock().map_or(true, |sessions| {
+            sessions
+                .values()
+                .any(|session| crate::accounts::tag_account(&session.account) == account)
+        })
     }
 
     fn switch_sentence(&self, provider: &str, choice: &Choice) -> String {

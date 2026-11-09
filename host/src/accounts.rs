@@ -117,6 +117,9 @@ struct Live {
     login_read_at_ms: Option<i64>,
     /// When the newest reading of the login began, by probe or on its own.
     identity_at_ms: Option<i64>,
+    /// When a turn last ran into a limit. Only a reading begun after it can
+    /// lift the hold early.
+    limited_at_ms: Option<i64>,
     /// Set when a turn was turned away for usage, until the stated reset.
     limited_until_ms: Option<i64>,
     limited_label: Option<String>,
@@ -545,6 +548,32 @@ impl Accounts {
         vec![(variable.into(), home.to_string_lossy().into_owned())]
     }
 
+    /// Copies the user's own Claude settings (MCP servers, projects) into an
+    /// added account's `.claude.json`. Claude writes that file too, with no lock
+    /// xd can take, so callers only do this while no Claude process runs as the
+    /// account.
+    pub(crate) fn share_settings(&self, provider: &str, id: &str) {
+        if provider != "claude" {
+            return;
+        }
+        let Some(home) = self.home(provider, id) else {
+            return;
+        };
+        let source = self
+            .inner
+            .homes
+            .lock()
+            .ok()
+            .and_then(|homes| homes.get("claude").cloned())
+            .or_else(|| user_home("claude"));
+        if let Some(source) = source
+            && let Err(error) =
+                sync_claude_settings(&user_claude_settings(&source), &home.join(".claude.json"))
+        {
+            eprintln!("xd: cannot share settings with the Claude account: {error}");
+        }
+    }
+
     /// Makes a home for an account that is about to sign in for the first time.
     pub(crate) fn begin_adding(&self, provider: &str) -> Result<String, String> {
         if self.inner.directory.is_none() {
@@ -745,11 +774,15 @@ impl Accounts {
                 // A fresh reading with clear room left lifts a limit a turn hit,
                 // such as after a reset credit. Near the limit it stays held: a
                 // reading can lag the limit that just turned a turn away.
+                let read_after_limit = account
+                    .live
+                    .limited_at_ms
+                    .is_none_or(|limited| checked_at_ms > limited);
                 if account
                     .live
                     .limited_until_ms
                     .is_none_or(|until| until <= checked_at_ms)
-                    || account.has_clear_room()
+                    || (read_after_limit && account.has_clear_room())
                 {
                     account.live.limited_until_ms = None;
                     account.live.limited_label = None;
@@ -775,6 +808,7 @@ impl Accounts {
                     .unwrap_or(now + UNTIMED_LIMIT_MS);
                 account.live.limited_until_ms = Some(until);
                 account.live.limited_label = label.map(str::to_owned);
+                account.live.limited_at_ms = Some(now);
             }
             Ok(())
         });
@@ -1085,9 +1119,6 @@ fn link_home(provider: &str, source: &Path, home: &Path) -> io::Result<()> {
             Ok(_) => {}
             Err(error) => return Err(error),
         }
-    }
-    if provider == "claude" {
-        sync_claude_settings(&user_claude_settings(source), &home.join(".claude.json"))?;
     }
     Ok(())
 }
@@ -1416,6 +1447,37 @@ mod tests {
             accounts.choose("codex", None, |_| true, 4).account,
             DEFAULT_ACCOUNT
         );
+    }
+
+    #[test]
+    fn a_reading_from_before_a_limit_does_not_lift_it() {
+        let data = temp("lift-order");
+        let accounts = Accounts::with_homes(&data, &[]);
+        added(&accounts, "codex", "b@example.com");
+        let room = vec![Headroom {
+            kind: "session".into(),
+            label: "Session".into(),
+            used_percent: 10.0,
+            resets_at_ms: Some(10 * HOUR),
+        }];
+        accounts.note_limited("codex", DEFAULT_ACCOUNT, Some(5 * HOUR), None, 100);
+        // Began at 50, before the turn ran into the limit at 100.
+        accounts.record_probe(
+            "codex",
+            DEFAULT_ACCOUNT,
+            &identity("a@example.com"),
+            room.clone(),
+            50,
+        );
+        assert!(accounts.describe("codex", 200)[0]["limited_until_ms"].is_i64());
+        accounts.record_probe(
+            "codex",
+            DEFAULT_ACCOUNT,
+            &identity("a@example.com"),
+            room,
+            150,
+        );
+        assert!(accounts.describe("codex", 200)[0]["limited_until_ms"].is_null());
     }
 
     #[test]
