@@ -37,6 +37,10 @@ pub enum MessageCursor {
 #[derive(Clone, Copy, Debug)]
 pub struct FirstMessage<'a> {
     pub text: &'a str,
+    pub effort: Option<&'a str>,
+    pub access: Option<&'a str>,
+    pub plan: Option<bool>,
+    pub attachments: &'a [Attachment],
     pub worktree_backend: Option<&'a str>,
     pub worktree_model: Option<&'a str>,
 }
@@ -961,6 +965,25 @@ impl HostHandle {
     ) -> Result<(), String> {
         let mut body = json!({"op":"new-chat", "folder":folder, "title":title, "backend":backend});
         body["start_from_remote"] = json!(start_from_remote);
+        if let Some(message) = first_message {
+            body["draft"] = json!(message.text);
+            body["draft_attachments"] = json!(
+                message
+                    .attachments
+                    .iter()
+                    .map(|a| json!({"name":a.name,"mime":a.mime,"data":a.data}))
+                    .collect::<Vec<_>>()
+            );
+            if let Some(effort) = message.effort {
+                body["effort"] = json!(effort);
+            }
+            if let Some(access) = message.access {
+                body["access"] = json!(access);
+            }
+            if let Some(plan) = message.plan {
+                body["plan"] = json!(plan);
+            }
+        }
         // A worktree made with the chat is named for what the chat is for:
         // from the message's first line at once, then by the naming model in
         // the background.
@@ -2922,6 +2945,10 @@ mod tests {
                 Some(&NewSessionWorktree::New),
                 false,
                 Some(FirstMessage {
+                    attachments: &[],
+                    effort: None,
+                    access: None,
+                    plan: None,
                     text,
                     worktree_backend: Some("claude"),
                     worktree_model: Some("claude-sonnet-5"),

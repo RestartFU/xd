@@ -383,6 +383,10 @@ class MainViewModel @JvmOverloads constructor(
     fun loadChatTitles() {
         chatTitlesWanted = true
         chatTitleRequest("Could not read the chat title settings") { client.chatTitleSettings() }
+        loadCreationCatalog()
+    }
+
+    fun loadCreationCatalog() {
         val read = ++catalogReads
         _catalogError.value = null
         viewModelScope.launch {
@@ -562,6 +566,9 @@ class MainViewModel @JvmOverloads constructor(
         sessionId: String? = null,
         worktree: Ops.NewSessionWorktree? = null,
         startFromRemote: Boolean = true,
+        effort: String? = null,
+        access: String? = null,
+        plan: Boolean? = null,
     ) {
         if (_creatingChat.value) return
         _creatingChat.value = true
@@ -574,8 +581,11 @@ class MainViewModel @JvmOverloads constructor(
                     backend = agent.wire,
                     sessionId = sessionId,
                     worktree = worktree,
+                    effort = effort, access = access, plan = plan,
                     startFromRemote = startFromRemote,
                 )
+                getApplication<Application>().getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
+                    .edit().remove("$folderId/${sessionId ?: "new"}").apply()
                 _createdDirectSession.value = CreatedDirectSession(
                     folderId,
                     chatId,

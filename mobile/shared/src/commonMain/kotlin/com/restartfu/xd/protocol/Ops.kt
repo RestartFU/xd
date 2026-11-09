@@ -346,8 +346,14 @@ public object Ops {
         sessionId: String? = null,
         worktree: NewSessionWorktree? = null,
         startFromRemote: Boolean = true,
+        effort: String? = null,
+        access: String? = null,
+        plan: Boolean? = null,
     ): JsonObject = buildJsonObject {
         put("op", "new-chat")
+        effort?.let { put("effort", it) }
+        access?.let { put("access", it) }
+        plan?.let { put("plan", it) }
         require(folderId.isNotBlank()) { "Folder id must not be blank" }
         put("folder", folderId)
         if (sessionId != null) {

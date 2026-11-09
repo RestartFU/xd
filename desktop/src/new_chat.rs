@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 /// Between the heading and the composer, as an empty chat has them.
 const HEADING_GAP: f32 = 28.0;
@@ -60,6 +61,57 @@ impl XdDesktop {
         let menu = self.new_chat_menu;
         let mut rows = Vec::new();
         match menu {
+            Some(option @ ("effort" | "access" | "mode")) => {
+                let choices: Vec<(String, String)> = match option {
+                    "effort" => self
+                        .model
+                        .agent_backends
+                        .iter()
+                        .find(|b| b.id == self.minimal_new_session_agent.protocol_name())
+                        .map(|b| {
+                            b.efforts
+                                .iter()
+                                .map(|e| (e.clone(), presentation::effort_name(e).to_owned()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    "access" => ["read-only", "edit", "full"]
+                        .into_iter()
+                        .map(|a| (a.to_owned(), presentation::access_name(a).to_owned()))
+                        .collect(),
+                    _ => vec![
+                        ("false".into(), "Build".into()),
+                        ("true".into(), "Plan".into()),
+                    ],
+                };
+                for (index, (value, label)) in choices.into_iter().enumerate() {
+                    if !label.to_lowercase().contains(&self.new_chat_query) {
+                        continue;
+                    }
+                    rows.push(
+                        ui_button(("draft-option-choice", index), ButtonKind::Ghost, colors)
+                            .w_full()
+                            .justify_start()
+                            .child(label)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                match option {
+                                    "effort" => {
+                                        this.new_chat_remembered.effort = Some(value.clone())
+                                    }
+                                    "access" => {
+                                        this.new_chat_remembered.access = Some(value.clone())
+                                    }
+                                    _ => this.new_chat_remembered.plan = Some(value == "true"),
+                                }
+                                this.new_chat_menu = None;
+                                this.remember_new_chat_choices();
+                                window.focus(&this.new_chat_input.read(cx).focus_handle(cx));
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    );
+                }
+            }
             Some("model") => {
                 for agent in [AgentCli::Codex, AgentCli::Claude] {
                     if self.new_chat_query.is_empty() && agent != self.minimal_new_session_agent {
@@ -132,6 +184,9 @@ impl XdDesktop {
                             ))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 window.focus(&this.new_chat_input.read(cx).focus_handle(cx));
+                                if this.minimal_new_session_agent != agent {
+                                    this.new_chat_remembered.effort = None;
+                                }
                                 this.minimal_new_session_agent = agent;
                                 this.new_chat_model = id.clone();
                                 this.new_chat_menu = None;
@@ -390,9 +445,11 @@ impl XdDesktop {
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if this.minimal_new_session_agent != agent {
+                                                this.new_chat_remembered.effort = None;
                                                 this.minimal_new_session_agent = agent;
                                                 this.new_chat_model = None;
                                             }
+                                            this.remember_new_chat_choices();
                                             this.new_chat_query.clear();
                                             this.new_chat_search.update(cx, |input, cx| {
                                                 input.set_text(String::new(), cx)
@@ -470,6 +527,66 @@ impl XdDesktop {
                 None
             })
             .into_any_element();
+        let mut controls = vec![model];
+        let supports_effort = self
+            .model
+            .agent_backends
+            .iter()
+            .find(|b| b.id == self.minimal_new_session_agent.protocol_name())
+            .is_some_and(|b| !b.efforts.is_empty());
+        let plan = self.new_chat_remembered.plan.unwrap_or(false);
+        let options = [
+            (
+                "effort",
+                self.new_chat_remembered
+                    .effort
+                    .as_deref()
+                    .map(|e| format!("{} effort", presentation::effort_name(e)))
+                    .unwrap_or("Default effort".into()),
+            ),
+            (
+                "access",
+                self.new_chat_remembered
+                    .access
+                    .as_deref()
+                    .map(|a| presentation::access_name(a).to_owned())
+                    .unwrap_or("Default access".into()),
+            ),
+            ("mode", if plan { "Plan" } else { "Build" }.to_owned()),
+        ];
+        for (option, label) in options {
+            if option == "effort" && !supports_effort {
+                continue;
+            }
+            let label = if option == "access" && plan {
+                "Read only".to_owned()
+            } else {
+                label
+            };
+            let chip = composer::composer_option(
+                SharedString::from(format!("draft-{option}")),
+                None,
+                label,
+                160.0,
+                colors,
+            );
+            let chip = if option == "access" && plan {
+                chip
+            } else {
+                self.draft_picker_toggle(option, chip, cx)
+            };
+            controls.push(
+                div()
+                    .relative()
+                    .child(chip)
+                    .children(if menu == Some(option) {
+                        popup.take()
+                    } else {
+                        None
+                    })
+                    .into_any_element(),
+            );
+        }
         let send = composer::composer_send_button("draft-send", ready, SEND_ICON, colors)
             .on_click(cx.listener(move |this, _, _, cx| {
                 if ready {
@@ -485,7 +602,7 @@ impl XdDesktop {
                 owner: image_preview::DraftOwner::NewChat,
                 width,
                 editor,
-                controls: vec![model],
+                controls,
                 actions: vec![send],
                 show_attachments: !starting,
             },
@@ -811,6 +928,7 @@ impl XdDesktop {
                 Err(error) => self.model.connection_error = Some(error),
             }
         }
+        self.persist_new_chat_draft();
         cx.notify();
     }
 
@@ -841,6 +959,7 @@ impl XdDesktop {
         if let Err(error) = result {
             self.model.connection_error = Some(error);
         }
+        self.persist_new_chat_draft();
         cx.notify();
     }
 
@@ -870,6 +989,155 @@ impl XdDesktop {
                 cx.notify();
             }
         }))
+    }
+
+    fn new_chat_draft_key(&self) -> Option<String> {
+        let folder = self.creating_chat_folder.as_ref()?;
+        Some(format!(
+            "{}/{}",
+            self.new_chat_choices_key(folder),
+            self.creating_chat_session.as_deref().unwrap_or("new")
+        ))
+    }
+
+    pub(super) fn schedule_new_chat_draft(&mut self, cx: &mut Context<Self>) {
+        self.new_chat_save_generation += 1;
+        let generation = self.new_chat_save_generation;
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_millis(250)).await;
+            let _ = this.update(cx, |this, _| {
+                if this.new_chat_save_generation == generation {
+                    this.persist_new_chat_draft();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn persist_new_chat_draft(&mut self) {
+        self.new_chat_save_generation += 1;
+        if self.chat_create_submitting {
+            return;
+        }
+        let Some(key) = self.new_chat_draft_key() else {
+            return;
+        };
+        let ids = json!(
+            self.new_chat_attachments
+                .iter()
+                .map(|a| a.id)
+                .collect::<Vec<_>>()
+        );
+        let changed = self
+            .settings
+            .new_chat_drafts
+            .get(&key)
+            .is_none_or(|d| d["ids"] != ids);
+        let attachments = (changed || cfg!(test)).then(|| {
+            json!(
+                self.new_chat_attachments
+                    .iter()
+                    .map(|a| json!({"name": a.name, "mime": a.mime, "data": a.data}))
+                    .collect::<Vec<_>>()
+            )
+        });
+        let mut choices = self.new_chat_remembered.clone();
+        choices.agent = Some(self.minimal_new_session_agent.protocol_name().to_owned());
+        choices.model = self.new_chat_model.clone();
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&ids.to_string(), &mut hash);
+        let attachment_file = format!("attachments-{:016x}.json", std::hash::Hasher::finish(&hash));
+        let mut draft = json!({"text": self.new_chat_prompt, "choices": choices,
+            "has_attachments": !self.new_chat_attachments.is_empty(), "ids": ids, "attachment_file": attachment_file});
+        if cfg!(test) {
+            draft["attachments"] = attachments.clone().unwrap_or(json!([]));
+        }
+        self.settings
+            .new_chat_drafts
+            .insert(key.clone(), draft.clone());
+        if !cfg!(test)
+            && let Err(error) = new_chat_store::save(key, draft, attachments)
+        {
+            self.model.connection_error =
+                Some(format!("Could not save the new-chat draft: {error}"));
+        }
+    }
+
+    pub(super) fn restore_new_chat_draft(&mut self, cx: &mut Context<Self>) {
+        let key = self.new_chat_draft_key();
+        let loaded = if cfg!(test) {
+            key.as_ref()
+                .and_then(|k| self.settings.new_chat_drafts.get(k))
+                .cloned()
+        } else {
+            key.and_then(|key| match new_chat_store::read(key) {
+                Ok(draft) => Some(draft),
+                Err(error) => {
+                    self.model.connection_error =
+                        Some(format!("Could not restore the new-chat draft: {error}"));
+                    None
+                }
+            })
+        };
+        let draft = loaded.as_ref();
+        self.new_chat_prompt = draft
+            .and_then(|d| d["text"].as_str())
+            .unwrap_or_default()
+            .to_owned();
+        self.new_chat_attachments = draft
+            .and_then(|d| d["attachments"].as_array())
+            .map(|a| a.iter().filter_map(Attachment::from_value).collect())
+            .unwrap_or_default();
+        if let Some(choices) = draft
+            .and_then(|d| d.get("choices"))
+            .and_then(|v| serde_json::from_value::<settings::NewChatChoices>(v.clone()).ok())
+        {
+            if let Some(agent) = choices
+                .agent
+                .as_deref()
+                .and_then(AgentCli::from_protocol_name)
+            {
+                self.minimal_new_session_agent = agent;
+            }
+            // A saved draft must follow the same catalog validation as remembered choices.
+            self.new_chat_model = choices.model.clone().filter(|model| {
+                self.model
+                    .agent_backends
+                    .iter()
+                    .find(|backend| backend.id == self.minimal_new_session_agent.protocol_name())
+                    .is_some_and(|backend| {
+                        backend
+                            .models
+                            .iter()
+                            .any(|candidate| &candidate.id == model)
+                    })
+            });
+            self.new_chat_remote = choices.start_from_remote;
+            self.new_chat_remembered = choices;
+        }
+        let text = self.new_chat_prompt.clone();
+        self.new_chat_input
+            .update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    pub(super) fn flush_new_chat_draft(&mut self) {
+        if !cfg!(test)
+            && let Some(key) = self.new_chat_draft_key()
+            && let Err(error) = new_chat_store::read(key)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    pub(super) fn clear_new_chat_draft(&mut self) {
+        if let Some(key) = self.new_chat_draft_key() {
+            self.settings.new_chat_drafts.remove(&key);
+            if !cfg!(test)
+                && let Err(error) = new_chat_store::save(key, json!({}), Some(json!([])))
+            {
+                self.model.connection_error = Some(error);
+            }
+        }
     }
 
     fn new_chat_choices_key(&self, folder_id: &str) -> String {
@@ -947,13 +1215,19 @@ impl XdDesktop {
                 }
             }
         }
-        if choices == self.new_chat_remembered {
+        if self
+            .settings
+            .new_chat_choices
+            .get(&self.new_chat_choices_key(&folder_id))
+            == Some(&choices)
+        {
             return;
         }
         self.settings
             .new_chat_choices
             .insert(self.new_chat_choices_key(&folder_id), choices.clone());
         self.new_chat_remembered = choices;
+        self.persist_new_chat_draft();
         if let Err(error) = self.settings.save() {
             self.model.connection_error = Some(error);
         }
@@ -1003,6 +1277,34 @@ impl XdDesktop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn new_chat_drafts_restore_text_files_and_keep_destinations_separate(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.creating_chat_folder = Some("project".into());
+            desktop.new_chat_prompt = "Unsent message".into();
+            desktop.new_chat_attachments =
+                vec![Attachment::from_file("notes.txt", b"notes".to_vec())];
+            desktop.new_chat_remembered.effort = Some("high".into());
+            desktop.persist_new_chat_draft();
+            desktop.creating_chat_session = Some("session".into());
+            desktop.restore_new_chat_draft(cx);
+            assert!(desktop.new_chat_prompt.is_empty());
+            assert!(desktop.new_chat_attachments.is_empty());
+            desktop.creating_chat_session = None;
+            desktop.restore_new_chat_draft(cx);
+            assert_eq!(desktop.new_chat_prompt, "Unsent message");
+            assert_eq!(desktop.new_chat_attachments[0].name, "notes.txt");
+            assert_eq!(desktop.new_chat_remembered.effort.as_deref(), Some("high"));
+            desktop.clear_new_chat_draft();
+            desktop.restore_new_chat_draft(cx);
+            assert!(desktop.new_chat_prompt.is_empty());
+            assert!(desktop.new_chat_attachments.is_empty());
+        });
+    }
 
     #[gpui::test]
     fn disconnect_and_endpoint_switch_release_chat_creation(cx: &mut gpui::TestAppContext) {

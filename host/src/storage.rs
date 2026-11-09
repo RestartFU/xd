@@ -4056,6 +4056,41 @@ impl StateStore {
                 })
             },
         )?;
+        let effort = if let Some(value) = request.get("effort").and_then(Value::as_str) {
+            if !effort_supported(&backend, value) {
+                return Err(StorageError::InvalidRequest(
+                    "That reasoning effort is not available for this assistant.".into(),
+                ));
+            }
+            Some(value.to_owned())
+        } else {
+            effort
+        };
+        let access = request.get("access").and_then(Value::as_str);
+        if access.is_some_and(|value| !["read-only", "edit", "full"].contains(&value)) {
+            return Err(StorageError::InvalidRequest(
+                "Unknown workspace access.".into(),
+            ));
+        }
+        let access = access.map(str::to_owned).or(defaults.1);
+        let plan = request
+            .get("plan")
+            .and_then(Value::as_bool)
+            .unwrap_or(defaults.2);
+        let draft = request
+            .get("draft")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if draft.len() > MAX_DRAFT_BYTES {
+            return Err(StorageError::InvalidRequest(
+                "A message draft is too large.".into(),
+            ));
+        }
+        let draft_attachments = request
+            .get("draft_attachments")
+            .cloned()
+            .unwrap_or(json!([]));
+        validate_draft_attachments(&draft_attachments)?;
         let id = Uuid::new_v4().to_string();
         let now = now_seconds();
         let (workdir, original_workdir) = if let Some(shared) = &shared {
@@ -4172,8 +4207,8 @@ impl StateStore {
                 backend,
                 model,
                 effort,
-                defaults.1,
-                defaults.2,
+                access,
+                plan,
                 defaults.3,
                 false,
                 workdir,
@@ -4186,6 +4221,12 @@ impl StateStore {
                 session,
                 shared.as_ref().is_some_and(|shared| shared.3),
             ],
+        )?;
+        let attachments =
+            encode_draft_attachments(&transaction, &id, &draft_attachments.to_string())?;
+        transaction.execute(
+            "UPDATE chats SET draft = ?, draft_attachments = ? WHERE id = ?",
+            params![draft, attachments, id],
         )?;
         transaction.commit()?;
         Ok(
@@ -11294,6 +11335,39 @@ mod tests {
         store
             .set_option(&json!({"chat": chat["id"], "option": option, "value": value}))
             .unwrap();
+    }
+
+    #[test]
+    fn new_chats_apply_options_and_draft_atomically() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let created = store
+            .new_chat(&json!({"folder":folder,"backend":"codex",
+            "effort":"high","access":"edit","plan":true,"draft":"Unsent first message",
+            "draft_attachments":[{"name":"notes.txt","mime":"text/plain","data":"bm90ZXM="}]}))
+            .unwrap();
+        let chat = store.chat(created["id"].as_str().unwrap()).unwrap();
+        assert_eq!(chat["effort"], "high");
+        assert_eq!(chat["access"], "edit");
+        assert_eq!(chat["plan"], true);
+        assert_eq!(chat["draft"], "Unsent first message");
+        assert_eq!(chat["draft_files"][0]["name"], "notes.txt");
+        assert!(
+            store
+                .new_chat(&json!({"folder":folder,"backend":"codex","effort":"invalid"}))
+                .is_err()
+        );
+        assert!(
+            store
+                .new_chat(&json!({"folder":folder,"access":"invalid"}))
+                .is_err()
+        );
+        assert!(
+            store
+                .new_chat(&json!({"folder":folder,"draft_attachments":[{"data":"invalid"}]}))
+                .is_err()
+        );
     }
 
     #[test]

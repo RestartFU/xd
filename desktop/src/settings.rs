@@ -66,6 +66,9 @@ pub struct NewChatChoices {
     /// The ref a new worktree branches from.
     pub base: Option<String>,
     pub start_from_remote: bool,
+    pub effort: Option<String>,
+    pub access: Option<String>,
+    pub plan: Option<bool>,
 }
 
 impl Default for NewChatChoices {
@@ -77,6 +80,9 @@ impl Default for NewChatChoices {
             checkout: None,
             base: None,
             start_from_remote: true,
+            effort: None,
+            access: None,
+            plan: None,
         }
     }
 }
@@ -135,6 +141,8 @@ pub struct AppSettings {
     /// The choices of each project's last new chat, per connection and project.
     pub new_chat_choices: HashMap<String, NewChatChoices>,
     #[serde(skip)]
+    pub new_chat_drafts: HashMap<String, serde_json::Value>,
+    #[serde(skip)]
     load_error: Option<String>,
 }
 
@@ -178,6 +186,7 @@ impl Default for AppSettings {
             usage_window_days: 30,
             usage_hidden_providers: Vec::new(),
             new_chat_choices: HashMap::new(),
+            new_chat_drafts: HashMap::new(),
             load_error: None,
         }
     }
@@ -230,7 +239,7 @@ impl AppSettings {
     }
 }
 
-fn settings_path() -> PathBuf {
+pub(super) fn settings_path() -> PathBuf {
     if let Some(path) = env::var_os("XD_SETTINGS_PATH").filter(|path| !path.is_empty()) {
         return PathBuf::from(path);
     }
@@ -427,8 +436,10 @@ mod tests {
                     checkout: None,
                     base: Some("refs/remotes/origin/dev".into()),
                     start_from_remote: true,
+                    ..Default::default()
                 },
             )]),
+            new_chat_drafts: HashMap::new(),
             load_error: None,
         };
         save_to(&path, &settings).unwrap();

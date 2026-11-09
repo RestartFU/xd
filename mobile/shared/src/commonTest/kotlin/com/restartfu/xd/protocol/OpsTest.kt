@@ -238,6 +238,15 @@ class OpsTest {
     }
 
     @Test
+    fun newChatCarriesFirstTurnOptions() {
+        val request = Ops.newChat("folder", effort = "high", access = "edit", plan = true)
+        assertEquals("high", request.getValue("effort").jsonPrimitive.content)
+        assertEquals("edit", request.getValue("access").jsonPrimitive.content)
+        assertEquals("true", request.getValue("plan").jsonPrimitive.content)
+        assertFalse("effort" in Ops.newChat("folder"))
+    }
+
+    @Test
     fun newChatCanJoinAnExistingWorkspaceSession() {
         val request = Ops.newChat("project", "Review", "claude", sessionId = "session")
         assertEquals("session", request.getValue("session").jsonPrimitive.content)

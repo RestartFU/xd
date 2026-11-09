@@ -48,6 +48,32 @@ class NewSessionDialogScreenshotTest {
 
     @Test fun newWorktreeComesFirstLight() = shoot("new-session-light", MinimalThemePreset.LIGHT)
 
+    @Test fun creationDraftSurvivesClosingAndReopening() {
+        fun open(): ComponentActivity {
+            val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+            activity.setContent {
+                MaterialTheme {
+                    NewSessionDialog(projectName = "Draft test", draftKey = "draft-reopen/new",
+                        onDismiss = {}, onCreate = { _, _, _, _, _, _, _ -> })
+                }
+            }
+            repeat(10) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
+            return activity
+        }
+        val first = open()
+        val dialog = dialogViews().last { it !== first.window.decorView }
+        val editor = composeViews(dialog).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
+            .first { it.config.getOrNull(androidx.compose.ui.semantics.SemanticsActions.SetText) != null }
+        editor.config[androidx.compose.ui.semantics.SemanticsActions.SetText].action!!(androidx.compose.ui.text.AnnotatedString("Keep my draft"))
+        repeat(10) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
+        first.finish()
+        val second = open()
+        val reopened = dialogViews().last { it !== second.window.decorView }
+        assertTrue(composeViews(reopened).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
+            .any { it.config.getOrNull(SemanticsProperties.EditableText)?.text == "Keep my draft" })
+        second.finish()
+    }
+
     private fun shoot(name: String, theme: MinimalThemePreset) {
         // A plain activity: the compose test rule waits for an idleness this
         // dialog never reaches under Robolectric.
@@ -59,9 +85,10 @@ class NewSessionDialogScreenshotTest {
                     Surface(Modifier.fillMaxSize()) {
                         NewSessionDialog(
                             projectName = "xd",
+                            backends = listOf(com.restartfu.xd.protocol.BackendReply("codex", "Codex", efforts = listOf("low", "medium", "high"))),
                             places = { PLACES },
                             onDismiss = {},
-                            onCreate = { _, _, _, remote -> createdRemote = remote },
+                            onCreate = { _, _, _, remote, _, _, _ -> createdRemote = remote },
                         )
                     }
                 }
@@ -70,6 +97,9 @@ class NewSessionDialogScreenshotTest {
         repeat(30) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
         val screen = activity.window.decorView
         val dialog = dialogViews().last { it !== screen }
+        topOf(dialog, "Reasoning effort")
+        topOf(dialog, "Workspace access")
+        topOf(dialog, "Chat mode")
         val newWorktree = topOf(dialog, "New worktree")
         val checkout = topOf(dialog, "master")
         val branch = topOf(dialog, "fix/reconnect-backoff")

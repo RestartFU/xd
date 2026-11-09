@@ -72,6 +72,7 @@ mod image_preview;
 mod input;
 mod minimal;
 mod new_chat;
+mod new_chat_store;
 #[cfg(target_os = "linux")]
 mod notifications;
 mod selection;
@@ -2177,6 +2178,7 @@ struct XdDesktop {
     creating_chat_session: Option<String>,
     new_chat_input: Entity<FileEditor>,
     new_chat_prompt: String,
+    new_chat_save_generation: u64,
     new_chat_generation: u64,
     new_chat_reading: usize,
     new_chat_submitted_prompt: Option<String>,
@@ -2331,7 +2333,11 @@ impl XdDesktop {
         });
         let desktop = cx.weak_entity();
         window.on_window_should_close(cx, move |_, cx| {
-            let _ = desktop.update(cx, |desktop, cx| desktop.shutdown_browsers(cx));
+            let _ = desktop.update(cx, |desktop, cx| {
+                desktop.persist_new_chat_draft();
+                desktop.flush_new_chat_draft();
+                desktop.shutdown_browsers(cx);
+            });
             true
         });
         let new_chat_search = cx.new(|cx| ComposerInput::new(cx, "Search…"));
@@ -2346,6 +2352,7 @@ impl XdDesktop {
         cx.subscribe(&new_chat_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => {
                 this.new_chat_prompt = text.clone();
+                this.schedule_new_chat_draft(cx);
                 cx.notify();
             }
             EditorEvent::Submit | EditorEvent::SubmitNow => this.save_minimal_chat_create(cx),
@@ -2836,6 +2843,7 @@ impl XdDesktop {
             creating_chat_session: None,
             new_chat_input,
             new_chat_prompt: String::new(),
+            new_chat_save_generation: 0,
             new_chat_generation: 0,
             new_chat_reading: 0,
             new_chat_submitted_prompt: None,
@@ -2980,6 +2988,11 @@ impl XdDesktop {
                 Timer::after(Duration::from_millis(500)).await;
                 let alive = this
                     .update(cx, |this, cx| {
+                        if let Some(error) = new_chat_store::take_error() {
+                            this.model.connection_error =
+                                Some(format!("Could not save the new-chat draft: {error}"));
+                            cx.notify();
+                        }
                         this.terminal_cursor_visible = !this.terminal_cursor_visible;
                         if this.terminal_panel.is_some() {
                             cx.notify();
@@ -5371,6 +5384,7 @@ impl XdDesktop {
                             attachments: self.new_chat_submitted_attachments.clone(),
                         },
                     );
+                    self.clear_new_chat_draft();
                     // The view stays, showing the message, until the chat
                     // opens in its place.
                     self.new_chat_started = Some(chat_id.to_owned());
@@ -6962,6 +6976,7 @@ impl XdDesktop {
         }
         self.begin_chat_create(session.folder.clone(), window, cx);
         self.creating_chat_session = Some(session.id);
+        self.restore_new_chat_draft(cx);
         self.chat_create_title = "New chat".into();
         self.chat_create_input
             .update(cx, |input, cx| input.set_text_selected("New chat", cx));
@@ -7248,6 +7263,7 @@ impl XdDesktop {
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.creating_chat_session = None;
         self.creating_chat_folder = Some(folder_id.clone());
+        self.restore_new_chat_draft(cx);
         // Naming a chat up front is busywork: the title is renamed later or
         // never. Open on the name the chat would have had anyway, selected, so
         // Enter takes it and typing replaces it.
@@ -7344,6 +7360,7 @@ impl XdDesktop {
     }
 
     fn cancel_chat_create(&mut self, cx: &mut Context<Self>) {
+        self.persist_new_chat_draft();
         self.creating_chat_folder = None;
         self.creating_chat_session = None;
         self.new_chat_started = None;
@@ -10756,6 +10773,7 @@ impl XdDesktop {
     }
 
     fn flush_draft_before_navigation(&mut self) -> bool {
+        self.persist_new_chat_draft();
         self.draft_generation = self.draft_generation.saturating_add(1);
         if !self.sync_draft() {
             return false;
@@ -11415,6 +11433,10 @@ impl XdDesktop {
                     self.new_chat_remote,
                     Some(FirstMessage {
                         text: &self.new_chat_prompt,
+                        attachments: &self.new_chat_attachments,
+                        effort: self.new_chat_remembered.effort.as_deref(),
+                        access: self.new_chat_remembered.access.as_deref(),
+                        plan: Some(self.new_chat_remembered.plan.unwrap_or(false)),
                         worktree_backend: self.settings.git_writer.backend(),
                         worktree_model: self.settings.git_writer_model.as_deref(),
                     }),
