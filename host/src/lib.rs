@@ -1318,6 +1318,21 @@ impl Engine {
     /// daemon does this, since it is what outlives the clients.
     pub fn start_account_switching(self: &Arc<Self>) {
         self.auth.start_watch();
+        // Codex sessions from before accounts were kept are filed under the
+        // login Codex has as the host starts, so a later change of login is
+        // caught for them too rather than resumed across.
+        if let Some(store) = self.store.clone() {
+            let auth = self.auth.clone();
+            let _ = thread::Builder::new()
+                .name("xd-claim-sessions".into())
+                .spawn(move || {
+                    if let Some(tag) = auth.read_own_codex_login()
+                        && let Err(error) = store.claim_unfiled_sessions("codex", &tag)
+                    {
+                        eprintln!("xd-host: cannot file earlier Codex sessions: {error}");
+                    }
+                });
+        }
         let Some(runtime) = self.runtime.as_ref() else {
             return;
         };

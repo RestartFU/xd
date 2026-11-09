@@ -929,6 +929,9 @@ two minutes or since the account last signed in or out; if it cannot, the chat
 starts a new session given its messages rather than resume. With several
 accounts and none able to take a turn, the turn is refused rather than run on
 the default. A kept process is reused only for the same login.
+Codex sessions stored before accounts existed name no login; as the host starts
+they are filed under the login Codex has then, which is the only record of
+who made them.
 `CODEX_HOME` and `CLAUDE_CONFIG_DIR` from agent secrets are ignored: the account
 decides the home. An account whose login the host cannot read is not added. A Claude Code session moves with the chat. A Codex session
 cannot open on another account, so the new account starts a session given the

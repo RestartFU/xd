@@ -2463,6 +2463,18 @@ impl StateStore {
         Ok(database.last_insert_rowid())
     }
 
+    /// Files every session stored before accounts were kept, and so filed under
+    /// no login, under `tag`. Done once as the host starts: those sessions were
+    /// made by the login the CLI had then, as far as anything can tell.
+    pub fn claim_unfiled_sessions(&self, backend: &str, tag: &str) -> Result<usize, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database.execute(
+            "UPDATE chat_sessions SET account = ? WHERE backend = ? AND account IS NULL \
+             AND session_id IS NOT NULL",
+            params![tag, backend],
+        )?)
+    }
+
     /// The conversation so far as plain text, newest kept when it is long, for
     /// an agent that has to start a new session on another account. Leaves out
     /// the newest user message, which the turn itself carries.
@@ -12852,6 +12864,49 @@ mod tests {
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_none());
         assert!(resumable());
+    }
+
+    /// Sessions from before accounts were kept are filed once, under the login
+    /// the CLI has as the host starts; sessions filed since are left alone.
+    #[test]
+    fn unfiled_sessions_are_claimed_once_for_the_current_login() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "old", "folder");
+        fixture.insert_chat(&database, "new", "folder");
+        database
+            .execute(
+                "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES ('old', 'codex', 'thread-old')",
+                [],
+            )
+            .unwrap();
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .set_session("new", "codex", "thread-new", "default#b")
+            .unwrap();
+        assert_eq!(
+            store.claim_unfiled_sessions("codex", "default#a").unwrap(),
+            1
+        );
+        assert_eq!(
+            store.claim_unfiled_sessions("codex", "default#c").unwrap(),
+            0
+        );
+        let account = |chat: &str| -> String {
+            Connection::open(&fixture.database)
+                .unwrap()
+                .query_row(
+                    "SELECT account FROM chat_sessions WHERE chat_id = ?",
+                    [chat],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(account("old"), "default#a");
+        assert_eq!(account("new"), "default#b");
     }
 
     /// The host continues a chat on another account only while the turn that

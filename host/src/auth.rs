@@ -323,6 +323,18 @@ impl AuthManager {
         }
     }
 
+    /// Reads the login of the user's own Codex sign-in and records it, giving
+    /// the session tag it files sessions under.
+    pub(crate) fn read_own_codex_login(&self) -> Option<String> {
+        let accounts = &self.inner.accounts;
+        let ticket = accounts.ticket();
+        let started = now_ms();
+        let identity = crate::usage::read_codex_login(&[])?;
+        identity.account_key.as_ref()?;
+        accounts.record_login_from(ticket, "codex", DEFAULT_ACCOUNT, &identity, started);
+        Some(accounts.session_tag("codex", DEFAULT_ACCOUNT))
+    }
+
     /// Sign-in state as a chat shows it: that of the account a new turn would use.
     pub(crate) fn state(&self, provider: &str) -> String {
         let account = self
