@@ -35,6 +35,11 @@ const CHAT_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 // Each timeout in a row doubles the next deadline for that snapshot, up to
 // 2^4 times the first one: 30 s, 1, 2, 4, then 8 minutes.
 const CHAT_LOAD_TIMEOUT_DOUBLINGS: u32 = 4;
+// How long a request without a deadline of its own, such as a Git push, may
+// hold up the snapshots queued behind it before the connection counts as
+// stuck: the longest a snapshot's deadline grows.
+const QUEUED_BEHIND_TIMEOUT: Duration =
+    Duration::from_secs(CHAT_LOAD_TIMEOUT.as_secs() << CHAT_LOAD_TIMEOUT_DOUBLINGS);
 
 struct PendingRequest {
     kind: RequestKind,
@@ -111,6 +116,10 @@ impl SnapshotDeadlines {
 
 struct ConnectionRequests {
     pending: Mutex<HashMap<u64, PendingRequest>>,
+    /// When the oldest request then waiting was answered. The host answers a
+    /// connection's requests one at a time, in order, so the next one only
+    /// starts being worked on then.
+    head_answered: Mutex<Option<Instant>>,
     closed: AtomicBool,
     deadlines: Arc<SnapshotDeadlines>,
     /// A snapshot's deadline before it has timed out on this host.
@@ -121,6 +130,7 @@ impl ConnectionRequests {
     fn new(deadlines: Arc<SnapshotDeadlines>, timeout: Duration) -> Self {
         Self {
             pending: Mutex::default(),
+            head_answered: Mutex::default(),
             closed: AtomicBool::new(false),
             deadlines,
             timeout,
@@ -138,23 +148,47 @@ impl ConnectionRequests {
         }
     }
 
+    /// Takes the request a reply answers, noting when the oldest one was.
+    fn take_reply(&self, request_id: u64, now: Instant) -> Option<RequestKind> {
+        let mut pending = self.pending.lock().ok()?;
+        let request = pending.remove(&request_id)?;
+        if pending.keys().all(|&other| other > request_id)
+            && let Ok(mut head_answered) = self.head_answered.lock()
+        {
+            *head_answered = Some(now);
+        }
+        Some(request.kind)
+    }
+
+    /// Whether the connection has stopped answering while a snapshot waits.
+    /// Only the oldest unanswered request is being worked on, so only its
+    /// clock runs, from when it was sent or the request before it was
+    /// answered: a snapshot queued behind a slow but healthy reply is not
+    /// late. A later reply does not restart that clock, so a lost reply
+    /// still expires.
     fn expire_chat_load(&self, now: Instant) -> bool {
         let Ok(mut pending) = self.pending.lock() else {
             return false;
         };
-        let expired = pending
-            .values()
-            .filter(|request| {
-                request.deadline.is_some_and(|deadline| {
-                    now.saturating_duration_since(request.started) >= deadline
-                })
-            })
-            .filter_map(|request| Snapshot::of(&request.kind))
-            .collect::<Vec<_>>();
-        if expired.is_empty() || self.closed.swap(true, Ordering::AcqRel) {
+        if !pending.values().any(|request| request.deadline.is_some()) {
             return false;
         }
-        for snapshot in expired {
+        let Some((_, head)) = pending.iter().min_by_key(|(id, _)| **id) else {
+            return false;
+        };
+        let head_answered = self
+            .head_answered
+            .lock()
+            .ok()
+            .and_then(|head_answered| *head_answered);
+        let since = head_answered.map_or(head.started, |answered| answered.max(head.started));
+        let allowed = head.deadline.unwrap_or(QUEUED_BEHIND_TIMEOUT);
+        if now.saturating_duration_since(since) < allowed
+            || self.closed.swap(true, Ordering::AcqRel)
+        {
+            return false;
+        }
+        if let Some(snapshot) = Snapshot::of(&head.kind) {
             self.deadlines.timed_out(snapshot);
         }
         pending.clear();
@@ -2297,13 +2331,7 @@ fn spawn_reader(
                         request_id: Some(request_id),
                         mut body,
                     } => {
-                        let kind = requests
-                            .pending
-                            .lock()
-                            .ok()
-                            .and_then(|mut pending| pending.remove(&request_id))
-                            .map(|request| request.kind);
-                        let Some(kind) = kind else {
+                        let Some(kind) = requests.take_reply(request_id, Instant::now()) else {
                             continue;
                         };
                         if let Some(snapshot) = Snapshot::of(&kind) {
@@ -2527,12 +2555,20 @@ mod tests {
             host.tree().unwrap_err(),
             "the xd state connection is closed"
         );
+        // Let every connection thread finish, then check what they left.
+        drop(host);
         drop(peer);
-        thread::sleep(Duration::from_millis(50));
-        assert!(
-            updates.try_recv().is_err(),
-            "a connection disconnects only once"
-        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !updates.is_closed() {
+            assert!(Instant::now() < deadline, "connection threads kept running");
+            thread::sleep(Duration::from_millis(5));
+        }
+        while let Ok(update) = updates.try_recv() {
+            assert!(
+                matches!(update, HostUpdate::Event { .. }),
+                "a connection disconnects only once and drops late replies"
+            );
+        }
     }
 
     #[test]
@@ -2646,6 +2682,86 @@ mod tests {
             !Arc::ptr_eq(&host, &SnapshotDeadlines::for_host(Path::new("other-host"))),
             "each host keeps its own deadlines"
         );
+    }
+
+    #[test]
+    fn a_snapshot_queued_behind_a_slow_reply_is_not_late() {
+        let deadlines = Arc::new(SnapshotDeadlines::default());
+        let page = Snapshot::Messages("big".into(), MessageCursor::Before(500));
+        deadlines.timed_out(page.clone());
+        let requests = ConnectionRequests::new(deadlines.clone(), CHAT_LOAD_TIMEOUT);
+        let sent = Instant::now();
+        let after = |seconds| sent + Duration::from_secs(seconds);
+        let older_page = requests.pending_request(
+            RequestKind::Messages {
+                chat_id: "big".into(),
+                cursor: MessageCursor::Before(500),
+            },
+            sent,
+        );
+        let tree = requests.pending_request(RequestKind::Tree, sent);
+        requests
+            .pending
+            .lock()
+            .unwrap()
+            .extend([(1, older_page), (2, tree)]);
+        // The tree's own 30 seconds pass while the page, with 60, is still
+        // being sent ahead of it.
+        assert!(!requests.expire_chat_load(after(40)));
+        assert!(requests.take_reply(1, after(45)).is_some());
+        // The tree's clock starts once the page is in.
+        assert!(!requests.expire_chat_load(after(70)));
+        assert!(requests.expire_chat_load(after(75)));
+        assert_eq!(
+            deadlines.deadline(&Snapshot::Tree, CHAT_LOAD_TIMEOUT),
+            CHAT_LOAD_TIMEOUT * 2
+        );
+    }
+
+    #[test]
+    fn a_lost_reply_expires_even_when_later_requests_are_answered() {
+        let requests = ConnectionRequests::new(Arc::default(), CHAT_LOAD_TIMEOUT);
+        let sent = Instant::now();
+        let chat = requests.pending_request(
+            RequestKind::Chat {
+                chat_id: "lost".into(),
+            },
+            sent,
+        );
+        let tree = requests.pending_request(RequestKind::Tree, sent);
+        requests
+            .pending
+            .lock()
+            .unwrap()
+            .extend([(1, chat), (2, tree)]);
+        assert!(
+            requests
+                .take_reply(2, sent + Duration::from_secs(20))
+                .is_some()
+        );
+        assert!(requests.expire_chat_load(sent + CHAT_LOAD_TIMEOUT));
+    }
+
+    #[test]
+    fn a_request_without_a_deadline_holds_up_snapshots_only_so_long() {
+        let requests = ConnectionRequests::new(Arc::default(), CHAT_LOAD_TIMEOUT);
+        let sent = Instant::now();
+        let push = requests.pending_request(
+            RequestKind::GitPush {
+                chat_id: "one".into(),
+                generation: 0,
+            },
+            sent,
+        );
+        let tree = requests.pending_request(RequestKind::Tree, sent);
+        requests
+            .pending
+            .lock()
+            .unwrap()
+            .extend([(1, push), (2, tree)]);
+        assert!(!requests.expire_chat_load(sent + Duration::from_secs(5 * 60)));
+        assert!(requests.expire_chat_load(sent + QUEUED_BEHIND_TIMEOUT));
+        assert_eq!(QUEUED_BEHIND_TIMEOUT, Duration::from_secs(8 * 60));
     }
 
     #[test]
