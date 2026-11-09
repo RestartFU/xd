@@ -1,5 +1,24 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.CancellationException
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,6 +31,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.res.painterResource
+import com.restartfu.xd.mobile.R
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -70,23 +92,103 @@ internal fun BackgroundRing(color: Color, modifier: Modifier = Modifier, size: D
     )
 }
 
-/**
- * A chat with no turn running whose agent still runs background agents or
- * shells, at the foot of the transcript where the working row would be.
- */
+/** Task output is fetched only while this expanded row is on screen and resumed. */
 @Composable
-internal fun BackgroundTasksRow(count: Int) {
-    Row(
-        modifier = Modifier.padding(start = 2.dp, top = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        BackgroundRing(LocalXdSignals.current.working, size = 7.dp)
-        Text(
-            backgroundTasksLabel(count),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+internal fun BackgroundTasksRow(
+    count: Int,
+    visible: Boolean,
+    load: suspend () -> List<com.restartfu.xd.protocol.BackgroundTaskOutput>,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var tasks by remember { mutableStateOf<List<com.restartfu.xd.protocol.BackgroundTaskOutput>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(expanded, visible, lifecycle) {
+        if (!expanded || !visible) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                try {
+                    tasks = load()
+                    error = null
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    tasks = null
+                    error = "Could not load background tasks."
+                }
+                delay(2_500)
+            }
+        }
+    }
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .clickable(role = Role.Button, onClickLabel = if (expanded) "Hide background tasks" else "Show background tasks") {
+                    expanded = !expanded
+                }
+                .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
+                .padding(start = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            BackgroundRing(LocalXdSignals.current.working, size = 7.dp)
+            Text(
+                backgroundTasksLabel(count),
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Icon(
+                painterResource(R.drawable.ic_chevron_down),
+                contentDescription = null,
+                modifier = Modifier.size(18.dp).rotate(if (expanded) 180f else 0f),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (expanded) {
+            Column(
+                Modifier.fillMaxWidth().padding(start = 17.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                val current = tasks
+                if (error != null || current == null || current.isEmpty()) {
+                    Text(
+                        error ?: if (current == null) "Loading background tasks…" else "No background tasks running.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                current.orEmpty().forEach { task ->
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(task.description, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                        Text(
+                            "${task.kind} · ${TurnTiming.duration(elapsedSeconds(task.startedAt.takeIf { it > 0 }?.times(1_000)))}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        SelectionContainer {
+                            Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer).padding(8.dp)) {
+                                task.outputError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                if (task.outputError == null && task.lines.isEmpty()) {
+                                    Text("No output yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                task.lines.forEach { line ->
+                                    Text(
+                                        line.text,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = if (line.error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                        if (task.truncated) Text("Latest output only", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
     }
 }
 

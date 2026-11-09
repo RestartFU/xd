@@ -3741,3 +3741,49 @@ mod tests {
         assert_eq!(model.todos[0].status, TodoStatus::Completed);
     }
 }
+
+/// Latest read-only output of a task owned by the selected chat's agent.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct BackgroundTaskOutput {
+    pub id: String,
+    pub kind: String,
+    pub description: String,
+    pub started_at: u64,
+    #[serde(default)]
+    pub lines: Vec<BackgroundOutputLine>,
+    #[serde(default)]
+    pub output_error: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct BackgroundOutputLine {
+    pub text: String,
+    #[serde(default)]
+    pub error: bool,
+}
+
+#[cfg(test)]
+mod background_output_tests {
+    use super::*;
+    #[test]
+    fn task_output_keeps_error_markers_and_unavailable_files() {
+        let task: BackgroundTaskOutput = serde_json::from_value(serde_json::json!({
+            "id":"watch", "kind":"Monitor", "description":"Watch CI", "started_at":123,
+            "output_file":"/tmp/watch", "lines":[{"text":"Checking"},{"text":"jq: command not found", "error":true}]
+        })).unwrap();
+        assert!(!task.lines[0].error);
+        assert!(task.lines[1].error);
+        let missing: BackgroundTaskOutput = serde_json::from_value(serde_json::json!({
+            "id":"gone", "kind":"Shell", "description":"Run tests", "started_at":123,
+            "output_error":"Output file unavailable."
+        }))
+        .unwrap();
+        assert!(missing.lines.is_empty());
+        assert_eq!(
+            missing.output_error.as_deref(),
+            Some("Output file unavailable.")
+        );
+    }
+}

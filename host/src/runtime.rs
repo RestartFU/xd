@@ -152,8 +152,8 @@ struct Router {
     released: bool,
     /// Claude's tasks it has started and not yet reported finished, by task id:
     /// background agents and shells, which die with the process. See
-    /// [`track_tasks`].
-    tasks: HashSet<String>,
+    /// [`crate::background_tasks::Tasks`].
+    tasks: crate::background_tasks::Tasks,
 }
 
 impl Router {
@@ -302,46 +302,6 @@ fn report_due_after(line: &str, due: bool) -> bool {
         (Some("system"), Some("task_notification")) => true,
         (Some("system"), Some("init")) => false,
         _ => due,
-    }
-}
-
-/// Keeps `tasks`, the ids of Claude's unfinished tasks, up to date with one line
-/// of its output.
-///
-/// Claude reports a background agent, a backgrounded shell command or a
-/// workflow with `task_started`, and its end with `task_notification` or a
-/// `task_updated` that gives it a final status. A task Claude marks as
-/// housekeeping with `skip_transcript` is not counted: it gets no card, so the
-/// user could not see what was holding things up, and nothing says it reports
-/// its end.
-fn track_tasks(line: &str, tasks: &mut HashSet<String>) {
-    if !line.contains("task_") {
-        return;
-    }
-    let Ok(root) = serde_json::from_str::<Value>(line) else {
-        return;
-    };
-    if root["type"] != "system" {
-        return;
-    }
-    let Some(id) = root["task_id"].as_str().filter(|id| !id.is_empty()) else {
-        return;
-    };
-    let status = |status: &Value| status.as_str().and_then(SubagentStatus::from_wire);
-    match root["subtype"].as_str() {
-        Some("task_started") if root["skip_transcript"] != true => {
-            tasks.insert(id.to_owned());
-        }
-        Some("task_notification") if status(&root["status"]) != Some(SubagentStatus::Running) => {
-            tasks.remove(id);
-        }
-        Some("task_updated")
-            if status(&root["patch"]["status"])
-                .is_some_and(|status| status != SubagentStatus::Running) =>
-        {
-            tasks.remove(id);
-        }
-        _ => {}
     }
 }
 
@@ -551,6 +511,27 @@ impl TurnRuntime {
                 Some(router.tasks.len())
             })
             .unwrap_or(0)
+    }
+
+    pub(crate) fn background_task_output(&self, chat_id: &str, task_id: Option<&str>) -> Value {
+        let snapshot = self
+            .inner
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| {
+                Some(
+                    sessions
+                        .get(chat_id)?
+                        .router
+                        .lock()
+                        .ok()?
+                        .tasks
+                        .snapshot(task_id),
+                )
+            })
+            .unwrap_or_default();
+        json!({"ok": true, "chat": chat_id, "tasks": crate::background_tasks::read_outputs(snapshot)})
     }
 
     /// [`Self::background_tasks`] for every chat that has any.
@@ -1230,7 +1211,7 @@ impl TurnRuntime {
                         router.wakes_itself |= schedules_a_wakeup(&text);
                         router.report_due = report_due_after(&text, router.report_due);
                         let tasks_before = router.tasks.len();
-                        track_tasks(&text, &mut router.tasks);
+                        router.tasks.track(&text);
                         router.backlog.push_back(text);
                         runtime.pump(&chat_id, &mut router);
                         router.tasks.len() != tasks_before
@@ -1509,7 +1490,7 @@ impl TurnRuntime {
             wakes_itself: false,
             report_due: false,
             released: false,
-            tasks: HashSet::new(),
+            tasks: crate::background_tasks::Tasks::default(),
         }));
         Self::spawn_reader(
             Arc::downgrade(&self.inner),
@@ -4069,6 +4050,52 @@ read poke"#,
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn background_output_reads_live_files_and_disappears_with_the_process() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+printf 'Checking CI\njq: command not found\n' > "$ROOT/task.output"
+printf '{{"type":"system","subtype":"task_started","task_id":"watch","description":"Watch CI","task_type":"local_workflow","output_file":"%s/task.output"}}\n' "$ROOT"
+{}
+read poke"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        let reply = agent.runtime.background_task_output(&agent.chat, None);
+        assert_eq!(reply["tasks"][0]["description"], "Watch CI");
+        assert_eq!(
+            reply["tasks"][0]["lines"][1]["text"],
+            "jq: command not found"
+        );
+        assert_eq!(reply["tasks"][0]["lines"][1]["error"], true);
+        std::fs::write(agent.root.join("task.output"), "Checks passed\n").unwrap();
+        let reply = agent
+            .runtime
+            .background_task_output(&agent.chat, Some("watch"));
+        assert_eq!(reply["tasks"][0]["lines"][0]["text"], "Checks passed");
+        assert!(
+            agent
+                .runtime
+                .background_task_output(&agent.chat, Some("unknown"))["tasks"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        agent.poke();
+        wait_for("the process to exit", || {
+            agent.runtime.background_tasks(&agent.chat) == 0
+        });
+        assert!(
+            agent.runtime.background_task_output(&agent.chat, None)["tasks"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     /// A chat waits on its background tasks between turns: clients hear the
     /// count each time it changes, and that it is zero once the process exits.
     #[cfg(unix)]
@@ -4126,37 +4153,6 @@ read poke"#,
         assert_eq!(counts, [1, 2, 1, 0]);
         assert_eq!(agent.runtime.background_tasks(&agent.chat), 0);
         assert!(agent.runtime.background_task_counts().is_empty());
-    }
-
-    #[test]
-    fn tasks_count_from_their_start_until_claude_reports_their_end() {
-        let mut tasks = HashSet::new();
-        for line in [
-            r#"{"type":"system","subtype":"task_started","task_id":"agent","is_backgrounded":true}"#,
-            r#"{"type":"system","subtype":"task_started","task_id":"shell","task_type":"local_bash"}"#,
-            r#"{"type":"system","subtype":"task_started","task_id":"chore","skip_transcript":true}"#,
-            r#"{"type":"system","subtype":"task_progress","task_id":"agent","description":"Reading"}"#,
-            r#"{"type":"system","subtype":"task_updated","task_id":"agent","patch":{"is_backgrounded":true}}"#,
-            r#"{"type":"system","subtype":"task_updated","task_id":"shell","patch":{"status":"running"}}"#,
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"task_notification"}]}}"#,
-        ] {
-            track_tasks(line, &mut tasks);
-        }
-        assert_eq!(
-            tasks,
-            HashSet::from(["agent".to_owned(), "shell".to_owned()])
-        );
-
-        track_tasks(
-            r#"{"type":"system","subtype":"task_updated","task_id":"shell","patch":{"status":"killed"}}"#,
-            &mut tasks,
-        );
-        assert_eq!(tasks, HashSet::from(["agent".to_owned()]));
-        track_tasks(
-            r#"{"type":"system","subtype":"task_notification","task_id":"agent","status":"failed"}"#,
-            &mut tasks,
-        );
-        assert!(tasks.is_empty());
     }
 
     #[cfg(unix)]

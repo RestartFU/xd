@@ -160,7 +160,7 @@ RUN mkdir -p src /src/terminal-core/src /src/transport-core/src \
 COPY terminal-core/src /src/terminal-core/src
 COPY transport-core/src /src/transport-core/src
 COPY host/src ./src
-COPY tests/fixtures/codex-exec.jsonl tests/fixtures/codex-recoverable-error.jsonl tests/fixtures/claude-stream.jsonl /src/tests/fixtures/
+COPY tests/fixtures/codex-exec.jsonl tests/fixtures/codex-recoverable-error.jsonl tests/fixtures/claude-stream.jsonl tests/fixtures/claude-background-tasks.jsonl /src/tests/fixtures/
 
 FROM rust-host-source AS rust-host-tests
 
