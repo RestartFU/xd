@@ -15453,50 +15453,12 @@ impl XdDesktop {
             let project = folder.map(|folder| folder.name.clone()).unwrap_or_default();
             let project_avatar =
                 self.owner_avatar(folder.and_then(|folder| folder.owner.as_deref()));
-            div()
-                .w_full()
-                .min_h(px(140.0))
-                .py_3()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(10.0))
-                .text_center()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .text_size(px(12.0))
-                        .text_color(rgb(colors.muted))
-                        .child(workspace_icon(project_avatar, 14.0, colors.muted))
-                        .child(project),
-                )
-                .child(
-                    div()
-                        .text_size(px(28.0))
-                        .debug_selector(|| "empty-chat-heading".into())
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(colors.text))
-                        .child(if self.transcript_loaded {
-                            "What are we working on?"
-                        } else {
-                            "Conversation did not load"
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .debug_selector(|| "empty-chat-description".into())
-                        .text_color(rgb(colors.muted))
-                        .child(if self.transcript_loaded {
-                            "A new conversation in the same workspace."
-                        } else {
-                            "Select this chat to retry."
-                        }),
-                )
+            let (heading, description) = if self.transcript_loaded {
+                composer::EMPTY_CHAT
+            } else {
+                ("Conversation did not load", "Select this chat to retry.")
+            };
+            composer::chat_heading(project, project_avatar, heading, description, colors)
                 .into_any_element()
         } else {
             list(self.transcript.clone(), move |index, _window, cx| {
