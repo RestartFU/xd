@@ -1,6 +1,9 @@
 package com.restartfu.xd.voice
 
-/** Removes speech wrapper tags from transcript text without touching code. */
+/**
+ * Removes the `<speak>` tags older replies carry, from when agents were asked to
+ * mark text to read aloud, without touching code.
+ */
 public object SpeakTagVisibility {
     private const val OPEN_TAG = "<speak>"
     private const val CLOSE_TAG = "</speak>"

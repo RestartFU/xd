@@ -94,7 +94,6 @@ pub struct AppSettings {
     pub theme: ThemePreset,
     pub accent: AccentPreset,
     pub notifications: bool,
-    pub speech: bool,
     pub allow_all_permissions: bool,
     /// Off by default: it starts agents working without anyone asking.
     pub auto_resume_chats: bool,
@@ -153,7 +152,6 @@ impl Default for AppSettings {
             theme: ThemePreset::Dark,
             accent: AccentPreset::Blue,
             notifications: true,
-            speech: false,
             allow_all_permissions: false,
             auto_resume_chats: false,
             git_writer: GitWriter::Chat,
@@ -362,7 +360,6 @@ mod tests {
             theme: ThemePreset::Light,
             accent: AccentPreset::Purple,
             notifications: false,
-            speech: true,
             allow_all_permissions: true,
             auto_resume_chats: true,
             git_writer: GitWriter::Claude,

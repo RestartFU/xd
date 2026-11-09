@@ -26,9 +26,6 @@ public class MobileSettings(context: Context) {
     private val _accent = MutableStateFlow(
         AccentPreset.fromKey(preferences.getString(KEY_ACCENT, null)),
     )
-    private val _speechEnabled = MutableStateFlow(
-        preferences.getBoolean(KEY_SPEECH_ENABLED, false),
-    )
     private val _allowAllPermissions = MutableStateFlow(
         preferences.getBoolean(KEY_ALLOW_ALL_PERMISSIONS, false),
     )
@@ -102,18 +99,12 @@ public class MobileSettings(context: Context) {
     )
 
     public val accent: StateFlow<AccentPreset> = _accent.asStateFlow()
-    public val speechEnabled: StateFlow<Boolean> = _speechEnabled.asStateFlow()
     public val allowAllPermissions: StateFlow<Boolean> = _allowAllPermissions.asStateFlow()
     public val theme: StateFlow<MinimalThemePreset> = _theme.asStateFlow()
 
     public fun setAccent(preset: AccentPreset) {
         preferences.edit().putString(KEY_ACCENT, preset.key).apply()
         _accent.value = preset
-    }
-
-    public fun setSpeechEnabled(enabled: Boolean) {
-        preferences.edit().putBoolean(KEY_SPEECH_ENABLED, enabled).apply()
-        _speechEnabled.value = enabled
     }
 
     public fun setAllowAllPermissions(enabled: Boolean) {
@@ -129,7 +120,6 @@ public class MobileSettings(context: Context) {
     private companion object {
         const val PREFERENCES = "xd_mobile_settings"
         const val KEY_ACCENT = "accent"
-        const val KEY_SPEECH_ENABLED = "speech_enabled"
         const val KEY_ALLOW_ALL_PERMISSIONS = "allow_all_permissions"
         const val KEY_THEME = "minimal_theme"
         const val KEY_COLLAPSED_FOLDERS = "collapsed_folders"

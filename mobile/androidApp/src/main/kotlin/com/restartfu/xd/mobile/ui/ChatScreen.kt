@@ -94,12 +94,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.restartfu.xd.mobile.AndroidSpeechSpeaker
 import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.OpenedQueue
 import com.restartfu.xd.mobile.DiffViewModel
@@ -143,7 +139,6 @@ internal class WorkspacePaneModel : ViewModel() {
 @Composable
 internal fun ChatScreen(
     model: ChatViewModel,
-    settings: MobileSettings,
     goBack: () -> Unit,
     sessionTitle: String = "",
     projectName: String = "",
@@ -173,12 +168,6 @@ internal fun ChatScreen(
     val messagingAgent by model.messagingAgent.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
     val catalog by model.catalog.collectAsStateWithLifecycle()
-    val speechEnabled by settings.speechEnabled.collectAsStateWithLifecycle()
-
-    SpeechOutput(model, speechEnabled)
-    LaunchedEffect(speechEnabled) {
-        if (!speechEnabled) model.resetSpeech()
-    }
 
     // The desktop shows these beside the conversation. A phone has room for
     // one at a time, so they are tabs over the same chat.
@@ -625,35 +614,6 @@ private fun SettleSubagentAction(run: com.restartfu.xd.model.SubagentRun, pendin
     val settled = run.state != SubagentState.RUNNING ||
         (pending == "Moving to background" && run.background)
     LaunchedEffect(settled) { if (settled) model.settleSubagentAction(key) }
-}
-
-@Composable
-private fun SpeechOutput(
-    model: ChatViewModel,
-    enabled: Boolean,
-) {
-    if (!enabled) return
-
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val speaker = remember(context) { AndroidSpeechSpeaker(context) }
-
-    DisposableEffect(lifecycleOwner, speaker) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) speaker.stop()
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            speaker.shutdown()
-        }
-    }
-    LaunchedEffect(model, speaker, lifecycleOwner) {
-        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            model.resetSpeech()
-            model.speech.collect { speaker.speak(it) }
-        }
-    }
 }
 
 /**

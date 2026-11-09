@@ -958,7 +958,6 @@ class ChatViewModel(
 ) : ViewModel() {
     val session: ChatSession = client.openChat(chatId)
     val state = session.state
-    val speech = session.speech
     private val _sending = MutableStateFlow(false)
     private val _cancelling = MutableStateFlow(false)
     private val _droppingQueued = MutableStateFlow(false)
@@ -1020,10 +1019,6 @@ class ChatViewModel(
     private var draftTextDirty = false
     private var draftAttachmentsDirty = false
     private var draftRevision = -1L
-
-    suspend fun resetSpeech() {
-        session.resetSpeech()
-    }
 
     init {
         loadCatalog()

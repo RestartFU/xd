@@ -14,7 +14,6 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.test.core.app.ApplicationProvider
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.credentials.CredentialStore
 import com.restartfu.xd.credentials.SshAuthentication
@@ -112,7 +111,6 @@ class AccountsScreenshotTest {
         setContent(MinimalThemePreset.DARK) {
             ChatScreen(
                 model = chat,
-                settings = MobileSettings(ApplicationProvider.getApplicationContext()),
                 goBack = {},
                 sessionTitle = "reconnect-backoff",
                 projectName = "xd",

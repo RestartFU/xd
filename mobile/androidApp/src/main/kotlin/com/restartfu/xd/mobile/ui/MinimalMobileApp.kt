@@ -359,7 +359,7 @@ internal fun MinimalMobileApp(
                                     factory = ChatViewModel.Factory(model.client, activeChat.id),
                                 )
                                 ChatScreen(
-                                    model = chat, settings = settings, goBack = showProjects,
+                                    model = chat, goBack = showProjects,
                                     sessionTitle = activeSession.title,
                                     branch = activeSession.branch,
                                     sessionWorking = activeSession.working,
@@ -2234,7 +2234,7 @@ private fun NewProjectDialog(
 }
 
 /**
- * The app's settings: how it looks and speaks on this phone, and the parts of
+ * The app's settings: how it looks and behaves on this phone, and the parts of
  * the connected host it can manage, as on the desktop's Settings page.
  */
 @Composable
@@ -2246,7 +2246,6 @@ private fun MinimalSettingsDialog(
 ) {
     val theme by settings.theme.collectAsStateWithLifecycle()
     val allPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
-    val speech by settings.speechEnabled.collectAsStateWithLifecycle()
     val tree by model.client.tree.collectAsStateWithLifecycle()
     val resumeChats by settings.resumeChats.collectAsStateWithLifecycle()
     var updatingHost by rememberSaveable { mutableStateOf(false) }
@@ -2295,12 +2294,6 @@ private fun MinimalSettingsDialog(
                     }
                 }
                 HorizontalDivider()
-                SettingSwitch(
-                    title = "Read replies aloud",
-                    detail = "Speaks the parts of a reply the agent marks with <speak> tags.",
-                    checked = speech,
-                    onCheckedChange = settings::setSpeechEnabled,
-                )
                 SettingSwitch(
                     title = "All permissions",
                     detail = "Pass the agent's unrestricted command-line flag.",

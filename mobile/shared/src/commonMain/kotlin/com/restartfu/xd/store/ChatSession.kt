@@ -31,7 +31,6 @@ import com.restartfu.xd.protocol.TerminalListReply
 import com.restartfu.xd.protocol.TerminalOpenReply
 import com.restartfu.xd.protocol.TerminalReply
 import com.restartfu.xd.protocol.decodeReply
-import com.restartfu.xd.voice.SpeakTagParser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -40,10 +39,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -68,15 +65,10 @@ public class ChatSession internal constructor(
 
     /** Counts Git changes the host reported for this chat's checkout. */
     public val gitChanges: StateFlow<Long> = core.gitChanges
-    /** Complete assistant `<speak>` blocks from this live turn. */
-    public val speech: Flow<String> = core.speech
     private var closed = false
 
-    /** Drops any speech block that was in progress when speech was disabled. */
     public suspend fun backgroundTaskOutput(): List<com.restartfu.xd.protocol.BackgroundTaskOutput> =
         core.read(Ops.backgroundTaskOutput(core.chatId)) { it.decodeReply<com.restartfu.xd.protocol.BackgroundTaskOutputReply>().tasks }
-
-    public suspend fun resetSpeech(): Unit = core.resetSpeech()
 
     public suspend fun send(
         text: String,
@@ -245,9 +237,6 @@ internal class ChatSessionCore(
     private val reloadMutex = Mutex()
     private val sendMutex = Mutex()
     private val _state = MutableStateFlow(ChatState(chatId = chatId))
-    private val _speech = MutableSharedFlow<String>(extraBufferCapacity = SPEECH_BUFFER_CAPACITY)
-    private val speakParser = SpeakTagParser()
-    private val speechMutex = Mutex()
     private var pendingSequence = 0L
     private var pendingTimer: Job? = null
     private var messageLimit = MESSAGE_PAGE_SIZE
@@ -261,7 +250,6 @@ internal class ChatSessionCore(
     }
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
-    val speech: Flow<String> = _speech.asSharedFlow()
 
     suspend fun reload() {
         reloadMutex.withLock {
@@ -544,52 +532,23 @@ internal class ChatSessionCore(
         }
 
         when (eventName) {
-            "turn-started" -> {
-                if (apply(
-                        TranscriptInput.TurnStarted(
-                            label = (value["label"] as? JsonPrimitive)?.contentOrNull,
-                            nowMillis = nowMillis(),
-                            turnId = turnId,
-                            turnSequence = turnSequence,
-                        ),
-                        arrivalGate,
-                    )
-                ) {
-                    speechMutex.withLock { speakParser.reset() }
-                }
-            }
+            "turn-started" -> apply(
+                TranscriptInput.TurnStarted(
+                    label = (value["label"] as? JsonPrimitive)?.contentOrNull,
+                    nowMillis = nowMillis(),
+                    turnId = turnId,
+                    turnSequence = turnSequence,
+                ),
+                arrivalGate,
+            )
             "text" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let { text ->
-                // Fed whatever the transcript makes of it. `apply` answers "did
-                // the drawn state change", which is not the same question: a
-                // reload that already covered this sequence, or a delta the
-                // machine folds into what it has, both come back false and used
-                // to take the speech with them -- so a second block in a turn
-                // that touched files was simply never heard.
-                val spoken = speechMutex.withLock { speakParser.feed(text) }
                 apply(TranscriptInput.Text(text, turnId, turnSequence), arrivalGate)
-                spoken.forEach { _speech.tryEmit(it) }
             }
             "tool" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let { text ->
                 val messageId = value.longOrNull("message_id")
-                if (apply(TranscriptInput.Tool(text, turnId, turnSequence, messageId), arrivalGate)) {
-                    // A tool ends the block, but what was already said is said.
-                    speechMutex.withLock { speakParser.finish() }
-                        .forEach { _speech.tryEmit(it) }
-                }
+                apply(TranscriptInput.Tool(text, turnId, turnSequence, messageId), arrivalGate)
             }
-            "turn-finished" -> {
-                if (apply(
-                        TranscriptInput.TurnFinished(turnId, turnSequence),
-                        arrivalGate,
-                    )
-                ) {
-                    // The last sentence of a reply often has no trailing space
-                    // for the parser to close on, and a turn that ended without
-                    // its closing tag still has something worth hearing.
-                    speechMutex.withLock { speakParser.finish() }
-                        .forEach { _speech.tryEmit(it) }
-                }
-            }
+            "turn-finished" -> apply(TranscriptInput.TurnFinished(turnId, turnSequence), arrivalGate)
             "record" -> {
                 val messageId = value.longOrNull("message_id") ?: return
                 val text = (value["text"] as? JsonPrimitive)?.contentOrNull ?: return
@@ -631,7 +590,6 @@ internal class ChatSessionCore(
     }
 
     suspend fun invalidate() {
-        resetSpeech()
         reloadRequests.close()
         reloadWorker.cancel()
         val timer = stateMutex.withLock {
@@ -645,10 +603,6 @@ internal class ChatSessionCore(
             pendingTimer.also { pendingTimer = null }
         }
         timer?.cancel()
-    }
-
-    suspend fun resetSpeech() {
-        speechMutex.withLock { speakParser.reset() }
     }
 
     fun requestReload() {
@@ -748,7 +702,6 @@ internal class ChatSessionCore(
     private companion object {
         const val MESSAGE_PAGE_SIZE = 150
         const val PENDING_TIMEOUT_MILLIS = 10_000L
-        const val SPEECH_BUFFER_CAPACITY = 32
         val CHAT_SCOPED_EVENTS = setOf(
             "interaction", "interaction-resolved", "interactions-cleared",
             "commands",

@@ -13,8 +13,6 @@ import kotlin.test.assertNull
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
-import kotlinx.coroutines.flow.take
-import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonArray
@@ -50,21 +48,6 @@ class ChatSessionCoreTest {
         runCurrent()
         kotlin.test.assertTrue(failure.await().isFailure)
         assertNull(core.state.value.error)
-    }
-
-    @Test
-    fun speechFlowEmitsOnlyCompleteAssistantBlocksAndResetsForTools() = runTest {
-        val core = ChatSessionCore("chat", testActor(backgroundScope), backgroundScope) { 10_000L }
-        val spoken = async { core.speech.take(2).toList() }
-        runCurrent()
-
-        core.onEvent(textEvent(1, "<speak>hel"))
-        core.onEvent(textEvent(2, "lo</spe"))
-        core.onEvent(textEvent(3, "ak>"))
-        core.onEvent(toolEvent(4, "Read"))
-        core.onEvent(textEvent(5, "<speak>after tool</speak>"))
-
-        assertEquals(listOf("hello", "after tool"), spoken.await())
     }
 
     @Test
@@ -260,26 +243,6 @@ class ChatSessionCoreTest {
 
         assertEquals(listOf("safe"), core.state.value.queue)
     }
-
-    private fun textEvent(sequence: Long, text: String): SequencedEvent =
-        SequencedEvent(
-            sequence = sequence,
-            value = buildJsonObject {
-                put("event", "text")
-                put("chat", "chat")
-                put("text", text)
-            },
-        )
-
-    private fun toolEvent(sequence: Long, text: String): SequencedEvent =
-        SequencedEvent(
-            sequence = sequence,
-            value = buildJsonObject {
-                put("event", "tool")
-                put("chat", "chat")
-                put("text", text)
-            },
-        )
 
     private fun testActor(scope: CoroutineScope): ConnectionActor = ConnectionActor(
         FakeSocketFactory(),
