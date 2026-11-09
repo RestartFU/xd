@@ -1317,12 +1317,20 @@ impl Render for BrowserTab {
                             })),
                     )
                     .child(
-                        self.button("browser-reload", crate::ROTATE_CW_ICON, has_page)
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                if has_page {
+                        self.button(
+                            "browser-reload",
+                            crate::ROTATE_CW_ICON,
+                            has_page || self.engine_failed,
+                        )
+                        .on_click(cx.listener(
+                            move |pane, _, window, cx| {
+                                if pane.engine_failed {
+                                    pane.retry(window, cx);
+                                } else if has_page {
                                     pane.reload(cx);
                                 }
-                            })),
+                            },
+                        )),
                     )
                     .child(
                         div()
