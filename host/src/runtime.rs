@@ -402,6 +402,10 @@ struct AgentSession {
     /// another model, another directory -- needs its own process, because all
     /// of it was fixed in argv when this one started.
     fingerprint: String,
+    /// The account and login the process runs as; see
+    /// [`crate::accounts::Accounts::session_tag`]. A process stays signed in
+    /// as whoever it started as, so a turn for another login needs its own.
+    account: String,
     /// Filled by a drain thread for the process's whole life: stderr has to be
     /// read continuously or it fills and the agent blocks on it.
     complaint: Arc<Mutex<String>>,
@@ -535,13 +539,20 @@ impl TurnRuntime {
             .map(crate::accounts::tag_account);
         let mut choice = self.inner.auth.choose(&turn.backend, chat_account);
         // A Codex session about to be resumed must be resumed as the login
-        // that wrote it, so that login is read again first when it may be stale.
+        // that wrote it, so that login is read again first when it may be
+        // stale. If it cannot be read, the session is not resumed.
+        let mut unconfirmed = false;
         if turn.backend == "codex" && turn.session_id.is_some() {
-            self.inner
+            unconfirmed = !self
+                .inner
                 .auth
                 .confirm_login(&turn.backend, &choice.account);
             choice = self.inner.auth.choose(&turn.backend, chat_account);
         }
+        // The account decides the home; a secret cannot point a turn at another
+        // one, where it would run as a login nothing here has checked.
+        turn.environment
+            .retain(|(name, _)| !matches!(name.as_str(), "CODEX_HOME" | "CLAUDE_CONFIG_DIR"));
         turn.environment.extend(choice.environment.iter().cloned());
         // Filed with the login, so a session never follows the user's own
         // sign-in to another login under the same account.
@@ -551,10 +562,11 @@ impl TurnRuntime {
             .accounts()
             .session_tag(&turn.backend, &choice.account);
         let moved = turn.session_id.is_some()
-            && !turn
-                .session_account
-                .as_deref()
-                .is_some_and(|stored| crate::accounts::same_login(stored, &turn.account));
+            && (unconfirmed
+                || !turn
+                    .session_account
+                    .as_deref()
+                    .is_some_and(|stored| crate::accounts::same_login(stored, &turn.account)));
         if !moved {
             return;
         }
@@ -564,7 +576,13 @@ impl TurnRuntime {
             .lock()
             .is_ok_and(|mut explained| explained.remove(&turn.chat_id));
         if !explained {
-            let sentence = self.switch_sentence(&turn.backend, &choice);
+            let sentence = if unconfirmed {
+                "xd could not confirm which login Codex is signed in to, so it started a new \
+                 session with this chat's messages."
+                    .to_owned()
+            } else {
+                self.switch_sentence(&turn.backend, &choice)
+            };
             self.post_account_notice(&turn.chat_id, &sentence);
         }
         if turn.backend != "codex" {
@@ -1154,17 +1172,14 @@ impl TurnRuntime {
         let keeps_process = app_server || AgentCommand::keeps_its_process(&command_backend);
         // Everything baked into argv when a process starts. A turn that wants
         // any of it different cannot be answered by the process already up.
-        // The account's login is in it too: the user's own sign-in can change
-        // login without changing the environment, and a process stays signed
-        // in as whoever it started as.
+        // The account's login is checked beside it, in `session_for`.
         let fingerprint = format!(
-            "{command_backend}\x01{command_model}\x01{command_effort}\x01{}\x01{}\x01{}\x01{}\x01{:?}\x01{}",
+            "{command_backend}\x01{command_model}\x01{command_effort}\x01{}\x01{}\x01{}\x01{}\x01{:?}",
             turn.access,
             turn.workdir,
             turn.fast,
             turn.system_prompt.as_deref().unwrap_or_default(),
             turn.environment,
-            turn.account,
         );
         let mut command = if app_server {
             specification.build_app_server()
@@ -1653,7 +1668,12 @@ impl TurnRuntime {
                 .ok()
                 .and_then(|mut child| child.try_wait().ok().flatten())
                 .is_some();
-            if !dead && session.fingerprint == fingerprint {
+            if !dead
+                && session.fingerprint == fingerprint
+                && crate::accounts::same_login(&session.account, &turn.account)
+            {
+                // The login may only now be known; it is the same one.
+                session.account = turn.account.clone();
                 let router = session.router.clone();
                 let mut router = router
                     .lock()
@@ -1774,6 +1794,7 @@ impl TurnRuntime {
                 stdin,
                 router,
                 fingerprint: fingerprint.to_owned(),
+                account: turn.account.clone(),
                 complaint: complaint.clone(),
             },
         );

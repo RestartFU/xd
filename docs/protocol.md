@@ -918,8 +918,12 @@ the host holds the account back until its limit resets, adds an
 latest and still resumable. New chats start on the first usable account in
 priority order. A session is filed under its account and the login that account
 was signed in to, so a session never follows the user's own CLI sign-in to a
-different login; before a Codex session is resumed, the host reads the
-account's login again unless it read it in the last two minutes. An account whose login the host cannot read is not added. A Claude Code session moves with the chat. A Codex session
+different login. Before a Codex session is resumed, the host reads the
+account's login again (a local `account/read`) unless it read it in the last
+two minutes; if it cannot, the chat starts a new session given its messages
+rather than resume. A kept process is reused only for the same login.
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` from agent secrets are ignored: the account
+decides the home. An account whose login the host cannot read is not added. A Claude Code session moves with the chat. A Codex session
 cannot open on another account, so the new account starts a session given the
 chat's messages as text, and the row says so.
 

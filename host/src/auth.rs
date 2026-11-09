@@ -153,7 +153,7 @@ impl AuthManager {
         {
             return true;
         }
-        {
+        let generation = {
             let Ok(mut states) = self.inner.states.lock() else {
                 return false;
             };
@@ -172,9 +172,10 @@ impl AuthManager {
             snapshot.login_url = None;
             snapshot.device_code = None;
             snapshot.needs_input = false;
-        }
+            // Taken under the same lock, so it is this check's and no one else's.
+            snapshot.generation
+        };
         self.publish(provider);
-        let generation = self.snapshot(provider, account).generation;
         let manager = self.clone();
         let checked_provider = provider.to_owned();
         let checked_account = account.to_owned();
@@ -260,18 +261,25 @@ impl AuthManager {
     /// Reads the account's login again before a Codex session is resumed on it,
     /// unless it was read moments ago. The CLI can be signed in to another
     /// login outside xd, and a Codex session cannot open under another login.
-    pub(crate) fn confirm_login(&self, provider: &str, account: &str) {
+    /// Returns whether the login is known now.
+    pub(crate) fn confirm_login(&self, provider: &str, account: &str) -> bool {
         const FRESH_MS: i64 = 2 * 60 * 1000;
-        let fresh = self
-            .inner
-            .accounts
-            .checked_at(provider, account)
-            .is_some_and(|checked| now_ms() - checked < FRESH_MS);
+        let accounts = &self.inner.accounts;
+        let fresh = accounts
+            .login_read_at(provider, account)
+            .is_some_and(|read| now_ms() - read < FRESH_MS);
         // Unit tests never start a real CLI for this.
         if fresh || cfg!(test) {
-            return;
+            return true;
         }
-        crate::usage::check_account(&self.inner.accounts, provider, account);
+        let environment = accounts.environment(provider, account);
+        match crate::usage::read_codex_login(&environment) {
+            Some(identity) => {
+                accounts.record_login(provider, account, &identity, now_ms());
+                true
+            }
+            None => false,
+        }
     }
 
     /// Sign-in state as a chat shows it: that of the account a new turn would use.

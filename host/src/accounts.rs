@@ -113,6 +113,8 @@ pub(crate) struct Headroom {
 struct Live {
     windows: Vec<Headroom>,
     checked_at_ms: Option<i64>,
+    /// When the login alone was last read, before a Codex session was resumed.
+    login_read_at_ms: Option<i64>,
     /// Set when a turn was turned away for usage, until the stated reset.
     limited_until_ms: Option<i64>,
     limited_label: Option<String>,
@@ -363,14 +365,59 @@ impl Accounts {
         .map_or_else(|| id.to_owned(), |key| format!("{id}#{key}"))
     }
 
-    /// When the account's limits and login were last read.
-    pub(crate) fn checked_at(&self, provider: &str, id: &str) -> Option<i64> {
+    /// When the account's login was last read, by a usage probe or on its own.
+    pub(crate) fn login_read_at(&self, provider: &str, id: &str) -> Option<i64> {
         self.with(provider, |state| {
-            state
-                .account(id)
-                .and_then(|account| account.live.checked_at_ms)
+            state.account(id).and_then(|account| {
+                account
+                    .live
+                    .login_read_at_ms
+                    .max(account.live.checked_at_ms)
+            })
         })
         .flatten()
+    }
+
+    /// Takes in a login read on its own, without limits.
+    pub(crate) fn record_login(
+        &self,
+        provider: &str,
+        id: &str,
+        identity: &Identity,
+        read_at_ms: i64,
+    ) {
+        let _ = self.update(provider, |state| {
+            let position = |id: &str| state.accounts.iter().position(|account| account.id == id);
+            let duplicate = identity.account_key.as_ref().is_some_and(|key| {
+                state.accounts.iter().any(|other| {
+                    other.id != id
+                        && other.account_key.as_ref() == Some(key)
+                        && position(&other.id) < position(id)
+                })
+            });
+            let Some(account) = state.account_mut(id) else {
+                return Ok(());
+            };
+            let changed = matches!(
+                (&account.account_key, &identity.account_key),
+                (Some(known), Some(found)) if known != found
+            );
+            account.live.problem = if changed && id != DEFAULT_ACCOUNT {
+                Some("mismatch")
+            } else if duplicate {
+                Some("duplicate")
+            } else {
+                None
+            };
+            if id == DEFAULT_ACCOUNT || account.account_key.is_none() {
+                account.account_key = identity.account_key.clone().or(account.account_key.take());
+                if identity.email.is_some() {
+                    account.email = identity.email.clone();
+                }
+            }
+            account.live.login_read_at_ms = Some(read_at_ms);
+            Ok(())
+        });
     }
 
     /// Whether the account's login has been read.
@@ -1149,6 +1196,22 @@ mod tests {
             &accounts.session_tag("codex", DEFAULT_ACCOUNT)
         ));
         assert!(!same_login(&tag, "a1b2c3d4e5f6#key-a@example.com"));
+    }
+
+    #[test]
+    fn a_login_read_on_its_own_moves_the_session_tag_and_flags_a_changed_account() {
+        let data = temp("login");
+        let accounts = Accounts::with_homes(&data, &[]);
+        let second = added(&accounts, "codex", "b@example.com");
+        assert_eq!(accounts.login_read_at("codex", DEFAULT_ACCOUNT), None);
+        accounts.record_login("codex", DEFAULT_ACCOUNT, &identity("a@example.com"), 7);
+        assert_eq!(accounts.login_read_at("codex", DEFAULT_ACCOUNT), Some(7));
+        assert_eq!(
+            accounts.session_tag("codex", DEFAULT_ACCOUNT),
+            "default#key-a@example.com"
+        );
+        accounts.record_login("codex", &second, &identity("c@example.com"), 8);
+        assert_eq!(accounts.describe("codex", 9)[1]["problem"], "mismatch");
     }
 
     #[test]

@@ -2459,6 +2459,32 @@ pub(crate) fn probe_reading(account: &Value) -> Option<(Identity, Vec<Headroom>)
     ))
 }
 
+/// Reads which login Codex is signed in to, and nothing else. Local and quick,
+/// unlike a usage probe, which also asks the service for limits.
+pub(crate) fn read_codex_login(environment: &[(String, String)]) -> Option<Identity> {
+    let mut command = crate::background_process::command(crate::agent::resolve_codex());
+    command.envs(environment.iter().map(|(name, value)| (name, value)));
+    if which_missing(&command) {
+        return None;
+    }
+    let mut session = codex_session(command)?;
+    session.deadline = Instant::now() + Duration::from_secs(5);
+    session.send(&json!({"id":3, "method":"account/read", "params":{}}))?;
+    loop {
+        let value = session.next()?;
+        if value["id"] != 3 {
+            continue;
+        }
+        let account = &value["result"]["account"];
+        let email = account["email"].as_str()?;
+        return Some(Identity {
+            email: Some(email.to_owned()),
+            plan: account["planType"].as_str().map(title_case),
+            account_key: account_key("codex", Some(email)),
+        });
+    }
+}
+
 /// Probes an account and records what it found. Returns who is signed in.
 pub(crate) fn check_account(accounts: &Accounts, provider: &str, id: &str) -> Option<Identity> {
     let now = now_ms();
