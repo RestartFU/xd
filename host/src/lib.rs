@@ -532,7 +532,7 @@ impl Engine {
             Some("drop-queue") => self.event_mutation(|store| store.drop_queue(&request)),
             Some("edit-queue") => self.event_mutation(|store| store.edit_queue(&request)),
             Some("reorder-queue") => self.event_mutation(|store| store.reorder_queue(&request)),
-            Some("steer-queue") => self.steer_queued(&request),
+            Some("steer-queue") => self.steer_queued(&request, false),
             Some("workflow-status") => self.workflow_status(owner, &request),
             Some("usage-summary") => self
                 .usage
@@ -1831,8 +1831,10 @@ impl Engine {
                 if request.get("steer").and_then(Value::as_bool) == Some(true)
                     && let Some((index, text)) = newest
                 {
-                    let steer =
-                        self.steer_queued(&json!({"chat": chat_id, "index": index, "text": text}));
+                    let steer = self.steer_queued(
+                        &json!({"chat": chat_id, "index": index, "text": text}),
+                        true,
+                    );
                     if steer.get("ok").and_then(Value::as_bool) != Some(true) {
                         return steer;
                     }
@@ -1892,6 +1894,26 @@ impl Engine {
         for chat_id in background.keys() {
             if !chats.contains(chat_id) {
                 chats.push(chat_id.clone());
+            }
+        }
+        // A send holds the chat's gate from before the chat reads as working
+        // until its turn has started, so a chat whose gate is taken may be about
+        // to work. The second pass below waits for those and looks again.
+        let gates = self
+            .chat_execution
+            .lock()
+            .map(|gates| {
+                gates
+                    .iter()
+                    .map(|(chat_id, gate)| (chat_id.clone(), gate.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (chat_id, gate) in gates {
+            if !chats.contains(&chat_id)
+                && matches!(gate.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+            {
+                chats.push(chat_id);
             }
         }
         let mut paused = Vec::new();
@@ -1967,7 +1989,7 @@ impl Engine {
                     .ok()
                     .and_then(|chat| chat["queue"][0].as_str().map(str::to_owned));
                 if let Some(text) = queued
-                    && let Err(error) = self.start_queued_if_idle(&chat_id, &text)
+                    && let Err(error) = self.start_queued_if_idle(&chat_id, &text, false)
                 {
                     eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
                 }
@@ -1983,7 +2005,8 @@ impl Engine {
     /// Redirects the running turn to a queued message: into the turn itself
     /// when its agent can take it, otherwise by stopping the turn with the
     /// message first in line.
-    fn steer_queued(&self, request: &Value) -> Value {
+    /// `gated` when the caller already holds the chat's execution gate.
+    fn steer_queued(&self, request: &Value, gated: bool) -> Value {
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
         };
@@ -2009,7 +2032,7 @@ impl Engine {
                     if let Some(runtime) = &self.runtime {
                         runtime.cancel(chat_id);
                     }
-                    if let Err(error) = self.start_queued_if_idle(chat_id, text) {
+                    if let Err(error) = self.start_queued_if_idle(chat_id, text, gated) {
                         return error_reply(error);
                     }
                 }
@@ -2023,9 +2046,25 @@ impl Engine {
     /// The turn a steer was meant for may have ended before it could take it,
     /// with nothing left to start the message when it does. A turn still ending
     /// picks the message up from the queue itself.
-    fn start_queued_if_idle(&self, chat_id: &str, text: &str) -> Result<(), String> {
+    ///
+    /// Like any send it starts the turn under the chat's execution gate, taken
+    /// here unless the caller (`gated`) already holds it, so `pause-all` sees
+    /// either the idle chat or the started turn.
+    fn start_queued_if_idle(&self, chat_id: &str, text: &str, gated: bool) -> Result<(), String> {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return Ok(());
+        };
+        let gate = if gated {
+            None
+        } else {
+            Some(self.chat_execution_gate(chat_id)?)
+        };
+        let _execution = match &gate {
+            Some(gate) => Some(
+                gate.lock()
+                    .map_err(|_| "This session's agent state is unavailable.".to_owned())?,
+            ),
+            None => None,
         };
         let chat = store.chat(chat_id).map_err(|error| error.to_string())?;
         if chat["working"] == true || chat["queue"][0].as_str() != Some(text) {

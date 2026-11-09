@@ -749,8 +749,9 @@ running background tasks between turns, so nothing goes on while the user is
 away. Each one it stops is marked `paused` in `tree`, keeps its queue instead of
 starting the next message, and becomes `resumable`. A paused chat is not
 settled or deleted by the automatic rules. A chat that was already idle is left
-alone. `pause-all` is a control operation, like `cancel`. It stops a chat a
-message is being sent to once that send has started its turn, after the others.
+alone. `pause-all` is a control operation, like `cancel`. It stops a chat that
+a message is being sent to, even one that was idle, once that send has started
+its turn, after the others.
 The host never continues a paused chat by itself: not after a restart, not on
 another account after a usage limit, and not for an agent's background report.
 
