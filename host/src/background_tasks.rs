@@ -506,17 +506,7 @@ fn tail(path: &Path) -> std::io::Result<(Vec<Value>, bool)> {
     file.take(TAIL_BYTES + (start - from))
         .read_to_end(&mut bytes)?;
     if start > from {
-        if bytes.first() == Some(&b'\n') {
-            // The window starts a line: keep all of it.
-            bytes.remove(0);
-        } else if let Some(end) = bytes.iter().position(|b| *b == b'\n') {
-            // Discard a clipped first line.
-            bytes.drain(..=end);
-        } else {
-            // A single line longer than the limit: keep its last bytes, so a
-            // long, still-being-written error is visible.
-            bytes.remove(0);
-        }
+        drop_byte_before_window(&mut bytes);
     }
     let text = String::from_utf8_lossy(&bytes);
     let lines = text.lines().collect::<Vec<_>>();
@@ -529,6 +519,30 @@ fn tail(path: &Path) -> std::io::Result<(Vec<Value>, bool)> {
             .collect(),
         truncated,
     ))
+}
+
+/// `bytes` were read from one byte before the tail window, to tell whether
+/// the window starts a line. The file can also have shrunk since its size was
+/// taken, leaving nothing.
+fn drop_byte_before_window(bytes: &mut Vec<u8>) {
+    match bytes.first() {
+        None => {}
+        // The window starts a line: keep all of it.
+        Some(b'\n') => {
+            bytes.remove(0);
+        }
+        Some(_) => match bytes.iter().position(|b| *b == b'\n') {
+            // Discard a clipped first line.
+            Some(end) => {
+                bytes.drain(..=end);
+            }
+            // A single line longer than the limit: keep its last bytes, so a
+            // long, still-being-written error is visible.
+            None => {
+                bytes.remove(0);
+            }
+        },
+    }
 }
 
 fn error_line(line: &str) -> bool {
@@ -717,6 +731,20 @@ mod tests {
             reported_id("Command was moved to the background (ID: b2) after running for 2s."),
             Some("b2".into())
         );
+    }
+
+    #[test]
+    fn the_byte_before_the_window_goes_whatever_was_read() {
+        for (read, kept) in [
+            (&b""[..], &b""[..]),
+            (b"\nnewest\n", b"newest\n"),
+            (b"clipped\nnewest\n", b"newest\n"),
+            (b"xlong line", b"long line"),
+        ] {
+            let mut bytes = read.to_vec();
+            drop_byte_before_window(&mut bytes);
+            assert_eq!(bytes, kept, "{:?}", String::from_utf8_lossy(read));
+        }
     }
 
     #[test]
