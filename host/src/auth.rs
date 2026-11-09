@@ -750,14 +750,14 @@ impl AuthManager {
                 self.publish(provider);
             }
             (_, Ok(())) | (_, Err(_)) if session.cancelled => {
-                self.set_snapshot(provider, account, failed("Sign-in canceled.".into()));
+                self.set_snapshot_if_idle(provider, account, failed("Sign-in canceled.".into()));
                 self.refresh_account(provider, account);
             }
             (_, Ok(())) => {
                 self.refresh_account(provider, account);
                 self.check_soon(provider, account);
             }
-            (_, Err(error)) => self.set_snapshot(provider, account, failed(error)),
+            (_, Err(error)) => self.set_snapshot_if_idle(provider, account, failed(error)),
         }
     }
 
@@ -779,9 +779,24 @@ impl AuthManager {
         // Every account already in the list must be known by its login first,
         // or a repeat of it could not be told apart.
         // Read again even when known: any of them may have signed in to
-        // another login since it was last read.
+        // another login since it was last read. A signed-in account whose
+        // login cannot be read leaves the new one undecided, so it is not added.
         for existing in accounts.ids(provider) {
-            crate::usage::check_account(accounts, provider, &existing);
+            let read = crate::usage::check_account(accounts, provider, &existing)
+                .is_some_and(|identity| identity.account_key.is_some());
+            if !read && self.signed_in(provider, &existing) {
+                accounts.forget(provider, account);
+                self.forget_snapshot(provider, account);
+                self.set_notice(
+                    provider,
+                    format!(
+                        "xd could not confirm which login {} is signed in to, so the new account \
+                         was not added. Try again.",
+                        accounts.label(provider, &existing)
+                    ),
+                );
+                return;
+            }
         }
         // An account whose login cannot be read is never taken in: it could be
         // another account's sign-in under a shared keychain entry.
@@ -856,6 +871,33 @@ impl AuthManager {
         if let Ok(mut states) = self.inner.states.lock() {
             states.remove(&key(provider, account));
         }
+    }
+
+    /// Like [`Self::set_snapshot`], unless a newer sign-in or sign-out for the
+    /// provider has begun since: then the state is that one's to set.
+    fn set_snapshot_if_idle(&self, provider: &str, account: &str, mut snapshot: AuthSnapshot) {
+        {
+            let Ok(sessions) = self.inner.sessions.lock() else {
+                return;
+            };
+            if sessions.contains_key(provider) {
+                return;
+            }
+            let Ok(mut states) = self.inner.states.lock() else {
+                return;
+            };
+            snapshot.generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+            let entry = key(provider, account);
+            snapshot.settled = if AuthSnapshot::established(&snapshot.state) {
+                Some(snapshot.state.clone())
+            } else {
+                states
+                    .get(&entry)
+                    .and_then(|previous| previous.settled.clone())
+            };
+            states.insert(entry, snapshot);
+        }
+        self.publish(provider);
     }
 
     fn set_snapshot(&self, provider: &str, account: &str, mut snapshot: AuthSnapshot) {

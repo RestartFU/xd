@@ -137,6 +137,16 @@ struct Account {
     live: Live,
 }
 
+impl Live {
+    fn forget_usage(&mut self) {
+        self.windows.clear();
+        self.checked_at_ms = None;
+        self.limited_until_ms = None;
+        self.limited_label = None;
+        self.limited_at_ms = None;
+    }
+}
+
 impl Account {
     fn new(id: &str, now: i64) -> Self {
         Self {
@@ -429,6 +439,11 @@ impl Accounts {
             } else {
                 None
             };
+            // Another login under the user's own sign-in: what was known about
+            // the old one's usage is not this one's.
+            if id == DEFAULT_ACCOUNT && changed {
+                account.live.forget_usage();
+            }
             if id == DEFAULT_ACCOUNT || account.account_key.is_none() {
                 account.account_key = identity.account_key.clone().or(account.account_key.take());
                 if identity.email.is_some() {
@@ -767,6 +782,9 @@ impl Accounts {
                 None
             };
             // The default account is whatever the user's CLI is signed in to.
+            if id == DEFAULT_ACCOUNT && changed {
+                account.live.forget_usage();
+            }
             if id == DEFAULT_ACCOUNT || account.account_key.is_none() {
                 account.account_key = identity.account_key.clone().or(account.account_key.take());
             }
@@ -1498,6 +1516,22 @@ mod tests {
         added(&accounts, "codex", "b@example.com");
         let choice = accounts.choose("codex", None, |_| false, 0);
         assert!(choice.unavailable);
+    }
+
+    #[test]
+    fn a_new_login_on_the_users_own_sign_in_drops_the_old_ones_hold() {
+        let data = temp("new-login");
+        let accounts = Accounts::with_homes(&data, &[]);
+        added(&accounts, "codex", "b@example.com");
+        accounts.record_login("codex", DEFAULT_ACCOUNT, &identity("a@example.com"), 1);
+        accounts.note_limited("codex", DEFAULT_ACCOUNT, Some(5 * HOUR), None, 2);
+        assert!(accounts.describe("codex", 3)[0]["limited_until_ms"].is_i64());
+        accounts.record_login("codex", DEFAULT_ACCOUNT, &identity("c@example.com"), 4);
+        assert!(accounts.describe("codex", 5)[0]["limited_until_ms"].is_null());
+        assert_eq!(
+            accounts.choose("codex", None, |_| true, 5).account,
+            DEFAULT_ACCOUNT
+        );
     }
 
     #[test]
