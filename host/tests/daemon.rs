@@ -592,6 +592,25 @@ fn pausing_all_holds_working_chats_until_they_resume() {
         reply["working"] == false && reply["queue"] == json!([])
     });
     assert!(paused_in_tree(&mut client).is_empty());
+
+    // Resuming while the pause is still stopping the turn: however the two
+    // meet, the queue runs and nothing stays paused.
+    for round in 0..5 {
+        let after = format!("after {round}");
+        let reply = client.call(json!({"op":"send", "chat":busy, "text":"forever"}));
+        assert_eq!(reply["ok"], true, "{reply}");
+        let reply = client.call(json!({"op":"send", "chat":busy, "text":after}));
+        assert_eq!(reply["queued"], true, "{reply}");
+        let reply = client.call(json!({"op":"pause-all"}));
+        assert_eq!(reply["paused"], json!([busy]), "{reply}");
+        let reply = client.call(json!({"op":"resume-all"}));
+        assert_eq!(reply["resumed"], json!([busy]), "{reply}");
+        client.wait_for(json!({"op":"chat", "chat":busy}), |reply| {
+            reply["working"] == false && reply["queue"] == json!([])
+        });
+        assert_eq!(user_messages(&mut client, &after), 1);
+        assert!(paused_in_tree(&mut client).is_empty());
+    }
 }
 
 #[test]

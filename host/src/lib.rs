@@ -2001,27 +2001,21 @@ impl Engine {
                 }
                 // Nothing to continue: the chat moved on, or its turn is still
                 // stopping. Let the queue go on, and leave the turn to resume
-                // from the chat.
+                // from the chat. Unpaused first, so a turn ending meanwhile
+                // hands the queue on itself; an idle chat starts it here.
+                if !store.unpause_chat(&chat_id).unwrap_or(false) {
+                    continue;
+                }
+                self.events.publish(json!({"event": "tree"}));
                 let queued = store
                     .chat(&chat_id)
                     .ok()
                     .and_then(|chat| chat["queue"][0].as_str().map(str::to_owned));
-                let started = match queued {
-                    Some(text) => self.start_queued_if_idle(&chat_id, &text, false),
-                    None => Ok(false),
-                };
-                match started {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        if !store.unpause_chat(&chat_id).unwrap_or(false) {
-                            continue;
-                        }
-                        self.events.publish(json!({"event": "tree"}));
-                    }
-                    Err(error) => {
-                        eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
-                        continue;
-                    }
+                if let Some(text) = queued
+                    && let Err(error) = self.start_queued_if_idle(&chat_id, &text, false, true)
+                {
+                    eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
+                    continue;
                 }
             }
             self.events
@@ -2061,7 +2055,7 @@ impl Engine {
                     if let Some(runtime) = &self.runtime {
                         runtime.cancel(chat_id);
                     }
-                    if let Err(error) = self.start_queued_if_idle(chat_id, text, gated) {
+                    if let Err(error) = self.start_queued_if_idle(chat_id, text, gated, false) {
                         return error_reply(error);
                     }
                 }
@@ -2080,10 +2074,17 @@ impl Engine {
     /// here unless the caller (`gated`) already holds it, so `pause-all` sees
     /// either the idle chat or the started turn.
     ///
-    /// True when it started the message.
-    fn start_queued_if_idle(&self, chat_id: &str, text: &str, gated: bool) -> Result<bool, String> {
+    /// `was_paused` when the caller has just unpaused the chat, which pauses
+    /// again if the message fails to start.
+    fn start_queued_if_idle(
+        &self,
+        chat_id: &str,
+        text: &str,
+        gated: bool,
+        was_paused: bool,
+    ) -> Result<(), String> {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
-            return Ok(false);
+            return Ok(());
         };
         let gate = if gated {
             None
@@ -2099,7 +2100,7 @@ impl Engine {
         };
         let chat = store.chat(chat_id).map_err(|error| error.to_string())?;
         if chat["working"] == true || chat["queue"][0].as_str() != Some(text) {
-            return Ok(false);
+            return Ok(());
         }
         let unpauses = store.chat_is_paused(chat_id).unwrap_or(false);
         let (_, event) = store
@@ -2112,7 +2113,7 @@ impl Engine {
         {
             SendDisposition::Queued { event, .. } => {
                 self.events.publish(event);
-                Ok(false)
+                Ok(())
             }
             SendDisposition::Start { turn, .. } => {
                 if unpauses {
@@ -2120,10 +2121,10 @@ impl Engine {
                 }
                 if let Err(error) = runtime.start(turn.clone()) {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
-                    self.keep_paused_after_failed_start(chat_id, unpauses);
+                    self.keep_paused_after_failed_start(chat_id, unpauses || was_paused);
                     return Err(error);
                 }
-                Ok(true)
+                Ok(())
             }
         }
     }
