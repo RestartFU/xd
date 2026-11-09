@@ -18,7 +18,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class UsageState(
-    val days: Int = 7,
+    val days: Int = 30,
+    val metric: String = "Limits",
+    val provider: String = "All providers",
     val summary: UsageSummaryReply? = null,
     val summaryLoading: Boolean = false,
     val summaryError: String? = null,
@@ -44,7 +46,7 @@ class UsageViewModel(
     private val client: XdClient,
     private val settings: MobileSettings,
 ) : ViewModel() {
-    private val _state = MutableStateFlow(UsageState())
+    private val _state = MutableStateFlow(UsageState(days = settings.usageDays, metric = settings.usageMetric, provider = settings.usageProvider))
     val state: StateFlow<UsageState> = _state.asStateFlow()
     private var summaryReads = 0L
     private var limitReads = 0L
@@ -66,7 +68,19 @@ class UsageViewModel(
 
     private val timeZone: String get() = ZoneId.systemDefault().id
 
+    fun showMetric(metric: String) {
+        settings.usageMetric = metric
+        _state.update { it.copy(metric = metric) }
+    }
+
+    fun showProvider(provider: String) {
+        settings.usageProvider = provider
+        _state.update { it.copy(provider = provider) }
+    }
+
     fun showDays(days: Int) {
+        if (days !in listOf(1, 7, 30, 90)) return
+        settings.usageDays = days
         if (_state.value.days == days) return
         _state.update { it.copy(days = days, summary = null) }
         readSummary(refresh = false)
