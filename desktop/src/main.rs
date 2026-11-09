@@ -13724,27 +13724,33 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    /// The button beside "Projects": pauses every chat at work, for checking
-    /// out, then resumes the paused ones with one more press.
-    fn render_pause_all_button(
+    /// The button beside a project's +: pauses the project's chats at work,
+    /// for checking out, then resumes them with one more press. Pausing shows
+    /// on hover, like the +; resuming stays in sight while anything waits.
+    fn render_project_pause_button(
         &self,
+        project_index: usize,
+        folder_id: &str,
         action: PauseAllAction,
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (label, path, ready) = match action {
-            PauseAllAction::Pause { ready } => ("Pause all chats", PAUSE_ICON, ready),
-            PauseAllAction::Resume => ("Resume paused chats", PLAY_ICON, true),
+        let (label, path) = match action {
+            PauseAllAction::Pause => ("Pause this project's chats", PAUSE_ICON),
+            PauseAllAction::Resume => ("Resume this project's chats", PLAY_ICON),
         };
-        let ready = ready && !self.pause_all_pending;
-        let color = match action {
-            _ if !ready => colors.faint,
-            PauseAllAction::Resume => colors.accent,
-            PauseAllAction::Pause { .. } => colors.muted,
-        };
+        let ready = !self.pause_all_pending;
+        let resume = action == PauseAllAction::Resume;
+        let folder_id = folder_id.to_owned();
         div()
-            .id("minimal-pause-all")
-            .size(px(26.0))
+            .id(("minimal-project-pause", project_index))
+            .when(!resume, |button| {
+                button
+                    .invisible()
+                    .group_hover("catalog-project", |style| style.visible())
+            })
+            .size(px(22.0))
+            .flex_none()
             .flex()
             .items_center()
             .justify_center()
@@ -13753,16 +13759,25 @@ impl XdDesktop {
             .when(ready, |button| {
                 button
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .hover(|style| style.bg(rgb(colors.border)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.pause_all(action == PauseAllAction::Resume, cx)
+                        cx.stop_propagation();
+                        this.pause_folder(&folder_id, resume, cx)
                     }))
             })
-            .child(icon(path, 12.0, color))
+            .child(icon(
+                path,
+                10.0,
+                match action {
+                    _ if !ready => colors.faint,
+                    PauseAllAction::Resume => colors.accent,
+                    PauseAllAction::Pause => colors.faint,
+                },
+            ))
             .into_any_element()
     }
 
-    fn pause_all(&mut self, resume: bool, cx: &mut Context<Self>) {
+    fn pause_folder(&mut self, folder_id: &str, resume: bool, cx: &mut Context<Self>) {
         if self.pause_all_pending {
             return;
         }
@@ -13771,7 +13786,7 @@ impl XdDesktop {
             cx.notify();
             return;
         };
-        match host.pause_all(resume) {
+        match host.pause_folder(folder_id, resume) {
             Ok(()) => self.pause_all_pending = true,
             Err(error) => self.model.connection_error = Some(error),
         }
@@ -14366,6 +14381,8 @@ impl XdDesktop {
             let context_project = project.id.clone();
             let context_name = project.name.clone();
             let create_project = project.id.clone();
+            let pause_project = project.id.clone();
+            let pause_action = self.model.pause_action_for(&project.id);
             let drag_payload = ProjectDragPayload {
                 project_id: project.id.clone(),
                 title: project.name.clone(),
@@ -14457,6 +14474,15 @@ impl XdDesktop {
                 )
                 .child(div().flex_1())
                 .when(!open, |header| header.child(drawer_tabs(&signals, colors)))
+                .when_some(pause_action, |header, action| {
+                    header.child(self.render_project_pause_button(
+                        project_index,
+                        &pause_project,
+                        action,
+                        colors,
+                        cx,
+                    ))
+                })
                 .child(
                     div()
                         .id(("minimal-session-group-add", project_index))
@@ -14582,7 +14608,6 @@ impl XdDesktop {
             });
         let terminal_active = matches!(self.minimal_route, MinimalRoute::Terminal);
         let settings_open = self.minimal_theme_open;
-        let pause_all = self.model.pause_all_action();
         let offers_update = self
             .self_update_panel
             .as_ref()
@@ -14619,9 +14644,6 @@ impl XdDesktop {
                             .text_color(rgb(colors.faint))
                             .child("Projects"),
                     )
-                    .when_some(pause_all, |header, action| {
-                        header.child(self.render_pause_all_button(action, colors, cx))
-                    })
                     .child(
                         div()
                             .id("minimal-new-project")

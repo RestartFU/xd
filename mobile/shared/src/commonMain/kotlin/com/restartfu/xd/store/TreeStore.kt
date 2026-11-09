@@ -154,6 +154,7 @@ internal class TreeStore(
                         settlement = reply.settlement,
                         folderGroups = reply.folderGroups,
                         pauseAll = reply.pauseAll,
+                        pauseFolders = reply.pauseFolders,
                         linkedPullRequests = reply.linkedPullRequests,
                         chats = reply.chats.map {
                             ChatSummary(

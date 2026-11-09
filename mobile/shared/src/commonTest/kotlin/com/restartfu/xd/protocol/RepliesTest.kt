@@ -198,14 +198,16 @@ class RepliesTest {
             """{"ok":true,"folders":[],"chats":[{"id":"c","folder":"p","title":"T","backend":"codex","working":true}]}""",
         ).jsonObject.decodeReply<TreeReply>()
         assertEquals(false, older.pauseAll)
+        assertEquals(false, older.pauseFolders)
         assertEquals(false, older.chats.single().paused)
 
         val current = WireJson.parseToJsonElement(
-            """{"ok":true,"pause_all":true,"folders":[],"chats":[""" +
+            """{"ok":true,"pause_all":true,"pause_folders":true,"folders":[],"chats":[""" +
                 """{"id":"c","folder":"p","title":"T","backend":"codex","working":false,"paused":true},""" +
                 """{"id":"d","folder":"p","title":"U","backend":"claude","working":false}]}""",
         ).jsonObject.decodeReply<TreeReply>()
         assertEquals(true, current.pauseAll)
+        assertEquals(true, current.pauseFolders)
         assertEquals(listOf(true, false), current.chats.map { it.paused })
 
         val paused = WireJson.parseToJsonElement("""{"ok":true,"paused":["c","d"]}""")

@@ -183,25 +183,36 @@ class MinimalProjectsTest {
     }
 
     @Test
-    fun thePauseButtonPausesUntilSomethingIsPausedThenResumes() {
-        val idle = TreeSnapshot(chats = listOf(chat("one", "p", "Idle", "codex")), pauseAll = true)
-        // An older host cannot pause every chat, so the button hides.
-        assertEquals(null, idle.copy(pauseAll = false).pauseAllAction)
-        assertEquals(PauseAllAction.PAUSE, idle.pauseAllAction)
-        assertEquals(false, idle.anythingToPause)
-
-        val working = idle.copy(chats = idle.chats + chat("two", "p", "Busy", "claude", working = true))
-        assertEquals(PauseAllAction.PAUSE, working.pauseAllAction)
-        assertEquals(true, working.anythingToPause)
-        // A chat waiting on background tasks between turns is paused too.
-        val background = idle.copy(chats = listOf(chat("one", "p", "Idle", "codex").copy(backgroundTasks = 1)))
-        assertEquals(true, background.anythingToPause)
+    fun aProjectPauseButtonFollowsItsOwnChats() {
+        val folders = listOf(
+            Folder("site", "Site", null),
+            Folder("inner", "Inner", "site"),
+            Folder("app", "App", null),
+        )
+        val idle = TreeSnapshot(
+            folders = folders,
+            chats = listOf(chat("one", "site", "Idle", "codex"), chat("two", "app", "Other", "codex")),
+            pauseAll = true,
+            pauseFolders = true,
+        )
+        // Nothing to pause hides the button, as does a host that cannot pause one project.
+        assertEquals(null, idle.pauseActionFor("site"))
+        val working = idle.copy(chats = idle.chats + chat("three", "inner", "Busy", "claude", working = true))
+        assertEquals(null, working.copy(pauseFolders = false).pauseActionFor("site"))
+        // A project inside counts toward the one around it.
+        assertEquals(PauseAllAction.PAUSE, working.pauseActionFor("site"))
+        assertEquals(PauseAllAction.PAUSE, working.pauseActionFor("inner"))
+        assertEquals(null, working.pauseActionFor("app"))
+        // A chat waiting on background tasks between turns can be paused too.
+        val background = idle.copy(chats = listOf(chat("one", "app", "Idle", "codex").copy(backgroundTasks = 1)))
+        assertEquals(PauseAllAction.PAUSE, background.pauseActionFor("app"))
         // A terminal running a command is not a chat at work.
-        val terminal = idle.copy(chats = listOf(chat("one", "p", "Idle", "codex", terminalWorking = true)))
-        assertEquals(false, terminal.anythingToPause)
+        val terminal = idle.copy(chats = listOf(chat("one", "app", "Idle", "codex", terminalWorking = true)))
+        assertEquals(null, terminal.pauseActionFor("app"))
 
-        val paused = idle.copy(chats = idle.chats + chat("two", "p", "Busy", "claude").copy(paused = true))
-        assertEquals(PauseAllAction.RESUME, paused.pauseAllAction)
-        assertEquals(listOf(false, true), paused.minimalSessions("p").map { it.paused })
+        val paused = working.copy(chats = working.chats + chat("four", "site", "Held", "claude").copy(paused = true))
+        assertEquals(PauseAllAction.RESUME, paused.pauseActionFor("site"))
+        assertEquals(PauseAllAction.PAUSE, paused.pauseActionFor("inner"))
+        assertEquals(listOf(false, true), paused.minimalSessions("site").map { it.paused })
     }
 }

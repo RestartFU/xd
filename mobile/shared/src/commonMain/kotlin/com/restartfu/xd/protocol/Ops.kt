@@ -317,11 +317,20 @@ public object Ops {
     /** Continues a cut-short turn; the host refuses if the chat moved on. */
     public fun resumeTurn(chatId: String): JsonObject = withChat("resume-turn", chatId)
 
-    /** Stops every working chat, and every one waiting on background tasks, marking them paused. */
-    public fun pauseAll(): JsonObject = op("pause-all")
+    /**
+     * Stops every working chat in folder [folderId] and the folders inside it,
+     * and every one waiting on background tasks, marking them paused.
+     */
+    public fun pauseAll(folderId: String): JsonObject = buildJsonObject {
+        put("op", "pause-all")
+        put("folder", requireId(folderId, "Folder"))
+    }
 
-    /** Continues every chat [pauseAll] stopped. */
-    public fun resumeAll(): JsonObject = op("resume-all")
+    /** Continues every chat in folder [folderId] that [pauseAll] stopped. */
+    public fun resumeAll(folderId: String): JsonObject = buildJsonObject {
+        put("op", "resume-all")
+        put("folder", requireId(folderId, "Folder"))
+    }
 
     /**
      * Moves queued message [source] before or [after] [anchor]. Both texts are

@@ -86,6 +86,8 @@ public data class TreeReply(
     @SerialName("folder_groups") val folderGroups: Boolean = false,
     /** True when the host can pause every chat at once; hide the pause button otherwise. */
     @SerialName("pause_all") val pauseAll: Boolean = false,
+    /** True when the host can pause one folder's chats; older hosts would pause every chat. */
+    @SerialName("pause_folders") val pauseFolders: Boolean = false,
     /** True when the host keeps pull requests linked to chats and lists them per chat. */
     @SerialName("linked_pull_requests") val linkedPullRequests: Boolean = false,
 )

@@ -93,6 +93,8 @@ public data class TreeSnapshot(
     val folderGroups: Boolean = false,
     /** The connected host can pause every chat at once and resume them. */
     val pauseAll: Boolean = false,
+    /** The connected host can pause and resume one project's chats. */
+    val pauseFolders: Boolean = false,
     /**
      * The connected host keeps pull requests linked to chats, so each chat's
      * [ChatSummary.pullRequests] is the whole list and can be changed.
@@ -107,20 +109,32 @@ public data class TreeSnapshot(
     val canCreateFolders: Boolean get() = folderGroups || folders.any(Folder::group)
 }
 
-/** What the Projects page's pause button does when pressed. */
+/** What a project's pause button does when pressed. */
 public enum class PauseAllAction { PAUSE, RESUME }
 
 /**
- * The pause button's action: resume while any chat is paused, pause
- * otherwise. Null when the host cannot pause every chat, so the button hides.
+ * The pause button of project [folderId]: resume while any of its chats is
+ * paused, pause while any is at work, and null otherwise, or on a host that
+ * cannot pause one project, so the button hides. Chats in folders or projects
+ * inside it count too, as the host counts them.
  */
-public val TreeSnapshot.pauseAllAction: PauseAllAction?
-    get() = when {
-        !pauseAll -> null
-        chats.any(ChatSummary::paused) -> PauseAllAction.RESUME
-        else -> PauseAllAction.PAUSE
+public fun TreeSnapshot.pauseActionFor(folderId: String): PauseAllAction? {
+    if (!pauseFolders) return null
+    val parents = folders.associate { it.id to it.parentId }
+    fun within(id: String): Boolean {
+        var current: String? = id
+        // Bounded, so a cycle in a broken tree cannot spin forever.
+        repeat(folders.size + 1) {
+            val here = current ?: return false
+            if (here == folderId) return true
+            current = parents[here]
+        }
+        return false
     }
-
-/** Something pausing would stop: a chat running a turn or waiting on its background tasks. */
-public val TreeSnapshot.anythingToPause: Boolean
-    get() = chats.any { it.working || it.backgroundTasks > 0 }
+    val scoped = chats.filter { within(it.folderId) }
+    return when {
+        scoped.any(ChatSummary::paused) -> PauseAllAction.RESUME
+        scoped.any { it.working || it.backgroundTasks > 0 } -> PauseAllAction.PAUSE
+        else -> null
+    }
+}

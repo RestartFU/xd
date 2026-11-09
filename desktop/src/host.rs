@@ -2115,10 +2115,14 @@ impl HostHandle {
         )
     }
 
-    /// Stops every chat at work, or with `resume` picks the paused ones up.
-    pub fn pause_all(&self, resume: bool) -> Result<(), String> {
+    /// Stops every chat at work in the folder, or with `resume` picks its
+    /// paused ones up.
+    pub fn pause_folder(&self, folder_id: &str, resume: bool) -> Result<(), String> {
         let op = if resume { "resume-all" } else { "pause-all" };
-        self.send(RequestKind::PauseAll { resume }, json!({"op": op}))
+        self.send(
+            RequestKind::PauseAll { resume },
+            json!({"op": op, "folder": folder_id}),
+        )
     }
 
     pub fn cancel(&self, chat_id: &str) -> Result<(), String> {

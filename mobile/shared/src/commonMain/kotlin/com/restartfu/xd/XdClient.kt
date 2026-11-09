@@ -669,17 +669,17 @@ public class XdClient(
         actor.call(Ops.setAgentSecrets(folderId, entries))
     }
 
-    /** Stops every working chat and marks it paused; answers the chats it stopped. */
-    public suspend fun pauseAll(): List<String> {
-        val paused = actor.decodeReply(actor.call(Ops.pauseAll())) { it.decodeReply<PauseAllReply>() }.paused
+    /** Stops every working chat in the folder and marks it paused; answers the chats it stopped. */
+    public suspend fun pauseAll(folderId: String): List<String> {
+        val paused = actor.decodeReply(actor.call(Ops.pauseAll(folderId))) { it.decodeReply<PauseAllReply>() }.paused
         // The host broadcasts `tree` too; this brings the paused marks in either way.
         requestTreeRefresh()
         return paused
     }
 
-    /** Continues every paused chat; answers the chats it continued. */
-    public suspend fun resumeAll(): List<String> {
-        val resumed = actor.decodeReply(actor.call(Ops.resumeAll())) { it.decodeReply<ResumeAllReply>() }.resumed
+    /** Continues every paused chat in the folder; answers the chats it continued. */
+    public suspend fun resumeAll(folderId: String): List<String> {
+        val resumed = actor.decodeReply(actor.call(Ops.resumeAll(folderId))) { it.decodeReply<ResumeAllReply>() }.resumed
         requestTreeRefresh()
         return resumed
     }

@@ -209,10 +209,13 @@ chats still answer `chat` and `messages` and can still be opened. List settled
 sessions apart from active ones, most recently settled first. Clients that
 ignore these members keep listing settled sessions with the active ones.
 
-A host that can pause every chat at once adds a top-level `"pause_all":true`;
-hide the pause button on one that does not. A chat that [`pause-all`](#pause-all-and-resume-all)
-stopped has `paused:true` until it resumes or any turn starts in it; the member
-is absent otherwise. While any chat is paused, the button resumes them.
+A host that can pause every chat at once adds a top-level `"pause_all":true`.
+One that can also pause a single project's chats adds `"pause_folders":true`.
+Clients show a pause button on each project only then, since an older host
+ignores `folder` and would pause everything. A chat that
+[`pause-all`](#pause-all-and-resume-all) stopped has `paused:true` until it
+resumes or any turn starts in it; the member is absent otherwise. While any chat
+in a project is paused, that project's button resumes them.
 
 A host that keeps pull requests linked to chats adds a top-level
 `"linked_pull_requests":true`. Each chat with links then has `pull_requests`, a
@@ -748,11 +751,14 @@ clients pressing it together start one turn. Anything queued runs after that tur
 ### `pause-all` and `resume-all`
 
 ```json
-{"op":"pause-all"}
+{"op":"pause-all","folder":"folder-1"}
 {"ok":true,"paused":["chat-1","chat-2"]}
-{"op":"resume-all"}
+{"op":"resume-all","folder":"folder-1"}
 {"ok":true,"resumed":["chat-1","chat-2"]}
 ```
+
+With `folder`, both keep to the chats in that folder and in any folder or
+project inside it. Without it, they cover every chat.
 
 `pause-all` stops every chat that is `working`, and every chat whose agent is
 running background tasks between turns, so nothing goes on while the user is
