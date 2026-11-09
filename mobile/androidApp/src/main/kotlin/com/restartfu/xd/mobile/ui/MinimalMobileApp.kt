@@ -36,7 +36,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
@@ -662,16 +662,7 @@ private fun MinimalProjectsHome(
     ) {
         val pauseAction = tree.pauseAllAction
         val pausingAll by model.pausingAll.collectAsStateWithLifecycle()
-        ProductHeader(link = link, title = "Projects", onSettings = { settingsOpen = true }) {
-            // Hidden on a host that cannot pause every chat.
-            if (pauseAction != null) PauseAllButton(
-                action = pauseAction,
-                enabled = !pausingAll && (pauseAction == PauseAllAction.RESUME || tree.anythingToPause),
-                onClick = {
-                    if (pauseAction == PauseAllAction.RESUME) model.resumeAll() else model.pauseAll()
-                },
-            )
-        }
+        ProductHeader(link = link, title = "Projects", onSettings = { settingsOpen = true })
         when {
             loading && projects.isEmpty() -> Box(
                 Modifier.fillMaxSize(),
@@ -788,11 +779,22 @@ private fun MinimalProjectsHome(
             // The page's one New button: a session, a project, or a folder.
             // On phones it sits just above the floating bar's right end, clear of it at any width.
             // The tooltip's own layout drops alignment, so a plain box places it.
-            Box(
+            Row(
                 Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 16.dp, bottom = if (newSessionAboveBar) NewSessionBottom else 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
+                // Beside the New button, as on desktop beside the Projects +.
+                // Hidden on a host that cannot pause every chat.
+                if (pauseAction != null) PauseAllButton(
+                    action = pauseAction,
+                    enabled = !pausingAll && (pauseAction == PauseAllAction.RESUME || tree.anythingToPause),
+                    onClick = {
+                        if (pauseAction == PauseAllAction.RESUME) model.resumeAll() else model.pauseAll()
+                    },
+                )
                 NewMenu(
                     canStartSession = projects.isNotEmpty(),
                     canCreateFolders = tree.canCreateFolders,
@@ -1194,8 +1196,6 @@ private fun ProductHeader(
     link: Link,
     title: String,
     onSettings: () -> Unit,
-    /** Buttons for the page itself, just after its title. */
-    actions: @Composable () -> Unit = {},
 ) {
     Row(
         modifier = Modifier
@@ -1220,7 +1220,6 @@ private fun ProductHeader(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        actions()
         val up = link is Link.Up
         Box(
             modifier = Modifier.size(48.dp),
@@ -1256,13 +1255,11 @@ private fun PauseAllButton(action: PauseAllAction, enabled: Boolean, onClick: ()
     val resume = action == PauseAllAction.RESUME
     val label = if (resume) "Resume paused chats" else "Pause all chats"
     IconTooltip(label) {
-        IconButton(
+        FilledTonalIconButton(
             onClick = onClick,
             enabled = enabled,
             modifier = Modifier.size(48.dp),
-            colors = IconButtonDefaults.iconButtonColors(
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            ),
+            shape = CircleShape,
         ) {
             Icon(
                 painter = painterResource(if (resume) R.drawable.ic_play else R.drawable.ic_pause),
