@@ -1837,16 +1837,18 @@ pub(crate) fn shell_script(command: &str) -> Cow<'_, str> {
 }
 
 fn unwrap_shell(command: &str) -> Option<String> {
-    let (program, rest) = command.trim().split_once(char::is_whitespace)?;
+    // Only a space or tab separates arguments; a newline would end the command.
+    let blank = [' ', '\t'];
+    let (program, rest) = command.trim_matches(blank).split_once(blank)?;
     let name = program.rsplit(['/', '\\']).next()?;
     if !matches!(name, "bash" | "zsh" | "sh" | "dash") {
         return None;
     }
-    let (flag, script) = rest.trim_start().split_once(char::is_whitespace)?;
+    let (flag, script) = rest.trim_start_matches(blank).split_once(blank)?;
     if !matches!(flag, "-c" | "-lc") {
         return None;
     }
-    shell_word(script.trim()).filter(|script| !script.trim().is_empty())
+    shell_word(script.trim_start_matches(blank)).filter(|script| !script.trim().is_empty())
 }
 
 /// Unquotes text that is exactly one POSIX shell word. Anything else, such as
@@ -2982,6 +2984,9 @@ mod tests {
             "/bin/bash -lc *.sh",
             r#"/bin/bash -lc "printf '%s\n' '$HOME'""#,
             r#"/bin/bash -lc "echo `date`""#,
+            "/bin/bash -lc\n'echo hello'",
+            "/bin/bash\n-lc 'echo hello'",
+            "/bin/bash -lc\u{a0}'echo hello'",
         ] {
             assert_eq!(shell_script(command), command);
         }
