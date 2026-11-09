@@ -38,8 +38,9 @@ impl LinkSource {
 }
 
 /// The canonical address of a pull request, `https://host/owner/repo/pull/N`,
-/// or `None` when `text` is not one. Anything after the number, such as
-/// `/files` or a fragment, is dropped, so one pull request has one address.
+/// or `None` when `text` is not one. The host, owner and repository are
+/// lowercased and anything after the number, such as `/files` or a fragment,
+/// is dropped, so one pull request has one address.
 pub(crate) fn normalize_url(text: &str) -> Option<String> {
     let text = text.trim();
     if text.len() > MAX_URL_BYTES {
@@ -83,7 +84,13 @@ pub(crate) fn normalize_url(text: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!("https://{host}/{owner}/{repository}/pull/{number}"))
+    // GitHub matches owners and repositories in any case, so one pull request
+    // keeps one address whichever case it was named in.
+    Some(format!(
+        "https://{host}/{}/{}/pull/{number}",
+        owner.to_ascii_lowercase(),
+        repository.to_ascii_lowercase()
+    ))
 }
 
 /// The pull requests a finished shell command opened, read from its output.
@@ -197,7 +204,7 @@ mod tests {
                 Some("https://github.com/restartfu/xd/pull/180"),
             ),
             (
-                " https://GitHub.com/restartfu/xd/pull/180/files?w=1 ",
+                " https://GitHub.com/RestartFU/XD/pull/180/files?w=1 ",
                 Some("https://github.com/restartfu/xd/pull/180"),
             ),
             (

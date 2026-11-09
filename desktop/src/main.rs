@@ -1439,12 +1439,16 @@ fn pull_request_chip_tooltip(state: Option<PullRequestState>) -> &'static str {
     }
 }
 
+/// How many addresses a host links in one request.
+const MAX_PULL_REQUESTS_PER_LINK: usize = 16;
+/// How many rows the Pull requests popover shows before its list scrolls.
+const PULL_REQUEST_PANEL_MAX_ROWS: f32 = 8.0;
+
 /// The addresses in what was pasted into the link field: one or several,
-/// apart by spaces, commas or lines. A host takes up to 16 at once.
+/// apart by spaces, commas or lines.
 fn pasted_pull_request_urls(text: &str) -> Vec<String> {
     text.split(|c: char| c.is_whitespace() || c == ',')
         .filter(|url| !url.is_empty())
-        .take(16)
         .map(str::to_owned)
         .collect()
 }
@@ -9959,6 +9963,15 @@ impl XdDesktop {
         if panel.linking.is_some() || urls.is_empty() {
             return;
         }
+        if urls.len() > MAX_PULL_REQUESTS_PER_LINK {
+            if let Some(panel) = &mut self.pull_request_panel {
+                panel.error = Some(format!(
+                    "Link at most {MAX_PULL_REQUESTS_PER_LINK} pull requests at a time."
+                ));
+            }
+            cx.notify();
+            return;
+        }
         let (endpoint, chat_id) = (panel.endpoint, panel.chat_id.clone());
         self.pull_request_generation += 1;
         let generation = self.pull_request_generation;
@@ -13072,7 +13085,20 @@ impl XdDesktop {
                         .child("No pull requests linked yet."),
                 )
             })
-            .children(rows)
+            .when(!rows.is_empty(), |panel| {
+                // A chat can link 32, more than fit, so the list scrolls and
+                // the field below it stays in reach.
+                panel.child(
+                    div()
+                        .id("pull-request-panel-rows")
+                        .max_h(px(PULL_REQUEST_PANEL_MAX_ROWS * 36.0))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(rows),
+                )
+            })
             .child(div().h(px(1.0)).my_1().bg(rgb(colors.rule)))
             .child(
                 div()
@@ -24473,7 +24499,7 @@ Binary files /dev/null and b/image.png differ\n";
             ]
         );
         assert!(pasted_pull_request_urls("  \n ").is_empty());
-        assert_eq!(pasted_pull_request_urls(&"a ".repeat(20)).len(), 16);
+        assert_eq!(pasted_pull_request_urls(&"a ".repeat(20)).len(), 20);
     }
 
     #[gpui::test]
@@ -24595,6 +24621,20 @@ Binary files /dev/null and b/image.png differ\n";
                     .is_focused(window),
                 "ready to paste into"
             );
+            let too_many = (1..=17)
+                .map(|number| format!("https://github.com/o/r/pull/{number}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            desktop.pull_request_text_changed(too_many.clone(), cx);
+            desktop.link_pasted_pull_requests(cx);
+            let panel = desktop.pull_request_panel.as_ref().unwrap();
+            assert_eq!(
+                panel.error.as_deref(),
+                Some("Link at most 16 pull requests at a time."),
+                "nothing is dropped without a word"
+            );
+            assert_eq!(panel.text, too_many);
+            assert_eq!(panel.linking, None);
             desktop
                 .pull_request_text_changed("https://github.com/o/r/pull/7 not-a-link".into(), cx);
             // Nothing is connected in tests, so the request cannot go out.
