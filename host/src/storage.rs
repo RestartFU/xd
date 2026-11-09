@@ -265,14 +265,12 @@ impl LinkState {
         urls
     }
 
-    /// Whether the user removed `url` from every one of `chats`.
-    pub(crate) fn removed_everywhere(&self, chats: &[String], url: &str) -> bool {
-        !chats.is_empty()
-            && chats.iter().all(|chat| {
-                self.0
-                    .iter()
-                    .any(|link| link.chat == *chat && link.url == url && link.dismissed)
-            })
+    /// Whether the user removed `url` and none of the chats links it now.
+    /// A chat that never had it says nothing either way, so removing it
+    /// from the one chat that showed it is enough.
+    pub(crate) fn removed(&self, url: &str) -> bool {
+        let rows = self.0.iter().filter(|link| link.url == url);
+        rows.clone().any(|link| link.dismissed) && rows.clone().all(|link| link.dismissed)
     }
 }
 

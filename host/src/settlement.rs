@@ -330,7 +330,7 @@ fn sweep(
 }
 
 /// The session's pull requests: its branch's, unless the user removed that
-/// one from every chat in it, and those linked to its chats. `None` when a
+/// one and no chat in it links it, and those linked to its chats. `None` when a
 /// lookup failed and the session has to wait for a sweep that can tell. Also
 /// returns the links it decided from, read once before any lookup, which the
 /// settling update checks again.
@@ -383,9 +383,7 @@ fn pull_requests_for(
             },
         };
         if let Some((url, snapshot)) = known {
-            let removed = url
-                .as_deref()
-                .is_some_and(|url| links.removed_everywhere(&candidate.chats, url));
+            let removed = url.as_deref().is_some_and(|url| links.removed(url));
             if !removed {
                 found.push(snapshot);
             }
@@ -1085,7 +1083,7 @@ mod tests {
         fixture.age(10);
         let candidate = fixture.store.settlement_candidates().unwrap().remove(0);
         let seen = fixture.store.link_state(&candidate.chats).unwrap();
-        assert!(!seen.removed_everywhere(&candidate.chats, &url));
+        assert!(!seen.removed(&url));
         fixture
             .store
             .unlink_pull_request(&fixture.chat, &url)
@@ -1098,8 +1096,30 @@ mod tests {
                 .unwrap()
         );
         let now_seen = fixture.store.link_state(&candidate.chats).unwrap();
-        assert!(now_seen.removed_everywhere(&candidate.chats, &url));
+        assert!(now_seen.removed(&url));
         assert!(now_seen.linked().is_empty());
+    }
+
+    #[test]
+    fn removing_the_branch_pull_request_from_the_chat_that_showed_it_is_enough() {
+        let row = |chat: &str, dismissed: bool| crate::storage::LinkRow {
+            chat: chat.into(),
+            url: "https://github.com/o/r/pull/1".into(),
+            dismissed,
+        };
+        let url = "https://github.com/o/r/pull/1";
+        assert!(
+            !LinkState(vec![]).removed(url),
+            "never linked, never removed"
+        );
+        assert!(
+            LinkState(vec![row("a", true)]).removed(url),
+            "chat b never had it"
+        );
+        assert!(
+            !LinkState(vec![row("a", true), row("b", false)]).removed(url),
+            "chat b still links it"
+        );
     }
 
     #[test]

@@ -502,8 +502,8 @@ connected:
   request. Merging and closing still do.
 
 A session's pull requests are those linked to any of its chats and the pull
-request of its checked-out branch, unless the user unlinked that one from every
-chat in it. The session settles once every one of them has finished. A pull
+request of its checked-out branch, unless the user unlinked that one and no chat
+in the session still links it. The session settles once every one of them has finished. A pull
 request that finished before the user's latest message in the session does not
 count. The rules skip sessions the operations above would refuse and
 sessions the user un-settled. `settled_at` is then when the session went quiet,
