@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/workspace-redesign/desktop-workbench-dark-after.png" alt="xd with a chat, its pending changes, and a shell terminal open together">
+  <img src="docs/assets/readme/workbench.png" alt="An xd session with a Claude Code chat, its uncommitted changes in the side pane, and a shell terminal below">
 </p>
 
 xd doesn't ship a model or an agent. It wraps the CLIs, logins, and configuration
@@ -65,12 +65,12 @@ computer or your Android phone.
 
 <table>
   <tr>
-    <td width="78%"><img src="docs/assets/usage-limits/desktop-cost-full-page-dark-after.png" alt="The Usage page with daily cost by provider and a breakdown by model"></td>
-    <td width="22%"><img src="docs/assets/workspace-redesign/android-phone-chat-dark-after.png" alt="The same chat in the Android app"></td>
+    <td width="78%"><img src="docs/assets/readme/usage.png" alt="The Usage page with daily cost by provider and a breakdown by model"></td>
+    <td width="22%"><img src="docs/assets/readme/android-chat.png" alt="A chat in the Android app"></td>
   </tr>
   <tr>
     <td align="center"><sub>Cost and tokens on the Usage page</sub></td>
-    <td align="center"><sub>The same chat on Android</sub></td>
+    <td align="center"><sub>A chat on Android</sub></td>
   </tr>
 </table>
 
