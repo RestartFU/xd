@@ -1850,8 +1850,8 @@ fn unwrap_shell(command: &str) -> Option<String> {
 }
 
 /// Unquotes text that is exactly one POSIX shell word. Anything else, such as
-/// a second argument or an unterminated quote, is left for the caller to show
-/// unchanged.
+/// a second argument, an unterminated quote or a shell operator, is left for
+/// the caller to show unchanged.
 fn shell_word(text: &str) -> Option<String> {
     let mut word = String::new();
     let mut chars = text.chars();
@@ -1881,8 +1881,11 @@ fn shell_word(text: &str) -> Option<String> {
                 '\n' => {}
                 c => word.push(c),
             },
-            c if c.is_whitespace() => return None,
-            c => word.push(c),
+            // Unquoted, only characters the shell gives no meaning. An
+            // operator, expansion, glob or `$'…'` quote means the text is not
+            // one plain script.
+            c if c.is_alphanumeric() || "-_./,:=+@%".contains(c) => word.push(c),
+            _ => return None,
         }
     }
     Some(word)
@@ -2966,6 +2969,14 @@ mod tests {
             r#"/bin/bash -lc "unterminated"#,
             "/bin/bash -lc ''",
             "python -c 'print(1)'",
+            "/bin/bash -lc 'cd /tmp';pwd",
+            "/bin/bash -lc 'make' > build.log",
+            "/bin/bash -lc 'a' | tee out",
+            "/bin/bash -lc 'sleep 9' &",
+            r"/bin/bash -lc $'echo hello\npwd'",
+            "/bin/bash -lc $SCRIPT",
+            "/bin/bash -lc 'ls' # note",
+            "/bin/bash -lc *.sh",
         ] {
             assert_eq!(shell_script(command), command);
         }
