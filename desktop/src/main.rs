@@ -53,8 +53,7 @@ use xd_desktop::{
     model::{
         AppModel, Attachment, AutoDeleteRules, AutoSettleRules, BackgroundTaskOutput, ChatSummary,
         Folder, MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage, MessagePageDirection, SentFrom,
-        ToolView,
-        Worktree,
+        ToolView, Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
