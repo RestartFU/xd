@@ -123,7 +123,7 @@ enum Feed {
     /// handles it in order, between one line and the next.
     Steer(String),
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    Subagent(SubagentPatch),
+    Subagent(Box<SubagentPatch>),
     End,
 }
 
@@ -187,7 +187,7 @@ enum LineSource {
 enum NextLine {
     Line,
     Steer(String),
-    Subagent(SubagentPatch),
+    Subagent(Box<SubagentPatch>),
     End,
     Quiet,
     Failed,
@@ -1234,7 +1234,7 @@ impl TurnRuntime {
                     }));
                     for patch in patches {
                         if let Some(sink) = &router.sink
-                            && sink.send(Feed::Subagent(patch.clone())).is_ok()
+                            && sink.send(Feed::Subagent(Box::new(patch.clone()))).is_ok()
                         { continue; }
                         runtime.idle_subagent(&chat_id, &router.template.workdir, patch);
                     }
@@ -1347,7 +1347,7 @@ impl TurnRuntime {
                 Feed::Line(line) => unread.push(line),
                 Feed::Steer(prompt) => steers.push(prompt),
                 Feed::Subagent(patch) => {
-                    self.idle_subagent(chat_id, &router.template.workdir, patch)
+                    self.idle_subagent(chat_id, &router.template.workdir, *patch)
                 }
                 Feed::End => break,
             }
@@ -1859,7 +1859,7 @@ impl TurnRuntime {
                 source.next(&mut line)
             };
             let observed = match next {
-                NextLine::Subagent(patch) => Some(AgentEvent::Subagent(patch)),
+                NextLine::Subagent(patch) => Some(AgentEvent::Subagent(*patch)),
                 NextLine::Line => None,
                 NextLine::Steer(prompt) => {
                     close_segment!();
