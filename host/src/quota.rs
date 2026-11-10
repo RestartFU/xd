@@ -339,6 +339,35 @@ impl QuotaMeter {
 }
 
 impl Pass {
+    /// A reading of the account told nothing: it failed, or read another
+    /// login. It is tried again after [`FAILED_READ_GAP`] while anything
+    /// works there. With nothing at work any more, what the account uses until
+    /// the next turn is nobody's here: the chats `seen` before the reading are
+    /// retired, and the next turn reads afresh, so an idle account whose
+    /// readings fail is not tried again and again.
+    /// `other_login` when the reading was of another login, which leaves the
+    /// baseline nothing to measure against; a failed one keeps it while the
+    /// account works.
+    fn unreadable(&self, key: &(String, String), seen: &[String], other_login: bool) {
+        let idle = self.working_on(&key.0, &key.1).is_empty();
+        let Ok(mut ledger) = self.ledger.lock() else {
+            return;
+        };
+        let Some(entry) = ledger.accounts.get_mut(key) else {
+            return;
+        };
+        entry.failed = true;
+        if idle || other_login {
+            entry.last = None;
+        }
+        if idle {
+            entry.sharers.retain(|chat_id| !seen.contains(chat_id));
+            if entry.sharers.is_empty() {
+                ledger.accounts.remove(key);
+            }
+        }
+    }
+
     /// The chats working on one account now, each with the account and login
     /// its turn runs as.
     fn working_on(&self, provider: &str, account: &str) -> Vec<(String, String)> {
@@ -479,15 +508,7 @@ impl Pass {
                 // With nothing at work here any more, what the account uses
                 // until the next reading is nobody's here: the next turn reads
                 // afresh rather than from before the gap.
-                let idle = self.working_on(&provider, &account).is_empty();
-                if let Ok(mut ledger) = self.ledger.lock()
-                    && let Some(entry) = ledger.accounts.get_mut(&key)
-                {
-                    entry.failed = true;
-                    if idle {
-                        entry.last = None;
-                    }
-                }
+                self.unreadable(&key, &sharers, false);
                 next = next.min(FAILED_READ_GAP);
                 continue;
             };
@@ -500,12 +521,7 @@ impl Pass {
                 .iter()
                 .any(|(_, tag)| !tag.ends_with("#?") && !crate::accounts::same_login(tag, &login))
             {
-                if let Ok(mut ledger) = self.ledger.lock()
-                    && let Some(entry) = ledger.accounts.get_mut(&key)
-                {
-                    entry.last = None;
-                    entry.failed = true;
-                }
+                self.unreadable(&key, &sharers, true);
                 next = next.min(FAILED_READ_GAP);
                 continue;
             }
