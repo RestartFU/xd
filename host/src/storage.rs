@@ -871,6 +871,8 @@ impl StateStore {
         }
         drop(database);
 
+        // What Git listed this read, shared by the chats left to it.
+        let mut listed_worktrees = ListedWorktrees::default();
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
         for (
@@ -878,7 +880,8 @@ impl StateStore {
             workdir,
         ) in visible_chats
         {
-            let branch = workdir.and_then(|workdir| worktree_branch(Path::new(&workdir)));
+            let branch = workdir
+                .and_then(|workdir| worktree_branch(Path::new(&workdir), &mut listed_worktrees));
             let mut chat = json!({
                 "id": id,
                 "folder": folder,
@@ -8837,11 +8840,11 @@ fn normalize_existing_path(path: &Path) -> String {
 /// repository took seconds on a busy host, and a connection's chat and
 /// transcript requests waited behind it. So the plain layouts xd makes, a
 /// checkout or a linked worktree, are read from their HEAD file; anything
-/// else is still left to Git.
-fn worktree_branch(workdir: &Path) -> Option<String> {
+/// else is still left to Git, once per repository within `listed`.
+fn worktree_branch(workdir: &Path, listed: &mut ListedWorktrees) -> Option<String> {
     // Git looks for the repository from the physical directory, as here.
     let workdir = fs::canonicalize(workdir).ok()?;
-    head_branch(&workdir).unwrap_or_else(|| listed_worktree_branch(&workdir))
+    head_branch(&workdir).unwrap_or_else(|| listed.branch(&workdir))
 }
 
 /// The branch HEAD names for the plain layouts, or `None` to ask Git.
@@ -8873,7 +8876,9 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
     // Of the layouts a `.git` file makes, only a linked worktree is read
     // here; a submodule or a separate Git directory is listed by Git in its
     // own way.
-    if !linked && !fs::metadata(root.join(".git")).ok()?.is_dir() {
+    // A `.git` that is a symbolic link to another checkout's is listed by
+    // Git at that checkout.
+    if !linked && !fs::symlink_metadata(root.join(".git")).ok()?.is_dir() {
         return None;
     }
     if linked {
@@ -9067,6 +9072,10 @@ fn plain_config(config: &str) -> bool {
         if setting.is_empty() {
             return true;
         }
+        // Git refuses a setting before any section.
+        if section.is_empty() {
+            return false;
+        }
         let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
         let key = key.trim();
         if setting.contains(['"', '\\'])
@@ -9127,22 +9136,40 @@ fn config_bool(line: &str, key: &str) -> Option<Option<bool>> {
     })
 }
 
-/// What `git worktree list` says is checked out in the worktree holding the
-/// physical directory `workdir`, for a HEAD only Git can read.
-fn listed_worktree_branch(workdir: &Path) -> Option<String> {
-    list_git_worktrees(workdir)
-        .ok()?
-        .into_iter()
-        .filter_map(|worktree| {
-            let path = fs::canonicalize(&worktree.path).ok()?;
-            workdir.starts_with(&path).then_some((path, worktree))
-        })
-        .max_by_key(|(path, _)| path.as_os_str().len())
-        .and_then(|(_, worktree)| {
-            worktree
-                .branch
-                .or_else(|| worktree.detached.then(|| "Detached HEAD".into()))
-        })
+/// The worktrees `git worktree list` named, by physical root, with what each
+/// has checked out. One listing answers every directory in its repository.
+#[derive(Default)]
+struct ListedWorktrees(Vec<(PathBuf, Option<String>)>);
+
+impl ListedWorktrees {
+    /// What Git says is checked out in the worktree holding the physical
+    /// directory `workdir`, asking Git only when no listing covers it yet.
+    fn branch(&mut self, workdir: &Path) -> Option<String> {
+        if let Some(branch) = self.covering(workdir) {
+            return branch;
+        }
+        match list_git_worktrees(workdir) {
+            Ok(worktrees) => self.0.extend(worktrees.into_iter().filter_map(|worktree| {
+                let path = fs::canonicalize(&worktree.path).ok()?;
+                let branch = worktree
+                    .branch
+                    .or_else(|| worktree.detached.then(|| "Detached HEAD".into()));
+                Some((path, branch))
+            })),
+            // Asking again in this read would fail the same way.
+            Err(_) => self.0.push((workdir.to_owned(), None)),
+        }
+        self.covering(workdir).flatten()
+    }
+
+    /// The listed worktree that most closely holds `workdir`.
+    fn covering(&self, workdir: &Path) -> Option<Option<String>> {
+        self.0
+            .iter()
+            .filter(|(root, _)| workdir.starts_with(root))
+            .max_by_key(|(root, _)| root.as_os_str().len())
+            .map(|(_, branch)| branch.clone())
+    }
 }
 
 struct BrowsableEntry {
@@ -10599,7 +10626,10 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
 
         // What Git lists for the worktree holding a directory.
-        let listed = |workdir: &Path| listed_worktree_branch(&fs::canonicalize(workdir).unwrap());
+        let listed =
+            |workdir: &Path| ListedWorktrees::default().branch(&fs::canonicalize(workdir).unwrap());
+        let worktree_branch =
+            |workdir: &Path| super::worktree_branch(workdir, &mut ListedWorktrees::default());
         for (workdir, expected) in [
             (repository.clone(), Some("main")),
             (repository.join("nested/deeper"), Some("main")),
@@ -10771,6 +10801,68 @@ mod tests {
             assert_eq!(listed(&refused), None, "{name}");
             assert_eq!(worktree_branch(&refused), None, "{name}");
         }
+
+        // A setting before any section, which Git refuses.
+        let sectionless = fixture.root.join("sectionless");
+        fs::create_dir_all(&sectionless).unwrap();
+        git(&sectionless, &["init", "-q", "-b", "main"]);
+        let config = fs::read_to_string(sectionless.join(".git/config")).unwrap();
+        fs::write(
+            sectionless.join(".git/config"),
+            format!("foo = bar\n{config}"),
+        )
+        .unwrap();
+        assert_eq!(listed(&sectionless), None);
+        assert_eq!(worktree_branch(&sectionless), None);
+
+        // A `.git` linked to another checkout's is listed at that checkout.
+        let borrowed = fixture.root.join("borrowed");
+        fs::create_dir_all(&borrowed).unwrap();
+        std::os::unix::fs::symlink(repository.join(".git"), borrowed.join(".git")).unwrap();
+        assert_eq!(worktree_branch(&borrowed), listed(&borrowed));
+        assert_eq!(head_branch(&fs::canonicalize(&borrowed).unwrap()), None);
+
+        // Worktrees left to Git share one listing of their repository.
+        let extended = fixture.root.join("extended");
+        let extended_linked = fixture.root.join("extended-linked");
+        fs::create_dir_all(&extended).unwrap();
+        git(&extended, &["init", "-q", "-b", "main"]);
+        git(
+            &extended,
+            &[
+                "-c",
+                "user.name=xd test",
+                "-c",
+                "user.email=xd@example.com",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "initial",
+            ],
+        );
+        git(&extended, &["config", "extensions.worktreeConfig", "true"]);
+        git(
+            &extended,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "side",
+                extended_linked.to_str().unwrap(),
+            ],
+        );
+        let mut shared = ListedWorktrees::default();
+        assert_eq!(
+            super::worktree_branch(&extended, &mut shared).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            shared.covering(&fs::canonicalize(&extended_linked).unwrap()),
+            Some(Some("side".into())),
+            "one listing answers the other worktree"
+        );
 
         // A bare setting spelled as Git also reads it.
         let numbered = fixture.root.join("numbered");
