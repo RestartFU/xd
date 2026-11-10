@@ -15645,18 +15645,17 @@ impl XdDesktop {
             .id("agents-tray-summary")
             .debug_selector(|| "agents-tray-summary".into())
             .w_full()
-            .h(px(28.0))
-            .px(px(10.0))
+            .h(px(38.0))
+            .px(px(14.0))
             .flex()
             .items_center()
-            .gap(px(9.0))
-            .rounded(px(6.0))
+            .gap(px(10.0))
             .cursor_pointer()
             .hover(|style| style.bg(rgb(colors.surface_high)))
             .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleAgentsTray), cx))
             .child(
                 div()
-                    .size(px(6.0))
+                    .size(px(7.0))
                     .flex_none()
                     .rounded_full()
                     .bg(rgb(if all_waiting {
@@ -15669,7 +15668,7 @@ impl XdDesktop {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(12.5))
+                    .text_size(px(13.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(colors.text))
                     .child(Self::tray_label(agents, workers)),
@@ -15679,7 +15678,7 @@ impl XdDesktop {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(12.5))
+                    .text_size(px(13.0))
                     .text_color(rgb(colors.faint))
                     .when(!open, |text| text.child(tasks)),
             )
@@ -15698,13 +15697,13 @@ impl XdDesktop {
             div()
                 .id(("agents-tray-worker", index))
                 .w_full()
-                .h(px(26.0))
-                .pl(px(25.0))
-                .pr(px(10.0))
+                .h(px(34.0))
+                // Lined up under the label, past the dot.
+                .pl(px(31.0))
+                .pr(px(14.0))
                 .flex()
                 .items_center()
-                .gap(px(10.0))
-                .rounded(px(6.0))
+                .gap(px(12.0))
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(colors.surface_high)))
                 .on_click(move |_, window, cx| {
@@ -15715,7 +15714,7 @@ impl XdDesktop {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.5))
+                        .text_size(px(13.0))
                         .text_color(rgb(colors.text))
                         .child(worker.title.clone()),
                 )
@@ -15745,13 +15744,13 @@ impl XdDesktop {
             div()
                 .id(("agents-tray-row", index))
                 .w_full()
-                .h(px(26.0))
-                .pl(px(25.0))
-                .pr(px(10.0))
+                .h(px(34.0))
+                // Lined up under the label, past the dot.
+                .pl(px(31.0))
+                .pr(px(14.0))
                 .flex()
                 .items_center()
-                .gap(px(10.0))
-                .rounded(px(6.0))
+                .gap(px(12.0))
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(colors.surface_high)))
                 .on_click(move |_, window, cx| {
@@ -15762,7 +15761,7 @@ impl XdDesktop {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.5))
+                        .text_size(px(13.0))
                         .text_color(rgb(colors.text))
                         .child(Self::tray_task(&agent.view)),
                 )
@@ -15779,20 +15778,28 @@ impl XdDesktop {
         });
         let rows = worker_rows.chain(rows).collect::<Vec<_>>();
         Some(
+            // A card of its own, like the composer under it, so it reads as
+            // part of the chat's controls rather than the transcript.
             div()
                 .w(px(736.0))
                 .max_w(relative(1.0))
                 .mb_2()
                 .flex()
                 .flex_col()
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .bg(rgb(colors.surface))
+                .overflow_hidden()
                 .child(summary)
                 .when(open, |tray| {
                     tray.child(
                         div()
                             .id("agents-tray-rows")
                             .w_full()
-                            .max_h(px(26.0 * 6.0))
+                            .max_h(px(34.0 * 6.0))
                             .overflow_y_scroll()
+                            .pb(px(4.0))
                             .flex()
                             .flex_col()
                             .children(rows),
