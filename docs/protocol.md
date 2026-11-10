@@ -654,14 +654,20 @@ stays, such as a file another device added meanwhile, or the files an image-only
 client never saw. A message sent apart from the draft, such as a shortcut,
 leaves the draft's attachments alone.
 
-Desktop clients may provide `worktree_name`, `worktree_backend`, and
-`worktree_model` when the chat is configured to create a new worktree. The
-name is used directly as the hint when supplied; otherwise the host asks a
-low-cost model to choose a short worktree name before the first turn: the
-`worktree_model` when given, or else the assistant's naming model from
-`chat-title-settings` (whether or not titles are enabled), once its CLI reports
-offering it. Without either, or for older or other clients that omit them, the
-host falls back to a prompt slug.
+When a chat's first message creates its worktree, the worktree's branch is
+named from the message's first line, so the send never waits on a model. Then,
+in the background, a low-cost model chooses a short name and the host renames
+the branch to `xd/<name>-<chat suffix>`. It does this only while the branch is
+still the one xd made. The model is `worktree_model` with `worktree_backend`
+when a client gives them and the CLI still offers that model. Otherwise it is
+the assistant's naming model from `chat-title-settings`, whether or not titles
+are enabled. An assistant that offers none of those keeps the name from the
+message. A client may give `worktree_name` to use that name instead, or
+`generate_worktree_name: false` to keep the name from the message. `new-chat`
+takes the same fields, with the first message in `prompt`, for a worktree it
+creates. A worktree that `new-chat` creates without `prompt` is named for the
+chat's placeholder title, and the chat's first message renames it in the same
+way.
 
 ### `set-draft`
 

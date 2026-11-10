@@ -1944,19 +1944,16 @@ impl Engine {
         if let Err(error) = store.await_chat_defaults(chat_id) {
             return error_reply(error);
         }
-        let mut request = request.clone();
-        if request.get("worktree_name").is_none() {
-            match store.prepare_worktree_name(&request) {
-                Ok(Some(spec)) => match worktree_name::generate(spec) {
-                    Ok(name) => request["worktree_name"] = Value::String(name),
-                    Err(error) => eprintln!("xd: AI worktree naming failed: {error}"),
-                },
-                Ok(None) => {}
-                Err(error) => eprintln!("xd: cannot prepare AI worktree naming: {error}"),
-            }
-        }
+        // Asked before the send, which can make the worktree, from the
+        // message's first line; the naming model renames it once the turn is
+        // under way.
+        let names_worktree = continues.is_none()
+            && store.send_names_worktree(request).unwrap_or_else(|error| {
+                eprintln!("xd: cannot prepare AI worktree naming: {error}");
+                false
+            });
         // Asked before the message is stored, since it depends on there being none.
-        let chat_title = store.prepare_chat_title(&request).unwrap_or_else(|error| {
+        let chat_title = store.prepare_chat_title(request).unwrap_or_else(|error| {
             eprintln!("xd: cannot prepare a chat title: {error}");
             None
         });
@@ -1968,13 +1965,13 @@ impl Engine {
         let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false) || was_paused;
         let prepared = match continues {
             Some(Continuation::AfterRestart(last_message)) => {
-                store.prepare_continuation(&request, last_message)
+                store.prepare_continuation(request, last_message)
             }
-            Some(Continuation::Resume) => store.prepare_resume(&request),
+            Some(Continuation::Resume) => store.prepare_resume(request),
             Some(Continuation::AfterLimit(last_message)) => {
-                store.prepare_after_limit(&request, last_message)
+                store.prepare_after_limit(request, last_message)
             }
-            None => store.prepare_send(&request),
+            None => store.prepare_send(request),
         };
         if resumes && prepared.is_ok() {
             self.events.publish(json!({"event": "tree"}));
@@ -2006,6 +2003,10 @@ impl Engine {
                 Ok(()) => {
                     if let Some(spec) = chat_title {
                         self.chat_titles.start(spec);
+                    }
+                    if names_worktree {
+                        self.worktree_names
+                            .start_after_send(chat_id.to_owned(), request.clone());
                     }
                     reply
                 }
