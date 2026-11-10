@@ -3068,6 +3068,10 @@ impl TurnRuntime {
 
     /// Tells whoever listens that a turn a message asked for could not start.
     pub(crate) fn report_start_failure(&self, chat_id: &str, error: &str, quiet: bool) {
+        // Told in the order turns ended, like a turn that ran: a turn still
+        // ending, which no longer marks the chat busy, is told of first.
+        let succession = self.succession(chat_id);
+        let _succession = succession.lock().unwrap_or_else(|error| error.into_inner());
         self.settled(SettledTurn {
             chat_id: chat_id.to_owned(),
             reply: String::new(),
@@ -3807,6 +3811,47 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         }
         panic!("timed out waiting for {what}");
+    }
+
+    #[test]
+    fn a_failed_start_is_told_of_after_the_turn_still_ending() {
+        let root =
+            std::env::temp_dir().join(format!("xd-start-failure-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let runtime = Arc::new(TurnRuntime::new(
+            store,
+            Arc::new(EventBus::default()),
+            Arc::new(SecretsStore::new(None)),
+        ));
+        let (told, heard) = std::sync::mpsc::channel();
+        let told = Mutex::new(told);
+        runtime.set_turn_settled_handler(Box::new(move |settled| {
+            let _ = told.lock().unwrap().send(settled.error.is_some());
+        }));
+        // A turn ending holds the chat's succession until it has been told of.
+        let succession = runtime.succession("chat");
+        let ending = succession.lock().unwrap();
+        let reporter = {
+            let runtime = runtime.clone();
+            thread::spawn(move || runtime.report_start_failure("chat", "no account", false))
+        };
+        assert!(heard.recv_timeout(Duration::from_millis(200)).is_err());
+        runtime.settled(SettledTurn {
+            chat_id: "chat".into(),
+            reply: "Done.".into(),
+            error: None,
+            waiting: false,
+            stopped: false,
+            quiet: false,
+        });
+        drop(ending);
+        reporter.join().unwrap();
+        assert!(!heard.recv().unwrap());
+        assert!(heard.recv().unwrap());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn contents(store: &StateStore, chat: &str) -> Vec<(String, String)> {
