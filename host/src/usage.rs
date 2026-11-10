@@ -1196,6 +1196,10 @@ struct CachedFile {
     /// Where reading left off, so a transcript that only grew is read on
     /// from there.
     resume: Resume,
+    /// Whether `records` came partly from reading on rather than all from
+    /// one read from the start. Such an entry is read in full again once
+    /// `FULL_REREAD_AFTER` has passed, even if the file has not changed.
+    read_on: bool,
 }
 
 /// A transcript read up to the end of its last complete line.
@@ -1367,6 +1371,7 @@ fn read_transcript_from(
         ),
         None => (0, Vec::new(), CodexScanState::default(), Instant::now()),
     };
+    let read_on = offset > 0;
     file.seek(SeekFrom::Start(offset)).ok()?;
     let reader = BufReader::with_capacity(256 * 1024, &file);
     // An unterminated last line is still being written; it counts for now
@@ -1430,6 +1435,7 @@ fn read_transcript_from(
             records,
             codex,
         },
+        read_on,
     })
 }
 
@@ -1523,7 +1529,11 @@ fn scan_source(
         let cached = cache
             .files
             .get(path)
-            .filter(|cached| cached.size == metadata.len() && cached.modified_ms == modified);
+            .filter(|cached| {
+                cached.size == metadata.len()
+                    && cached.modified_ms == modified
+                    && (!cached.read_on || cached.resume.full_read_at.elapsed() < FULL_REREAD_AFTER)
+            });
         if let Some(cached) = cached {
             scan.records.push(cached.records.clone());
             scan.malformed_records += cached.malformed;
@@ -3181,6 +3191,56 @@ mod tests {
             read_transcript_from("codex", &path, 0, Some(&stale)).unwrap()
         };
         same(&reread, &full(&edited_again));
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_transcript_read_on_is_read_in_full_again_even_once_it_stops_changing() {
+        let directory = temporary_directory("read-on-expiry");
+        let path = directory.join("rollout.jsonl");
+        let now = DateTime::from_timestamp_millis(now_ms()).unwrap();
+        let at = |seconds: i64| (now - chrono::Duration::seconds(seconds)).to_rfc3339();
+        let line = |value: Value| format!("{value}\n");
+        let start = format!(
+            "{}{}{}",
+            line(json!({"timestamp": at(60), "type": "session_meta", "payload": {"id": "thread"}})),
+            line(json!({"timestamp": at(60), "type": "turn_context", "payload": {"model": "gpt-5.5"}})),
+            line(token_count_line(&at(50), usage(100, 0, 10, 0), usage(100, 0, 10, 0))),
+        );
+        let scan = |cache: &mut ScanCache| -> Vec<UsageRecord> {
+            let scan = scan_source("codex", Some(&directory), 0, cache);
+            scan.records.iter().flat_map(|records| records.iter().cloned()).collect()
+        };
+        let mut cache = ScanCache::default();
+        fs::write(&path, &start).unwrap();
+        assert_eq!(scan(&mut cache).len(), 1);
+        // Grows, so it is read on from where it left off.
+        let grown = format!(
+            "{start}{}",
+            line(token_count_line(&at(40), usage(20, 0, 2, 0), usage(120, 0, 12, 0))),
+        );
+        fs::write(&path, &grown).unwrap();
+        assert_eq!(scan(&mut cache).len(), 2);
+        assert!(cache.files[&path].read_on);
+
+        // Rewritten past every byte the resume check compares, with its size
+        // and time kept, and the read-on entry old enough to expire.
+        let rewritten = grown.replacen("\"input_tokens\":100", "\"input_tokens\":900", 1);
+        assert_eq!(rewritten.len(), grown.len());
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, &rewritten).unwrap();
+        fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        let entry = cache.files.get_mut(&path).unwrap();
+        entry.resume.head.clear();
+        entry.resume.check.clear();
+        entry.resume.full_read_at = Instant::now()
+            .checked_sub(FULL_REREAD_AFTER + Duration::from_secs(1))
+            .unwrap();
+
+        let records = scan(&mut cache);
+        let (expected, _) = read_transcript("codex", &path, now_ms() - RETENTION_MS).unwrap();
+        assert_eq!(records, expected);
+        assert!(!cache.files[&path].read_on);
         fs::remove_dir_all(directory).ok();
     }
 
