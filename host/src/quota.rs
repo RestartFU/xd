@@ -134,10 +134,22 @@ impl Ledger {
     /// A chat started a turn on the account (`working`), or ended one,
     /// still `working` when background work of its own goes on.
     /// `tag` is the account and login the turn ran as.
+    #[cfg(test)]
     pub(crate) fn turn(&mut self, provider: &str, tag: &str, chat_id: &str, working: bool) {
+        self.turn_tagged(provider, tag, chat_id, working, Instant::now());
+    }
+
+    fn turn_tagged(
+        &mut self,
+        provider: &str,
+        tag: &str,
+        chat_id: &str,
+        working: bool,
+        at: Instant,
+    ) {
         let account = crate::accounts::tag_account(tag).to_owned();
         self.note_login(provider, tag, chat_id);
-        self.turn_at(provider, &account, chat_id, working, Instant::now());
+        self.turn_at(provider, &account, chat_id, working, at);
     }
 
     /// [`Self::note`] for a chat whose turn runs as the login in `tag`.
@@ -301,6 +313,10 @@ pub(crate) struct QuotaMeter {
     wake: Arc<Mutex<Sender<()>>>,
 }
 
+/// A turn's start or end as the runtime reported it: the chat, assistant,
+/// account and login, whether the chat still works, and when.
+type Activity = (String, String, String, bool, Instant);
+
 struct Pass {
     store: Arc<StateStore>,
     runtime: TurnRuntime,
@@ -308,6 +324,33 @@ struct Pass {
     reader: Reader,
     stopper: Stopper,
     ledger: Arc<Mutex<Ledger>>,
+    activity: Arc<Mutex<Vec<Activity>>>,
+}
+
+/// What the runtime calls as each turn starts and ends. The runtime calls it
+/// with its own locks held, a session's router among them, so it only queues
+/// the news under a lock held for nothing else, and wakes the meter, which
+/// takes it into the ledger itself.
+fn activity_handler(
+    activity: Arc<Mutex<Vec<Activity>>>,
+    wake: std::sync::Weak<Mutex<Sender<()>>>,
+) -> crate::runtime::ActivityHandler {
+    Box::new(move |chat_id, provider, tag, working| {
+        if let Ok(mut activity) = activity.lock() {
+            activity.push((
+                chat_id.to_owned(),
+                provider.to_owned(),
+                tag.to_owned(),
+                working,
+                Instant::now(),
+            ));
+        }
+        if let Some(wake) = wake.upgrade()
+            && let Ok(wake) = wake.lock()
+        {
+            let _ = wake.send(());
+        }
+    })
 }
 
 impl QuotaMeter {
@@ -320,22 +363,10 @@ impl QuotaMeter {
         stopper: Stopper,
     ) -> Self {
         let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let activity = Arc::new(Mutex::new(Vec::<Activity>::new()));
         let (wake, wakes) = mpsc::channel::<()>();
         let wake = Arc::new(Mutex::new(wake));
-        {
-            let ledger = ledger.clone();
-            let wake = Arc::downgrade(&wake);
-            runtime.set_activity_handler(Box::new(move |chat_id, provider, tag, working| {
-                if let Ok(mut ledger) = ledger.lock() {
-                    ledger.turn(provider, tag, chat_id, working);
-                }
-                if let Some(wake) = wake.upgrade()
-                    && let Ok(wake) = wake.lock()
-                {
-                    let _ = wake.send(());
-                }
-            }));
-        }
+        runtime.set_activity_handler(activity_handler(activity.clone(), Arc::downgrade(&wake)));
         let pass = Pass {
             store,
             runtime,
@@ -343,6 +374,7 @@ impl QuotaMeter {
             reader,
             stopper,
             ledger: ledger.clone(),
+            activity: activity.clone(),
         };
         let spawned = thread::Builder::new()
             .name("xd-chat-quotas".into())
@@ -378,6 +410,18 @@ impl QuotaMeter {
 }
 
 impl Pass {
+    /// Takes the turns the runtime reported into the ledger, in order.
+    fn take_activity(&self, ledger: &mut Ledger) {
+        let queued = self
+            .activity
+            .lock()
+            .map(|mut activity| std::mem::take(&mut *activity))
+            .unwrap_or_default();
+        for (chat_id, provider, tag, working, at) in queued {
+            ledger.turn_tagged(&provider, &tag, &chat_id, working, at);
+        }
+    }
+
     /// A reading of the account told nothing: it failed, or read another
     /// login. It is tried again after [`FAILED_READ_GAP`] while anything
     /// works there. With nothing at work any more, what the account uses until
@@ -393,6 +437,7 @@ impl Pass {
         let Ok(mut ledger) = self.ledger.lock() else {
             return;
         };
+        self.take_activity(&mut ledger);
         let Some(entry) = ledger.accounts.get_mut(key) else {
             return;
         };
@@ -437,6 +482,7 @@ impl Pass {
         // decide below whether a reading is theirs at all.
         let tagged = self.runtime.working_accounts();
         if let Ok(mut ledger) = self.ledger.lock() {
+            self.take_activity(&mut ledger);
             for (chat_id, provider, tag) in &tagged {
                 ledger.note_login(provider, tag, chat_id);
             }
@@ -559,9 +605,11 @@ impl Pass {
                 let Ok(mut ledger) = self.ledger.lock() else {
                     return next;
                 };
-                // Who works on the account now, read with the ledger held, so
-                // no turn's start or end lands between this and recording it.
+                // Who works on the account now, then every start and end
+                // reported up to here, so the ledger records no older picture
+                // than this. Nothing but this thread takes the ledger.
                 let working_now = self.working_on(&provider, &account);
+                self.take_activity(&mut ledger);
                 // A turn known to run as another login than the one read, such
                 // as after the user's own CLI signed in to someone else, is not
                 // measured by this reading, nor is anyone beside it: whether it
@@ -928,6 +976,27 @@ mod tests {
             events.clone(),
             Arc::new(crate::secrets::SecretsStore::new(None)),
         );
+        // The runtime's news is queued, and the meter woken, without the
+        // ledger, which the meter may hold while it waits on the runtime.
+        let activity = Arc::new(Mutex::new(Vec::new()));
+        let (sender, woken) = mpsc::channel();
+        let sender = Arc::new(Mutex::new(sender));
+        runtime.set_activity_handler(activity_handler(activity.clone(), Arc::downgrade(&sender)));
+        runtime.note_activity_for_test("chat", "claude", "second#login", true);
+        assert!(woken.try_recv().is_ok());
+        let queued = activity.lock().unwrap().clone();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(
+            (
+                &queued[0].0[..],
+                &queued[0].1[..],
+                &queued[0].2[..],
+                queued[0].3
+            ),
+            ("chat", "claude", "second#login", true)
+        );
+
+        // Dropping the meter ends its thread, which lets go of the runtime.
         let meter = QuotaMeter::start(
             store,
             runtime.clone(),
@@ -935,15 +1004,8 @@ mod tests {
             Box::new(|_, _| None),
             Box::new(|_| {}),
         );
-        runtime.note_activity_for_test("chat", "claude", "second#login", true);
-        let ledger = meter.ledger();
-        let ledger = ledger.lock().unwrap();
-        // Filed by account; which login a reading was of is checked apart.
-        let entry = &ledger.accounts[&("claude".to_owned(), "second".to_owned())];
-        assert!(entry.sharers.contains("chat"));
-        drop(ledger);
+        let _ = meter.ledger();
         meter.wake();
-        // Dropping the meter ends its thread, which lets go of the runtime.
         let held = runtime.handles();
         drop(meter);
         let deadline = Instant::now() + Duration::from_secs(5);
