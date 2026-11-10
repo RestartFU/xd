@@ -193,6 +193,15 @@ class RepliesTest {
     }
 
     @Test
+    fun aSessionNamesTheSessionWhoseAgentStartedIt() {
+        val reply = WireJson.parseToJsonElement(
+            """{"ok":true,"child_chats":true,"folders":[],"chats":[],"sessions":[{"id":"lead","folder":"p","title":"L","chats":[]},{"id":"w","folder":"p","title":"W","chats":[],"parent":"lead"}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertNull(reply.sessions.first().parent)
+        assertEquals("lead", reply.sessions.last().parent)
+    }
+
+    @Test
     fun pauseMembersAreOptional() {
         val older = WireJson.parseToJsonElement(
             """{"ok":true,"folders":[],"chats":[{"id":"c","folder":"p","title":"T","backend":"codex","working":true}]}""",

@@ -11,7 +11,11 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use xd_desktop::markdown::{self, CodeKind, CodeSpan};
 
-use crate::{MONO, UI_FONT, selection::TextSelection};
+use crate::{
+    MONO, UI_FONT,
+    selection::TextSelection,
+    undo::{EditHistory, EditKind, Snapshot},
+};
 use xd_desktop::theme::{ThemeColors, ThemePreset};
 
 actions!(
@@ -42,6 +46,8 @@ actions!(
         SubmitNow,
         Save,
         Tab,
+        Undo,
+        Redo,
     ]
 );
 
@@ -85,6 +91,10 @@ pub struct FileEditor {
     /// space its whole column has, which is wider than that box.
     wrap_width: Option<Pixels>,
     colors: ThemeColors,
+    history: EditHistory,
+    /// The state before a delete key widened the selection to what it
+    /// deletes, and how that delete groups with the ones around it.
+    pending_edit: Option<(Snapshot, EditKind)>,
 }
 
 #[derive(Clone)]
@@ -127,6 +137,8 @@ impl FileEditor {
             scroll_to_caret: false,
             wrap_width: None,
             colors: ThemePreset::Dark.colors(),
+            history: EditHistory::default(),
+            pending_edit: None,
         }
     }
 
@@ -185,6 +197,8 @@ impl FileEditor {
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_to_caret = true;
+        self.history.clear();
+        self.pending_edit = None;
         cx.notify();
     }
 
@@ -213,6 +227,7 @@ impl FileEditor {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_delete(EditKind::Delete);
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
         }
@@ -220,6 +235,7 @@ impl FileEditor {
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_delete(EditKind::Delete);
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
         }
@@ -227,6 +243,7 @@ impl FileEditor {
     }
 
     fn delete_word(&mut self, _: &DeleteWord, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_delete(EditKind::Other);
         if self.selected_range.is_empty() {
             let offset = previous_word_boundary(&self.content, self.cursor_offset());
             self.select_to(offset, cx);
@@ -240,11 +257,77 @@ impl FileEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.begin_delete(EditKind::Other);
         if self.selected_range.is_empty() {
             let offset = next_word_boundary(&self.content, self.cursor_offset());
             self.select_to(offset, cx);
         }
         self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            text: self.content.clone(),
+            selection: self.selected_range.clone(),
+            reversed: self.selection_reversed,
+        }
+    }
+
+    /// Remembers the caret before a delete key selects what it deletes, so
+    /// undoing puts the caret back rather than selecting deleted text.
+    fn begin_delete(&mut self, kind: EditKind) {
+        let kind = if self.selected_range.is_empty() {
+            kind
+        } else {
+            EditKind::Other
+        };
+        self.pending_edit = Some((self.snapshot(), kind));
+    }
+
+    /// Notes the edit about to replace `range` with `text`, unless it changes
+    /// nothing or finishes an input-method composition already noted.
+    fn record_edit(&mut self, range: &Range<usize>, text: &str) {
+        let pending = self.pending_edit.take();
+        if range.is_empty() && text.is_empty() {
+            return;
+        }
+        if self.marked_range.is_some() {
+            self.history.break_group();
+            return;
+        }
+        let (before, kind) = pending.unwrap_or_else(|| {
+            let typed =
+                range.is_empty() && !text.contains('\n') && text.graphemes(true).count() == 1;
+            let kind = if typed {
+                EditKind::Insert
+            } else {
+                EditKind::Other
+            };
+            (self.snapshot(), kind)
+        });
+        self.history.record(before, kind, range.clone(), text);
+    }
+
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(snapshot) = self.history.undo(self.snapshot()) {
+            self.restore(snapshot, cx);
+        }
+    }
+
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(snapshot) = self.history.redo(self.snapshot()) {
+            self.restore(snapshot, cx);
+        }
+    }
+
+    fn restore(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        self.content = snapshot.text;
+        self.refresh_document();
+        self.selected_range = snapshot.selection;
+        self.selection_reversed = snapshot.reversed;
+        self.marked_range = None;
+        self.pending_edit = None;
+        self.changed(cx);
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -311,6 +394,7 @@ impl FileEditor {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
         cx.notify();
@@ -401,6 +485,8 @@ impl FileEditor {
         match content {
             Some(ClipboardContent::Text(text)) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                // A paste is a step of its own, even of a single character.
+                self.pending_edit = Some((self.snapshot(), EditKind::Other));
                 self.replace_text_in_range(None, &text, window, cx);
             }
             Some(ClipboardContent::Image(format, bytes)) => {
@@ -479,6 +565,9 @@ impl FileEditor {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        // Typing after the caret moves is a step of its own, even back where
+        // the last step left off.
+        self.history.break_group();
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.scroll_to_caret = true;
@@ -486,6 +575,10 @@ impl FileEditor {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        // A delete key selects what it deletes, as part of its own step.
+        if self.pending_edit.is_none() {
+            self.history.break_group();
+        }
         self.scroll_to_caret = true;
         if self.selection_reversed {
             self.selected_range.start = offset;
@@ -646,6 +739,7 @@ impl EntityInputHandler for FileEditor {
             .map(|range| self.range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        self.record_edit(&range, text);
         self.content =
             (self.content[..range.start].to_owned() + text + &self.content[range.end..]).into();
         self.refresh_document();
@@ -669,6 +763,12 @@ impl EntityInputHandler for FileEditor {
             .map(|range| self.range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        // A composition is one step, noted when it starts.
+        if self.marked_range.is_none() {
+            self.pending_edit = None;
+            self.history
+                .record(self.snapshot(), EditKind::Other, range.clone(), text);
+        }
         self.content =
             (self.content[..range.start].to_owned() + text + &self.content[range.end..]).into();
         self.refresh_document();
@@ -1011,6 +1111,8 @@ impl Render for FileEditor {
             .on_action(cx.listener(Self::submit_now))
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::tab))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1467,5 +1569,91 @@ mod tests {
             content,
             Some(ClipboardContent::Image(ImageFormat::Png, bytes)) if bytes == vec![1, 2, 3]
         ));
+    }
+
+    fn editor_text(editor: &Entity<FileEditor>, cx: &mut gpui::VisualTestContext) -> String {
+        editor.read_with(cx, |editor, _| editor.content.to_string())
+    }
+
+    fn undo_editor(
+        cx: &mut gpui::TestAppContext,
+        build: impl FnOnce(&mut Context<FileEditor>) -> FileEditor + 'static,
+    ) -> (Entity<FileEditor>, &mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            cx.bind_keys(crate::undo_key_bindings());
+            cx.bind_keys([
+                gpui::KeyBinding::new("backspace", Backspace, Some("FileEditor")),
+                gpui::KeyBinding::new("backspace", Backspace, Some("MessageEditor")),
+                gpui::KeyBinding::new("left", Left, Some("MessageEditor")),
+                gpui::KeyBinding::new("right", Right, Some("MessageEditor")),
+            ]);
+        });
+        let (editor, cx) = cx.add_window_view(|_, cx| build(cx));
+        editor.update_in(cx, |editor, window, cx| {
+            window.focus(&editor.focus_handle(cx));
+        });
+        cx.run_until_parked();
+        (editor, cx)
+    }
+
+    #[gpui::test]
+    fn ctrl_z_undoes_typing_in_the_message_box(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = undo_editor(cx, FileEditor::composer);
+        cx.simulate_input("hello world");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(editor_text(&editor, cx), "hello");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(editor_text(&editor, cx), "");
+        cx.simulate_keystrokes("ctrl-shift-z");
+        assert_eq!(editor_text(&editor, cx), "hello");
+        cx.simulate_keystrokes("ctrl-y");
+        assert_eq!(editor_text(&editor, cx), "hello world");
+    }
+
+    #[gpui::test]
+    fn ctrl_z_brings_back_deleted_text_with_the_caret_where_it_was(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = undo_editor(cx, FileEditor::new);
+        cx.simulate_input("abc");
+        cx.simulate_keystrokes("ctrl-z");
+        cx.simulate_keystrokes("ctrl-shift-z");
+        cx.simulate_keystrokes("backspace backspace");
+        assert_eq!(editor_text(&editor, cx), "a");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(editor_text(&editor, cx), "abc");
+        editor.read_with(cx, |editor, _| assert_eq!(editor.selected_range, 3..3));
+    }
+
+    #[gpui::test]
+    fn loading_new_text_forgets_what_could_be_undone(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = undo_editor(cx, FileEditor::composer);
+        cx.simulate_input("typed in another chat");
+        editor.update(cx, |editor, cx| editor.set_text("", cx));
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(editor_text(&editor, cx), "");
+    }
+
+    #[gpui::test]
+    fn typing_after_moving_the_caret_away_and_back_is_a_new_step(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = undo_editor(cx, FileEditor::composer);
+        cx.simulate_input("abc");
+        cx.simulate_keystrokes("left right");
+        cx.simulate_input("d");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(editor_text(&editor, cx), "abc");
+    }
+
+    #[gpui::test]
+    fn a_one_character_paste_is_a_step_of_its_own(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = undo_editor(cx, FileEditor::composer);
+        cx.simulate_input("ab");
+        editor.update_in(cx, |editor, window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("X".into()));
+            editor.paste(&Paste, window, cx);
+        });
+        cx.simulate_input("c");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(editor_text(&editor, cx), "abX");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(editor_text(&editor, cx), "ab");
     }
 }

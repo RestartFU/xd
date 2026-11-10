@@ -36,6 +36,11 @@ public data class ChatSummaryReply(
     /** Linked pull requests, oldest first, on hosts with `linked_pull_requests`. */
     @SerialName("pull_requests")
     val pullRequests: List<LinkedPullRequestReply> = emptyList(),
+    /** The chat whose agent started this one through xd's start_agent tool. */
+    val parent: String? = null,
+    /** Its last reply ends on a question for whoever reads it. */
+    @SerialName("question_waiting")
+    val questionWaiting: Boolean = false,
 )
 
 /** One pull request linked to a chat; [state] is absent until the host has asked GitHub. */
@@ -72,6 +77,8 @@ public data class SessionSummaryReply(
     /** Seconds since the epoch when the session was settled; absent while it is active. */
     @SerialName("settled_at") val settledAt: Long? = null,
     @SerialName("auto_settle_disabled") val autoSettleDisabled: Boolean = false,
+    /** The session whose agent started this one's through xd's start_agent tool. */
+    val parent: String? = null,
 )
 
 @Serializable

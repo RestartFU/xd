@@ -23,8 +23,9 @@
 
 xd doesn't ship a model or an agent. It wraps the CLIs, logins, and configuration
 you already have in one persistent workspace. A single daemon owns every session,
-so work keeps running when you close the window, and you can reach it from another
-computer or your Android phone.
+and you can reach it from another computer or your Android phone. Closing xd
+stops the daemon it started, along with its work; run the daemon yourself to keep
+work going while the app is closed.
 
 ## Features
 
@@ -53,11 +54,11 @@ computer or your Android phone.
   sidebar, and a chat can link up to 32 pull requests: its branch's PR, ones
   opened from xd or by the agent, and any you add from the session header.
 - **Settle finished sessions** with one click. Idle and merged sessions settle by
-  themselves, even while the app is closed.
+  themselves.
 
 ### Anywhere, on your terms
 
-- **One persistent daemon** owns local and remote sessions; clients come and go.
+- **One daemon** owns local and remote sessions; clients come and go.
 - **Direct remote connections** over pinned TLS, with expiring pairing codes and
   revocable devices. No relay, no SSH.
 - **An Android app** with the same projects, chats, approvals, terminal, and usage.

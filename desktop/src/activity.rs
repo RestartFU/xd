@@ -78,6 +78,9 @@ pub struct SubagentView {
     pub started_at: Option<u64>,
     pub latest: String,
     pub summary: String,
+    /// The xd chat this agent is, for one an agent started with xd's
+    /// start_agent tool. Empty for an agent inside its lead's own process.
+    pub chat: String,
 }
 
 /// Steps the host keeps per agent; a longer run keeps only its newest.
@@ -106,6 +109,45 @@ impl SubagentState {
             Self::Stopped => "Stopped",
         }
     }
+}
+
+/// How the turn an agent chat reported on ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentOutcome {
+    Done,
+    Failed,
+    Waiting,
+}
+
+/// The message xd sends a chat when an agent it started ends a turn:
+/// `[xd] Agent "Title" (chat-id) is done with its turn.` and the reply after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentReport {
+    pub chat: String,
+    pub title: String,
+    pub outcome: AgentOutcome,
+}
+
+/// The report `text` is, when xd sent it for one of the chat's agents.
+pub fn agent_report(text: &str) -> Option<AgentReport> {
+    let first = text.lines().next()?.strip_prefix("[xd] ")?;
+    let (head, ending) = first.rsplit_once(") is ")?;
+    let outcome = match ending {
+        "done with its turn." => AgentOutcome::Done,
+        "stopped with an error." => AgentOutcome::Failed,
+        "waiting for an answer." => AgentOutcome::Waiting,
+        _ => return None,
+    };
+    let (name, chat) = head.rsplit_once(" (")?;
+    let title = match name {
+        "An agent" => String::new(),
+        name => name.strip_prefix("Agent \"")?.strip_suffix('"')?.to_owned(),
+    };
+    (!chat.is_empty() && !chat.contains(' ')).then(|| AgentReport {
+        chat: chat.to_owned(),
+        title,
+        outcome,
+    })
 }
 
 impl SubagentView {
@@ -174,6 +216,7 @@ impl SubagentView {
             started_at: record.get("started_at").and_then(serde_json::Value::as_u64),
             latest: text("latest"),
             summary: text("summary"),
+            chat: text("chat"),
         })
     }
 
@@ -916,5 +959,33 @@ mod tests {
             assert_eq!(card.status, "Failed");
         }
         assert_eq!(ActivityCard::parse("read file").status, "Done");
+    }
+
+    #[test]
+    fn an_agent_report_names_its_chat_title_and_outcome() {
+        assert_eq!(
+            agent_report(
+                "[xd] Agent \"Fix (the) tests\" (c-1) is done with its turn.\n\nIts reply:\n\nOk."
+            ),
+            Some(AgentReport {
+                chat: "c-1".into(),
+                title: "Fix (the) tests".into(),
+                outcome: AgentOutcome::Done,
+            })
+        );
+        assert_eq!(
+            agent_report("[xd] An agent (c-2) is stopped with an error.")
+                .map(|report| (report.title, report.outcome)),
+            Some((String::new(), AgentOutcome::Failed))
+        );
+        assert_eq!(
+            agent_report("[xd] Agent \"Q\" (c-3) is waiting for an answer.").map(|r| r.outcome),
+            Some(AgentOutcome::Waiting)
+        );
+        assert_eq!(
+            agent_report("Agent \"Q\" (c-3) is done with its turn."),
+            None
+        );
+        assert_eq!(agent_report("[xd] something else"), None);
     }
 }

@@ -332,12 +332,13 @@ mod tests {
         fs::remove_dir_all(directory(&key)).unwrap();
         // Simulate an unavailable destination, then recover and retry with only new text.
         fs::write(directory(&key), b"blocked").unwrap();
-        save(
+        // The worker may fail the write before this call returns, and then
+        // this call reports it; the read below fails either way.
+        let _ = save(
             key.clone(),
             json!({"text":"first","has_attachments":true}),
             Some(json!([{"name":"retry.txt","mime":"text/plain","data":"bm90ZXM="}])),
-        )
-        .unwrap();
+        );
         assert!(read(key.clone()).is_err());
         fs::remove_file(directory(&key)).unwrap();
         save(

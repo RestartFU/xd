@@ -653,6 +653,8 @@ impl HostHandle {
                 .arg("stdio")
                 .arg("--data")
                 .arg(&data)
+                // A host this starts stops once the app closes.
+                .env("XD_APP_BRIDGE", "1")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());

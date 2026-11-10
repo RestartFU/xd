@@ -149,7 +149,8 @@ internal class TreeStore(
                             WorkspaceSession(it.id, it.folder, it.title, it.chats,
                                 it.branch, it.working, it.terminalChat,
                                 settledAt = it.settledAt,
-                                autoSettleDisabled = it.autoSettleDisabled)
+                                autoSettleDisabled = it.autoSettleDisabled,
+                                parentId = it.parent)
                         },
                         settlement = reply.settlement,
                         folderGroups = reply.folderGroups,
@@ -194,6 +195,8 @@ internal class TreeStore(
                                 pullRequests = it.pullRequests.map { pull ->
                                     LinkedPullRequest(pull.url, pull.state?.takeIf(String::isNotBlank))
                                 },
+                                parentId = it.parent,
+                                questionWaiting = it.questionWaiting,
                             )
                         },
                     )

@@ -358,6 +358,42 @@ pub enum SendDisposition {
     Start { reply: Value, turn: TurnSpec },
 }
 
+/// The chat an agent works in, as [`StateStore::agent_origin`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentOrigin {
+    pub folder: String,
+    pub backend: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub access: Option<String>,
+    pub session: String,
+    pub parent: Option<String>,
+}
+
+/// The card [`StateStore::write_agent_record`] wrote, for telling clients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRecord {
+    pub parent: String,
+    pub key: String,
+    pub message_id: i64,
+    pub text: String,
+    /// It is new, rather than rewritten in place.
+    pub created: bool,
+}
+
+/// A chat another chat's agent started, as [`StateStore::child_agents`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildAgent {
+    pub id: String,
+    pub title: String,
+    pub backend: String,
+    pub model: Option<String>,
+    pub working: bool,
+    pub paused: bool,
+    pub reply: Option<String>,
+    pub error: Option<String>,
+}
+
 pub struct TurnFinish {
     pub last_message_id: i64,
     pub next: Option<TurnSpec>,
@@ -782,7 +818,8 @@ impl StateStore {
         let mut statement = database.prepare(
             "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir, session_mode, workspace_session_id, \
              (SELECT CASE WHEN role = 'assistant' THEN content END FROM messages \
-              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1), paused FROM chats \
+              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1), paused, \
+             parent_chat_id FROM chats \
              ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
         let stored_chats = statement
@@ -799,10 +836,18 @@ impl StateStore {
                     row.get::<_, String>(8)?,
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, bool>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             })?
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
         drop(statement);
+        // Each chat's session, so a chat started by another names the session
+        // its sidebar row nests under.
+        let chat_sessions = stored_chats
+            .iter()
+            .filter(|chat| visible_ids.contains(chat.1.as_str()))
+            .map(|chat| (chat.0.clone(), chat.8.clone()))
+            .collect::<HashMap<_, _>>();
 
         let mut statement = database.prepare(
             "SELECT id, CASE WHEN settled_override = 'settled' \
@@ -875,7 +920,20 @@ impl StateStore {
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
         for (
-            (id, folder, title, backend, working, _, _, session_mode, session, last_reply, paused),
+            (
+                id,
+                folder,
+                title,
+                backend,
+                working,
+                _,
+                _,
+                session_mode,
+                session,
+                last_reply,
+                paused,
+                parent,
+            ),
             workdir,
         ) in visible_chats
         {
@@ -917,6 +975,18 @@ impl StateStore {
             if paused {
                 chat["paused"] = Value::Bool(true);
             }
+            // Only a parent still shown, so a chat whose parent was deleted
+            // stands on its own again.
+            let parent_session = parent
+                .as_ref()
+                .and_then(|parent| Some((parent, chat_sessions.get(parent)?)));
+            if let Some((parent, _)) = parent_session {
+                chat["parent"] = Value::String(parent.clone());
+            }
+            let parent_session = parent_session
+                .map(|(_, parent_session)| parent_session)
+                .filter(|parent_session| **parent_session != session)
+                .cloned();
             if let Some(links) = linked_pull_requests.remove(&id) {
                 chat["pull_requests"] = Value::Array(links);
             }
@@ -936,6 +1006,11 @@ impl StateStore {
                 if working {
                     group["working"] = json!(true);
                 }
+                if group.get("parent").is_none()
+                    && let Some(parent_session) = parent_session
+                {
+                    group["parent"] = Value::String(parent_session);
+                }
             } else {
                 let session_title = session_titles.remove(&session).unwrap_or_default();
                 let mut group = json!({"id": session, "folder": folder, "title": session_title,
@@ -948,6 +1023,9 @@ impl StateStore {
                 }
                 if auto_settle_disabled {
                     group["auto_settle_disabled"] = json!(true);
+                }
+                if let Some(parent_session) = parent_session {
+                    group["parent"] = Value::String(parent_session);
                 }
                 sessions.push(group);
             }
@@ -968,6 +1046,9 @@ impl StateStore {
             // The host keeps folders of projects; older hosts ignore `group`
             // and `owner` and would make a project instead.
             "folder_groups": true,
+            // Chats and sessions name the chat and session whose agent
+            // started them; older hosts never start one.
+            "child_chats": true,
         }))
     }
 
@@ -1923,7 +2004,11 @@ impl StateStore {
             }
             None => {}
         }
-        if working {
+        // The host's own messages, such as an agent's report to the chat
+        // that started it, wait in a paused chat's queue instead of resuming it.
+        let keep_paused =
+            paused && request.get("keep_paused").and_then(Value::as_bool) == Some(true);
+        if working || keep_paused {
             let stored = transaction.query_row(
                 "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
                 [chat_id],
@@ -1935,9 +2020,10 @@ impl StateStore {
             // Writing to a chat still stopping for a pause picks it back up,
             // so the message runs once the stopped turn ends.
             transaction.execute(
-                "UPDATE chats SET queued = ?, paused = 0, updated_at = ? WHERE id = ?",
+                "UPDATE chats SET queued = ?, paused = ? AND paused, updated_at = ? WHERE id = ?",
                 params![
                     serde_json::to_string(&queue).unwrap(),
+                    keep_paused,
                     now_seconds(),
                     chat_id
                 ],
@@ -2012,60 +2098,114 @@ impl StateStore {
         })
     }
 
-    pub(crate) fn prepare_worktree_name(
-        &self,
-        request: &Value,
-    ) -> Result<Option<WorktreeNameSpec>, StorageError> {
-        if request
-            .get("generate_worktree_name")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
-            return Ok(None);
+    /// Whether this send is a chat's first message, which the naming model
+    /// then names the chat's worktree for: one the send makes, or one made
+    /// before there was a message. Asked before the send, which makes the
+    /// worktree; the name itself comes afterwards, in the background, so the
+    /// send never waits on a model. Not when the client gives `worktree_name`
+    /// itself or turns the naming off with `generate_worktree_name: false`.
+    pub(crate) fn send_names_worktree(&self, request: &Value) -> Result<bool, StorageError> {
+        if !generates_worktree_name(request) || request.get("worktree_name").is_some() {
+            return Ok(false);
         }
         let chat_id = required_string(
             request,
             "chat",
             "A message needs a chat and something to say.",
         )?;
-        let prompt = optional_string(request, "text")?.unwrap_or("");
-        if prompt.is_empty() {
-            return Ok(None);
+        if optional_string(request, "text")?
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            return Ok(false);
         }
-        let (chat_backend, chat_model, eligible) = {
+        let (new_worktree, working, has_messages, workdir) = {
             let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-            let (backend, model, new_worktree, working, has_messages) = database
+            database
                 .query_row(
-                    "SELECT backend, model, new_worktree, host_working, \
-                     EXISTS (SELECT 1 FROM messages WHERE chat_id = chats.id AND role = 'user') \
-                     FROM chats WHERE id = ?",
+                    "SELECT new_worktree, host_working, \
+                     EXISTS (SELECT 1 FROM messages WHERE chat_id = chats.id AND role = 'user'), \
+                     workdir FROM chats WHERE id = ?",
                     [chat_id],
                     |row| {
                         Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, bool>(0)?,
+                            row.get::<_, bool>(1)?,
                             row.get::<_, bool>(2)?,
-                            row.get::<_, bool>(3)?,
-                            row.get::<_, bool>(4)?,
+                            row.get::<_, Option<String>>(3)?,
                         ))
                     },
                 )
                 .optional()?
-                .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
-            (backend, model, new_worktree && !working && !has_messages)
+                .ok_or_else(|| StorageError::NoChat(chat_id.into()))?
         };
-        if !eligible {
+        if working || has_messages {
+            return Ok(false);
+        }
+        if new_worktree {
+            return Ok(true);
+        }
+        // A worktree made with a chat that had no message yet, as the mobile
+        // app makes them, is named for the chat's placeholder title. Its first
+        // message names it instead.
+        let Some(workdir) = workdir else {
+            return Ok(false);
+        };
+        let workdir = normalize_existing_path(Path::new(&workdir));
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let recorded = database
+            .query_row(
+                "SELECT branch FROM generated_worktrees WHERE path = ?",
+                [&workdir],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(recorded.is_some_and(|branch| {
+            ["New Chat", "New Session"].iter().any(|title| {
+                branch == format!("xd/{}-{}", worktree_slug(Some(title)), glib_hash(chat_id))
+            })
+        }))
+    }
+
+    /// How to name the worktree a chat's first message made, once
+    /// [`Self::send_names_worktree`] said the send would make one. Discovery
+    /// can take seconds, so this is not for the request's own thread.
+    pub(crate) fn prepare_sent_worktree_name(
+        &self,
+        request: &Value,
+    ) -> Result<Option<WorktreeNameSpec>, StorageError> {
+        let chat_id = required_string(
+            request,
+            "chat",
+            "A message needs a chat and something to say.",
+        )?;
+        let prompt = optional_string(request, "text")?.unwrap_or("");
+        if prompt.trim().is_empty() {
             return Ok(None);
         }
-        self.worktree_name_spec(&chat_backend, chat_model, prompt, request)
+        let (backend, model) = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            database
+                .query_row(
+                    "SELECT backend, model FROM chats WHERE id = ?",
+                    [chat_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| StorageError::NoChat(chat_id.into()))?
+        };
+        self.worktree_name_spec(&backend, model, prompt, request)
     }
 
     /// How to name the worktree made with a new chat, from the chat's first
     /// message in the request that created it. The worktree already has a
     /// name from that message's first line; this one replaces it in the
-    /// background. As for a message that makes a worktree, the client asks
-    /// for it with `generate_worktree_name`. Discovery can take seconds, so
-    /// this is not for the request's own thread.
+    /// background unless the client turns it off with
+    /// `generate_worktree_name: false`, as for a message that makes a
+    /// worktree. Discovery can take seconds, so this is not for the request's
+    /// own thread.
     pub(crate) fn prepare_new_chat_worktree_name(
         &self,
         request: &Value,
@@ -2075,12 +2215,7 @@ impl StateStore {
             .and_then(|worktree| worktree.get("kind"))
             .and_then(Value::as_str)
             .is_some_and(|kind| matches!(kind, "new" | "branch" | "pull-request"));
-        if !makes_worktree
-            || request.get("session").is_some()
-            || request
-                .get("generate_worktree_name")
-                .and_then(Value::as_bool)
-                != Some(true)
+        if !makes_worktree || request.get("session").is_some() || !generates_worktree_name(request)
         {
             return Ok(None);
         }
@@ -2231,26 +2366,28 @@ impl StateStore {
         request: &Value,
     ) -> Result<Option<WorktreeNameSpec>, StorageError> {
         validate_backend(chat_backend)?;
-        let requested_backend = optional_string(request, "worktree_backend")?;
-        let backend = requested_backend.unwrap_or(chat_backend).to_owned();
-        validate_backend(&backend)?;
-        // A name is a few words, so it goes to the low-cost model that titles
-        // chats unless the user chose a Git writer model. When the CLI offers
-        // none of those, the worktree is named from the message instead of by
-        // a costlier model. Only an assistant without such models uses the
-        // chat's own.
-        let model = match optional_string(request, "worktree_model")? {
-            Some(model) => {
-                validate_model(&backend, model)?;
-                // A choice saved before the CLI dropped the model would only
-                // fail, after holding up the send.
+        // A Git writer the host no longer runs gives way to the chat's own
+        // assistant, as a model it no longer offers gives way to the default
+        // below: a choice saved long ago should not stop the naming.
+        let backend = optional_string(request, "worktree_backend")?
+            .filter(|backend| validate_backend(backend).is_ok())
+            .unwrap_or(chat_backend)
+            .to_owned();
+        let chosen = optional_string(request, "worktree_model")?.filter(|model| {
+            validate_model(&backend, model).is_ok() && {
                 let offered = offered_models(&backend);
-                if !offered.is_empty() && !offered.iter().any(|known| known.id == model) {
-                    return Ok(None);
-                }
-                model.to_owned()
+                offered.is_empty() || offered.iter().any(|known| known.id == *model)
             }
-            None => match self.offered_side_model(&backend)? {
+        });
+        // A name is a few words, so it goes to the low-cost model that titles
+        // chats unless the user chose a Git writer model. As for titles, that
+        // model is tried before discovery confirms it, since nothing waits on
+        // the name. When the CLI offers none of those, the worktree keeps the
+        // name from the message rather than going to a costlier model. Only
+        // an assistant without such models uses the chat's own.
+        let model = match chosen {
+            Some(model) => model.to_owned(),
+            None => match chat_title_model(&self.database, &backend)? {
                 Some(model) => model,
                 None if !chat_title_models(&backend).is_empty() => return Ok(None),
                 None => {
@@ -2269,16 +2406,6 @@ impl StateStore {
             workdir: self.scratch_workdir()?,
             model,
         }))
-    }
-
-    /// The low-cost model for a run the user waits on, only once the CLI is
-    /// known to offer it: titles may guess while discovery is pending, since
-    /// they never hold anything up, but a guess here could delay a send.
-    /// Discovery can take seconds, so never call this with the database locked.
-    fn offered_side_model(&self, backend: &str) -> Result<Option<String>, StorageError> {
-        let offered = offered_models(backend);
-        Ok(chat_title_model(&self.database, backend)?
-            .filter(|model| offered.iter().any(|known| known.id == *model)))
     }
 
     /// An empty directory for short runs, so they load no project instructions:
@@ -2973,6 +3100,241 @@ impl StateStore {
             params![chat_id, background],
         )?;
         Ok(changed == 1)
+    }
+
+    /// What a chat's agent needs to start another: where it works and on what.
+    pub fn agent_origin(&self, chat_id: &str) -> Result<AgentOrigin, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database
+            .query_row(
+                "SELECT folder_id, backend, model, effort, access, workspace_session_id, \
+                 parent_chat_id FROM chats WHERE id = ?",
+                [chat_id],
+                |row| {
+                    Ok(AgentOrigin {
+                        folder: row.get(0)?,
+                        backend: row.get(1)?,
+                        model: row.get(2)?,
+                        effort: row.get(3)?,
+                        access: row.get(4)?,
+                        session: row.get(5)?,
+                        parent: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))
+    }
+
+    /// The chat that started `chat_id`, and whether `chat_id` reports its
+    /// finished turns back to it. `None` for a chat nobody started.
+    pub fn chat_parent(&self, chat_id: &str) -> Result<Option<(String, bool)>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database
+            .query_row(
+                "SELECT parent_chat_id, report_to_parent FROM chats WHERE id = ?",
+                [chat_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()?
+            .and_then(|(parent, reports)| Some((parent?, reports))))
+    }
+
+    /// Writes the card in its parent's transcript that stands for the agent
+    /// chat `child`: a `subagent_run` record naming the chat, made the first
+    /// time and rewritten in place after. `status` and `summary` say how its
+    /// latest turn went. `None` for a chat no agent started.
+    pub fn write_agent_record(
+        &self,
+        child: &str,
+        status: &str,
+        summary: Option<&str>,
+    ) -> Result<Option<AgentRecord>, StorageError> {
+        self.write_agent_record_with(child, status, summary, None)
+    }
+
+    /// Removes the card standing for agent chat `child` from its parent's
+    /// transcript, and returns the parent it was in.
+    pub fn remove_agent_record(&self, child: &str) -> Result<Option<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let Some((Some(parent), Some(record))) = database
+            .query_row(
+                "SELECT parent_chat_id, agent_record_id FROM chats WHERE id = ?",
+                [child],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        database.execute(
+            "DELETE FROM messages WHERE id = ? AND chat_id = ? AND role = 'tool'",
+            params![record, parent],
+        )?;
+        database.execute(
+            "UPDATE chats SET agent_record_id = NULL WHERE id = ?",
+            [child],
+        )?;
+        Ok(Some(parent))
+    }
+
+    /// The card for an agent about to start its first turn, whose task is
+    /// `prompt`. Made only if there is none yet: written before the turn
+    /// starts, it can never replace what a finished turn wrote.
+    pub fn open_agent_record(
+        &self,
+        child: &str,
+        prompt: &str,
+    ) -> Result<Option<AgentRecord>, StorageError> {
+        self.write_agent_record_with(child, "running", None, Some(prompt))
+    }
+
+    fn write_agent_record_with(
+        &self,
+        child: &str,
+        status: &str,
+        summary: Option<&str>,
+        opening: Option<&str>,
+    ) -> Result<Option<AgentRecord>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let Some((parent, record, title, backend, model, created_at, prompt)) = transaction
+            .query_row(
+                "SELECT parent_chat_id, agent_record_id, COALESCE(title, ''), backend, model, \
+                 created_at, (SELECT content FROM messages WHERE chat_id = chats.id \
+                 AND role = 'user' ORDER BY id LIMIT 1) FROM chats WHERE id = ?",
+                [child],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+        let exists = match record {
+            Some(id) => transaction
+                .query_row(
+                    "SELECT 1 FROM messages WHERE id = ? AND chat_id = ? AND role = 'tool'",
+                    params![id, parent],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some(),
+            None => false,
+        };
+        // Only a start makes a card, and only once; later turns rewrite it.
+        // A card taken away, with a worker that never started, stays away.
+        if opening.is_some() == exists {
+            return Ok(None);
+        }
+        let prompt = prompt.or_else(|| opening.map(str::to_owned));
+        let key = format!("chat:{child}");
+        let mut card = json!({
+            "key": key,
+            "chat": child,
+            "provider": if backend == "codex" { "Codex" } else { "Claude" },
+            "agent": title,
+            "description": title,
+            "status": status,
+            "background": true,
+            "steps": [],
+            "tool_uses": 0,
+            "started_at": created_at * 1000,
+        });
+        if let Some(model) = model.filter(|model| !model.is_empty()) {
+            card["model"] = json!(model);
+        }
+        if let Some(prompt) = prompt {
+            card["prompt"] = json!(prompt);
+        }
+        if let Some(summary) = summary.filter(|summary| !summary.trim().is_empty()) {
+            card["summary"] = json!(summary);
+        }
+        let text = format!("{}{card}", crate::subagent::PREFIX);
+        let updated = match record {
+            Some(id) => transaction.execute(
+                "UPDATE messages SET content = ? WHERE id = ? AND chat_id = ? AND role = 'tool'",
+                params![text, id, parent],
+            )? == 1,
+            None => false,
+        };
+        let message_id = if updated {
+            record.unwrap_or_default()
+        } else {
+            transaction.execute(
+                "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'tool', ?, ?)",
+                params![parent, text, now_seconds()],
+            )?;
+            let id = transaction.last_insert_rowid();
+            transaction.execute(
+                "UPDATE chats SET agent_record_id = ? WHERE id = ?",
+                params![id, child],
+            )?;
+            id
+        };
+        transaction.commit()?;
+        Ok(Some(AgentRecord {
+            parent,
+            key,
+            message_id,
+            text,
+            created: !updated,
+        }))
+    }
+
+    /// The chats `parent`'s agent started, oldest first.
+    pub fn child_agents(&self, parent: &str) -> Result<Vec<ChildAgent>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(
+            "SELECT id, COALESCE(title, ''), backend, model, host_working, paused, \
+             (SELECT content FROM messages WHERE chat_id = chats.id AND role = 'assistant' \
+              AND id > (SELECT COALESCE(MAX(id), 0) FROM messages \
+                WHERE chat_id = chats.id AND role = 'user') \
+              ORDER BY id DESC LIMIT 1), \
+             (SELECT role FROM messages WHERE chat_id = chats.id \
+              AND role IN ('assistant', 'error', 'user') ORDER BY id DESC LIMIT 1), \
+             (SELECT content FROM messages WHERE chat_id = chats.id AND role = 'error' \
+              ORDER BY id DESC LIMIT 1) \
+             FROM chats WHERE parent_chat_id = ? ORDER BY created_at, rowid",
+        )?;
+        let children = statement
+            .query_map([parent], |row| {
+                let last_role = row.get::<_, Option<String>>(7)?;
+                Ok(ChildAgent {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    backend: row.get(2)?,
+                    model: row.get(3)?,
+                    working: row.get(4)?,
+                    paused: row.get(5)?,
+                    // Only what it said since it was last spoken to.
+                    reply: row.get(6)?,
+                    // An error after its last reply is how its last turn ended.
+                    error: (last_role.as_deref() == Some("error"))
+                        .then(|| row.get::<_, Option<String>>(8))
+                        .transpose()?
+                        .flatten(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(children)
     }
 
     pub fn chat_is_paused(&self, chat_id: &str) -> Result<bool, StorageError> {
@@ -4545,6 +4907,25 @@ impl StateStore {
     }
 
     pub fn new_chat(&self, request: &Value) -> Result<Value, StorageError> {
+        self.new_chat_under(request, None)
+    }
+
+    /// A chat another chat's agent started with xd's start_agent tool. It
+    /// reports each finished turn back to `parent` when `reports` is set.
+    pub fn new_child_chat(
+        &self,
+        request: &Value,
+        parent: &str,
+        reports: bool,
+    ) -> Result<Value, StorageError> {
+        self.new_chat_under(request, Some((parent, reports)))
+    }
+
+    fn new_chat_under(
+        &self,
+        request: &Value,
+        parent: Option<(&str, bool)>,
+    ) -> Result<Value, StorageError> {
         let requested_folder = optional_string(request, "folder")?;
         let requested_session = optional_string(request, "session")?;
         let title = optional_string(request, "title")?.unwrap_or("New Chat");
@@ -4817,8 +5198,9 @@ impl StateStore {
         transaction.execute(
             "INSERT INTO chats \
              (id, folder_id, title, backend, model, effort, access, plan, fast, claude_mode, \
-              workdir, original_workdir, sort_order, created_at, updated_at, last_user_message_at, session_mode, workspace_session_id, new_worktree) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              workdir, original_workdir, sort_order, created_at, updated_at, last_user_message_at, session_mode, workspace_session_id, new_worktree, \
+              parent_chat_id, report_to_parent) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id,
                 folder_id,
@@ -4839,6 +5221,8 @@ impl StateStore {
                 "chat",
                 session,
                 shared.as_ref().is_some_and(|shared| shared.3),
+                parent.map(|(parent, _)| parent),
+                parent.is_some_and(|(_, reports)| reports),
             ],
         )?;
         let attachments =
@@ -6465,6 +6849,29 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
             [],
         )?;
     }
+    // The chat whose agent started this one through xd's start_agent tool.
+    if !columns.contains("parent_chat_id") {
+        database.execute("ALTER TABLE chats ADD COLUMN parent_chat_id TEXT", [])?;
+    }
+    // The card in the parent's transcript that stands for this chat.
+    if !columns.contains("agent_record_id") {
+        database.execute("ALTER TABLE chats ADD COLUMN agent_record_id INTEGER", [])?;
+    }
+    // However a worker's chat goes, its card in the parent goes with it:
+    // nothing would ever end a card for a chat that is gone.
+    database.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS chats_remove_agent_card AFTER DELETE ON chats \
+         WHEN OLD.agent_record_id IS NOT NULL BEGIN \
+           DELETE FROM messages WHERE id = OLD.agent_record_id \
+             AND chat_id = OLD.parent_chat_id AND role = 'tool'; \
+         END;",
+    )?;
+    if !columns.contains("report_to_parent") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN report_to_parent INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -7590,6 +7997,16 @@ fn offered_models(backend: &str) -> Vec<crate::model_catalog::Model> {
     } else {
         cached
     }
+}
+
+/// Whether a request that makes a worktree from a message wants the naming
+/// model to name it. Clients turn it off with `generate_worktree_name: false`;
+/// one that says nothing, such as an older client, gets the name.
+fn generates_worktree_name(request: &Value) -> bool {
+    request
+        .get("generate_worktree_name")
+        .and_then(Value::as_bool)
+        != Some(false)
 }
 
 fn chat_title_models(backend: &str) -> &'static [&'static str] {
@@ -9346,7 +9763,9 @@ fn stop_orphaned_agents(
         let Some(mut record) = content
             .strip_prefix(crate::subagent::PREFIX)
             .and_then(|record| serde_json::from_str::<Value>(record).ok())
-            .filter(|record| record["status"] == "running")
+            // A card for an agent chat follows the chat, which a restart
+            // resumes rather than ends.
+            .filter(|record| record["status"] == "running" && record.get("chat").is_none())
         else {
             continue;
         };
@@ -12747,6 +13166,176 @@ mod tests {
     }
 
     #[test]
+    fn a_workers_card_goes_when_its_chat_does() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let parent = new_chat_on(&store, &folder, "claude");
+        let parent_id = parent["id"].as_str().unwrap();
+        let child = store
+            .new_child_chat(
+                &json!({"folder": folder, "backend": "claude"}),
+                parent_id,
+                true,
+            )
+            .unwrap();
+        let child_id = child["id"].as_str().unwrap();
+        store
+            .open_agent_record(child_id, "Fix it")
+            .unwrap()
+            .unwrap();
+        let cards = || {
+            store.messages(&json!({"chat": parent_id})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| {
+                    row["content"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with(crate::subagent::PREFIX))
+                })
+                .count()
+        };
+        assert_eq!(cards(), 1);
+        store.delete_chat(&json!({"chat": child_id})).unwrap();
+        assert_eq!(cards(), 0);
+        assert_eq!(
+            store
+                .write_agent_record(child_id, "completed", None)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_child_chat_nests_under_the_chat_that_started_it() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let parent = new_chat_on(&store, &folder, "claude");
+        let parent_id = parent["id"].as_str().unwrap();
+        let child = store
+            .new_child_chat(
+                &json!({"folder": folder, "backend": "codex", "title": "Worker"}),
+                parent_id,
+                true,
+            )
+            .unwrap();
+        let child_id = child["id"].as_str().unwrap();
+        let tab = store
+            .new_child_chat(
+                &json!({"folder": folder, "session": parent["session"]}),
+                parent_id,
+                false,
+            )
+            .unwrap();
+
+        let tree = store.tree().unwrap();
+        let chat = |id: &str| {
+            tree["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|chat| chat["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        let session = |id: &Value| {
+            tree["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|session| session["id"] == *id)
+                .unwrap()
+                .clone()
+        };
+        assert!(chat(parent_id).get("parent").is_none());
+        assert_eq!(chat(child_id)["parent"], parent_id);
+        assert_eq!(chat(tab["id"].as_str().unwrap())["parent"], parent_id);
+        // A worker in its own session nests that session under the parent's;
+        // one working in the parent's session is just another of its tabs.
+        assert_eq!(session(&child["session"])["parent"], parent["session"]);
+        assert!(session(&parent["session"]).get("parent").is_none());
+        assert_eq!(
+            store.chat_parent(child_id).unwrap(),
+            Some((parent_id.to_owned(), true))
+        );
+        assert_eq!(
+            store.chat_parent(tab["id"].as_str().unwrap()).unwrap(),
+            Some((parent_id.to_owned(), false))
+        );
+        assert_eq!(store.chat_parent(parent_id).unwrap(), None);
+        let children = store.child_agents(parent_id).unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].id, child_id);
+        assert_eq!(children[0].title, "Worker");
+        assert_eq!(children[0].backend, "codex");
+        // A card opening for a turn about to start never replaces one a
+        // finished turn already wrote.
+        let opened = store
+            .open_agent_record(child_id, "Fix it")
+            .unwrap()
+            .unwrap();
+        assert!(opened.created);
+        assert!(opened.text.contains("\"status\":\"running\""));
+        let done = store
+            .write_agent_record(child_id, "completed", Some("All green."))
+            .unwrap()
+            .unwrap();
+        assert!(!done.created);
+        assert_eq!(done.message_id, opened.message_id);
+        assert_eq!(store.open_agent_record(child_id, "Fix it").unwrap(), None);
+        assert!(store.open_agent_record(parent_id, "x").unwrap().is_none());
+        // What a worker said before it was last spoken to is not its reply.
+        {
+            let database = store.database.lock().unwrap();
+            for (role, content) in [
+                ("user", "Fix it"),
+                ("assistant", "Which one?"),
+                ("user", "The first"),
+                ("error", "Could not start."),
+            ] {
+                database
+                    .execute(
+                        "INSERT INTO messages (chat_id, role, content, created_at) \
+                         VALUES (?, ?, ?, 0)",
+                        params![child_id, role, content],
+                    )
+                    .unwrap();
+            }
+        }
+        let worker = &store.child_agents(parent_id).unwrap()[0];
+        assert_eq!(worker.reply, None);
+        assert_eq!(worker.error.as_deref(), Some("Could not start."));
+        let origin = store.agent_origin(child_id).unwrap();
+        assert_eq!(origin.parent.as_deref(), Some(parent_id));
+        assert_eq!(origin.session, child["session"]);
+
+        // Once the parent is gone, the worker stands on its own.
+        store
+            .database
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM chats WHERE id = ?", [parent_id])
+            .unwrap();
+        let tree = store.tree().unwrap();
+        let orphan = tree["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chat| chat["id"] == child_id)
+            .unwrap();
+        assert!(orphan.get("parent").is_none());
+        assert!(
+            tree["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|session| session.get("parent").is_none())
+        );
+    }
+
+    #[test]
     fn new_chats_apply_options_and_draft_atomically() {
         let fixture = Fixture::new();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
@@ -14033,6 +14622,18 @@ mod tests {
         assert!(store.prepare_continuation(&go_on, latest).is_err());
         assert!(!store.begin_background_turn("chat").unwrap());
         assert!(store.chat_is_paused("chat").unwrap());
+        // An agent's report waits in the queue of a paused chat, which stays
+        // paused, both idle and still stopping.
+        let report = json!({"chat": "chat", "text": "[xd] report", "keep_paused": true});
+        assert!(matches!(
+            store.prepare_send(&report).unwrap(),
+            SendDisposition::Queued { .. }
+        ));
+        assert!(store.chat_is_paused("chat").unwrap());
+        assert_eq!(
+            store.chat("chat").unwrap()["queue"],
+            json!(["queued", "[xd] report"])
+        );
 
         // Resuming starts a turn, and any turn picks the chat back up.
         store
@@ -14872,6 +15473,23 @@ mod tests {
             branch(&named_id)
         );
 
+        // A worktree made before there was a message, as the mobile app makes
+        // them, is named by the chat's first message instead of its
+        // placeholder title. One the user titled, or already named for a
+        // message, keeps its name.
+        let placeholder = store
+            .new_chat(&json!({
+                "folder": "repo",
+                "title": "New Chat",
+                "worktree": {"kind": "new"},
+            }))
+            .unwrap();
+        let placeholder_id = placeholder["id"].as_str().unwrap();
+        let first = |id: &str| json!({"chat": id, "text": "Tidy the footer"});
+        assert!(store.send_names_worktree(&first(placeholder_id)).unwrap());
+        assert!(!store.send_names_worktree(&first(&created_id)).unwrap());
+        assert!(!store.send_names_worktree(&first(&named_id)).unwrap());
+
         // The generated name arrives later and renames the branch, keeping
         // the chat's suffix, and what deletion will remove follows it.
         let renamed = format!("xd/footer-links-new-tab-{}", glib_hash(&named_id));
@@ -15126,20 +15744,25 @@ mod tests {
         drop(database);
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
 
-        assert!(
-            store
-                .prepare_worktree_name(&json!({
-                    "chat": "chat-worktree",
-                    "text": "review it"
-                }))
-                .unwrap()
-                .is_none()
-        );
+        // The first message makes the worktree, so the send names it, unless
+        // the client names it itself or turns the naming off.
+        let first = json!({"chat": "chat-worktree", "text": "review it"});
+        assert!(store.send_names_worktree(&first).unwrap());
+        for change in [
+            json!({"generate_worktree_name": false}),
+            json!({"worktree_name": "Chosen"}),
+            json!({"text": "  "}),
+        ] {
+            let mut request = first.clone();
+            for (key, value) in change.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            assert!(!store.send_names_worktree(&request).unwrap(), "{change}");
+        }
         let naming = store
-            .prepare_worktree_name(&json!({
+            .prepare_sent_worktree_name(&json!({
                 "chat": "chat-worktree",
                 "text": "review it",
-                "generate_worktree_name": true,
                 "worktree_backend": "claude",
                 "worktree_model": "claude-sonnet-5"
             }))
@@ -15159,7 +15782,6 @@ mod tests {
             "backend": "codex",
             "worktree": {"kind": "branch", "ref": "refs/heads/main", "oid": "abc"},
             "prompt": "review it",
-            "generate_worktree_name": true,
             "worktree_backend": "claude",
             "worktree_model": "claude-sonnet-5"
         });
@@ -15170,7 +15792,8 @@ mod tests {
         assert_eq!(naming.backend, "claude");
         assert_eq!(naming.model, "claude-sonnet-5");
         assert_eq!(naming.prompt, "review it");
-        // Not without a worktree to make, a message, or the client asking.
+        // Not without a worktree to make, a message, or when the client turns
+        // it off.
         for change in [
             json!({"worktree": {"kind": "existing", "path": "/repo"}}),
             json!({"session": "shared"}),
@@ -15190,17 +15813,11 @@ mod tests {
             );
         }
 
-        // Nothing confirms the low-cost model yet, so naming is left to the message.
-        assert!(
-            store
-                .prepare_worktree_name(&json!({
-                    "chat": "chat-worktree",
-                    "text": "review it",
-                    "generate_worktree_name": true
-                }))
-                .unwrap()
-                .is_none()
-        );
+        // Before discovery confirms it, the low-cost title model is tried, as
+        // for titles: nothing waits on the name.
+        let default_naming = store.prepare_sent_worktree_name(&first).unwrap().unwrap();
+        assert_eq!(default_naming.backend, "codex");
+        assert_eq!(default_naming.model, "gpt-6-luna");
 
         // Without a chosen model the name comes from the low-cost title model.
         crate::model_catalog::set_test_models(
@@ -15210,29 +15827,26 @@ mod tests {
                 discovered("gpt-6-sol", true, None),
             ],
         );
-        let default_naming = store
-            .prepare_worktree_name(&json!({
-                "chat": "chat-worktree",
-                "text": "review it",
-                "generate_worktree_name": true
-            }))
-            .unwrap()
-            .unwrap();
+        let default_naming = store.prepare_sent_worktree_name(&first).unwrap().unwrap();
         assert_eq!(default_naming.backend, "codex");
         assert_eq!(default_naming.model, "gpt-6-luna");
 
-        // A chosen model the CLI no longer offers is not tried.
-        assert!(
-            store
-                .prepare_worktree_name(&json!({
-                    "chat": "chat-worktree",
-                    "text": "review it",
-                    "generate_worktree_name": true,
-                    "worktree_model": "gpt-5.6-sol"
-                }))
-                .unwrap()
-                .is_none()
-        );
+        // A chosen model the CLI no longer offers, one for another assistant,
+        // or a writer the host no longer runs gives way to the default, so a
+        // stale setting does not stop the naming.
+        for stale in [
+            json!({"worktree_model": "gpt-5.6-sol"}),
+            json!({"worktree_model": "claude-sonnet-5"}),
+            json!({"worktree_backend": "jcode", "worktree_model": "jcode-1"}),
+        ] {
+            let mut request = first.clone();
+            for (key, value) in stale.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            let naming = store.prepare_sent_worktree_name(&request).unwrap().unwrap();
+            assert_eq!(naming.backend, "codex", "{stale}");
+            assert_eq!(naming.model, "gpt-6-luna", "{stale}");
+        }
 
         // A CLI with only older or costlier models leaves naming to the message.
         crate::model_catalog::set_test_models(
@@ -15242,16 +15856,7 @@ mod tests {
                 discovered("gpt-6-sol", true, None),
             ],
         );
-        assert!(
-            store
-                .prepare_worktree_name(&json!({
-                    "chat": "chat-worktree",
-                    "text": "review it",
-                    "generate_worktree_name": true
-                }))
-                .unwrap()
-                .is_none()
-        );
+        assert!(store.prepare_sent_worktree_name(&first).unwrap().is_none());
         crate::model_catalog::set_test_models("codex", Vec::new());
 
         let turn = match store

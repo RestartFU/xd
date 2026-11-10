@@ -86,8 +86,14 @@ internal fun AgentsTray(
     onToggle: () -> Unit,
     onOpenAgent: (String) -> Unit,
     compact: Boolean,
+    /** The chat's agent chats at work or waiting on the user, from the tree. */
+    workers: List<com.restartfu.xd.model.ChatSummary> = emptyList(),
+    /** Opens an agent chat by id. */
+    onOpenChat: (String) -> Unit = {},
 ) {
-    if (running.isEmpty()) return
+    if (running.isEmpty() && workers.isEmpty()) return
+    // Only what waits on the user stops the dot pulsing.
+    val allWaiting = running.isEmpty() && workers.all(AgentsTray::needsYou)
     val signals = LocalXdSignals.current
     val now = rememberNow(open)
     Surface(
@@ -109,15 +115,19 @@ internal fun AgentsTray(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                PulseDot(signals.working)
+                if (allWaiting) {
+                    Box(Modifier.size(8.dp).clip(androidx.compose.foundation.shape.CircleShape).background(signals.waiting))
+                } else {
+                    PulseDot(signals.working)
+                }
                 Text(
-                    AgentsTray.label(running),
+                    AgentsTray.label(running, workers),
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                 )
                 Text(
-                    if (open) "" else running.joinToString(", ") { trayTask(it) },
+                    if (open) "" else (workers.map { it.title } + running.map { trayTask(it) }).joinToString(", "),
                     modifier = Modifier.weight(1f),
                     color = signals.faint,
                     style = MaterialTheme.typography.bodyMedium,
@@ -138,6 +148,35 @@ internal fun AgentsTray(
                         .verticalScroll(rememberScrollState())
                         .padding(bottom = 4.dp),
                 ) {
+                    // Agent chats first: each is a chat of its own, which a row opens.
+                    workers.forEach { worker ->
+                        val needsYou = AgentsTray.needsYou(worker)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .clickable(onClickLabel = "Open chat") { onOpenChat(worker.id) }
+                                .padding(horizontal = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            AgentAvatar(if (needsYou) signals.waiting else signals.working, size = 24.dp) {
+                                BackendIcon(worker.backend, size = 12.dp)
+                            }
+                            Text(
+                                worker.title.ifBlank { "New Chat" },
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                if (needsYou) "Needs you" else "Running",
+                                color = if (needsYou) signals.waiting else signals.faint,
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                        }
+                    }
                     running.forEach { run ->
                         val key = run.key
                         Row(
@@ -147,11 +186,22 @@ internal fun AgentsTray(
                                 .clickable(enabled = key != null, onClickLabel = "Open agent") {
                                     key?.let(onOpenAgent)
                                 }
-                                // Lined up under the label, past the dot.
-                                .padding(start = 31.dp, end = 14.dp),
+                                .padding(horizontal = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
+                            AgentAvatar(signals.working, size = 24.dp) {
+                                if (run.isShell) {
+                                    Icon(
+                                        painterResource(R.drawable.ic_terminal),
+                                        contentDescription = null,
+                                        tint = signals.faint,
+                                        modifier = Modifier.size(12.dp),
+                                    )
+                                } else {
+                                    BackendIcon(run.provider.lowercase(), size = 12.dp)
+                                }
+                            }
                             Text(
                                 trayTask(run),
                                 modifier = Modifier.weight(1f),
