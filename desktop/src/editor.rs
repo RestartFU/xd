@@ -394,6 +394,7 @@ impl FileEditor {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.history.break_group();
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
         cx.notify();
@@ -484,6 +485,8 @@ impl FileEditor {
         match content {
             Some(ClipboardContent::Text(text)) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                // A paste is a step of its own, even of a single character.
+                self.pending_edit = Some((self.snapshot(), EditKind::Other));
                 self.replace_text_in_range(None, &text, window, cx);
             }
             Some(ClipboardContent::Image(format, bytes)) => {
@@ -562,6 +565,9 @@ impl FileEditor {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        // Typing after the caret moves is a step of its own, even back where
+        // the last step left off.
+        self.history.break_group();
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.scroll_to_caret = true;
@@ -569,6 +575,10 @@ impl FileEditor {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        // A delete key selects what it deletes, as part of its own step.
+        if self.pending_edit.is_none() {
+            self.history.break_group();
+        }
         self.scroll_to_caret = true;
         if self.selection_reversed {
             self.selected_range.start = offset;
@@ -1574,6 +1584,8 @@ mod tests {
             cx.bind_keys([
                 gpui::KeyBinding::new("backspace", Backspace, Some("FileEditor")),
                 gpui::KeyBinding::new("backspace", Backspace, Some("MessageEditor")),
+                gpui::KeyBinding::new("left", Left, Some("MessageEditor")),
+                gpui::KeyBinding::new("right", Right, Some("MessageEditor")),
             ]);
         });
         let (editor, cx) = cx.add_window_view(|_, cx| build(cx));
@@ -1618,5 +1630,30 @@ mod tests {
         editor.update(cx, |editor, cx| editor.set_text("", cx));
         cx.simulate_keystrokes("ctrl-z");
         assert_eq!(editor_text(&editor, cx), "");
+    }
+
+    #[gpui::test]
+    fn typing_after_moving_the_caret_away_and_back_is_a_new_step(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = undo_editor(cx, FileEditor::composer);
+        cx.simulate_input("abc");
+        cx.simulate_keystrokes("left right");
+        cx.simulate_input("d");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(editor_text(&editor, cx), "abc");
+    }
+
+    #[gpui::test]
+    fn a_one_character_paste_is_a_step_of_its_own(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = undo_editor(cx, FileEditor::composer);
+        cx.simulate_input("ab");
+        editor.update_in(cx, |editor, window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("X".into()));
+            editor.paste(&Paste, window, cx);
+        });
+        cx.simulate_input("c");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(editor_text(&editor, cx), "abX");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(editor_text(&editor, cx), "ab");
     }
 }

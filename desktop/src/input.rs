@@ -678,6 +678,8 @@ impl ComposerInput {
                 ) {
                     return;
                 }
+                // A paste is a step of its own, even of a single character.
+                self.pending_edit = Some((self.snapshot(), EditKind::Other));
                 self.replace_text_in_range(None, &text.replace(['\r', '\n'], " "), window, cx);
             }
             Some(ClipboardContent::Image(format, bytes)) => {
@@ -715,6 +717,9 @@ impl ComposerInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        // Typing after the caret moves is a step of its own, even back where
+        // the last step left off.
+        self.history.break_group();
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         cx.notify();
@@ -746,6 +751,10 @@ impl ComposerInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        // A delete key selects what it deletes, as part of its own step.
+        if self.pending_edit.is_none() {
+            self.history.break_group();
+        }
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {

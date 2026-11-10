@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn pastes_never_join_the_typing_around_them() {
+    fn other_edits_never_join_the_typing_around_them() {
         let mut history = EditHistory::default();
         let text = type_text(&mut history, "", "ab");
         history.record(at(&text, 2), EditKind::Other, 2..2, "pasted");
