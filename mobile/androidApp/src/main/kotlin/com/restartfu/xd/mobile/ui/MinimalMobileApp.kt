@@ -133,6 +133,7 @@ import com.restartfu.xd.model.activeSessions
 import com.restartfu.xd.model.settledSessions
 import com.restartfu.xd.model.PauseAllAction
 import com.restartfu.xd.model.pauseActionFor
+import com.restartfu.xd.model.waitingOnUser
 import com.restartfu.xd.protocol.Ops
 import androidx.compose.material3.RadioButton
 import com.restartfu.xd.protocol.BranchSourceReply
@@ -198,6 +199,7 @@ internal fun MinimalMobileApp(
     settings: MobileSettings,
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
+    val waitingChats by model.client.waitingChats.collectAsStateWithLifecycle()
     val created by model.createdDirectSession.collectAsStateWithLifecycle()
     val operationError by model.error.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -389,7 +391,9 @@ internal fun MinimalMobileApp(
                                         renameSession = { sessionActions.rename(activeSession) },
                                     ),
                                     linkedPullRequests = activeChat.pullRequests.takeIf { tree.linkedPullRequests },
-                                    agentChats = tree.chats.filter { it.parentId == activeChat.id }.associateBy { it.id },
+                                    agentChats = tree.chats.filter { it.parentId == activeChat.id }
+                                        .map { it.waitingOnUser(it.id in waitingChats) }
+                                        .associateBy { it.id },
                                     startedBy = activeChat.parentId?.let { parent -> tree.chats.firstOrNull { it.id == parent } },
                                     openChat = { id ->
                                         tree.chats.firstOrNull { it.id == id }?.let { chat ->

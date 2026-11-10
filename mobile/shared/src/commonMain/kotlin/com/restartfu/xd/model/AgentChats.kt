@@ -41,6 +41,14 @@ public data class AgentReport(
     }
 }
 
+/**
+ * This chat as its parent shows it when its turn [asking] waits on an
+ * approval or answer from the user: waiting on the user rather than working,
+ * as it would be after a reply that asked a question.
+ */
+public fun ChatSummary.waitingOnUser(asking: Boolean): ChatSummary =
+    if (asking) copy(working = false, questionWaiting = true) else this
+
 /** How an agent chat stands, in the words its row uses. */
 public enum class AgentChatStatus(public val label: String) {
     RUNNING("Running"),

@@ -861,7 +861,10 @@ struct AgentChatLive {
     title: String,
     working: bool,
     paused: bool,
+    /// Its last reply ends on a question for the user.
     waiting: bool,
+    /// Its turn waits on an approval or an answer from the user.
+    asking: bool,
 }
 
 /// How an agent chat stands, in the words its row uses.
@@ -893,6 +896,7 @@ impl AgentChatStatus {
 /// stopped or cut short.
 fn agent_chat_status(card: SubagentState, live: Option<&AgentChatLive>) -> AgentChatStatus {
     match (card, live) {
+        (_, Some(live)) if live.asking => AgentChatStatus::NeedsYou,
         (_, Some(live)) if live.working => AgentChatStatus::Running,
         (_, Some(live)) if live.paused => AgentChatStatus::Paused,
         (_, Some(live)) if live.waiting => AgentChatStatus::NeedsYou,
@@ -11629,6 +11633,14 @@ impl XdDesktop {
         }
     }
 
+    /// Whether `chat`'s turn waits on an approval or an answer from the user.
+    fn waits_on_user(&self, chat: &str) -> bool {
+        self.model
+            .waiting_chats
+            .get(chat)
+            .is_some_and(|pending| !pending.is_empty())
+    }
+
     /// The open chat's agent chats that are at work or waiting on the user, in
     /// the tree's order, for the tray: their rows may be far up the chat.
     fn tray_workers(&self) -> Vec<TrayWorker> {
@@ -11640,7 +11652,10 @@ impl XdDesktop {
             .iter()
             .filter(|chat| self.model.chat_parents.get(&chat.id) == Some(selected))
             .filter_map(|chat| {
-                let needs_you = !chat.working && self.model.question_chats.contains(&chat.id);
+                // A turn waiting on an approval or answer needs the user as
+                // much as a finished one that asked a question.
+                let needs_you = self.waits_on_user(&chat.id)
+                    || (!chat.working && self.model.question_chats.contains(&chat.id));
                 (chat.working || needs_you).then(|| TrayWorker {
                     chat: chat.id.clone(),
                     title: chat
@@ -17895,6 +17910,7 @@ impl XdDesktop {
                             working: chat.working,
                             paused: chat.paused,
                             waiting: self.model.question_chats.contains(id),
+                            asking: self.waits_on_user(id),
                         },
                     ))
                 })
@@ -24127,6 +24143,42 @@ Binary files /dev/null and b/image.png differ\n";
         assert_eq!(
             label(&["Explore", "Shell", "Plan"]),
             "2 agents and 1 command running"
+        );
+    }
+
+    #[test]
+    fn an_agent_chat_waiting_on_an_approval_needs_the_user_though_it_runs() {
+        let live = AgentChatLive {
+            title: "Worker".into(),
+            working: true,
+            paused: false,
+            waiting: false,
+            asking: false,
+        };
+        assert_eq!(
+            agent_chat_status(SubagentState::Completed, Some(&live)),
+            AgentChatStatus::Running
+        );
+        let asking = AgentChatLive {
+            asking: true,
+            ..live.clone()
+        };
+        assert_eq!(
+            agent_chat_status(SubagentState::Completed, Some(&asking)),
+            AgentChatStatus::NeedsYou
+        );
+        // A question in a reply the chat has since moved past is not asked.
+        let stale = AgentChatLive {
+            waiting: true,
+            ..live
+        };
+        assert_eq!(
+            agent_chat_status(SubagentState::Completed, Some(&stale)),
+            AgentChatStatus::Running
+        );
+        assert_eq!(
+            agent_chat_status(SubagentState::Running, None),
+            AgentChatStatus::Stopped
         );
     }
 

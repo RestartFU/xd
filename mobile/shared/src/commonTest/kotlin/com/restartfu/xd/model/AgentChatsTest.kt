@@ -27,6 +27,10 @@ class AgentChatsTest {
         assertEquals("1 agent working", AgentsTray.label(emptyList(), listOf(working)))
         assertEquals("2 agents working · 1 needs you", AgentsTray.label(emptyList(), listOf(working, working, asking)))
         assertEquals("2 need you", AgentsTray.label(emptyList(), listOf(asking, asking)))
+        // A turn waiting on an approval needs the user, though it still runs.
+        val approving = working.waitingOnUser(true)
+        assertEquals("1 needs you", AgentsTray.label(emptyList(), listOf(approving)))
+        assertEquals(working, working.waitingOnUser(false))
     }
 
     @Test
