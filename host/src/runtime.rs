@@ -105,7 +105,8 @@ pub(crate) type TurnSettledHandler = Box<dyn Fn(SettledTurn) + Send + Sync>;
 /// Hears that a chat's turn started or ended, with its assistant and the
 /// account and login it runs as.
 /// Called with the chat's succession held, so it must only note it, never wait.
-pub(crate) type ActivityHandler = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
+/// The last argument says whether the turn started (or else ended).
+pub(crate) type ActivityHandler = Box<dyn Fn(&str, &str, &str, bool) + Send + Sync>;
 
 /// A turn that ended for good: neither stopped nor going on elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -664,15 +665,21 @@ impl TurnRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn note_activity_for_test(&self, chat_id: &str, provider: &str, account: &str) {
-        self.note_activity(chat_id, provider, account);
+    pub(crate) fn note_activity_for_test(
+        &self,
+        chat_id: &str,
+        provider: &str,
+        account: &str,
+        started: bool,
+    ) {
+        self.note_activity(chat_id, provider, account, started);
     }
 
-    fn note_activity(&self, chat_id: &str, provider: &str, account: &str) {
+    fn note_activity(&self, chat_id: &str, provider: &str, account: &str, started: bool) {
         if let Ok(handler) = self.inner.on_activity.lock()
             && let Some(handler) = handler.as_ref()
         {
-            handler(chat_id, provider, account);
+            handler(chat_id, provider, account, started);
         }
     }
 
@@ -1610,7 +1617,7 @@ impl TurnRuntime {
                 },
             );
         }
-        self.note_activity(&turn.chat_id, &turn.backend, &turn.account);
+        self.note_activity(&turn.chat_id, &turn.backend, &turn.account, true);
         let chat_id = turn.chat_id.clone();
         let label = turn.label.clone();
         let backend = turn.backend.clone();
@@ -2950,7 +2957,7 @@ impl TurnRuntime {
         {
             active.remove(&turn.chat_id);
         }
-        self.note_activity(&turn.chat_id, &turn.backend, &turn.account);
+        self.note_activity(&turn.chat_id, &turn.backend, &turn.account, false);
         if let Ok(mut interactions) = self.inner.interactions.lock() {
             let pending = interactions.entry(turn.chat_id.clone()).or_default();
             pending.requests.clear();

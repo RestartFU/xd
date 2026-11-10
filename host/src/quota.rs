@@ -71,6 +71,13 @@ struct AccountLedger {
     /// The reading the next rise is measured from.
     last: Option<Reading>,
     read_at: Option<Instant>,
+    /// The chats running a turn here, by their starts and ends.
+    running: HashSet<String>,
+    /// Since `last`, every turn here ended at some point, and then one began
+    /// again. What the account used in that gap cannot be told apart from
+    /// the work around it, so the interval is counted for nobody.
+    went_idle: bool,
+    restarted_after_idle: bool,
     /// When a reading was last begun, and whether it failed.
     tried_at: Option<Instant>,
     failed: bool,
@@ -112,6 +119,28 @@ impl Ledger {
             .insert(chat_id.to_owned());
     }
 
+    /// A chat started or ended a turn on the account.
+    pub(crate) fn turn(&mut self, provider: &str, account: &str, chat_id: &str, started: bool) {
+        self.note(provider, account, chat_id);
+        let Some(entry) = self
+            .accounts
+            .get_mut(&(provider.to_owned(), account.to_owned()))
+        else {
+            return;
+        };
+        if started {
+            entry.running.insert(chat_id.to_owned());
+            if entry.went_idle {
+                entry.restarted_after_idle = true;
+            }
+        } else {
+            entry.running.remove(chat_id);
+            if entry.running.is_empty() {
+                entry.went_idle = true;
+            }
+        }
+    }
+
     /// Takes in a reading of the account's limit as `login`, asked for at
     /// `asked_ms`, with the chats working on it now, and returns each chat's
     /// share of the rise since the last one, and when that last one was asked
@@ -136,7 +165,10 @@ impl Ledger {
         sharers.extend(working.iter().cloned());
         let rise = entry
             .baseline(login)
+            .filter(|_| !entry.restarted_after_idle)
             .map_or(0.0, |last| rise(last, reading));
+        entry.went_idle = false;
+        entry.restarted_after_idle = false;
         let since_ms = std::mem::replace(&mut entry.asked_ms, asked_ms);
         entry.last = Some(reading);
         entry.read_at = Some(now);
@@ -222,9 +254,14 @@ impl QuotaMeter {
         {
             let ledger = ledger.clone();
             let wake = Mutex::new(wake.clone());
-            runtime.set_activity_handler(Box::new(move |chat_id, provider, tag| {
+            runtime.set_activity_handler(Box::new(move |chat_id, provider, tag, started| {
                 if let Ok(mut ledger) = ledger.lock() {
-                    ledger.note(provider, crate::accounts::tag_account(tag), chat_id);
+                    ledger.turn(
+                        provider,
+                        crate::accounts::tag_account(tag),
+                        chat_id,
+                        started,
+                    );
                 }
                 if let Ok(wake) = wake.lock() {
                     let _ = wake.send(());
@@ -637,6 +674,30 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_gap_between_readings_is_counted_for_nobody() {
+        let mut ledger = Ledger::default();
+        let now = Instant::now();
+        let a = chats(&["a"]);
+        ledger.turn("claude", "default", "a", true);
+        record_in(&mut ledger, "claude", "default", reading(10.0, 1), &a, now);
+        // A turn that ends and another that starts before the next reading:
+        // the rise between them holds idle time nobody can be charged with.
+        ledger.turn("claude", "default", "a", false);
+        ledger.turn("claude", "default", "a", true);
+        assert!(record_in(&mut ledger, "claude", "default", reading(20.0, 1), &a, now).is_empty());
+        // Work that never stopped is counted again from there.
+        let shares = record_in(&mut ledger, "claude", "default", reading(22.0, 1), &a, now);
+        assert_eq!(shares, vec![("a".to_owned(), 2.0)]);
+        // A turn that ends with another still running is no idle gap.
+        ledger.turn("claude", "default", "b", true);
+        ledger.turn("claude", "default", "a", false);
+        ledger.turn("claude", "default", "a", true);
+        let ab = chats(&["a", "b"]);
+        let shares = record_in(&mut ledger, "claude", "default", reading(26.0, 1), &ab, now);
+        assert_eq!(shares, vec![("a".to_owned(), 2.0), ("b".to_owned(), 2.0)]);
+    }
+
+    #[test]
     fn quotas_count_against_the_five_hour_limit_or_else_the_weekly() {
         let window = |kind: &str, label: &str, used: f64| Headroom {
             kind: kind.into(),
@@ -679,7 +740,7 @@ mod tests {
             Box::new(|_, _| None),
             Box::new(|_| {}),
         );
-        runtime.note_activity_for_test("chat", "claude", "second#login");
+        runtime.note_activity_for_test("chat", "claude", "second#login", true);
         let ledger = meter.ledger();
         let ledger = ledger.lock().unwrap();
         // Filed by account; which login a reading was of is checked apart.
