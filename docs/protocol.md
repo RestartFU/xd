@@ -55,6 +55,12 @@ the reply stream. A `new-chat` that carries an id is also set up beside the
 connection's other requests, a few at a time, since making its worktree can
 take a while; its reply can come after replies to requests sent later.
 
+Git requests that can take seconds — `diff-read`, `git-status`,
+`git-pr-status`, `git-pr-create`, `git-commit`, and `git-push` — are answered
+in order among themselves, but apart from the rest when they carry an id, so
+a `chat` or `messages` read sent after them can be answered first. Requests
+without an id keep strict order.
+
 A host that does not echo the id answers strictly in order. A client
 supporting that compatibility path must keep a FIFO slot for every request
 written, and must retain the slot of a timed-out or cancelled caller — dropping

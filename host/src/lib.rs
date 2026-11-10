@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{SyncSender, TrySendError, sync_channel},
     },
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -2781,6 +2781,43 @@ fn refresh_pull_request_states(store: &StateStore, events: &EventBus, chat_id: &
     }
 }
 
+/// Answers one connection's requests from `queued` in the order they came.
+fn answer_in_order(
+    engine: Arc<Engine>,
+    subscriber: u64,
+    queued: std::sync::mpsc::Receiver<Value>,
+    replies: SyncSender<Value>,
+    stream: UnixStream,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while let Ok(request) = queued.recv() {
+            if !engine.events.subscribed(subscriber) {
+                break;
+            }
+            let reply = engine.dispatch_for(subscriber, request);
+            if replies.try_send(reply).is_err() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                break;
+            }
+        }
+    })
+}
+
+/// Git requests slow enough to hold up the reads queued behind them.
+fn answered_in_git_lane(request: &Value) -> bool {
+    matches!(
+        request["op"].as_str(),
+        Some(
+            "diff-read"
+                | "git-status"
+                | "git-pr-status"
+                | "git-pr-create"
+                | "git-commit"
+                | "git-push"
+        )
+    )
+}
+
 pub fn serve_daemon_connection(
     stream: UnixStream,
     engine: Arc<Engine>,
@@ -2808,21 +2845,18 @@ pub fn serve_daemon_connection(
     let writer_stream = stream.try_clone()?;
     let writer = thread::spawn(move || write_frames(writer_stream, frames));
     let (commands, queued) = sync_channel::<Value>(128);
-    let worker_engine = engine.clone();
-    let replies = outbound.clone();
-    let worker_stream = stream.try_clone()?;
-    let worker = thread::spawn(move || {
-        while let Ok(request) = queued.recv() {
-            if !worker_engine.events.subscribed(subscriber) {
-                break;
-            }
-            let reply = worker_engine.dispatch_for(subscriber, request);
-            if replies.try_send(reply).is_err() {
-                let _ = worker_stream.shutdown(std::net::Shutdown::Both);
-                break;
-            }
-        }
-    });
+    let worker = answer_in_order(
+        engine.clone(),
+        subscriber,
+        queued,
+        outbound.clone(),
+        stream.try_clone()?,
+    );
+    // Git requests that can take seconds (a push, a GitHub round trip) are
+    // answered in order on a lane of their own, so the chat and transcript
+    // reads queued behind them are not held up. Only requests carrying a
+    // request id go there: their replies may then overtake one another.
+    let mut git_lane: Option<(SyncSender<Value>, JoinHandle<()>)> = None;
     let new_chats_aside = Arc::new(NewChatsAside::default());
     let result = (|| -> std::io::Result<()> {
         loop {
@@ -2933,6 +2967,27 @@ pub fn serve_daemon_connection(
                         return Err(error);
                     }
                 }
+            } else if authenticated
+                && request.get(REQUEST_ID).is_some()
+                && answered_in_git_lane(&request)
+            {
+                let lane = match &git_lane {
+                    Some((lane, _)) => lane.clone(),
+                    None => {
+                        let (lane, requests) = sync_channel::<Value>(128);
+                        let worker = answer_in_order(
+                            engine.clone(),
+                            subscriber,
+                            requests,
+                            outbound.clone(),
+                            stream.try_clone()?,
+                        );
+                        git_lane = Some((lane.clone(), worker));
+                        lane
+                    }
+                };
+                lane.try_send(request)
+                    .map_err(|_| std::io::Error::other("Client command queue overflowed"))?;
             } else {
                 commands
                     .try_send(request)
@@ -2941,6 +2996,10 @@ pub fn serve_daemon_connection(
         }
     })();
     drop(commands);
+    let git_worker = git_lane.map(|(lane, worker)| {
+        drop(lane);
+        worker
+    });
     // The app has gone even while requests it sent are still being answered.
     engine.release_app_client(subscriber);
     if result.is_err() {
@@ -2949,6 +3008,9 @@ pub fn serve_daemon_connection(
     // A half-close requests a final drain; a disconnected client cannot block
     // this forever because daemon sockets have bounded write deadlines.
     let _ = worker.join();
+    if let Some(worker) = git_worker {
+        let _ = worker.join();
+    }
     new_chats_aside.wait_idle();
     engine.unsubscribe(subscriber);
     drop(outbound);
@@ -4341,6 +4403,68 @@ read next
             2
         );
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn slow_git_requests_do_not_hold_up_reads_sent_after_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = test_directory();
+        let store = StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap();
+        let folder = store.new_folder(&json!({"name": "Repo"})).unwrap()["id"].clone();
+        let chat = store.new_chat(&json!({"folder": folder})).unwrap()["id"].clone();
+        let repository = root.join("Workspaces/Repo");
+        // git status asks this monitor first, which takes its time.
+        let monitor = root.join("slow-monitor.sh");
+        fs::write(&monitor, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+        fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+        for arguments in [
+            vec!["init", "-q"],
+            vec!["config", "core.fsmonitor", monitor.to_str().unwrap()],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let engine = Arc::new(Engine::with_store(store));
+        let (client, server) = UnixStream::pair().unwrap();
+        let serving = {
+            let engine = engine.clone();
+            thread::spawn(move || serve_daemon_connection(server, engine, false))
+        };
+        let mut writer = client.try_clone().unwrap();
+        writeln!(
+            writer,
+            "{}",
+            json!({"op": "git-status", "chat": chat, "_xd_request": 1})
+        )
+        .unwrap();
+        writeln!(writer, "{}", json!({"op": "tree", "_xd_request": 2})).unwrap();
+        let started = Instant::now();
+        let mut replies = BufReader::new(client.try_clone().unwrap()).lines();
+        let mut order = Vec::new();
+        let mut tree_after = None;
+        while order.len() < 2 {
+            let frame: Value = serde_json::from_str(&replies.next().unwrap().unwrap()).unwrap();
+            if let Some(id) = frame.get("_xd_request").and_then(Value::as_u64) {
+                if id == 2 {
+                    tree_after = Some(started.elapsed());
+                }
+                order.push(id);
+            }
+        }
+        assert_eq!(order, vec![2, 1], "the tree is answered first");
+        let tree_after = tree_after.unwrap();
+        assert!(
+            tree_after < Duration::from_millis(1500),
+            "the tree waited for git: {tree_after:?}"
+        );
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        serving.join().unwrap().ok();
     }
 
     #[test]
