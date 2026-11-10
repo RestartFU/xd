@@ -383,6 +383,7 @@ fn drive(
     let mut pending = Vec::new();
     let mut offset = 0;
     let mut blocked_since = None;
+    let mut last_progress = Instant::now();
     loop {
         let mut progress = false;
         match connection.read_tls(socket) {
@@ -447,9 +448,22 @@ fn drive(
                 Err(error) => return Err(error),
             }
         }
-        if !progress {
-            thread::sleep(Duration::from_millis(5));
+        if progress {
+            last_progress = Instant::now();
+        } else {
+            thread::sleep(idle_wait(last_progress.elapsed()));
         }
+    }
+}
+
+/// How long the driver sleeps when nothing moved. Traffic keeps it quick;
+/// a connection quiet for a while, as most are most of the time, wakes far
+/// less often, at the cost of a few milliseconds on the first frame after.
+fn idle_wait(quiet: Duration) -> Duration {
+    if quiet < Duration::from_secs(1) {
+        Duration::from_millis(5)
+    } else {
+        Duration::from_millis(50)
     }
 }
 
@@ -461,6 +475,16 @@ mod tests {
             code: "ABCD-EFGH".into(),
             fingerprint: "ab".repeat(32),
         }
+    }
+
+    #[test]
+    fn an_idle_connection_wakes_less_often() {
+        assert_eq!(idle_wait(Duration::ZERO), Duration::from_millis(5));
+        assert_eq!(
+            idle_wait(Duration::from_millis(900)),
+            Duration::from_millis(5)
+        );
+        assert_eq!(idle_wait(Duration::from_secs(5)), Duration::from_millis(50));
     }
 
     #[test]
