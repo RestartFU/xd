@@ -190,6 +190,7 @@ struct GitWorktree {
     detached: bool,
 }
 
+#[derive(Clone, Copy)]
 enum RequestedNewChatWorktree<'a> {
     Default,
     Existing(&'a str),
@@ -1813,6 +1814,63 @@ impl StateStore {
         )?)
     }
 
+    /// Checks out the worktree a chat's first message will run in, before
+    /// the send takes the database: `git worktree add` can take seconds, and
+    /// every other chat's writes would wait behind it. The send records it if
+    /// the chat still needs it then; otherwise it is removed again. Callers
+    /// hold the engine's session resources, so no other worktree change runs
+    /// meanwhile. Anything unexpected here leaves the work to the send.
+    fn premake_turn_worktree(
+        &self,
+        chat_id: &str,
+        name_hint: Option<&str>,
+        keep_paused: bool,
+    ) -> Result<Option<MadeWorktree>, StorageError> {
+        let source = {
+            let Ok(database) = self.reader() else {
+                return Ok(None);
+            };
+            let chat = database
+                .query_row(
+                    "SELECT folder_id, workdir, original_workdir, new_worktree, host_working, \
+                     paused FROM chats WHERE id = ?",
+                    [chat_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, bool>(3)?,
+                            row.get::<_, bool>(4)?,
+                            row.get::<_, bool>(5)?,
+                        ))
+                    },
+                )
+                .optional();
+            let Ok(Some((folder, workdir, original, new_worktree, working, paused))) = chat else {
+                return Ok(None);
+            };
+            if !new_worktree
+                || working
+                || (paused && keep_paused)
+                || !workspace_is_unused(&database, chat_id).unwrap_or(false)
+            {
+                return Ok(None);
+            }
+            match resolve_workdir(
+                &database,
+                &self.workspace_root,
+                &folder,
+                workdir.as_deref(),
+                original.as_deref(),
+            ) {
+                Ok(source) => source,
+                Err(_) => return Ok(None),
+            }
+        };
+        make_worktree(&source, chat_id, name_hint, None).map(Some)
+    }
+
     fn prepare_send_inner(
         &self,
         request: &Value,
@@ -1831,6 +1889,14 @@ impl StateStore {
             ));
         }
         let mut message = self.materialize_message(request, text)?;
+        let keep_paused = request.get("keep_paused").and_then(Value::as_bool) == Some(true);
+        // Declared before the database lock, so a worktree this send does not
+        // end up using is removed after the lock is released.
+        let mut premade = self.premake_turn_worktree(
+            chat_id,
+            turn_worktree_hint(&message.prompt, worktree_name),
+            keep_paused,
+        )?;
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let (working, backend, paused) = transaction
@@ -1892,8 +1958,7 @@ impl StateStore {
         }
         // The host's own messages, such as an agent's report to the chat
         // that started it, wait in a paused chat's queue instead of resuming it.
-        let keep_paused =
-            paused && request.get("keep_paused").and_then(Value::as_bool) == Some(true);
+        let keep_paused = paused && keep_paused;
         if working || keep_paused {
             let stored = transaction.query_row(
                 "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
@@ -1952,6 +2017,7 @@ impl StateStore {
             chat_id,
             &message.prompt,
             worktree_name,
+            premade.as_ref(),
         )?;
         if let Some(user_message_at) = user_message_at {
             transaction.execute(
@@ -1978,6 +2044,11 @@ impl StateStore {
         }
         transaction.commit()?;
         message.keep();
+        if let Some(made) = premade.as_mut()
+            && made.path == turn.workdir
+        {
+            made.keep();
+        }
         Ok(SendDisposition::Start {
             reply: json!({"ok": true, "queued": false}),
             turn,
@@ -2847,7 +2918,16 @@ impl StateStore {
         )?;
         let next = next_text
             .as_deref()
-            .map(|text| prepare_turn(&transaction, &self.workspace_root, chat_id, text, None))
+            .map(|text| {
+                prepare_turn(
+                    &transaction,
+                    &self.workspace_root,
+                    chat_id,
+                    text,
+                    None,
+                    None,
+                )
+            })
             .transpose()?;
         transaction.commit()?;
         Ok(TurnFinish {
@@ -4819,6 +4899,46 @@ impl StateStore {
         self.new_chat_under(request, Some((parent, reports)))
     }
 
+    /// The worktree a new chat asks for, chosen and checked out before the
+    /// chat takes the database, since git can take seconds (or fetch over the
+    /// network) and every other chat's writes would wait behind it. Callers
+    /// hold the engine's session resources. Anything unexpected here leaves
+    /// the work to the locked part, which reports it as before.
+    fn prechoose_new_chat_worktree(
+        &self,
+        folder: &str,
+        id: &str,
+        worktree_name: &str,
+        requested: RequestedNewChatWorktree<'_>,
+        start_from_remote: bool,
+    ) -> Result<Option<(String, ChosenWorktree)>, StorageError> {
+        let source = {
+            let Ok(database) = self.reader() else {
+                return Ok(None);
+            };
+            let project: Option<bool> = database
+                .query_row(
+                    "SELECT is_group FROM workspace_folders WHERE root_path = ? AND id = ?",
+                    params![self.workspace_root.to_string_lossy().as_ref(), folder],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .map(|group: bool| !group);
+            if project != Some(true) {
+                return Ok(None);
+            }
+            match resolve_workdir(&database, &self.workspace_root, folder, None, None) {
+                Ok(source) => source,
+                Err(_) => return Ok(None),
+            }
+        };
+        let chosen =
+            choose_new_chat_worktree(&source, id, worktree_name, requested, start_from_remote)?;
+        Ok(Some((source, chosen)))
+    }
+
     fn new_chat_under(
         &self,
         request: &Value,
@@ -4848,6 +4968,23 @@ impl StateStore {
         let worktree_name = optional_string(request, "prompt")?
             .and_then(|prompt| prompt.lines().find(|line| !line.trim().is_empty()))
             .unwrap_or(title);
+        let id = Uuid::new_v4().to_string();
+        let start_from_remote = request
+            .get("start_from_remote")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        // Declared before the database lock, so a worktree the chat does not
+        // end up using is removed after the lock is released.
+        let mut chosen = match (requested_session, requested_folder, requested_worktree) {
+            (_, _, RequestedNewChatWorktree::Default) | (Some(_), _, _) | (_, None, _) => None,
+            (None, Some(folder), requested) => self.prechoose_new_chat_worktree(
+                folder,
+                &id,
+                worktree_name,
+                requested,
+                start_from_remote,
+            )?,
+        };
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let shared = if let Some(session) = requested_session {
@@ -4989,101 +5126,34 @@ impl StateStore {
             .cloned()
             .unwrap_or(json!([]));
         validate_draft_attachments(&draft_attachments)?;
-        let id = Uuid::new_v4().to_string();
         let now = now_seconds();
         let (workdir, original_workdir) = if let Some(shared) = &shared {
             (shared.1.clone(), shared.2.clone())
         } else {
             match requested_worktree {
                 RequestedNewChatWorktree::Default => (legacy_workdir.map(str::to_owned), None),
-                RequestedNewChatWorktree::Existing(requested) => {
-                    if !Path::new(requested).is_absolute() {
-                        return Err(StorageError::InvalidRequest(
-                            "An existing worktree path is required.".into(),
+                requested => {
+                    let source =
+                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
+                    // Chosen before the lock unless the project's directory
+                    // moved meanwhile, which the git work here then redoes.
+                    if chosen.as_ref().is_none_or(|(before, _)| before != &source) {
+                        chosen = Some((
+                            source.clone(),
+                            choose_new_chat_worktree(
+                                &source,
+                                &id,
+                                worktree_name,
+                                requested,
+                                start_from_remote,
+                            )?,
                         ));
                     }
-                    let source =
-                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                    let requested = normalize_existing_path(Path::new(requested));
-                    let normalized_source = normalize_existing_path(Path::new(&source));
-                    let selected = match list_git_worktrees(Path::new(&source)) {
-                        Ok(worktrees) => worktrees
-                            .into_iter()
-                            .find(|worktree| normalize_existing_path(&worktree.path) == requested)
-                            .map(|worktree| normalize_existing_path(&worktree.path))
-                            .ok_or_else(|| {
-                                StorageError::InvalidRequest(
-                                    "That path is not a worktree of this repository.".into(),
-                                )
-                            })?,
-                        Err(_) if requested == normalized_source => normalized_source,
-                        Err(error) => return Err(error),
+                    let path = match chosen.as_ref() {
+                        Some((_, chosen)) => chosen.record(&transaction)?,
+                        None => unreachable!("a worktree was just chosen"),
                     };
-                    (Some(selected), Some(source))
-                }
-                RequestedNewChatWorktree::New => {
-                    let source =
-                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                    let created =
-                        create_worktree(&transaction, &source, &id, Some(worktree_name), None)?;
-                    (Some(created), Some(source))
-                }
-                RequestedNewChatWorktree::Branch { reference, oid } => {
-                    let source =
-                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                    let root = git_repository_root(&source)?;
-                    let resolved = git_resolve_commit(&root, reference)?;
-                    if resolved != oid {
-                        return Err(StorageError::InvalidRequest(
-                            "That branch changed after it was selected. Refresh and try again."
-                                .into(),
-                        ));
-                    }
-                    let base = if request
-                        .get("start_from_remote")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                    {
-                        fetch_worktree_base(&root, reference, oid)?
-                    } else {
-                        oid.to_owned()
-                    };
-                    let created = create_worktree(
-                        &transaction,
-                        &source,
-                        &id,
-                        Some(worktree_name),
-                        Some(&base),
-                    )?;
-                    (Some(created), Some(source))
-                }
-                RequestedNewChatWorktree::PullRequest { number, oid } => {
-                    let source =
-                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                    let root = git_repository_root(&source)?;
-                    let reference = format!("refs/pull/{number}/head");
-                    let fetched = run_git(&root, &["fetch", "origin", &reference])?;
-                    if !fetched.0.success() {
-                        return Err(StorageError::InvalidRequest(command_error(
-                            &fetched.2,
-                            "git could not fetch that pull request",
-                        )));
-                    }
-                    let resolved = git_resolve_commit(&root, "FETCH_HEAD")?;
-                    if resolved != oid {
-                        return Err(StorageError::InvalidRequest(
-                        "That pull request changed after it was selected. Refresh and try again."
-                            .into(),
-                    ));
-                    }
-                    let created = create_worktree(
-                        &transaction,
-                        &source,
-                        &id,
-                        Some(worktree_name),
-                        Some(oid),
-                    )?;
-                    (Some(created), Some(source))
+                    (Some(path), Some(source))
                 }
             }
         };
@@ -5130,6 +5200,9 @@ impl StateStore {
             params![draft, attachments, id],
         )?;
         transaction.commit()?;
+        if let Some((_, chosen)) = chosen.as_mut() {
+            chosen.keep();
+        }
         Ok(
             json!({"ok": true, "id": id, "backend": backend, "session": session,
             "terminal_chat": format!("session:{session}")}),
@@ -5829,48 +5902,14 @@ impl StateStore {
             ));
         }
         let requested = normalize_existing_path(Path::new(requested));
-        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        let transaction = database.transaction()?;
-        let chat = transaction
-            .query_row(
-                "SELECT workdir, original_workdir, new_worktree FROM chats WHERE id = ?",
-                [chat_id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, bool>(2)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
-        let selected = chat
-            .0
-            .as_deref()
-            .map(|path| normalize_existing_path(Path::new(path)))
-            .filter(|path| path == &requested)
-            .ok_or_else(|| {
-                StorageError::InvalidRequest("That worktree is no longer selected.".into())
-            })?;
-        let original = chat.1.ok_or_else(|| {
-            StorageError::InvalidRequest("That chat is not using a removable worktree.".into())
-        })?;
-        if chat.2 {
-            return Err(StorageError::InvalidRequest(
-                "The chat has not selected an existing worktree.".into(),
-            ));
-        }
-        let has_messages: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
-            [chat_id],
-            |row| row.get(0),
-        )?;
-        if has_messages || !workspace_is_unused(&transaction, chat_id)? {
-            return Err(StorageError::InvalidRequest(
-                "A worktree cannot be removed after the session's first message.".into(),
-            ));
-        }
+        // Checked first under the lock, then git runs without it: removing a
+        // worktree can take a while, and every other chat's writes would wait.
+        // The engine's session resources keep other worktree changes and
+        // first messages out meanwhile, and the update below checks again.
+        let (selected, original) = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            worktree_to_give_back(&database, chat_id, &requested)?
+        };
         let worktrees = list_git_worktrees(Path::new(&original))?;
         let target_index = worktrees
             .iter()
@@ -5883,23 +5922,6 @@ impl StateStore {
         if target_index == 0 {
             return Err(StorageError::InvalidRequest(
                 "The main checkout cannot be removed.".into(),
-            ));
-        }
-        let references = {
-            let mut statement = transaction.prepare(
-                "SELECT workdir FROM chats WHERE workspace_session_id != \
-                    (SELECT workspace_session_id FROM chats WHERE id = ?) AND workdir IS NOT NULL",
-            )?;
-            statement
-                .query_map([chat_id], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        if references
-            .iter()
-            .any(|path| normalize_existing_path(Path::new(path)) == requested)
-        {
-            return Err(StorageError::InvalidRequest(
-                "Another chat is still using that worktree.".into(),
             ));
         }
         let status = run_git(
@@ -5919,6 +5941,16 @@ impl StateStore {
                 "The worktree must be clean before it is removed.".into(),
             ));
         }
+        {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            if worktree_to_give_back(&database, chat_id, &requested)?
+                != (selected.clone(), original.clone())
+            {
+                return Err(StorageError::InvalidRequest(
+                    "The workspace changed before the worktree was removed.".into(),
+                ));
+            }
+        }
         let removed = run_git(Path::new(&original), &["worktree", "remove", &selected])?;
         if !removed.0.success() {
             let message = String::from_utf8_lossy(&removed.2).trim().to_owned();
@@ -5928,6 +5960,8 @@ impl StateStore {
                 message
             }));
         }
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
         transaction.execute(
             "DELETE FROM generated_worktrees WHERE path = ?",
             [&selected],
@@ -8113,6 +8147,73 @@ fn workspace_session_chat(database: &Connection, session: &str) -> Result<String
         .ok_or_else(|| StorageError::InvalidRequest("No such session on the host.".into()))
 }
 
+/// The worktree `requested` a chat may give back before its first message,
+/// as its selected path and the checkout it came from.
+fn worktree_to_give_back(
+    database: &Connection,
+    chat_id: &str,
+    requested: &str,
+) -> Result<(String, String), StorageError> {
+    let chat = database
+        .query_row(
+            "SELECT workdir, original_workdir, new_worktree FROM chats WHERE id = ?",
+            [chat_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+    let selected = chat
+        .0
+        .as_deref()
+        .map(|path| normalize_existing_path(Path::new(path)))
+        .filter(|path| path == requested)
+        .ok_or_else(|| {
+            StorageError::InvalidRequest("That worktree is no longer selected.".into())
+        })?;
+    let original = chat.1.ok_or_else(|| {
+        StorageError::InvalidRequest("That chat is not using a removable worktree.".into())
+    })?;
+    if chat.2 {
+        return Err(StorageError::InvalidRequest(
+            "The chat has not selected an existing worktree.".into(),
+        ));
+    }
+    let has_messages: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
+        [chat_id],
+        |row| row.get(0),
+    )?;
+    if has_messages || !workspace_is_unused(database, chat_id)? {
+        return Err(StorageError::InvalidRequest(
+            "A worktree cannot be removed after the session's first message.".into(),
+        ));
+    }
+    let references = {
+        let mut statement = database.prepare(
+            "SELECT workdir FROM chats WHERE workspace_session_id != \
+                    (SELECT workspace_session_id FROM chats WHERE id = ?) AND workdir IS NOT NULL",
+        )?;
+        statement
+            .query_map([chat_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if references
+        .iter()
+        .any(|path| normalize_existing_path(Path::new(path)) == requested)
+    {
+        return Err(StorageError::InvalidRequest(
+            "Another chat is still using that worktree.".into(),
+        ));
+    }
+    Ok((selected, original))
+}
+
 fn workspace_is_unused(database: &Connection, chat: &str) -> Result<bool, StorageError> {
     Ok(database.query_row(
         "SELECT NOT EXISTS(SELECT 1 FROM chats c WHERE c.workspace_session_id = \
@@ -8158,6 +8259,176 @@ fn create_worktree(
     name_hint: Option<&str>,
     start: Option<&str>,
 ) -> Result<String, StorageError> {
+    let mut made = make_worktree(workdir, chat_id, name_hint, start)?;
+    record_worktree(transaction, &made)?;
+    made.keep();
+    Ok(made.path.clone())
+}
+
+/// A worktree checked out for a chat, before the database records it. Git
+/// does the slow part, so callers make it without holding the database and
+/// record it afterwards in a short transaction. Dropped without `keep`, it
+/// removes the checkout and branch it added, so a send or new chat that
+/// fails afterwards leaves nothing behind.
+pub(crate) struct MadeWorktree {
+    /// The working directory it was made from.
+    source: String,
+    path: String,
+    container: PathBuf,
+    /// Set when `git worktree add` made it here, rather than finding the
+    /// chat's branch already checked out.
+    added: Option<AddedWorktree>,
+}
+
+struct AddedWorktree {
+    root: PathBuf,
+    branch: String,
+    new_branch: bool,
+}
+
+impl MadeWorktree {
+    fn keep(&mut self) {
+        self.added = None;
+    }
+}
+
+impl Drop for MadeWorktree {
+    fn drop(&mut self) {
+        let Some(added) = self.added.take() else {
+            return;
+        };
+        let removed = run_git(&added.root, &["worktree", "remove", "--force", &self.path])
+            .is_ok_and(|result| result.0.success());
+        if removed && added.new_branch {
+            let _ = run_git(&added.root, &["branch", "-D", &added.branch]);
+        }
+        if let Some(parent) = Path::new(&self.path).parent() {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+}
+
+/// The worktree a new chat runs in: one that already exists, or one made for it.
+pub(crate) enum ChosenWorktree {
+    Existing(String),
+    Made(MadeWorktree),
+}
+
+impl ChosenWorktree {
+    /// Records it in the chat's transaction and returns its path.
+    fn record(&self, transaction: &rusqlite::Transaction<'_>) -> Result<String, StorageError> {
+        match self {
+            Self::Existing(path) => Ok(path.clone()),
+            Self::Made(made) => {
+                record_worktree(transaction, made)?;
+                Ok(made.path.clone())
+            }
+        }
+    }
+
+    fn keep(&mut self) {
+        if let Self::Made(made) = self {
+            made.keep();
+        }
+    }
+}
+
+/// Picks or checks out the worktree a new chat asked for, from the project's
+/// working directory `source`. Runs git only; the caller records the result.
+fn choose_new_chat_worktree(
+    source: &str,
+    id: &str,
+    worktree_name: &str,
+    requested: RequestedNewChatWorktree<'_>,
+    start_from_remote: bool,
+) -> Result<ChosenWorktree, StorageError> {
+    match requested {
+        RequestedNewChatWorktree::Default => Err(StorageError::InvalidRequest(
+            "A new chat without a worktree choice uses its project's checkout.".into(),
+        )),
+        RequestedNewChatWorktree::Existing(requested) => {
+            if !Path::new(requested).is_absolute() {
+                return Err(StorageError::InvalidRequest(
+                    "An existing worktree path is required.".into(),
+                ));
+            }
+            let requested = normalize_existing_path(Path::new(requested));
+            let normalized_source = normalize_existing_path(Path::new(source));
+            let selected = match list_git_worktrees(Path::new(source)) {
+                Ok(worktrees) => worktrees
+                    .into_iter()
+                    .find(|worktree| normalize_existing_path(&worktree.path) == requested)
+                    .map(|worktree| normalize_existing_path(&worktree.path))
+                    .ok_or_else(|| {
+                        StorageError::InvalidRequest(
+                            "That path is not a worktree of this repository.".into(),
+                        )
+                    })?,
+                Err(_) if requested == normalized_source => normalized_source,
+                Err(error) => return Err(error),
+            };
+            Ok(ChosenWorktree::Existing(selected))
+        }
+        RequestedNewChatWorktree::New => Ok(ChosenWorktree::Made(make_worktree(
+            source,
+            id,
+            Some(worktree_name),
+            None,
+        )?)),
+        RequestedNewChatWorktree::Branch { reference, oid } => {
+            let root = git_repository_root(source)?;
+            let resolved = git_resolve_commit(&root, reference)?;
+            if resolved != oid {
+                return Err(StorageError::InvalidRequest(
+                    "That branch changed after it was selected. Refresh and try again.".into(),
+                ));
+            }
+            let base = if start_from_remote {
+                fetch_worktree_base(&root, reference, oid)?
+            } else {
+                oid.to_owned()
+            };
+            Ok(ChosenWorktree::Made(make_worktree(
+                source,
+                id,
+                Some(worktree_name),
+                Some(&base),
+            )?))
+        }
+        RequestedNewChatWorktree::PullRequest { number, oid } => {
+            let root = git_repository_root(source)?;
+            let reference = format!("refs/pull/{number}/head");
+            let fetched = run_git(&root, &["fetch", "origin", &reference])?;
+            if !fetched.0.success() {
+                return Err(StorageError::InvalidRequest(command_error(
+                    &fetched.2,
+                    "git could not fetch that pull request",
+                )));
+            }
+            let resolved = git_resolve_commit(&root, "FETCH_HEAD")?;
+            if resolved != oid {
+                return Err(StorageError::InvalidRequest(
+                    "That pull request changed after it was selected. Refresh and try again."
+                        .into(),
+                ));
+            }
+            Ok(ChosenWorktree::Made(make_worktree(
+                source,
+                id,
+                Some(worktree_name),
+                Some(oid),
+            )?))
+        }
+    }
+}
+
+/// Checks out the chat's worktree without touching the database.
+fn make_worktree(
+    workdir: &str,
+    chat_id: &str,
+    name_hint: Option<&str>,
+    start: Option<&str>,
+) -> Result<MadeWorktree, StorageError> {
     let root = git_repository_root(workdir)?;
     let worktrees = list_git_worktrees(&root)?;
     let main = worktrees
@@ -8178,7 +8449,13 @@ fn create_worktree(
             StorageError::InvalidRequest("Worktree selection needs a Git working directory.".into())
         })?;
     let container = repository_parent.join("worktrees");
-    register_worktree_container(transaction, &container)?;
+    prepare_worktree_container(&container)?;
+    let made = |path: String, added: Option<AddedWorktree>| MadeWorktree {
+        source: workdir.to_owned(),
+        path,
+        container: container.clone(),
+        added,
+    };
 
     let slug = worktree_slug(name_hint);
     let branch = format!("xd/{slug}-{}", glib_hash(chat_id));
@@ -8191,7 +8468,7 @@ fn create_worktree(
                 .is_some_and(|candidate| candidate == branch || candidate == legacy_branch)
     }) {
         // Not recorded as generated: it may be a checkout the user made.
-        return Ok(normalize_existing_path(&existing.path));
+        return Ok(made(normalize_existing_path(&existing.path), None));
     }
 
     for suffix in 1..=10_000_u32 {
@@ -8230,8 +8507,14 @@ fn create_worktree(
                 }));
             }
             let path = normalize_existing_path(Path::new(target));
-            record_generated_worktree(transaction, &path, &branch)?;
-            return Ok(path);
+            return Ok(made(
+                path,
+                Some(AddedWorktree {
+                    root: root.clone(),
+                    branch: branch.clone(),
+                    new_branch: !branch_exists,
+                }),
+            ));
         }
     }
     Err(StorageError::InvalidRequest(
@@ -8239,10 +8522,20 @@ fn create_worktree(
     ))
 }
 
-fn register_worktree_container(
+/// Records a worktree `make_worktree` checked out: its container, and the
+/// worktree itself when this chat's request added it.
+fn record_worktree(
     transaction: &rusqlite::Transaction<'_>,
-    container: &Path,
+    made: &MadeWorktree,
 ) -> Result<(), StorageError> {
+    register_worktree_container(transaction, &made.container)?;
+    if let Some(added) = &made.added {
+        record_generated_worktree(transaction, &made.path, &added.branch)?;
+    }
+    Ok(())
+}
+
+fn prepare_worktree_container(container: &Path) -> Result<(), StorageError> {
     let existed = container.exists();
     fs::create_dir_all(container).map_err(|source| StorageError::Filesystem {
         context: "Cannot create the generated worktree container".into(),
@@ -8254,6 +8547,14 @@ fn register_worktree_container(
             source,
         })?;
     }
+    Ok(())
+}
+
+fn register_worktree_container(
+    transaction: &rusqlite::Transaction<'_>,
+    container: &Path,
+) -> Result<(), StorageError> {
+    prepare_worktree_container(container)?;
     let normalized = normalize_existing_path(container);
     transaction.execute(
         "INSERT INTO worktree_containers (path, created_at, updated_at) VALUES (?, ?, ?) \
@@ -9840,12 +10141,18 @@ fn with_cut_off_note(
     ))
 }
 
+/// What a chat's first message names its worktree after.
+fn turn_worktree_hint<'a>(text: &'a str, worktree_name: Option<&'a str>) -> Option<&'a str> {
+    worktree_name.or_else(|| text.lines().find(|line| !line.trim().is_empty()))
+}
+
 fn prepare_turn(
     transaction: &rusqlite::Transaction<'_>,
     workspace_root: &Path,
     chat_id: &str,
     text: &str,
     worktree_name: Option<&str>,
+    premade: Option<&MadeWorktree>,
 ) -> Result<TurnSpec, StorageError> {
     // Any turn picks a paused chat back up.
     transaction.execute(
@@ -9890,13 +10197,19 @@ fn prepare_turn(
             ));
         }
         let source = workdir.clone();
-        workdir = create_worktree(
-            transaction,
-            &source,
-            chat_id,
-            worktree_name.or_else(|| text.lines().find(|line| !line.trim().is_empty())),
-            None,
-        )?;
+        workdir = match premade.filter(|made| made.source == source) {
+            Some(made) => {
+                record_worktree(transaction, made)?;
+                made.path.clone()
+            }
+            None => create_worktree(
+                transaction,
+                &source,
+                chat_id,
+                turn_worktree_hint(text, worktree_name),
+                None,
+            )?,
+        };
         let changed = transaction.execute(
             "UPDATE chats SET workdir = ?, original_workdir = COALESCE(original_workdir, ?), \
              new_worktree = 0, updated_at = ? WHERE id = ? AND new_worktree = 1 \
@@ -16428,6 +16741,132 @@ mod tests {
                 .and_then(|worktree| worktree.head.as_deref()),
             Some("2222222222222222222222222222222222222222")
         );
+    }
+
+    /// A one-commit repository whose checkouts take `delay`, through a
+    /// post-checkout hook, registered as project `repo` with chats on it.
+    fn slow_checkout_repository(fixture: &Fixture, delay: &str) -> PathBuf {
+        let repository = fixture.workspaces.join("Repo");
+        fs::create_dir_all(&repository).unwrap();
+        for arguments in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.name", "xd test"],
+            vec!["config", "user.email", "xd@example.test"],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let hook = repository.join(".git/hooks/post-checkout");
+        fs::write(&hook, format!("#!/bin/sh\nsleep {delay}\n")).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        database
+            .execute(
+                "INSERT INTO workspace_folders \
+                 (id, root_path, relative_path, repo, shortcuts) VALUES ('repo', ?, 'Repo', ?, '[]')",
+                params![
+                    fixture.workspaces.to_string_lossy(),
+                    repository.to_string_lossy()
+                ],
+            )
+            .unwrap();
+        database
+            .execute_batch(
+                "INSERT INTO chats (id, folder_id, title, backend, new_worktree) \
+                 VALUES ('chat-worktree', 'repo', 'Worktree', 'codex', 1); \
+                 INSERT INTO chats (id, folder_id, title, backend) \
+                 VALUES ('chat-other', 'repo', 'Other', 'codex');",
+            )
+            .unwrap();
+        repository
+    }
+
+    #[test]
+    fn a_first_send_makes_its_worktree_without_holding_up_other_chats() {
+        let fixture = Fixture::new();
+        slow_checkout_repository(&fixture, "2");
+        let store = Arc::new(StateStore::open(&fixture.database, &fixture.workspaces).unwrap());
+        let sending = {
+            let store = store.clone();
+            thread::spawn(move || {
+                store.prepare_send(&json!({"chat": "chat-worktree", "text": "review it"}))
+            })
+        };
+        thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        store
+            .set_partial_reply("chat-other", "still streaming", None)
+            .unwrap();
+        let waited = started.elapsed();
+        let Ok(SendDisposition::Start { turn, .. }) = sending.join().unwrap() else {
+            panic!("the first message should start a turn");
+        };
+        assert!(
+            waited < Duration::from_millis(1200),
+            "another chat's write waited on git: {waited:?}"
+        );
+        assert!(Path::new(&turn.workdir).is_dir());
+        let database = store.database.lock().unwrap();
+        let (workdir, recorded): (String, i64) = database
+            .query_row(
+                "SELECT workdir, (SELECT count(*) FROM generated_worktrees WHERE path = workdir) \
+                 FROM chats WHERE id = 'chat-worktree'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(workdir, turn.workdir);
+        assert_eq!(recorded, 1, "the worktree is recorded as generated");
+    }
+
+    #[test]
+    fn a_worktree_made_for_a_send_that_did_not_use_it_is_removed() {
+        let fixture = Fixture::new();
+        let repository = slow_checkout_repository(&fixture, "0");
+        let branches = || {
+            String::from_utf8(
+                Command::new("git")
+                    .args(["branch", "--list", "xd/*"])
+                    .current_dir(&repository)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+        };
+        let made = make_worktree(
+            &repository.to_string_lossy(),
+            "chat-worktree",
+            Some("review it"),
+            None,
+        )
+        .unwrap();
+        let path = made.path.clone();
+        assert!(Path::new(&path).is_dir());
+        assert!(!branches().is_empty());
+        drop(made);
+        assert!(!Path::new(&path).exists(), "the unused checkout is removed");
+        assert!(branches().is_empty(), "with the branch it added");
+
+        let mut kept = make_worktree(
+            &repository.to_string_lossy(),
+            "chat-worktree",
+            Some("review it"),
+            None,
+        )
+        .unwrap();
+        kept.keep();
+        let path = kept.path.clone();
+        drop(kept);
+        assert!(Path::new(&path).is_dir(), "a kept worktree stays");
     }
 
     #[test]
