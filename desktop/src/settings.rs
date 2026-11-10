@@ -3,6 +3,7 @@ use std::{
     env, fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock, mpsc},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -208,13 +209,26 @@ impl AppSettings {
         }
     }
 
+    /// Saves in the background: the write syncs to disk, which can take a
+    /// while on a busy disk, and switching chats or navigating the browser
+    /// saves. Only the newest settings are written, in order; a failure is
+    /// reported through [`take_save_error`], and [`flush_saves`] waits for
+    /// the write before the app exits.
     pub fn save(&self) -> Result<(), String> {
         // Persistence is tested through save_preserving with explicit paths.
         // GPUI fixtures must not write to the user's settings or each other.
         if cfg!(test) {
             return Ok(());
         }
-        self.save_preserving(&settings_path())
+        if let Some(error) = &self.load_error {
+            return Err(format!(
+                "App settings were not saved because the existing file is invalid: {error}"
+            ));
+        }
+        let bytes = encode(self)?;
+        save_writer()
+            .send(SaveJob::Write(settings_path(), bytes))
+            .map_err(|_| "Cannot save app settings: the writer stopped.".to_owned())
     }
 
     fn load_preserving(path: &Path) -> Self {
@@ -228,6 +242,7 @@ impl AppSettings {
         self.load_error.as_deref()
     }
 
+    #[cfg(test)]
     fn save_preserving(&self, path: &Path) -> Result<(), String> {
         if let Some(error) = &self.load_error {
             return Err(format!(
@@ -266,7 +281,101 @@ fn load_from(path: &Path) -> Result<AppSettings, String> {
     serde_json::from_slice(&bytes).map_err(|error| format!("Cannot parse app settings: {error}"))
 }
 
+enum SaveJob {
+    Write(PathBuf, Vec<u8>),
+    Flush(mpsc::Sender<()>),
+}
+
+static SAVE_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// The last background save that failed, once.
+pub fn take_save_error() -> Option<String> {
+    SAVE_ERROR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+}
+
+/// Waits, for a short while, until every saved setting is on disk.
+pub fn flush_saves() {
+    if cfg!(test) {
+        return;
+    }
+    let (reply, done) = mpsc::channel();
+    if save_writer().send(SaveJob::Flush(reply)).is_ok() {
+        // Every save the app made is on disk before it goes, as when saving
+        // was synchronous, however long the disk takes.
+        let _ = done.recv();
+    }
+}
+
+fn save_writer() -> &'static mpsc::Sender<SaveJob> {
+    static WRITER: OnceLock<mpsc::Sender<SaveJob>> = OnceLock::new();
+    WRITER.get_or_init(|| {
+        let (sender, jobs) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("xd-settings-writer".into())
+            .spawn(move || run_save_writer(jobs))
+            .expect("start the settings writer");
+        sender
+    })
+}
+
+/// Writes saves in order. Saves that queue up behind a slow write collapse
+/// into the newest one for each file.
+fn run_save_writer(jobs: mpsc::Receiver<SaveJob>) {
+    let mut pending: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    let write_pending = |pending: &mut Vec<(PathBuf, Vec<u8>)>| {
+        for (path, bytes) in pending.drain(..) {
+            if let Err(error) = write_bytes(&path, &bytes) {
+                *SAVE_ERROR
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
+            }
+        }
+    };
+    loop {
+        let job = if pending.is_empty() {
+            match jobs.recv() {
+                Ok(job) => job,
+                Err(_) => return,
+            }
+        } else {
+            match jobs.try_recv() {
+                Ok(job) => job,
+                Err(mpsc::TryRecvError::Empty) => {
+                    write_pending(&mut pending);
+                    continue;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    write_pending(&mut pending);
+                    return;
+                }
+            }
+        };
+        match job {
+            SaveJob::Write(path, bytes) => {
+                pending.retain(|(queued, _)| queued != &path);
+                pending.push((path, bytes));
+            }
+            SaveJob::Flush(reply) => {
+                write_pending(&mut pending);
+                let _ = reply.send(());
+            }
+        }
+    }
+}
+
+fn encode(settings: &AppSettings) -> Result<Vec<u8>, String> {
+    serde_json::to_vec_pretty(settings)
+        .map_err(|error| format!("Cannot encode app settings: {error}"))
+}
+
 fn save_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
+    write_bytes(path, &encode(settings)?)
+}
+
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "App settings need a parent directory.".to_owned())?;
@@ -276,8 +385,6 @@ fn save_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
         .unwrap_or_default()
         .as_nanos();
     let temporary = parent.join(format!(".settings-{}-{nonce}.tmp", std::process::id()));
-    let bytes = serde_json::to_vec_pretty(settings)
-        .map_err(|error| format!("Cannot encode app settings: {error}"))?;
     let result = (|| {
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -289,7 +396,7 @@ fn save_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
         let mut file = options
             .open(&temporary)
             .map_err(|error| format!("Cannot prepare app settings: {error}"))?;
-        file.write_all(&bytes)
+        file.write_all(bytes)
             .and_then(|_| file.sync_all())
             .map_err(|error| format!("Cannot write app settings: {error}"))?;
         fs::rename(&temporary, path)
@@ -312,6 +419,39 @@ mod tests {
             serde_json::from_str(r#"{"git_writer":"jcode","theme":"light"}"#).unwrap();
         assert_eq!(settings.git_writer, GitWriter::Chat);
         assert_eq!(settings.theme, ThemePreset::Light);
+    }
+
+    #[test]
+    fn background_saves_write_the_newest_settings_before_a_flush_returns() {
+        let directory = env::temp_dir().join(format!(
+            "xd-settings-writer-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("settings.json");
+        let (sender, jobs) = mpsc::channel();
+        let writer = std::thread::spawn(move || run_save_writer(jobs));
+        sender
+            .send(SaveJob::Write(path.clone(), b"first".to_vec()))
+            .unwrap();
+        sender
+            .send(SaveJob::Write(path.clone(), b"second".to_vec()))
+            .unwrap();
+        let (reply, done) = mpsc::channel();
+        sender.send(SaveJob::Flush(reply)).unwrap();
+        done.recv().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+
+        sender
+            .send(SaveJob::Write(path.clone(), b"third".to_vec()))
+            .unwrap();
+        drop(sender);
+        writer.join().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"third", "written before exiting");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -581,6 +581,82 @@ class XdClientVerticalSliceTest {
         assertEquals(3, socket.countOps("tree"))
     }
 
+    @Test
+    fun aTreeChangeReadsOnlyTheChatOnScreenAgainAndTheRestWhenShown() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val pairing = async { client.connect(testConnection()) }
+        runCurrent()
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receiveReadinessTreeReply()
+        runCurrent()
+        runCurrent()
+        assertIs<ConnectResult.Success>(pairing.await())
+        socket.receive(treeReply(working = false))
+        runCurrent()
+
+        fun reads(chat: String) = socket.writes.count {
+            val line = it.decodeToString()
+            line.contains(""""op":"chat"""") && line.contains(""""chat":"$chat"""")
+        }
+        val sessions = listOf("one", "two").map { id ->
+            client.openChat(id).also {
+                runCurrent()
+                socket.receive(chatReply(working = false))
+                runCurrent()
+                socket.receive(messagesReply("""{"role":"user","content":"Earlier","at":1,"id":1}"""))
+                runCurrent()
+                assertTrue(it.state.value.transcriptLoaded)
+            }
+        }
+        client.setVisibleChat("one")
+        runCurrent()
+        assertEquals(1, reads("one"))
+        assertEquals(1, reads("two"))
+
+        socket.receive("""{"event":"tree"}""")
+        runCurrent()
+        assertEquals(2, reads("one"), "the chat on screen is read again")
+        assertEquals(1, reads("two"), "a chat off screen waits until it is shown")
+
+        socket.receive(treeReply(working = false), chatReply(working = false))
+        runCurrent()
+        socket.receive(messagesReply("""{"role":"user","content":"Earlier","at":1,"id":1}"""))
+        runCurrent()
+        client.setVisibleChat("two")
+        runCurrent()
+        assertEquals(2, reads("two"), "shown again, it is brought up to date")
+        socket.receive(chatReply(working = false))
+        runCurrent()
+        socket.receive(messagesReply("""{"role":"user","content":"Earlier","at":1,"id":1}"""))
+        runCurrent()
+        client.setVisibleChat("one")
+        runCurrent()
+        assertEquals(2, reads("one"), "a chat read since it was marked is not read again")
+
+        // A deferred read that fails leaves the chat marked, so the next
+        // visit tries again.
+        socket.receive("""{"event":"tree"}""")
+        runCurrent()
+        socket.receive(treeReply(working = false), chatReply(working = false))
+        runCurrent()
+        socket.receive(messagesReply("""{"role":"user","content":"Earlier","at":1,"id":1}"""))
+        runCurrent()
+        client.setVisibleChat("two")
+        runCurrent()
+        assertEquals(3, reads("two"))
+        socket.receive("""{"ok":false,"error":"chat read failed"}""")
+        runCurrent()
+        client.setVisibleChat("one")
+        runCurrent()
+        client.setVisibleChat("two")
+        runCurrent()
+        assertEquals(4, reads("two"), "a failed read is tried again on the next visit")
+        sessions.forEach { it.close() }
+    }
+
     private fun FakeSocket.opAt(index: Int): String {
         val line = writes[index].decodeToString()
         return Regex(""""op":"([^"]+)"""").find(line)?.groupValues?.get(1)

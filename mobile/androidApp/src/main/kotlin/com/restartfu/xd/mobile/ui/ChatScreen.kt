@@ -81,6 +81,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import com.restartfu.xd.model.ChatState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -110,7 +117,8 @@ import com.restartfu.xd.model.AssistantSectionKind
 import com.restartfu.xd.model.AssistantSections
 import com.restartfu.xd.model.SubagentState
 import com.restartfu.xd.model.AgentRelay
-import com.restartfu.xd.model.ToolGrouping
+import com.restartfu.xd.model.TranscriptRowCache
+import com.restartfu.xd.model.key
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.ImageReference
@@ -251,43 +259,50 @@ internal fun ChatScreen(
         model.refreshPullRequest(branch, fetch = !busy)
     }
     val listState = rememberLazyListState()
-    val items = state.visibleItems
-
     // A run of ordinary tool calls collapses to one line; inline diffs keep
-    // their own file-change row, and a lone call shows its command.
-    val rows = remember(items) { ToolGrouping.rows(items) }
-    val answered = remember(items) { AskBlock.answered(items) }
+    // their own file-change row, and a lone call shows its command. Grouped
+    // again only when a row is added or rewritten, not for each streamed word.
+    val rowCache = remember(state.chatId) { TranscriptRowCache() }
+    val transcript = rowCache.rows(state)
+    val settledRows = transcript.settled
+    val rows = transcript.rows
+    val answered = transcript.answered
+    val transcriptEmpty = transcript.isEmpty
     // The chat's agents by record key: the host rewrites one record per agent,
     // so each key is one row holding the agent's newest snapshot.
-    val agentRuns = remember(rows) {
-        rows.filterIsInstance<TranscriptRow.Subagent>()
+    val agentRuns = remember(settledRows) {
+        settledRows.filterIsInstance<TranscriptRow.Subagent>()
             .mapNotNull { row -> row.run.key?.let { it to row.run } }
             .toMap()
     }
-    val runningAgents = remember(rows) {
-        rows.filterIsInstance<TranscriptRow.Subagent>()
+    val runningAgents = remember(settledRows) {
+        settledRows.filterIsInstance<TranscriptRow.Subagent>()
             .map { it.run }
             // An agent chat opens as a chat of its own, not a tab here.
             .filter { it.state == SubagentState.RUNNING && it.chat == null }
     }
-    val agents = AgentTabs(
-        tabs = agentTabKeys.map { key ->
-            val run = agentRuns[key]
-            AgentTab(
-                key = key,
-                title = run?.let(::agentTitle) ?: "Agent",
-                provider = run?.provider.orEmpty(),
-                running = run?.state == SubagentState.RUNNING,
-            )
-        },
-        viewing = viewingAgent,
-        open = { key ->
-            pane = Pane.CHAT
-            model.openAgent(key)
-        },
-        close = model::closeAgent,
-        showChat = model::showChat,
-    )
+    // Kept while its agents are unchanged, so the tabs and header that take
+    // it are not drawn again for every streamed word.
+    val agents = remember(agentTabKeys, agentRuns, viewingAgent, model, workspacePane) {
+        AgentTabs(
+            tabs = agentTabKeys.map { key ->
+                val run = agentRuns[key]
+                AgentTab(
+                    key = key,
+                    title = run?.let(::agentTitle) ?: "Agent",
+                    provider = run?.provider.orEmpty(),
+                    running = run?.state == SubagentState.RUNNING,
+                )
+            },
+            viewing = viewingAgent,
+            open = { key ->
+                workspacePane.pane = Pane.CHAT
+                model.openAgent(key)
+            },
+            close = model::closeAgent,
+            showChat = model::showChat,
+        )
+    }
     val shownAgent = viewingAgent?.let { agentRuns[it] }
     var trayOpen by rememberSaveable(state.chatId) { mutableStateOf(false) }
     val leadingItemCount =
@@ -328,8 +343,8 @@ internal fun ChatScreen(
         }
     }
 
-    LaunchedEffect(state.chatId, items.isNotEmpty()) {
-        if (!model.landed && items.isNotEmpty()) {
+    LaunchedEffect(state.chatId, !transcriptEmpty) {
+        if (!model.landed && !transcriptEmpty) {
             // Jumped, not animated: scrolling through a loaded history on open
             // is motion the reader did not ask for.
             listState.scrollToEnd(lastTranscriptIndex)
@@ -338,9 +353,46 @@ internal fun ChatScreen(
         }
     }
 
-    LaunchedEffect(items.size, items.lastOrNull()?.text, leadingItemCount, trailingItemCount) {
-        if (model.landed && items.isNotEmpty() && following.value) {
-            listState.scrollToEnd(lastTranscriptIndex, animated = true)
+    // One follower for the visit, fed the newest end to keep in view. A word
+    // arriving mid-scroll is picked up when that scroll ends, rather than
+    // cancelling it and starting over for every word.
+    val followTarget = rememberUpdatedState(
+        FollowTarget(
+            count = transcript.items.size + (if (transcript.segment != null) 1 else 0),
+            lastText = state.lastVisibleItem?.text,
+            leading = leadingItemCount,
+            trailing = trailingItemCount,
+            lastIndex = lastTranscriptIndex,
+        ),
+    )
+    LaunchedEffect(listState, model) {
+        var lastFollowed: Pair<FollowTarget?, Int?> = null to null
+        // The newest message's drawn height too: a streaming reply is drawn
+        // at a pace, so its last words can land after the text that woke
+        // this. It is the row above the working row while a turn runs, and
+        // the end stays the place scrolled to.
+        snapshotFlow {
+            val target = followTarget.value
+            val newest = target.lastIndex - target.trailing
+            val drawnHeight = listState.layoutInfo.visibleItemsInfo
+                .firstOrNull { it.index == newest }?.size
+            target to drawnHeight
+        }.collect { (target, drawnHeight) ->
+            // Only new output, or the newest message growing while in view,
+            // moves the list; it leaving or entering the view is the reader's.
+            val grew = target == lastFollowed.first &&
+                drawnHeight != null &&
+                (lastFollowed.second ?: Int.MAX_VALUE) < drawnHeight
+            val changed = target != lastFollowed.first
+            lastFollowed = target to drawnHeight
+            if ((changed || grew) && model.landed && target.count > 0 && following.value) {
+                try {
+                    listState.scrollToEnd(target.lastIndex, animated = true)
+                } catch (interrupted: CancellationException) {
+                    // The reader's own scroll took over; only leaving stops following.
+                    currentCoroutineContext().ensureActive()
+                }
+            }
         }
     }
 
@@ -546,11 +598,11 @@ internal fun ChatScreen(
         }
         if (viewingAgent != null) {
             val address = shownAgent?.messageAddress
-            val sent = remember(items, address) {
+            val sent = remember(transcript.items, address) {
                 if (address == null) {
                     emptyList()
                 } else {
-                    items.filter { it.kind == TranscriptKind.USER }
+                    transcript.items.filter { it.kind == TranscriptKind.USER }
                         .mapNotNull { AgentRelay.parse(it.text) }
                         .filter { it.address == address }
                 }
@@ -573,7 +625,7 @@ internal fun ChatScreen(
             return@Scaffold
         }
         if (state.transcriptLoaded && !state.loading && !state.hasOlderMessages &&
-            items.isEmpty() && state.error == null && !state.working
+            transcriptEmpty && state.error == null && !state.working
         ) {
             Box(
                 Modifier.fillMaxSize().padding(padding).padding(horizontal = 28.dp),
@@ -626,13 +678,13 @@ internal fun ChatScreen(
                     }
                 }
             }
-            if (state.loading && items.isEmpty()) {
+            if (state.loading && transcriptEmpty) {
                 item { CircularProgressIndicator() }
             }
             state.error?.let { error ->
                 item { Text(error, color = MaterialTheme.colorScheme.error) }
             }
-            items(rows, key = ::rowKey) { row ->
+            items(rows, key = { it.key }, contentType = ::rowContentType) { row ->
                 when (row) {
                     is TranscriptRow.Single -> {
                         // xd's word that one of this chat's agents ended a turn.
@@ -1416,13 +1468,42 @@ private suspend fun LazyListState.scrollToEnd(index: Int, animated: Boolean = fa
     }
 }
 
-private fun rowKey(row: TranscriptRow): String = when (row) {
-    is TranscriptRow.Single -> row.item.id
-    // Keyed on the run's first call, which is stable as the run grows.
-    is TranscriptRow.Tools -> "tools-${row.items.first().id}"
-    is TranscriptRow.AccountSwitch -> "account-switch-${row.item.id}"
-    is TranscriptRow.Pipeline -> "pipeline-${row.item.id}"
-    is TranscriptRow.Subagent -> "subagent-${row.item.id}"
+/** What the chat's follower keeps in view: the end, as of the newest output. */
+private data class FollowTarget(
+    val count: Int,
+    val lastText: String?,
+    val leading: Int,
+    val trailing: Int,
+    val lastIndex: Int,
+)
+
+/** How often a streaming reply is drawn again. */
+private const val LIVE_TEXT_INTERVAL_MILLIS = 80L
+
+/**
+ * [text] as last drawn: its newest value, at most once per
+ * [LIVE_TEXT_INTERVAL_MILLIS]. The first value shows at once.
+ */
+@Composable
+private fun rememberPacedText(text: String): String {
+    val latest = rememberUpdatedState(text)
+    var shown by remember { mutableStateOf(text) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { latest.value }.collect { value ->
+            shown = value
+            delay(LIVE_TEXT_INTERVAL_MILLIS)
+        }
+    }
+    return shown
+}
+
+/** Rows drawn alike, so the list can reuse one's layout for another. */
+private fun rowContentType(row: TranscriptRow): String = when (row) {
+    is TranscriptRow.Single -> "single-${row.item.kind}"
+    is TranscriptRow.Tools -> "tools"
+    is TranscriptRow.AccountSwitch -> "account-switch"
+    is TranscriptRow.Pipeline -> "pipeline"
+    is TranscriptRow.Subagent -> "subagent"
 }
 
 /**
@@ -1433,7 +1514,7 @@ private fun rowKey(row: TranscriptRow): String = when (row) {
  */
 @Composable
 private fun ToolGroupRow(row: TranscriptRow.Tools) {
-    var expanded by rememberSaveable(rowKey(row)) { mutableStateOf(false) }
+    var expanded by rememberSaveable(row.key) { mutableStateOf(false) }
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
@@ -1566,7 +1647,15 @@ private fun AccountSwitchNotice(sentence: String) {
  * boxes where the only difference is which side is narrower.
  */
 @Composable
-private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel, answering: String? = null) {
+private fun TranscriptRow(row: TranscriptItem, model: ChatViewModel, answering: String? = null) {
+    // The reply still streaming in is drawn at a steady pace rather than
+    // parsed and laid out again for every word.
+    val item = if (row.id == ChatState.LIVE_SEGMENT_ID) {
+        val shown = rememberPacedText(row.text)
+        remember(row.id, shown) { row.copy(text = shown) }
+    } else {
+        row
+    }
     if (item.kind == TranscriptKind.TOOL) {
         ToolRow(item)
         return

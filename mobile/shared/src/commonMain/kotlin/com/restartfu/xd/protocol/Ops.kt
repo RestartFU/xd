@@ -84,10 +84,16 @@ public object Ops {
         }
     }
 
-    public fun messages(chatId: String, limit: Int = 150): JsonObject = buildJsonObject {
+    /**
+     * The newest [limit] messages, or with [before] the [limit] stored just
+     * before that message id. A host without cursors ignores [before] and
+     * answers without `has_older`.
+     */
+    public fun messages(chatId: String, limit: Int = 150, before: Long? = null): JsonObject = buildJsonObject {
         put("op", "messages")
         put("chat", chatId)
         put("limit", limit)
+        if (before != null) put("before", before)
     }
 
     public fun workflowStatus(marker: String): JsonObject = buildJsonObject {

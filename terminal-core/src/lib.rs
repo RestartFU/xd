@@ -16,6 +16,14 @@ const CHECKPOINT_HEADER: &[u8] = b"XDTS\x02";
 const CHECKPOINT_FIXED_BYTES: usize = 5 + 2 + 2 + 4 + 8;
 const MAX_PENDING_BYTES: usize = 2 * 1024 * 1024;
 
+/// Hands out screen revisions. One counter for every screen, so a revision
+/// also tells a replaced screen apart from the one before it.
+static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_revision() -> u64 {
+    NEXT_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Converts agent-owned terminal titles into activity transitions. Codex's
 /// animated title has no explicit idle token, so the following spinnerless
 /// title closes the active interval.
@@ -117,6 +125,7 @@ pub struct TerminalScreen {
     pending: Vec<u8>,
     pending_state: PendingState,
     sync_replay: Option<Vec<u8>>,
+    revision: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -157,7 +166,14 @@ impl TerminalScreen {
             pending: Vec::new(),
             pending_state: PendingState::Ground,
             sync_replay: None,
+            revision: next_revision(),
         }
+    }
+
+    /// Changes whenever what [`Self::rendered`] returns may have changed, and
+    /// differs between screens, so callers can keep a rendering until then.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn resize(&mut self, columns: usize, rows: usize) {
@@ -166,6 +182,7 @@ impl TerminalScreen {
         if self.columns == columns && self.rows == rows {
             return;
         }
+        self.revision = next_revision();
         self.columns = columns;
         self.rows = rows;
         self.term.resize(TerminalSize { columns, rows });
@@ -265,6 +282,10 @@ impl TerminalScreen {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.revision = next_revision();
         for &byte in bytes {
             if self.processor.sync_bytes_count() > 0
                 && !self.processor.sync_timeout().pending_timeout()
@@ -993,6 +1014,22 @@ impl Default for TerminalScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_revision_changes_with_every_change_and_between_screens() {
+        let mut screen = TerminalScreen::new(12, 3);
+        let other = TerminalScreen::new(12, 3);
+        assert_ne!(screen.revision(), other.revision());
+        let start = screen.revision();
+        screen.feed(b"");
+        screen.resize(12, 3);
+        assert_eq!(screen.revision(), start, "nothing changed");
+        screen.feed(b"x");
+        let fed = screen.revision();
+        assert_ne!(fed, start);
+        screen.resize(20, 3);
+        assert_ne!(screen.revision(), fed);
+    }
 
     #[test]
     fn applies_cursor_control_without_duplicate_prompt_lines() {

@@ -21,7 +21,15 @@ internal object Scanner {
     ): List<SyntaxPiece> {
         if (line.isEmpty()) return emptyList()
         if (language == L.NONE) return listOf(SyntaxPiece(SyntaxToken.TEXT, line))
+        return joined(scanPieces(language, line, state))
+    }
 
+    /** The line's pieces as scanned, neighbours of one token not yet joined. */
+    private fun scanPieces(
+        language: L,
+        line: String,
+        state: SyntaxState,
+    ): List<SyntaxPiece> {
         val pieces = mutableListOf<SyntaxPiece>()
         var at = continueFromPreviousLine(language, line, state, pieces)
         if (at < 0) return pieces
@@ -377,13 +385,32 @@ internal object Scanner {
     }
 
     private fun emit(pieces: MutableList<SyntaxPiece>, token: SyntaxToken, text: String) {
-        if (text.isEmpty()) return
-        val last = pieces.lastOrNull()
-        if (last != null && last.token == token) {
-            pieces[pieces.lastIndex] = SyntaxPiece(token, last.text + text)
-            return
+        if (text.isNotEmpty()) pieces.add(SyntaxPiece(token, text))
+    }
+
+    /**
+     * Joins neighbouring pieces of one token. Done once at the end: joining
+     * as each piece arrived copied a long run of plain text once per character.
+     */
+    private fun joined(pieces: List<SyntaxPiece>): List<SyntaxPiece> {
+        if (pieces.size < 2) return pieces
+        val result = ArrayList<SyntaxPiece>(pieces.size)
+        var index = 0
+        while (index < pieces.size) {
+            val first = pieces[index]
+            var end = index + 1
+            while (end < pieces.size && pieces[end].token == first.token) end++
+            result += if (end == index + 1) {
+                first
+            } else {
+                SyntaxPiece(
+                    first.token,
+                    buildString { for (piece in index until end) append(pieces[piece].text) },
+                )
+            }
+            index = end
         }
-        pieces.add(SyntaxPiece(token, text))
+        return result
     }
 
     private fun slashComments(l: L) =

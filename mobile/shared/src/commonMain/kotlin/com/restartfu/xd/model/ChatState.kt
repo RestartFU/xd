@@ -82,6 +82,14 @@ public data class ChatState(
     val loading: Boolean = false,
     val loadingOlder: Boolean = false,
     val hasOlderMessages: Boolean = false,
+    /**
+     * Host id of the oldest stored message fetched so far, hidden rows
+     * included, so "Load older" asks for the page before it even when a
+     * whole page held only hidden rows.
+     */
+    val oldestFetchedMessageId: Long? = null,
+    /** Whether [todos] came from a snapshot, which may be an empty list. */
+    val todosFromSnapshot: Boolean = false,
     val error: String? = null,
 ) {
     public val visibleItems: List<TranscriptItem>
@@ -89,17 +97,27 @@ public data class ChatState(
             addAll(messages)
             pendingUser?.let(::add)
             addAll(liveItems)
-            if (liveSegment.isNotEmpty()) {
-                add(
-                    TranscriptItem(
-                        id = "live-segment",
-                        kind = TranscriptKind.ASSISTANT,
-                        text = liveSegment,
-                        live = true,
-                    ),
-                )
-            }
+            segmentItem?.let(::add)
         }
+
+    /** The reply still streaming in, drawn after everything else. */
+    public val segmentItem: TranscriptItem?
+        get() = liveSegment.takeIf(String::isNotEmpty)?.let {
+            TranscriptItem(
+                id = LIVE_SEGMENT_ID,
+                kind = TranscriptKind.ASSISTANT,
+                text = it,
+                live = true,
+            )
+        }
+
+    /** The last of [visibleItems], without building the list. */
+    public val lastVisibleItem: TranscriptItem?
+        get() = segmentItem ?: liveItems.lastOrNull() ?: pendingUser ?: messages.lastOrNull()
+
+    public companion object {
+        public const val LIVE_SEGMENT_ID: String = "live-segment"
+    }
 }
 
 public data class PendingInteraction(

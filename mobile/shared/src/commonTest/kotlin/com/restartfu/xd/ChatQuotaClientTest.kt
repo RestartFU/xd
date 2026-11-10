@@ -120,6 +120,7 @@ class ChatQuotaClientTest {
     fun aNewDefaultReadsTheOpenChatAgain() = runTest {
         val (client, socket) = connected(backgroundScope)
         client.openChat("chat")
+        client.setVisibleChat("chat")
         runCurrent()
         socket.receive(
             """{"ok":true,"title":"Hello","backend":"codex","plan":false,"queue":[],"working":false,""" +
