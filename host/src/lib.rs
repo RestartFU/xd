@@ -142,6 +142,9 @@ pub struct Engine {
     _shared_event_monitor: Option<SharedEventMonitor>,
     auto_settler: Mutex<Option<AutoSettler>>,
     quota_meter: Mutex<Option<quota::QuotaMeter>>,
+    /// Held from saving the default chat quota until it is broadcast, so the
+    /// last broadcast always carries the saved value.
+    quota_settings: Mutex<()>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,6 +217,7 @@ impl Engine {
             _shared_event_monitor: None,
             auto_settler: Mutex::new(None),
             quota_meter: Mutex::new(None),
+            quota_settings: Mutex::new(()),
             events,
             runtime: None,
         }
@@ -282,6 +286,7 @@ impl Engine {
             _shared_event_monitor: shared_event_monitor,
             auto_settler: Mutex::new(None),
             quota_meter: Mutex::new(None),
+            quota_settings: Mutex::new(()),
             events,
         };
         engine.auth.refresh_all();
@@ -1751,6 +1756,10 @@ impl Engine {
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
         };
+        let _settings = self
+            .quota_settings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         match store.set_chat_quota_settings(request) {
             Ok(percent) => {
                 self.events

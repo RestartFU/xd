@@ -68,6 +68,9 @@ struct AccountLedger {
     /// The reading the next rise is measured from.
     last: Option<Reading>,
     read_at: Option<Instant>,
+    /// When `last` was asked for, by the clock, so a chat whose count started
+    /// again since is not charged with use from before.
+    asked_ms: i64,
     /// Nothing worked on the account when `last` was read.
     idle: bool,
     /// Every chat that worked on the account since `last`.
@@ -102,9 +105,10 @@ impl Ledger {
             .insert(chat_id.to_owned());
     }
 
-    /// Takes in a reading of the account's limit, with the chats working on
-    /// it now, and returns each chat's share of the rise since the last one.
-    /// Chats without a quota take their share too; the caller drops theirs.
+    /// Takes in a reading of the account's limit, asked for at `asked_ms`,
+    /// with the chats working on it now, and returns each chat's share of the
+    /// rise since the last one, and when that last one was asked for. Chats
+    /// without a quota take their share too; the caller drops theirs.
     pub(crate) fn record(
         &mut self,
         provider: &str,
@@ -112,7 +116,8 @@ impl Ledger {
         reading: Reading,
         working: &[String],
         now: Instant,
-    ) -> Vec<(String, f64)> {
+        asked_ms: i64,
+    ) -> (Vec<(String, f64)>, i64) {
         let entry = self
             .accounts
             .entry((provider.to_owned(), account.to_owned()))
@@ -120,15 +125,19 @@ impl Ledger {
         let mut sharers = std::mem::take(&mut entry.sharers);
         sharers.extend(working.iter().cloned());
         let rise = entry.baseline(now).map_or(0.0, |last| rise(last, reading));
+        let since_ms = std::mem::replace(&mut entry.asked_ms, asked_ms);
         entry.last = Some(reading);
         entry.read_at = Some(now);
         entry.idle = working.is_empty();
         entry.sharers = working.iter().cloned().collect();
         if rise <= 0.0 || sharers.is_empty() {
-            return Vec::new();
+            return (Vec::new(), since_ms);
         }
         let share = rise / sharers.len() as f64;
-        sharers.into_iter().map(|chat| (chat, share)).collect()
+        (
+            sharers.into_iter().map(|chat| (chat, share)).collect(),
+            since_ms,
+        )
     }
 
     fn forget(&mut self, provider: &str, account: &str) {
@@ -295,18 +304,21 @@ impl Pass {
             if involved.is_empty() {
                 // Nothing to count here. A baseline stays while nothing works
                 // on the account, for the next turn of a chat with a quota.
-                // Chats without one working here would leave a rise nobody
-                // counts, so the next turn reads afresh, beside them.
+                // Chats without one that worked here since would leave a rise
+                // nobody is charged for, so the next turn reads afresh. Chats
+                // noted since the list above was taken stay for the next look.
                 if let Ok(mut ledger) = self.ledger.lock()
                     && let Some(entry) = ledger
                         .accounts
                         .get_mut(&(provider.clone(), account.clone()))
                 {
-                    entry.sharers = here.iter().cloned().collect();
-                    if !here.is_empty() {
+                    let seen = sharers.iter().collect::<HashSet<_>>();
+                    if !seen.is_empty() || !here.is_empty() {
                         entry.last = None;
                     }
-                    if entry.last.is_none() && here.is_empty() {
+                    entry.sharers.retain(|chat_id| !seen.contains(chat_id));
+                    entry.sharers.extend(here.iter().cloned());
+                    if entry.last.is_none() && entry.sharers.is_empty() {
                         ledger.forget(&provider, &account);
                     }
                 }
@@ -325,6 +337,7 @@ impl Pass {
                 continue;
             }
             // Read without the ledger, which turns starting and ending wait on.
+            let asked_ms = crate::accounts::now_ms();
             let Some(reading) = (self.reader)(&provider, &account) else {
                 continue;
             };
@@ -336,14 +349,19 @@ impl Pass {
                 .filter(|(_, p, a)| *p == provider && *a == account)
                 .map(|(chat_id, _, _)| chat_id)
                 .collect::<Vec<_>>();
-            let shares = match self.ledger.lock() {
-                Ok(mut ledger) => {
-                    ledger.record(&provider, &account, reading, &here_now, Instant::now())
-                }
+            let (shares, since_ms) = match self.ledger.lock() {
+                Ok(mut ledger) => ledger.record(
+                    &provider,
+                    &account,
+                    reading,
+                    &here_now,
+                    Instant::now(),
+                    asked_ms,
+                ),
                 Err(_) => return next,
             };
             for (chat_id, share) in shares {
-                let counted = match self.store.add_quota_use(&chat_id, share) {
+                let counted = match self.store.add_quota_use(&chat_id, share, since_ms) {
                     Ok(Some(quota)) => quota,
                     Ok(None) => continue,
                     Err(error) => {
@@ -373,6 +391,40 @@ mod tests {
         }
     }
 
+    fn record_in(
+        ledger: &mut Ledger,
+        provider: &str,
+        account: &str,
+        reading: Reading,
+        working: &[String],
+        now: Instant,
+    ) -> Vec<(String, f64)> {
+        ledger.record(provider, account, reading, working, now, 0).0
+    }
+
+    #[test]
+    fn shares_say_when_the_use_they_count_began() {
+        let mut ledger = Ledger::default();
+        let now = Instant::now();
+        ledger.record(
+            "claude",
+            "default",
+            reading(10.0, 1),
+            &chats(&["a"]),
+            now,
+            100,
+        );
+        let (shares, since) = ledger.record(
+            "claude",
+            "default",
+            reading(12.0, 1),
+            &chats(&["a"]),
+            now,
+            200,
+        );
+        assert_eq!((shares, since), (vec![("a".to_owned(), 2.0)], 100));
+    }
+
     fn chats(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
@@ -383,12 +435,19 @@ mod tests {
         let now = Instant::now();
         ledger.note("claude", "default", "a");
         assert!(
-            ledger
-                .record("claude", "default", reading(10.0, 1), &chats(&["a"]), now)
-                .is_empty()
+            record_in(
+                &mut ledger,
+                "claude",
+                "default",
+                reading(10.0, 1),
+                &chats(&["a"]),
+                now
+            )
+            .is_empty()
         );
         ledger.note("claude", "default", "b");
-        let shares = ledger.record(
+        let shares = record_in(
+            &mut ledger,
             "claude",
             "default",
             reading(16.0, 1),
@@ -397,9 +456,23 @@ mod tests {
         );
         assert_eq!(shares, vec![("a".to_owned(), 3.0), ("b".to_owned(), 3.0)]);
         // A chat that ended since the last reading still takes its share of it.
-        let shares = ledger.record("claude", "default", reading(18.0, 1), &chats(&["a"]), now);
+        let shares = record_in(
+            &mut ledger,
+            "claude",
+            "default",
+            reading(18.0, 1),
+            &chats(&["a"]),
+            now,
+        );
         assert_eq!(shares, vec![("a".to_owned(), 1.0), ("b".to_owned(), 1.0)]);
-        let shares = ledger.record("claude", "default", reading(20.0, 1), &chats(&["a"]), now);
+        let shares = record_in(
+            &mut ledger,
+            "claude",
+            "default",
+            reading(20.0, 1),
+            &chats(&["a"]),
+            now,
+        );
         assert_eq!(shares, vec![("a".to_owned(), 2.0)]);
     }
 
@@ -408,8 +481,16 @@ mod tests {
         let mut ledger = Ledger::default();
         let now = Instant::now();
         let hour = 60 * 60 * 1000;
-        ledger.record("codex", "default", reading(97.0, hour), &chats(&["a"]), now);
-        let shares = ledger.record(
+        record_in(
+            &mut ledger,
+            "codex",
+            "default",
+            reading(97.0, hour),
+            &chats(&["a"]),
+            now,
+        );
+        let shares = record_in(
+            &mut ledger,
             "codex",
             "default",
             reading(4.0, 6 * hour),
@@ -419,36 +500,50 @@ mod tests {
         assert_eq!(shares, vec![("a".to_owned(), 4.0)]);
         // Nothing works on the account after this reading. A turn soon after
         // counts from it, but one after a long gap starts from its own.
-        let shares = ledger.record("codex", "default", reading(5.0, 6 * hour), &[], now);
+        let shares = record_in(
+            &mut ledger,
+            "codex",
+            "default",
+            reading(5.0, 6 * hour),
+            &[],
+            now,
+        );
         assert_eq!(shares, vec![("a".to_owned(), 1.0)]);
         ledger.note("codex", "default", "b");
         let soon = now + Duration::from_secs(60);
-        let shares = ledger.record("codex", "default", reading(7.0, 6 * hour), &[], soon);
+        let shares = record_in(
+            &mut ledger,
+            "codex",
+            "default",
+            reading(7.0, 6 * hour),
+            &[],
+            soon,
+        );
         assert_eq!(shares, vec![("b".to_owned(), 2.0)]);
         ledger.note("codex", "default", "b");
         let later = soon + IDLE_BASELINE_LIFETIME + Duration::from_secs(1);
         assert!(
-            ledger
-                .record(
-                    "codex",
-                    "default",
-                    reading(30.0, 6 * hour),
-                    &chats(&["b"]),
-                    later
-                )
-                .is_empty()
+            record_in(
+                &mut ledger,
+                "codex",
+                "default",
+                reading(30.0, 6 * hour),
+                &chats(&["b"]),
+                later
+            )
+            .is_empty()
         );
         // Accounts are apart.
         assert!(
-            ledger
-                .record(
-                    "codex",
-                    "second",
-                    reading(50.0, 6 * hour),
-                    &chats(&["c"]),
-                    now
-                )
-                .is_empty()
+            record_in(
+                &mut ledger,
+                "codex",
+                "second",
+                reading(50.0, 6 * hour),
+                &chats(&["c"]),
+                now
+            )
+            .is_empty()
         );
     }
 

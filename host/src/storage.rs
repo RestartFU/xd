@@ -3162,13 +3162,16 @@ impl StateStore {
         read_chat_quota(&database, chat_id)
     }
 
-    /// Counts `amount` percentage points of a usage limit against the chat's
-    /// quota. Nothing is counted for a chat without a quota or one already
-    /// stopped at it. Returns the quota as it now stands when it counted.
+    /// Counts `amount` percentage points of a usage limit, used since
+    /// `since_ms`, against the chat's quota. Nothing is counted for a chat
+    /// without a quota, one already stopped at it, or one whose count started
+    /// again after `since_ms`, which that use belongs before. Returns the
+    /// quota as it now stands when it counted.
     pub fn add_quota_use(
         &self,
         chat_id: &str,
         amount: f64,
+        since_ms: i64,
     ) -> Result<Option<ChatQuota>, StorageError> {
         if !amount.is_finite() || amount <= 0.0 {
             return Ok(None);
@@ -3176,7 +3179,12 @@ impl StateStore {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let quota = read_chat_quota(&transaction, chat_id)?;
-        if quota.percent.is_none() || quota.reached {
+        let counted_from = transaction.query_row(
+            "SELECT quota_since_ms FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if quota.percent.is_none() || quota.reached || counted_from > since_ms {
             return Ok(None);
         }
         transaction.execute(
@@ -3216,8 +3224,8 @@ impl StateStore {
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
         transaction.execute(
             "UPDATE chats SET quota_own = ?, quota_percent = ?, quota_used = 0, \
-             quota_reached = 0 WHERE id = ?",
-            params![own, percent, chat_id],
+             quota_reached = 0, quota_since_ms = ? WHERE id = ?",
+            params![own, percent, crate::accounts::now_ms(), chat_id],
         )?;
         transaction.commit()?;
         Ok(reached)
@@ -6995,6 +7003,13 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
     }
     if !columns.contains("quota_percent") {
         database.execute("ALTER TABLE chats ADD COLUMN quota_percent INTEGER", [])?;
+    }
+    // When the chat's count last started again, in milliseconds.
+    if !columns.contains("quota_since_ms") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN quota_since_ms INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     if !columns.contains("quota_used") {
         database.execute(
@@ -14907,7 +14922,7 @@ mod tests {
         // No quota until one is chosen; nothing counts against none.
         assert_eq!(store.chat_quota_settings().unwrap(), None);
         assert!(store.chat("chat").unwrap().get("quota").is_none());
-        assert_eq!(store.add_quota_use("chat", 5.0).unwrap(), None);
+        assert_eq!(store.add_quota_use("chat", 5.0, i64::MAX).unwrap(), None);
         assert!(
             store
                 .set_chat_quota_settings(&json!({"percent": 0}))
@@ -14928,18 +14943,27 @@ mod tests {
         assert_eq!(store.tree().unwrap()["chat_quotas"], true);
 
         send("first");
-        let quota = store.add_quota_use("chat", 4.04).unwrap().unwrap();
+        let quota = store
+            .add_quota_use("chat", 4.04, i64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(quota.percent, Some(10));
         assert!(!quota.spent());
         assert_eq!(
             store.chat("chat").unwrap()["quota"],
             json!({"percent": 10, "used": 4.0, "own": false})
         );
-        assert!(store.add_quota_use("chat", 6.0).unwrap().unwrap().spent());
+        assert!(
+            store
+                .add_quota_use("chat", 6.0, i64::MAX)
+                .unwrap()
+                .unwrap()
+                .spent()
+        );
         assert!(store.stop_for_quota("chat", false).unwrap());
         assert!(!store.stop_for_quota("chat", false).unwrap());
         // Nothing more counts once it stopped.
-        assert_eq!(store.add_quota_use("chat", 1.0).unwrap(), None);
+        assert_eq!(store.add_quota_use("chat", 1.0, i64::MAX).unwrap(), None);
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_none());
 
@@ -14977,6 +15001,8 @@ mod tests {
             chat["quota"],
             json!({"percent": 20, "used": 0.0, "own": true})
         );
+        // Use read before the new count began is not counted against it.
+        assert_eq!(store.add_quota_use("chat", 30.0, 0).unwrap(), None);
         store.prepare_resume(&resume).unwrap();
         assert!(!store.chat_is_paused("chat").unwrap());
 
@@ -14987,7 +15013,7 @@ mod tests {
                 .unwrap()
         );
         assert!(store.chat("chat").unwrap().get("quota").is_none());
-        assert_eq!(store.add_quota_use("chat", 50.0).unwrap(), None);
+        assert_eq!(store.add_quota_use("chat", 50.0, i64::MAX).unwrap(), None);
         store
             .set_chat_quota(&json!({"chat": "chat", "inherit": true}))
             .unwrap();
@@ -15002,7 +15028,7 @@ mod tests {
         assert!(finish.next.is_some());
         store.finish_turn("chat", true, None, 1, false).unwrap();
         assert_eq!(store.chat("chat").unwrap()["working"], false);
-        store.add_quota_use("chat", 10.0).unwrap();
+        store.add_quota_use("chat", 10.0, i64::MAX).unwrap();
         assert!(store.stop_for_quota("chat", false).unwrap());
         assert_eq!(store.chat("chat").unwrap()["resumable"], false);
         assert_eq!(store.chat("chat").unwrap()["quota_reached"], true);
