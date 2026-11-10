@@ -871,7 +871,6 @@ impl StateStore {
         }
         drop(database);
 
-        let mut branches = HashMap::<String, Option<String>>::new();
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
         for (
@@ -879,28 +878,7 @@ impl StateStore {
             workdir,
         ) in visible_chats
         {
-            let branch = workdir.and_then(|workdir| {
-                let normalized = normalize_existing_path(Path::new(&workdir));
-                let cached = cached_worktree_branch(&branches, &normalized);
-                if cached.is_none() {
-                    match list_git_worktrees(Path::new(&workdir)) {
-                        Ok(worktrees) => {
-                            for worktree in worktrees {
-                                branches.insert(
-                                    normalize_existing_path(&worktree.path),
-                                    worktree.branch.or_else(|| {
-                                        worktree.detached.then(|| "Detached HEAD".into())
-                                    }),
-                                );
-                            }
-                        }
-                        Err(_) => {
-                            branches.insert(normalized.clone(), None);
-                        }
-                    }
-                }
-                cached_worktree_branch(&branches, &normalized).flatten()
-            });
+            let branch = workdir.and_then(|workdir| worktree_branch(Path::new(&workdir)));
             let mut chat = json!({
                 "id": id,
                 "folder": folder,
@@ -8852,17 +8830,54 @@ fn normalize_existing_path(path: &Path) -> String {
         .into_owned()
 }
 
-fn cached_worktree_branch(
-    branches: &HashMap<String, Option<String>>,
-    workdir: &str,
-) -> Option<Option<String>> {
-    branches
-        .iter()
-        .filter(|(root, _)| {
-            workdir == root.as_str() || Path::new(workdir).starts_with(Path::new(root.as_str()))
-        })
-        .max_by_key(|(root, _)| root.len())
-        .map(|(_, branch)| branch.clone())
+/// The branch checked out in the worktree holding `workdir`, as `git worktree
+/// list` names it: the branch, "Detached HEAD", or nothing.
+///
+/// Every tree read asks this for every chat. It reads the worktree's HEAD file
+/// instead of starting Git: one `git worktree list` per repository took
+/// seconds on a busy host, and a connection's chat and transcript requests
+/// waited behind it.
+fn worktree_branch(workdir: &Path) -> Option<String> {
+    // Git looks for the repository from the physical directory, as here.
+    let workdir = fs::canonicalize(workdir).ok()?;
+    let git_dir = workdir.ancestors().find_map(|directory| {
+        let dot_git = directory.join(".git");
+        let metadata = fs::metadata(&dot_git).ok()?;
+        if metadata.is_dir() {
+            return Some(dot_git);
+        }
+        // A linked worktree's `.git` file names its own directory in the
+        // repository, relative to the worktree when it is not absolute.
+        let link = fs::read_to_string(&dot_git).ok()?;
+        let target = link.lines().next()?.strip_prefix("gitdir:")?.trim();
+        (!target.is_empty()).then(|| directory.join(target))
+    })?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim_end();
+    match head.strip_prefix("ref:") {
+        // A repository with reftable keeps this placeholder in HEAD and its
+        // real refs elsewhere, so only Git can say.
+        Some(reference) if reference.trim() == "refs/heads/.invalid" => {
+            list_git_worktrees(&workdir)
+                .ok()?
+                .into_iter()
+                .filter(|worktree| workdir.starts_with(&worktree.path))
+                .max_by_key(|worktree| worktree.path.as_os_str().len())
+                .and_then(|worktree| {
+                    worktree
+                        .branch
+                        .or_else(|| worktree.detached.then(|| "Detached HEAD".into()))
+                })
+        }
+        Some(reference) => reference
+            .trim()
+            .strip_prefix("refs/heads/")
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_owned),
+        None => (matches!(head.len(), 40 | 64)
+            && head.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| "Detached HEAD".into()),
+    }
 }
 
 struct BrowsableEntry {
@@ -10271,6 +10286,95 @@ mod tests {
                 "history"
             );
         }
+    }
+
+    #[test]
+    fn worktree_branches_are_read_from_head_as_git_lists_them() {
+        let fixture = Fixture::new();
+        let repository = fixture.root.join("repository");
+        fs::create_dir_all(repository.join("nested/deeper")).unwrap();
+        let git = |directory: &Path, args: &[&str]| {
+            let (status, _, error) = run_git(directory, args).unwrap();
+            assert!(status.success(), "{}", String::from_utf8_lossy(&error));
+        };
+        git(&repository, &["init", "-b", "main"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=xd test",
+                "-c",
+                "user.email=xd@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        let linked = fixture.root.join("linked");
+        let detached = fixture.root.join("detached");
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/x",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git(
+            &repository,
+            &["worktree", "add", "--detach", detached.to_str().unwrap()],
+        );
+        // Reached through a symlink, as Git also resolves it.
+        let alias = fixture.root.join("alias");
+        std::os::unix::fs::symlink(&linked, &alias).unwrap();
+        let outside = fixture.root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        let listed = |workdir: &Path| {
+            let workdir = fs::canonicalize(workdir).unwrap();
+            list_git_worktrees(&workdir)
+                .ok()?
+                .into_iter()
+                .filter(|worktree| workdir.starts_with(fs::canonicalize(&worktree.path).unwrap()))
+                .max_by_key(|worktree| worktree.path.as_os_str().len())
+                .and_then(|worktree| {
+                    worktree
+                        .branch
+                        .or_else(|| worktree.detached.then(|| "Detached HEAD".into()))
+                })
+        };
+        for (workdir, expected) in [
+            (repository.clone(), Some("main")),
+            (repository.join("nested/deeper"), Some("main")),
+            (linked.clone(), Some("feature/x")),
+            (alias.clone(), Some("feature/x")),
+            (detached.clone(), Some("Detached HEAD")),
+            (outside.clone(), None),
+            (fixture.root.join("missing"), None),
+        ] {
+            assert_eq!(
+                worktree_branch(&workdir).as_deref(),
+                expected,
+                "{}",
+                workdir.display()
+            );
+            if workdir.exists() {
+                assert_eq!(
+                    worktree_branch(&workdir),
+                    listed(&workdir),
+                    "{}",
+                    workdir.display()
+                );
+            }
+        }
+
+        // A worktree whose entry in the repository is gone has no branch,
+        // as Git then reports none.
+        fs::remove_dir_all(repository.join(".git/worktrees/linked")).unwrap();
+        assert_eq!(worktree_branch(&linked), None);
     }
 
     #[test]

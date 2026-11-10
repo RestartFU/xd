@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
     sync::{
-        Arc, LazyLock, Mutex, MutexGuard,
+        Arc, LazyLock, Mutex, MutexGuard, Weak,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -122,8 +122,20 @@ impl SnapshotDeadlines {
     }
 }
 
+/// The sidebar tree read on one connection. The host answers a connection's
+/// requests in order, and a tree read can take a while on a busy host, so
+/// every `tree` event sending its own read queued a chat's own snapshots
+/// behind a row of them. One read is on its way at a time; asking meanwhile
+/// reads the tree once more after it lands.
+#[derive(Default)]
+struct TreeRead {
+    in_flight: bool,
+    again: bool,
+}
+
 struct ConnectionRequests {
     pending: Mutex<HashMap<u64, PendingRequest>>,
+    tree: Mutex<TreeRead>,
     /// When the oldest request then waiting was answered. The host answers a
     /// connection's requests one at a time, in order, so the next one only
     /// starts being worked on then.
@@ -141,12 +153,49 @@ impl ConnectionRequests {
     fn new(deadlines: Arc<SnapshotDeadlines>, timeout: Duration) -> Self {
         Self {
             pending: Mutex::default(),
+            tree: Mutex::default(),
             head_answered: Mutex::default(),
             closed: AtomicBool::new(false),
             publishing: Mutex::default(),
             deadlines,
             timeout,
         }
+    }
+
+    fn tree_read(&self) -> MutexGuard<'_, TreeRead> {
+        self.tree
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether to send a tree read now. With one on its way already, the tree
+    /// is read again once that one is answered instead.
+    fn claim_tree(&self) -> bool {
+        let mut tree = self.tree_read();
+        if tree.in_flight {
+            tree.again = true;
+            false
+        } else {
+            tree.in_flight = true;
+            true
+        }
+    }
+
+    /// Notes that the tree read was answered, and whether it is wanted again:
+    /// the read then stays claimed for the one sent next.
+    fn tree_answered(&self) -> bool {
+        let mut tree = self.tree_read();
+        if std::mem::take(&mut tree.again) {
+            true
+        } else {
+            tree.in_flight = false;
+            false
+        }
+    }
+
+    /// No tree read is on its way after all.
+    fn release_tree(&self) {
+        *self.tree_read() = TreeRead::default();
     }
 
     /// A request about to be sent, with its snapshot deadline as of now.
@@ -592,7 +641,9 @@ struct Command {
 
 #[derive(Clone)]
 pub struct HostHandle {
-    commands: mpsc::SyncSender<Command>,
+    /// The writer stops once every handle is gone. The reader holds this
+    /// weakly to send a tree read again, so it does not keep the writer up.
+    commands: Arc<mpsc::SyncSender<Command>>,
     requests: Arc<ConnectionRequests>,
 }
 
@@ -723,18 +774,19 @@ impl HostHandle {
             timeout,
         ));
 
+        let commands = Arc::new(command_tx);
         let _ = update_tx.try_send(HostUpdate::Connected { path: identity });
         spawn_writer(writer, command_rx, update_tx.clone(), requests.clone());
-        spawn_reader(reader, update_tx.clone(), requests.clone(), process_errors);
+        spawn_reader(
+            reader,
+            update_tx.clone(),
+            requests.clone(),
+            Arc::downgrade(&commands),
+            process_errors,
+        );
         spawn_chat_load_watchdog(update_tx, requests.clone(), timeout);
 
-        (
-            Self {
-                commands: command_tx,
-                requests,
-            },
-            update_rx,
-        )
+        (Self { commands, requests }, update_rx)
     }
 
     #[cfg(all(test, unix))]
@@ -750,8 +802,20 @@ impl HostHandle {
         Ok(Self::connect_io(reader, stream, path))
     }
 
+    /// Reads the sidebar tree, or once more after the read already on its
+    /// way, which may predate whatever the caller wants to see.
     pub fn tree(&self) -> Result<(), String> {
-        self.send(RequestKind::Tree, json!({"op": "tree"}))
+        if self.requests.closed.load(Ordering::Acquire) {
+            return Err(CONNECTION_CLOSED.to_owned());
+        }
+        if !self.requests.claim_tree() {
+            return Ok(());
+        }
+        let result = send_command(&self.commands, &self.requests, tree_command());
+        if result.is_err() {
+            self.requests.release_tree();
+        }
+        result
     }
 
     pub fn agent_catalog(&self) -> Result<(), String> {
@@ -2297,18 +2361,31 @@ impl HostHandle {
     }
 
     fn send(&self, kind: RequestKind, body: Value) -> Result<(), String> {
-        if self.requests.closed.load(Ordering::Acquire) {
-            return Err("the xd state connection is closed".to_owned());
-        }
-        self.commands
-            .try_send(Command { kind, body })
-            .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => "the xd state command queue is full".to_owned(),
-                mpsc::TrySendError::Disconnected(_) => {
-                    "the xd state connection is closed".to_owned()
-                }
-            })
+        send_command(&self.commands, &self.requests, Command { kind, body })
     }
+}
+
+const CONNECTION_CLOSED: &str = "the xd state connection is closed";
+
+fn tree_command() -> Command {
+    Command {
+        kind: RequestKind::Tree,
+        body: json!({"op": "tree"}),
+    }
+}
+
+fn send_command(
+    commands: &mpsc::SyncSender<Command>,
+    requests: &ConnectionRequests,
+    command: Command,
+) -> Result<(), String> {
+    if requests.closed.load(Ordering::Acquire) {
+        return Err(CONNECTION_CLOSED.to_owned());
+    }
+    commands.try_send(command).map_err(|error| match error {
+        mpsc::TrySendError::Full(_) => "the xd state command queue is full".to_owned(),
+        mpsc::TrySendError::Disconnected(_) => CONNECTION_CLOSED.to_owned(),
+    })
 }
 
 fn spawn_writer(
@@ -2368,6 +2445,7 @@ fn spawn_reader(
     stream: impl Read + Send + 'static,
     updates: Sender<HostUpdate>,
     requests: Arc<ConnectionRequests>,
+    commands: Weak<mpsc::SyncSender<Command>>,
     process_errors: Option<Arc<Mutex<Vec<u8>>>>,
 ) {
     thread::Builder::new()
@@ -2423,6 +2501,7 @@ fn spawn_reader(
                 if requests.closed.load(Ordering::Acquire) {
                     return;
                 }
+                let mut tree_answered = false;
                 let update = match frame {
                     Frame::Event { name, mut body } => {
                         let attachments = take_draft_attachments(&mut body);
@@ -2439,6 +2518,7 @@ fn spawn_reader(
                         let Some(kind) = requests.take_reply(request_id, Instant::now()) else {
                             continue;
                         };
+                        tree_answered = matches!(kind, RequestKind::Tree);
                         let attachments = take_draft_attachments(&mut body);
                         HostUpdate::Reply {
                             kind,
@@ -2452,6 +2532,16 @@ fn spawn_reader(
                 };
                 if !requests.publish(&updates, update) {
                     return;
+                }
+                // Asked for while this read was on its way, so it may predate
+                // what that caller wants to see.
+                if tree_answered && requests.tree_answered() {
+                    let sent = commands.upgrade().is_some_and(|commands| {
+                        send_command(&commands, &requests, tree_command()).is_ok()
+                    });
+                    if !sent {
+                        requests.release_tree();
+                    }
                 }
             }
         })
@@ -2590,6 +2680,99 @@ mod tests {
                 }
                 error => panic!("host update did not arrive: {error:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn tree_reads_asked_for_while_one_is_on_its_way_become_one_more_read() {
+        let (reader, peer) = crate::local_socket::UnixStream::pair().unwrap();
+        let (host, updates) = HostHandle::connect_io(
+            reader.try_clone().unwrap(),
+            reader,
+            PathBuf::from("busy-tree-host"),
+        );
+        assert!(matches!(
+            next_update(&updates),
+            HostUpdate::Connected { .. }
+        ));
+        peer.set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let mut sent = BufReader::new(peer.try_clone().unwrap());
+        let mut peer = peer;
+        let mut next_request = || {
+            let mut line = String::new();
+            match sent.read_line(&mut line) {
+                Ok(0) => None,
+                Ok(_) => Some(serde_json::from_str::<Value>(&line).unwrap()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    None
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+
+        host.tree().unwrap();
+        let first = next_request().expect("the first read is sent");
+        assert_eq!(first["op"], "tree");
+        // Every tree event while that read is out asks again.
+        for _ in 0..5 {
+            host.tree().unwrap();
+        }
+        host.chat("c1").unwrap();
+        let chat = next_request().expect("other requests still go out");
+        assert_eq!(chat["op"], "chat");
+        assert!(next_request().is_none(), "no second tree read queued");
+
+        let first_id = first["_xd_request"].as_u64().unwrap();
+        writeln!(
+            peer,
+            "{{\"ok\":true,\"folders\":[],\"chats\":[],\"_xd_request\":{first_id}}}"
+        )
+        .unwrap();
+        assert!(matches!(
+            next_update(&updates),
+            HostUpdate::Reply {
+                kind: RequestKind::Tree,
+                ..
+            }
+        ));
+        let again = next_request().expect("one more read after the answer");
+        assert_eq!(again["op"], "tree");
+        assert!(next_request().is_none(), "only one more");
+
+        let again_id = again["_xd_request"].as_u64().unwrap();
+        writeln!(
+            peer,
+            "{{\"ok\":true,\"folders\":[],\"chats\":[],\"_xd_request\":{again_id}}}"
+        )
+        .unwrap();
+        assert!(matches!(
+            next_update(&updates),
+            HostUpdate::Reply {
+                kind: RequestKind::Tree,
+                ..
+            }
+        ));
+        assert!(next_request().is_none(), "nothing was asked meanwhile");
+        host.tree().unwrap();
+        assert_eq!(
+            next_request().expect("a later read goes out at once")["op"],
+            "tree"
+        );
+
+        // The reader's way to send a read again does not keep the connection
+        // up once the app lets go of it.
+        let requests = host.requests.clone();
+        drop(host);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !requests.closed.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "the writer outlived its handles");
+            thread::sleep(Duration::from_millis(5));
         }
     }
 
