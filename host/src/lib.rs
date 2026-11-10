@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{SyncSender, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle},
@@ -94,8 +94,73 @@ pub const FRAME_LIMIT: usize = isize::MAX as usize - 1;
 pub const AUTH_FRAME_LIMIT: usize = 64 * 1024;
 /// New chats one connection may be setting up beside its other requests.
 /// Making a worktree can take a while, and the client should not have to
-/// wait for it to open another chat. Past this many they wait in line.
+/// wait for it to open another chat. Past this many they wait in a line of
+/// their own, as long as the connection's command queue.
 const NEW_CHATS_ASIDE: usize = 4;
+const NEW_CHATS_QUEUED: usize = 128;
+
+/// The new chats a connection is setting up beside its request worker.
+#[derive(Default)]
+struct NewChatsAside {
+    state: Mutex<NewChatsAsideState>,
+    idle: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct NewChatsAsideState {
+    running: usize,
+    queued: std::collections::VecDeque<Value>,
+}
+
+impl NewChatsAside {
+    fn state(&self) -> std::sync::MutexGuard<'_, NewChatsAsideState> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// The request back to start on a thread of its own, or none when it
+    /// waits for one of the running ones.
+    fn take_or_queue(&self, request: Value) -> std::io::Result<Option<Value>> {
+        let mut state = self.state();
+        if state.running < NEW_CHATS_ASIDE {
+            state.running += 1;
+            return Ok(Some(request));
+        }
+        if state.queued.len() >= NEW_CHATS_QUEUED {
+            return Err(std::io::Error::other("Client command queue overflowed"));
+        }
+        state.queued.push_back(request);
+        Ok(None)
+    }
+
+    /// The next waiting request for a thread that finished one, or none
+    /// when it should stop. A connection that stopped answering drops the
+    /// rest.
+    fn next(&self, answered: bool) -> Option<Value> {
+        let mut state = self.state();
+        if !answered {
+            state.queued.clear();
+        }
+        let next = state.queued.pop_front();
+        if next.is_none() {
+            state.running -= 1;
+            if state.running == 0 {
+                self.idle.notify_all();
+            }
+        }
+        next
+    }
+
+    /// Waits until every accepted new chat has been answered.
+    fn wait_idle(&self) {
+        let mut state = self.state();
+        while state.running > 0 {
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
 const REQUEST_ID: &str = "_xd_request";
 
 pub struct Engine {
@@ -2756,7 +2821,7 @@ pub fn serve_daemon_connection(
             }
         }
     });
-    let new_chats_aside = Arc::new(AtomicUsize::new(0));
+    let new_chats_aside = Arc::new(NewChatsAside::default());
     let result = (|| -> std::io::Result<()> {
         loop {
             let authenticated = engine.pairing.authenticated(subscriber);
@@ -2823,29 +2888,30 @@ pub fn serve_daemon_connection(
                 && request["op"] == "new-chat"
                 // Without an id to match it by, a reply must come in order.
                 && request.get(REQUEST_ID).is_some()
-                && new_chats_aside
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |running| {
-                        (running < NEW_CHATS_ASIDE).then_some(running + 1)
-                    })
-                    .is_ok()
             {
                 // Off the request worker: creating a worktree can take a
                 // while, and the client's other requests need not wait for
                 // it. Replies carry their request id, so their order does
                 // not matter.
-                let engine = engine.clone();
-                let outbound = outbound.clone();
-                let running = new_chats_aside.clone();
-                let stream = stream.try_clone()?;
-                thread::spawn(move || {
-                    if engine.events.subscribed(subscriber) {
-                        let reply = engine.dispatch_for(subscriber, request);
-                        if outbound.try_send(reply).is_err() {
-                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                if let Some(request) = new_chats_aside.take_or_queue(request)? {
+                    let engine = engine.clone();
+                    let outbound = outbound.clone();
+                    let aside = new_chats_aside.clone();
+                    let stream = stream.try_clone()?;
+                    thread::spawn(move || {
+                        let mut request = Some(request);
+                        while let Some(next) = request {
+                            let answered = !engine.events.subscribed(subscriber) || {
+                                let reply = engine.dispatch_for(subscriber, next);
+                                outbound.try_send(reply).is_ok()
+                            };
+                            if !answered {
+                                let _ = stream.shutdown(std::net::Shutdown::Both);
+                            }
+                            request = aside.next(answered);
                         }
-                    }
-                    running.fetch_sub(1, Ordering::AcqRel);
-                });
+                    });
+                }
             } else {
                 commands
                     .try_send(request)
@@ -2860,6 +2926,7 @@ pub fn serve_daemon_connection(
     // A half-close requests a final drain; a disconnected client cannot block
     // this forever because daemon sockets have bounded write deadlines.
     let _ = worker.join();
+    new_chats_aside.wait_idle();
     engine.unsubscribe(subscriber);
     drop(outbound);
     let writer_result = writer

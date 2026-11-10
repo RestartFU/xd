@@ -261,7 +261,10 @@ internal fun MinimalMobileApp(
         model.client.setVisibleChat(visibleChatId)
         onDispose { model.client.setVisibleChat(null) }
     }
-    val showProjects = { mobileDestination = MobileDestination.PROJECTS }
+    val showProjects = {
+        model.stopOpeningStartingSessions()
+        mobileDestination = MobileDestination.PROJECTS
+    }
     val showTerminal = {
         model.stopOpeningStartingSessions()
         mobileDestination = MobileDestination.TERMINAL

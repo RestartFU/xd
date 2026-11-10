@@ -1120,6 +1120,7 @@ impl XdDesktop {
         } else {
             self.new_chat_draft_keys.remove(&key);
         }
+        self.new_chat_drafts_written.insert(key.clone());
         self.settings
             .new_chat_drafts
             .insert(key.clone(), draft.clone());
@@ -1203,6 +1204,7 @@ impl XdDesktop {
     pub(super) fn clear_new_chat_draft(&mut self) {
         if let Some(key) = self.new_chat_draft_key() {
             self.new_chat_draft_keys.remove(&key);
+            self.new_chat_drafts_written.insert(key.clone());
             self.settings.new_chat_drafts.remove(&key);
             if !cfg!(test)
                 && let Err(error) = new_chat_store::save(key, json!({}), Some(json!([])))
@@ -1633,7 +1635,7 @@ impl XdDesktop {
             let _ = this.update(cx, |this, cx| {
                 // Drafts saved or emptied this run already know their state.
                 for (key, draft) in keys {
-                    if !this.settings.new_chat_drafts.contains_key(&key) {
+                    if !this.new_chat_drafts_written.contains(&key) {
                         this.new_chat_draft_keys.insert(key.clone());
                         this.settings.new_chat_drafts.insert(key, draft);
                     }
@@ -1700,12 +1702,11 @@ fn join_drafts(first: &str, second: &str) -> String {
     }
 }
 
-/// Adds the files not attached already, as many as the limits allow.
+/// Adds the files not attached already. All of them, even past the limits:
+/// none is dropped unseen, and sending asks for any over them to go first.
 fn merge_attachments(into: &mut Vec<Attachment>, more: Vec<Attachment>) {
     for attachment in more {
-        if !into.iter().any(|existing| existing.id == attachment.id)
-            && attachment_fits(into, &attachment).is_ok()
-        {
+        if !into.iter().any(|existing| existing.id == attachment.id) {
             into.push(attachment);
         }
     }

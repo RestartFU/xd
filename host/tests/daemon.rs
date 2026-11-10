@@ -1573,17 +1573,20 @@ fn a_new_worktree_being_made_does_not_hold_up_the_clients_other_requests() {
     let mut client = daemon.client();
     let folder = client.call(json!({"op":"new-folder", "name":"Repo", "repo":repo}));
     assert_eq!(folder["ok"], true, "{folder}");
-    let creating = 9_000;
-    writeln!(
-        client.writer,
-        "{}",
-        json!({"op":"new-chat", "folder":folder["id"], "backend":"codex",
-            "worktree":{"kind":"new"}, "_xd_request":creating})
-    )
-    .unwrap();
+    // More than are set up at once: the rest wait in their own line.
+    let creating = (9_000..9_006).collect::<Vec<u64>>();
+    for id in &creating {
+        writeln!(
+            client.writer,
+            "{}",
+            json!({"op":"new-chat", "folder":folder["id"], "backend":"codex",
+                "worktree":{"kind":"new"}, "_xd_request":id})
+        )
+        .unwrap();
+    }
     client.writer.flush().unwrap();
 
-    // The tree comes back while the worktree is still being checked out,
+    // The tree comes back while the worktrees are still being checked out,
     // rather than this read timing out.
     client
         .reader
@@ -1595,20 +1598,46 @@ fn a_new_worktree_being_made_does_not_hold_up_the_clients_other_requests() {
     assert!(!release.exists());
 
     fs::write(&release, "").unwrap();
-    let created = loop {
+    client
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let mut made = Vec::new();
+    while made.len() < creating.len() {
         let frame = client.frame();
-        if frame["_xd_request"] == creating {
+        if frame.get("_xd_request").is_some() {
+            assert_eq!(frame["ok"], true, "{frame}");
+            made.push(frame["id"].as_str().unwrap().to_owned());
+        }
+    }
+    let tree = client.call(json!({"op":"tree"}));
+    let listed = tree["chats"].as_array().unwrap();
+    for id in &made {
+        assert!(listed.iter().any(|chat| chat["id"] == *id), "{tree}");
+    }
+
+    // A client that half-closes after asking still gets its answer.
+    let mut leaving = daemon.client();
+    writeln!(
+        leaving.writer,
+        "{}",
+        json!({"op":"new-chat", "folder":folder["id"], "backend":"codex",
+            "worktree":{"kind":"new"}, "_xd_request":7})
+    )
+    .unwrap();
+    leaving.writer.flush().unwrap();
+    leaving.writer.shutdown(Shutdown::Write).unwrap();
+    leaving
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let answer = loop {
+        let frame = leaving.frame();
+        if frame["_xd_request"] == 7 {
             break frame;
         }
     };
-    assert_eq!(created["ok"], true, "{created}");
-    let tree = client.call(json!({"op":"tree"}));
-    assert!(
-        tree["chats"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|chat| chat["id"] == created["id"]),
-        "{tree}"
-    );
+    assert_eq!(answer["ok"], true, "{answer}");
 }

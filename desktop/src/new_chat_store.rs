@@ -238,8 +238,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The store's worker and error are shared, so its tests take turns.
+    static STORE: Mutex<()> = Mutex::new(());
+
     #[test]
     fn new_chat_store_lists_the_drafts_holding_something() {
+        let _store = STORE.lock().unwrap_or_else(|error| error.into_inner());
         let long = format!("local/project/{}/new", "p".repeat(90));
         save(
             long.clone(),
@@ -273,6 +277,7 @@ mod tests {
 
     #[test]
     fn new_chat_store_keeps_payloads_when_only_text_changes() {
+        let _store = STORE.lock().unwrap_or_else(|error| error.into_inner());
         let key = "local/project/test/new".to_owned();
         save(
             key.clone(),

@@ -662,6 +662,8 @@ class MainViewModel @JvmOverloads constructor(
      */
     fun stopOpeningStartingSessions() {
         openWhenMade.clear()
+        // Made already but not shown yet: it stays in its project instead.
+        _createdDirectSession.value = null
     }
 
     fun consumeCreatedDirectSession(session: CreatedDirectSession) {

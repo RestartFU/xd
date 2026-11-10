@@ -2357,6 +2357,9 @@ struct XdDesktop {
     /// The new-chat drafts holding something, by draft key, shown in the
     /// sidebar as draft chats.
     new_chat_draft_keys: HashSet<String>,
+    /// The draft keys saved or emptied this run, which the listing of
+    /// drafts saved before must not bring back.
+    new_chat_drafts_written: HashSet<String>,
     chat_create_title: String,
     chat_create_submitting: bool,
     chat_create_worktree: Option<NewSessionWorktree>,
@@ -3053,6 +3056,7 @@ impl XdDesktop {
             new_chat_tokens: 0,
             starting_chats: Vec::new(),
             new_chat_draft_keys: HashSet::new(),
+            new_chat_drafts_written: HashSet::new(),
             chat_create_title: String::new(),
             chat_create_submitting: false,
             chat_create_worktree: None,
@@ -12018,6 +12022,13 @@ impl XdDesktop {
             return;
         }
         if self.new_chat_prompt.trim().is_empty() && self.new_chat_attachments.is_empty() {
+            return;
+        }
+        // A message put back beside a newer draft can hold more files than
+        // one message takes.
+        if let Err(error) = message_fits(&self.new_chat_attachments) {
+            self.model.connection_error = Some(error);
+            cx.notify();
             return;
         }
         if self.chat_create_sources_loading
