@@ -8911,20 +8911,31 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
             if !plain_branch_name(branch) {
                 return None;
             }
-            // A branch that is itself a symbolic ref names another, which
-            // Git follows; a packed ref never is one.
+            // The branch's own ref, when it is a loose file, must name a
+            // commit as Git writes one; a symbolic ref names another branch,
+            // which Git follows. A branch with no loose ref is packed, or has
+            // no commit yet, and Git lists it either way.
             let loose = common.join("refs/heads").join(branch);
-            let symbolic = fs::symlink_metadata(&loose)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-                || fs::read(&loose).is_ok_and(|reference| reference.starts_with(b"ref:"));
-            (!symbolic).then(|| Some(branch.to_owned()))
+            let plain = match fs::symlink_metadata(&loose) {
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                Ok(metadata) if metadata.is_file() => {
+                    fs::read(&loose).is_ok_and(|reference| sha1_line(&reference))
+                }
+                Ok(_) => false,
+            };
+            plain.then(|| Some(branch.to_owned()))
         }
         // A SHA-1 object id, in a repository that names no other format.
-        None => (head.len() == 40
-            && head.bytes().all(|byte| byte.is_ascii_hexdigit())
+        None => (sha1_line(head.as_bytes())
             && !config.to_ascii_lowercase().contains("objectformat"))
         .then(|| Some("Detached HEAD".into())),
     }
+}
+
+/// Whether `contents` is a SHA-1 object id, as Git writes a ref.
+fn sha1_line(contents: &[u8]) -> bool {
+    let id = contents.strip_suffix(b"\n").unwrap_or(contents);
+    id.len() == 40 && id.iter().all(u8::is_ascii_hexdigit)
 }
 
 /// Whether `name` is a branch name of the kind Git always accepts: ASCII
@@ -9073,10 +9084,12 @@ fn plain_config(config: &str) -> bool {
 }
 
 /// Whether a repository's config says it is bare (`core.bare`), or `None`
-/// for a value only Git can read.
+/// when it does not say plainly.
 fn bare_repository(config: &str) -> Option<bool> {
     let mut core = false;
-    let mut bare = false;
+    // Git writes `bare` into every repository it makes. Without it, settings
+    // from outside the repository decide, which only Git can read.
+    let mut bare = None;
     for line in config.lines() {
         let line = line.trim();
         let setting = if let Some(header) = line.strip_prefix('[') {
@@ -9089,13 +9102,13 @@ fn bare_repository(config: &str) -> Option<bool> {
         };
         if core && !setting.is_empty() {
             match config_bool(setting, "bare") {
-                Some(Some(value)) => bare = value,
+                Some(Some(value)) => bare = Some(value),
                 Some(None) => return None,
                 None => {}
             }
         }
     }
-    Some(bare)
+    bare
 }
 
 /// The boolean `line` sets `key` to: `None` when it sets another key, and
@@ -10766,6 +10779,28 @@ mod tests {
         git(&numbered, &["config", "core.bare", "2"]);
         assert_eq!(listed(&numbered), None);
         assert_eq!(worktree_branch(&numbered), None);
+
+        // A branch whose loose ref names no commit.
+        let corrupt = fixture.root.join("corrupt");
+        fs::create_dir_all(&corrupt).unwrap();
+        git(&corrupt, &["init", "-q", "-b", "main"]);
+        git(
+            &corrupt,
+            &[
+                "-c",
+                "user.name=xd test",
+                "-c",
+                "user.email=xd@example.com",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "initial",
+            ],
+        );
+        fs::write(corrupt.join(".git/refs/heads/main"), "garbage\n").unwrap();
+        assert_eq!(worktree_branch(&corrupt), listed(&corrupt));
+        assert_eq!(head_branch(&fs::canonicalize(&corrupt).unwrap()), None);
 
         // HEAD naming what Git would not take as a branch or commit.
         let odd = fixture.root.join("odd");
