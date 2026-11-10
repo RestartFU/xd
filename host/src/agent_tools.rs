@@ -42,6 +42,9 @@ your final reply, so end each turn with what it needs to know.";
 pub(crate) fn hint(started_by_agent: bool) -> &'static str {
     if started_by_agent { STARTED_HINT } else { HINT }
 }
+/// How long an agent waits for one of these tools to answer, and the server
+/// for the daemon. Codex gives up on a tool after a minute unless told.
+pub const AGENT_TOOL_TIMEOUT_SECONDS: u64 = 300;
 const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 struct Launch {
@@ -132,6 +135,7 @@ fn add_server(launch: &Launch, command: &mut Command, backend: &str, chat_id: &s
                 format!("mcp_servers.{SERVER}.command={executable}"),
                 format!("mcp_servers.{SERVER}.args={arguments}"),
                 format!("mcp_servers.{SERVER}.default_tools_approval_mode=\"approve\""),
+                format!("mcp_servers.{SERVER}.tool_timeout_sec={AGENT_TOOL_TIMEOUT_SECONDS}"),
             ] {
                 command.arg("-c").arg(setting);
             }
@@ -638,6 +642,8 @@ mod tests {
                 "mcp_servers.xd.args=[\"mcp\",\"--database\",\"/data/chats.db\",\"--workspaces\",\"/data/Workspaces\",\"--chat\",\"chat-1\"]",
                 "-c",
                 "mcp_servers.xd.default_tools_approval_mode=\"approve\"",
+                "-c",
+                "mcp_servers.xd.tool_timeout_sec=300",
             ]
         );
         assert!(!arguments("other").0);

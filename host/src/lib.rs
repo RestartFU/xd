@@ -65,7 +65,7 @@ mod user_environment;
 mod workflow;
 mod worktree_name;
 
-pub use agent_tools::{answer_mcp, offer_link_tool};
+pub use agent_tools::{AGENT_TOOL_TIMEOUT_SECONDS, answer_mcp, offer_link_tool};
 use auth::AuthManager;
 use chat_title::ChatTitleService;
 use cli_updates::CliUpdates;

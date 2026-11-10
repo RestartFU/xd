@@ -1184,6 +1184,10 @@ parent gets it in its queue without resuming. Statuses in `list-agents` are
 `working`, `paused`, `waiting for an answer`, `stopped with an error`,
 `finished` and `idle`.
 
+Starting an agent creates its chat and starts its first turn before answering,
+so the server waits up to 300 seconds for the daemon, and Codex is started with
+`mcp_servers.xd.tool_timeout_sec=300` so it waits as long for the tool.
+
 `move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
 to move the folder to the workspace root. A folder cannot be moved into itself
 or one of its descendants, and the host rejects a destination name collision.

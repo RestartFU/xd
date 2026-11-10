@@ -1,11 +1,20 @@
 //! `xd-host mcp`: the MCP server of xd's agent tools, which an agent starts over stdio.
 //! Each call goes to the running daemon; this process keeps no state.
 
-use std::io::{self, BufRead, Read, Write};
+use std::{
+    io::{self, BufRead, Read, Write},
+    time::Duration,
+};
 
 use serde_json::{Value, json};
 
 use crate::{HostOptions, daemon};
+
+/// How long a tool call waits for the daemon. Starting an agent makes its
+/// chat and worktree and starts its first turn, which a busy disk slows; a
+/// reply given up on would leave the agent running with no id to mind it by.
+/// The agent's own MCP client is told to wait as long; see `agent_tools`.
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(xd_host::AGENT_TOOL_TIMEOUT_SECONDS);
 
 /// A line longer than this is not a tool call xd answers.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -47,5 +56,5 @@ pub(super) fn serve(options: HostOptions, chat: &str) -> Result<(), String> {
 fn ask(options: &HostOptions, chat: &str, mut request: Value) -> Result<Value, String> {
     request["chat"] = json!(chat);
     let mut stream = daemon::connect(options, false).map_err(|error| error.to_string())?;
-    daemon::request(&mut stream, request).map_err(|error| error.to_string())
+    daemon::request_within(&mut stream, request, CALL_TIMEOUT).map_err(|error| error.to_string())
 }

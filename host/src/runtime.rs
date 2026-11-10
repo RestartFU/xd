@@ -95,7 +95,8 @@ struct RuntimeInner {
 /// message, which must still be its newest for the continuation to go ahead.
 pub(crate) type AccountSwitchHandler = Box<dyn Fn(String, i64) + Send + Sync>;
 
-/// Hears that a chat's turn ended for good, and how.
+/// Hears that a chat's turn ended for good, and how. Called with the chat's
+/// succession held, so it must only hand the news on, never wait.
 pub(crate) type TurnSettledHandler = Box<dyn Fn(SettledTurn) + Send + Sync>;
 
 /// A turn that ended for good: neither stopped nor going on elsewhere.
@@ -2898,17 +2899,19 @@ impl TurnRuntime {
             asked,
             context_usage,
         );
-        drop(succession);
+        // Told while the chat's succession is still held: the next turn, which
+        // `finish` may have started, cannot end and be told of first.
         let moves_on = matches!(limited, Some((AfterLimit::Switches(_), _)));
-        if let Some((outcome, message)) = limited {
-            self.continue_after_limit(&chat_id, outcome, message);
-        }
         if !was_cancelled
             && !moves_on
             && let Ok(handler) = self.inner.on_turn_settled.lock()
             && let Some(handler) = handler.as_ref()
         {
             handler(settled);
+        }
+        drop(succession);
+        if let Some((outcome, message)) = limited {
+            self.continue_after_limit(&chat_id, outcome, message);
         }
         if keeps_process {
             self.pump_idle(&chat_id);

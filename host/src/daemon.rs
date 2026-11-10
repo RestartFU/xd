@@ -453,9 +453,18 @@ fn stop_command(options: &HostOptions) -> String {
 fn rpc(stream: &mut UnixStream, operation: &str) -> io::Result<Value> {
     request(stream, json!({"op": operation}))
 }
-pub(super) fn request(stream: &mut UnixStream, mut body: Value) -> io::Result<Value> {
+pub(super) fn request(stream: &mut UnixStream, body: Value) -> io::Result<Value> {
+    request_within(stream, body, Duration::from_secs(10))
+}
+
+/// [`request`], waiting up to `timeout` for the reply.
+pub(super) fn request_within(
+    stream: &mut UnixStream,
+    mut body: Value,
+    timeout: Duration,
+) -> io::Result<Value> {
     body["_xd_request"] = json!(0);
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_read_timeout(Some(timeout))?;
     writeln!(stream, "{body}")?;
     let mut reader = BufReader::new(stream.try_clone()?);
     loop {
