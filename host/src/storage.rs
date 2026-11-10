@@ -9002,10 +9002,12 @@ fn owned_by_this_user(paths: &[&Path]) -> bool {
             .all(|path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.uid() == user))
 }
 
-/// Whether a Git config file is plain: section headers and `key = value`
-/// lines, with no includes, quoting or continued lines. Anything else is left
-/// to Git, which may read it differently or reject it.
+/// Whether a Git config file is plain: well-formed section headers and
+/// `key = value` lines, with no includes, extensions, quoted or continued
+/// values, and a repository format Git always reads. Anything else is left to
+/// Git, which may read it differently or refuse the repository.
 fn plain_config(config: &str) -> bool {
+    let mut section = String::new();
     config.lines().all(|line| {
         let line = line.trim();
         if line.is_empty() || line.starts_with(['#', ';']) {
@@ -9013,13 +9015,24 @@ fn plain_config(config: &str) -> bool {
         }
         let setting = match line.strip_prefix('[') {
             Some(header) => {
-                let Some((name, rest)) = header.split_once(']') else {
+                let Some((inner, rest)) = header.split_once(']') else {
                     return false;
                 };
-                if name
-                    .trim_start()
-                    .to_ascii_lowercase()
-                    .starts_with("include")
+                let (name, subsection) = inner.split_once(' ').unwrap_or((inner, ""));
+                let subsection_plain = subsection.is_empty()
+                    || (subsection.len() >= 2
+                        && subsection.starts_with('"')
+                        && subsection.ends_with('"')
+                        && !subsection[1..subsection.len() - 1].contains(['"', '\\']));
+                let name_plain = !name.is_empty()
+                    && name.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || "-.".contains(character)
+                    });
+                section = name.to_ascii_lowercase();
+                if !name_plain
+                    || !subsection_plain
+                    || section.starts_with("include")
+                    || section == "extensions"
                 {
                     return false;
                 }
@@ -9027,13 +9040,22 @@ fn plain_config(config: &str) -> bool {
             }
             None => line,
         };
-        let key = setting.split('=').next().unwrap_or_default().trim();
-        setting.is_empty()
-            || (!setting.contains(['"', '\\'])
-                && key.starts_with(|first: char| first.is_ascii_alphabetic())
-                && key
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || character == '-'))
+        if setting.is_empty() {
+            return true;
+        }
+        let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
+        let key = key.trim();
+        if setting.contains(['"', '\\'])
+            || !key.starts_with(|first: char| first.is_ascii_alphabetic())
+            || !key
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            return false;
+        }
+        section != "core"
+            || !key.eq_ignore_ascii_case("repositoryformatversion")
+            || matches!(value.trim(), "0" | "1")
     })
 }
 
@@ -10575,8 +10597,10 @@ mod tests {
                     workdir.display()
                 );
             }
-            // The layouts xd makes are read without starting Git.
-            if expected.is_some() {
+            // The layouts xd makes are read without starting Git, except by
+            // root, which Git's ownership rules are left to.
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            if expected.is_some() && unsafe { libc::geteuid() } != 0 {
                 assert!(
                     head_branch(&fs::canonicalize(&workdir).unwrap()).is_some(),
                     "{} was left to Git",
@@ -10699,6 +10723,22 @@ mod tests {
         fs::write(garbled.join(".git/config"), config).unwrap();
         assert_eq!(listed(&garbled), None);
         assert_eq!(worktree_branch(&garbled), None);
+
+        // So do a repository format Git does not know and a malformed
+        // section header.
+        for (garbage, name) in [
+            ("[core]\n\trepositoryformatversion = 999\n", "format"),
+            ("[core invalid]\n", "header"),
+        ] {
+            let refused = fixture.root.join(name);
+            fs::create_dir_all(&refused).unwrap();
+            git(&refused, &["init", "-q", "-b", "main"]);
+            let mut config = fs::read_to_string(refused.join(".git/config")).unwrap();
+            config.push_str(garbage);
+            fs::write(refused.join(".git/config"), config).unwrap();
+            assert_eq!(listed(&refused), None, "{name}");
+            assert_eq!(worktree_branch(&refused), None, "{name}");
+        }
 
         // A bare setting spelled as Git also reads it.
         let numbered = fixture.root.join("numbered");
