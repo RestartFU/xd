@@ -233,15 +233,21 @@ fn run_inner(options: HostOptions, stop_with_app: bool) -> io::Result<()> {
     }
     let mut clients = Vec::<thread::JoinHandle<()>>::new();
     let app_grace = app_close_grace();
-    // The bridge that started this daemon connects right after it listens.
-    let mut app_seen = Instant::now();
+    let mut installed_at = None::<Instant>;
     while !STOP.load(Ordering::Acquire) && !engine.shutdown_requested() {
         clients.retain(|client| !client.is_finished());
         if stop_with_app {
             // An update the app asked for finishes before the host stops.
-            if engine.app_clients() > 0 || engine.installing_update() {
-                app_seen = Instant::now();
-            } else if app_seen.elapsed() >= app_grace {
+            if engine.installing_update() {
+                installed_at = Some(Instant::now());
+            }
+            // The bridge that started this daemon connects right after it
+            // listens, and the engine counts from its start until then.
+            if engine
+                .app_absent_for()
+                .is_some_and(|absent| absent >= app_grace)
+                && installed_at.is_none_or(|at| at.elapsed() >= app_grace)
+            {
                 eprintln!("xd-host: stopping, because the xd app that started it closed");
                 break;
             }
@@ -354,14 +360,19 @@ pub(super) fn bridge(options: HostOptions) -> Result<(), String> {
     let mut info = rpc(&mut stream, "daemon-info").map_err(|e| e.to_string())?;
     // A restart keeps the daemon's arguments, so it cannot fix this mismatch.
     check_workspaces(&options, &info)?;
+    // Only a daemon the app started stops when it closes. One started any
+    // other way keeps running, and an older one refuses this. It is sent
+    // before any replacement: a busy daemon refuses to restart, and the app's
+    // retries must keep it running until it can.
+    if app {
+        let _ = rpc(&mut stream, "app-client");
+    }
     if !matches_this_build(&info) {
         (stream, info) = replace_stale_daemon(&options, stream, &info, app)?;
         check_workspaces(&options, &info)?;
-    }
-    if app {
-        // Only a daemon the app started stops when it closes. One started
-        // any other way keeps running, and an older one refuses this.
-        let _ = rpc(&mut stream, "app-client");
+        if app {
+            let _ = rpc(&mut stream, "app-client");
+        }
     }
     let mut reader = stream.try_clone().map_err(|e| e.to_string())?;
     let close = stream.try_clone().map_err(|e| e.to_string())?;

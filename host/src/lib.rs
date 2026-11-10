@@ -9,7 +9,7 @@ use std::{
         mpsc::{SyncSender, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
@@ -94,11 +94,26 @@ pub const FRAME_LIMIT: usize = isize::MAX as usize - 1;
 pub const AUTH_FRAME_LIMIT: usize = 64 * 1024;
 const REQUEST_ID: &str = "_xd_request";
 
+struct AppClients {
+    open: HashSet<u64>,
+    /// When the last one closed, or when the engine started.
+    last_seen: Instant,
+}
+
+impl Default for AppClients {
+    fn default() -> Self {
+        Self {
+            open: HashSet::new(),
+            last_seen: Instant::now(),
+        }
+    }
+}
+
 pub struct Engine {
     shutdown: AtomicBool,
     /// Local connections the xd app's own bridge opened. A daemon the app
-    /// started stops once none is left.
-    app_clients: Mutex<HashSet<u64>>,
+    /// started stops once none has been open for a while.
+    app_clients: Mutex<AppClients>,
     store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
@@ -294,7 +309,7 @@ impl Engine {
             }
             Some("app-client") if self.pairing.is_local(owner) => {
                 if let Ok(mut clients) = self.app_clients.lock() {
-                    clients.insert(owner);
+                    clients.open.insert(owner);
                 }
                 json!({"ok": true})
             }
@@ -626,9 +641,11 @@ impl Engine {
         self.shutdown.load(Ordering::Acquire)
     }
 
-    /// How many connections from the xd app are open.
-    pub fn app_clients(&self) -> usize {
-        self.app_clients.lock().map_or(0, |clients| clients.len())
+    /// How long no connection from the xd app has been open, counted from the
+    /// last one closing or the engine starting. `None` while one is open.
+    pub fn app_absent_for(&self) -> Option<Duration> {
+        let clients = self.app_clients.lock().ok()?;
+        clients.open.is_empty().then(|| clients.last_seen.elapsed())
     }
 
     /// Whether an app update is being installed, which a stop must not cut off.
@@ -2424,8 +2441,10 @@ impl Engine {
     }
 
     fn release_app_client(&self, id: u64) {
-        if let Ok(mut clients) = self.app_clients.lock() {
-            clients.remove(&id);
+        if let Ok(mut clients) = self.app_clients.lock()
+            && clients.open.remove(&id)
+        {
+            clients.last_seen = Instant::now();
         }
     }
 

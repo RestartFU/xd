@@ -1512,6 +1512,36 @@ fn bridge_keeps_a_busy_daemon_running_and_explains_how_to_stop_it() {
     assert!(error.contains("daemon-stop --data"), "{error}");
 }
 
+#[test]
+fn an_app_bridge_holds_a_busy_daemon_while_it_waits_to_restart_it() {
+    let stale = StaleDaemon::start(false);
+    let host = stale.install_host();
+    stale.report("executable", json!(host));
+    let output = Command::new(&host)
+        .args(["stdio", "--data"])
+        .arg(stale.root.join("data"))
+        .env("HOME", &stale.root)
+        .env("SHELL", "/bin/sh")
+        .env("XD_DISABLE_AUTO_UPDATE", "1")
+        .env("XD_APP_BRIDGE", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let requests = stale.requests.lock().unwrap().clone();
+    let app = requests
+        .iter()
+        .position(|request| request["op"] == "app-client");
+    let restart = requests
+        .iter()
+        .position(|request| request["action"] == "restart");
+    // Registered first, so the app's retries keep the busy daemon running.
+    assert!(
+        matches!((app, restart), (Some(app), Some(restart)) if app < restart),
+        "{requests:?}"
+    );
+}
+
 fn assert_bridge_leaves_running(stale: &StaleDaemon, host: &Path) {
     let error = stale.rejection(host);
     assert_eq!(stale.restart_requests(), 0);
