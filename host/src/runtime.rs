@@ -2305,7 +2305,17 @@ impl TurnRuntime {
             Err(error) => {
                 let succession = self.succession(&turn.chat_id);
                 let _succession = succession.lock().unwrap_or_else(|error| error.into_inner());
-                self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
+                let settled = SettledTurn {
+                    chat_id: turn.chat_id.clone(),
+                    reply: String::new(),
+                    error: Some(error.clone()),
+                    waiting: false,
+                };
+                let next = self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
+                self.settled(settled);
+                if let Some(next) = next {
+                    self.settled(next);
+                }
                 return;
             }
         };
@@ -2888,7 +2898,7 @@ impl TurnRuntime {
             error: error.clone().filter(|_| !success),
             waiting: asked.is_some(),
         };
-        self.finish(
+        let next_failed = self.finish(
             turn,
             turn_id,
             progress.sequence(),
@@ -2902,12 +2912,11 @@ impl TurnRuntime {
         // Told while the chat's succession is still held: the next turn, which
         // `finish` may have started, cannot end and be told of first.
         let moves_on = matches!(limited, Some((AfterLimit::Switches(_), _)));
-        if !was_cancelled
-            && !moves_on
-            && let Ok(handler) = self.inner.on_turn_settled.lock()
-            && let Some(handler) = handler.as_ref()
-        {
-            handler(settled);
+        if !was_cancelled && !moves_on {
+            self.settled(settled);
+        }
+        if let Some(next_failed) = next_failed {
+            self.settled(next_failed);
         }
         drop(succession);
         if let Some((outcome, message)) = limited {
@@ -2978,7 +2987,7 @@ impl TurnRuntime {
         silent: bool,
         asked: Option<Ask>,
         context_usage: Option<(u64, u64)>,
-    ) {
+    ) -> Option<SettledTurn> {
         if let Some((used, window)) = context_usage {
             let _ = self.inner.store.set_context_usage(
                 &turn.chat_id,
@@ -2996,7 +3005,7 @@ impl TurnRuntime {
             silent,
         );
         let Ok(finish) = finish else {
-            return;
+            return None;
         };
         let mut event = json!({
             "event": "turn-finished",
@@ -3029,6 +3038,24 @@ impl TurnRuntime {
             self.inner
                 .events
                 .publish(json!({"event": "changed", "chat": next.chat_id}));
+            // The queued message was taken and will not run: that ends it too.
+            return Some(SettledTurn {
+                chat_id: next.chat_id,
+                reply: String::new(),
+                error: Some(error),
+                waiting: false,
+            });
+        }
+        None
+    }
+
+    /// Tells whoever listens that a turn ended for good. Called with the
+    /// chat's succession held, so turns are told of in the order they ended.
+    fn settled(&self, settled: SettledTurn) {
+        if let Ok(handler) = self.inner.on_turn_settled.lock()
+            && let Some(handler) = handler.as_ref()
+        {
+            handler(settled);
         }
     }
 

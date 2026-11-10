@@ -340,10 +340,10 @@ fn status(agent: &ChildAgent) -> &'static str {
         "paused"
     } else if agent.working {
         "working"
-    } else if agent.reply.as_deref().and_then(crate::ask::parse).is_some() {
-        "waiting for an answer"
     } else if agent.error.is_some() {
         "stopped with an error"
+    } else if agent.reply.as_deref().and_then(crate::ask::parse).is_some() {
+        "waiting for an answer"
     } else if agent.reply.is_some() {
         "finished"
     } else {
@@ -512,6 +512,21 @@ mod tests {
             ..settled
         };
         assert!(report("child", "", &asking).contains("is waiting for an answer."));
+    }
+
+    #[test]
+    fn a_failed_turn_is_not_read_as_the_question_before_it() {
+        let question = "<ask>\nWhich?\n- A\n- B\n</ask>";
+        let asking = ChildAgent {
+            reply: Some(question.into()),
+            ..agent()
+        };
+        assert_eq!(status(&asking), "waiting for an answer");
+        let failed = ChildAgent {
+            error: Some("Could not start.".into()),
+            ..asking
+        };
+        assert_eq!(status(&failed), "stopped with an error");
     }
 
     #[test]

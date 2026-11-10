@@ -3063,6 +3063,8 @@ impl StateStore {
         let mut statement = database.prepare(
             "SELECT id, COALESCE(title, ''), backend, model, host_working, paused, \
              (SELECT content FROM messages WHERE chat_id = chats.id AND role = 'assistant' \
+              AND id > (SELECT COALESCE(MAX(id), 0) FROM messages \
+                WHERE chat_id = chats.id AND role = 'user') \
               ORDER BY id DESC LIMIT 1), \
              (SELECT role FROM messages WHERE chat_id = chats.id \
               AND role IN ('assistant', 'error', 'user') ORDER BY id DESC LIMIT 1), \
@@ -3080,6 +3082,7 @@ impl StateStore {
                     model: row.get(3)?,
                     working: row.get(4)?,
                     paused: row.get(5)?,
+                    // Only what it said since it was last spoken to.
                     reply: row.get(6)?,
                     // An error after its last reply is how its last turn ended.
                     error: (last_role.as_deref() == Some("error"))
@@ -12918,6 +12921,27 @@ mod tests {
         assert_eq!(children[0].id, child_id);
         assert_eq!(children[0].title, "Worker");
         assert_eq!(children[0].backend, "codex");
+        // What a worker said before it was last spoken to is not its reply.
+        {
+            let database = store.database.lock().unwrap();
+            for (role, content) in [
+                ("user", "Fix it"),
+                ("assistant", "Which one?"),
+                ("user", "The first"),
+                ("error", "Could not start."),
+            ] {
+                database
+                    .execute(
+                        "INSERT INTO messages (chat_id, role, content, created_at) \
+                         VALUES (?, ?, ?, 0)",
+                        params![child_id, role, content],
+                    )
+                    .unwrap();
+            }
+        }
+        let worker = &store.child_agents(parent_id).unwrap()[0];
+        assert_eq!(worker.reply, None);
+        assert_eq!(worker.error.as_deref(), Some("Could not start."));
         let origin = store.agent_origin(child_id).unwrap();
         assert_eq!(origin.parent.as_deref(), Some(parent_id));
         assert_eq!(origin.session, child["session"]);
