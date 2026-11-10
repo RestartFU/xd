@@ -120,7 +120,8 @@ class ChatQuotaScreenshotTest {
                 dir.mkdirs()
                 File(dir, "chat-quota-reached-dark.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
             }
-            check(shows("This chat used its quota: 10% of 10% of the 5-hour limit."))
+            check(shows("This chat reached its quota") && shows("Waiting on you"))
+            check(shows("It used 10% of its account's 5-hour limit; its quota was 10%."))
             check(shows("New quota") && shows("Continue without a limit"))
             // Prefilled with twice the last quota.
             check(compose.onAllNodes(hasText("20"), useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())

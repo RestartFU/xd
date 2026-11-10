@@ -2182,6 +2182,9 @@ enum RemoteState {
 
 /// Where clicking a "turn finished" notification should lead.
 #[cfg(target_os = "linux")]
+/// How a notification ends the chat's title when its quota stopped it.
+const QUOTA_STOP_ENDING: &str = "stopped at its quota";
+
 struct TurnNotificationTarget {
     endpoint: ChatEndpoint,
     chat_id: Option<String>,
@@ -2411,6 +2414,12 @@ struct XdDesktop {
     /// How many `chat-quota-settings` broadcasts have arrived; each request
     /// about the default carries the count from when it was sent.
     chat_quota_broadcasts: u64,
+    /// Chats on the active host the tree showed stopped at their quota, from
+    /// the first tree on; `None` until then, so chats already stopped when
+    /// xd connects do not notify.
+    quota_stops_seen: Option<HashSet<String>>,
+    /// Stops already notified through their turn's end.
+    quota_stops_announced: HashSet<String>,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
@@ -3128,6 +3137,8 @@ impl XdDesktop {
             auto_delete: None,
             chat_quota: None,
             chat_quota_broadcasts: 0,
+            quota_stops_seen: None,
+            quota_stops_announced: HashSet::new(),
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
             sidebar_move: None,
@@ -3613,6 +3624,8 @@ impl XdDesktop {
         self.auto_delete = None;
         self.chat_quota = None;
         self.quota_card = chat_quota::QuotaCard::default();
+        self.quota_stops_seen = None;
+        self.quota_stops_announced.clear();
         if self.minimal_theme_open {
             self.request_auto_settle_settings();
             self.request_auto_delete_settings();
@@ -3668,6 +3681,8 @@ impl XdDesktop {
         self.request_chat_title_settings();
         self.chat_quota = None;
         self.quota_card = chat_quota::QuotaCard::default();
+        self.quota_stops_seen = None;
+        self.quota_stops_announced.clear();
         self.request_chat_quota_settings();
         true
     }
@@ -4995,6 +5010,7 @@ impl XdDesktop {
                     self.model.connection_error = Some(format!("Invalid tree response: {error}"));
                     return;
                 }
+                self.notify_new_quota_stops(cx);
                 if self.model.chat_quotas_supported != chat_quotas_before {
                     self.chat_quota = None;
                     self.request_chat_quota_settings();
@@ -6485,19 +6501,17 @@ impl XdDesktop {
                 .unwrap_or("Background chat")
                 .to_owned();
             self.model.apply_event(name, &body);
-            if self.settings.notifications {
-                #[cfg(target_os = "linux")]
-                self.turn_notifier.show(
-                    notifications::turn_finished_body(&title),
-                    TurnNotificationTarget {
-                        endpoint: self.active_endpoint,
-                        chat_id: chat_id.map(str::to_owned),
-                    },
-                    cx.background_executor(),
-                );
-                #[cfg(not(target_os = "linux"))]
-                notify_turn_finished(&title);
-            }
+            let chat_id = chat_id.map(str::to_owned);
+            // A turn its quota stopped is no finished turn: say why it ended.
+            let ending = if body.get("quota_reached").and_then(Value::as_bool) == Some(true) {
+                if let Some(chat_id) = &chat_id {
+                    self.quota_stops_announced.insert(chat_id.clone());
+                }
+                QUOTA_STOP_ENDING
+            } else {
+                "finished"
+            };
+            self.notify_chat_ended(chat_id, &title, ending, cx);
             self.request_tree();
         }
         match name {
@@ -22090,9 +22104,9 @@ fn workflow_row_indices(model: &AppModel, marker: &str) -> Vec<usize> {
 }
 
 #[cfg(target_os = "macos")]
-fn notify_turn_finished(title: &str) {
+fn notify_turn_finished(title: &str, ending: &str) {
     let body = format!(
-        "{} finished",
+        "{} {ending}",
         title
             .chars()
             .filter(|character| !character.is_control())
@@ -22122,7 +22136,7 @@ fn notify_turn_finished(title: &str) {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn notify_turn_finished(_: &str) {}
+fn notify_turn_finished(_: &str, _: &str) {}
 
 fn optional_trimmed(value: &str) -> Option<&str> {
     let value = value.trim();
@@ -24250,6 +24264,10 @@ Binary files /dev/null and b/image.png differ\n";
             assert!(!desktop.model.working);
         });
         redraw(cx);
+        assert!(
+            cx.debug_bounds("chat-quota-invalid").is_some(),
+            "an invalid quota says what it needs"
+        );
         let continue_button = cx.debug_bounds("chat-quota-continue").unwrap();
         cx.simulate_click(continue_button.center(), gpui::Modifiers::default());
         cx.run_until_parked();
@@ -24269,6 +24287,41 @@ Binary files /dev/null and b/image.png differ\n";
         // newly appears can be seen here; the card's state is checked above.
         redraw(cx);
         assert!(cx.debug_bounds("native-quota-meter").is_some());
+    }
+
+    #[gpui::test]
+    fn a_chat_newly_stopped_at_its_quota_is_announced_once(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.settings.notifications = false;
+            desktop.model = grouped_workspace_fixture();
+            let stop = |desktop: &mut XdDesktop, id: &str| {
+                if let Some(chat) = desktop.model.chats.iter_mut().find(|chat| chat.id == id) {
+                    chat.quota_reached = true;
+                }
+            };
+            // Chats already stopped when xd first sees the tree stay quiet.
+            let first = desktop.model.chats[0].id.clone();
+            stop(desktop, &first);
+            desktop.notify_new_quota_stops(cx);
+            assert!(desktop.quota_stops_announced.is_empty());
+
+            // One that stops later is announced, once.
+            let second = desktop.model.chats[1].id.clone();
+            stop(desktop, &second);
+            desktop.notify_new_quota_stops(cx);
+            assert!(desktop.quota_stops_announced.contains(&second));
+            assert!(!desktop.quota_stops_announced.contains(&first));
+            desktop.notify_new_quota_stops(cx);
+            assert_eq!(desktop.quota_stops_announced.len(), 1);
+
+            // Going on forgets it, so a later stop is announced again.
+            for chat in &mut desktop.model.chats {
+                chat.quota_reached = false;
+            }
+            desktop.notify_new_quota_stops(cx);
+            assert!(desktop.quota_stops_announced.is_empty());
+        });
     }
 
     #[cfg(unix)]

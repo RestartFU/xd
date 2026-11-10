@@ -26,6 +26,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -39,10 +41,13 @@ internal fun chatQuotaDetail(percent: Int?): String =
     "Limit each chat to ${percent?.let { "$it%" } ?: "a share"} of its account's 5-hour usage limit. " +
         "A chat that reaches it stops and asks before going on."
 
-/** The quota card's sentence, with the desktop's wording. */
+/** The quota card's headline, with the desktop's wording. */
+internal const val QUOTA_REACHED_TITLE = "This chat reached its quota"
+
+/** What the chat used and what its quota was, with the desktop's wording. */
 internal fun quotaReachedSentence(quota: ChatQuota?): String =
-    if (quota == null) "This chat used its quota of the 5-hour limit."
-    else "This chat used its quota: ${quota.usedLabel}% of ${quota.percent}% of the 5-hour limit."
+    if (quota == null) "It used its share of its account's 5-hour limit."
+    else "It used ${quota.usedLabel}% of its account's 5-hour limit; its quota was ${quota.percent}%."
 
 /**
  * The host's default chat quota: off, or a whole percentage of each chat's
@@ -87,7 +92,7 @@ internal fun ChatQuotaSection(model: MainViewModel) {
             Column(Modifier.weight(1f).padding(end = 12.dp)) {
                 Text("Quota per chat", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "A whole number from 1 to 100.",
+                    "A chat's own quota, chosen when it stops, takes the place of this one.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -97,6 +102,7 @@ internal fun ChatQuotaSection(model: MainViewModel) {
                 onText = { typed = it },
                 onDone = commit,
                 modifier = Modifier.onFocusChanged { if (!it.isFocused) commit() },
+                label = "Quota per chat",
             )
         }
     }
@@ -123,17 +129,34 @@ internal fun QuotaReachedCard(
 ) {
     var typed by rememberSaveable(quota?.percent) { mutableStateOf(ChatQuota.nextPercent(quota?.percent).toString()) }
     val chosen = ChatQuota.typedPercent(typed)
+    // Waiting on the user like a question, so it wears the same mark.
+    val waiting = LocalXdSignals.current.waiting
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        border = BorderStroke(1.dp, waiting.copy(alpha = 0.6f)),
     ) {
         Column(
-            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(quotaReachedSentence(quota), style = MaterialTheme.typography.bodyMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(QUOTA_REACHED_TITLE, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                StatusPill("Waiting on you", waiting)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    quotaReachedSentence(quota),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "Messages you send wait in the queue until it goes on.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("New quota", style = MaterialTheme.typography.bodyMedium)
                 PercentField(
@@ -141,6 +164,14 @@ internal fun QuotaReachedCard(
                     onText = { typed = it },
                     onDone = { if (chosen != null && !busy) onContinue(chosen) },
                     enabled = !busy,
+                    label = "New quota",
+                )
+            }
+            if (chosen == null) {
+                Text(
+                    "Enter a whole number from 1 to 100.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -160,13 +191,16 @@ private fun PercentField(
     text: String,
     onText: (String) -> Unit,
     onDone: () -> Unit,
+    label: String,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
     OutlinedTextField(
         value = text,
         onValueChange = { typed -> onText(typed.filter(Char::isDigit).take(3)) },
-        modifier = modifier.width(92.dp),
+        // The visible words beside it are not tied to it, so screen readers
+        // are told what the number is.
+        modifier = modifier.width(92.dp).semantics { contentDescription = "$label, percent" },
         enabled = enabled,
         singleLine = true,
         isError = ChatQuota.typedPercent(text) == null,

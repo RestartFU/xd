@@ -142,24 +142,33 @@ impl XdDesktop {
         if !self.quota_card_visible() {
             return None;
         }
-        let sentence = match self.model.quota {
+        let detail = match self.model.quota {
             Some(quota) => format!(
-                "This chat used its quota: {}% of {}% of the 5-hour limit.",
+                "It used {}% of its account's 5-hour limit; its quota was {}%.",
                 quota_points(quota.used),
                 quota.percent
             ),
-            None => "This chat used its quota of the 5-hour limit.".to_owned(),
+            None => "It used its share of its account's 5-hour limit.".to_owned(),
         };
         let waiting = self.quota_card.pending.is_some();
         let percent = parse_quota_percent(&self.quota_card.text);
         let can_continue = !waiting && self.model.connected && percent.is_some();
         let can_lift = !waiting && self.model.connected;
+        let invalid = percent.is_none();
         let focused = self
             .quota_input
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
+        let field_border = if invalid {
+            colors.danger
+        } else if focused {
+            colors.selected_border
+        } else {
+            colors.border
+        };
         Some(
+            // Waiting on the user like a question, so it wears the same mark.
             div()
                 .id("chat-quota-card")
                 .debug_selector(|| "chat-quota-card".into())
@@ -170,28 +179,45 @@ impl XdDesktop {
                 .flex_col()
                 .gap(px(10.0))
                 .rounded(px(8.0))
-                .border_1()
-                .border_color(rgb(colors.border))
+                .border(px(1.5))
+                .border_color(rgb(colors.waiting))
                 .bg(rgb(colors.surface))
                 .text_size(px(13.0))
                 .text_color(rgb(colors.text))
                 .child(
                     div()
                         .flex()
-                        .flex_col()
-                        .gap(px(3.0))
+                        .items_start()
+                        .gap_3()
                         .child(
                             div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .debug_selector(|| "chat-quota-sentence".into())
-                                .child(sentence),
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.0))
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .debug_selector(|| "chat-quota-sentence".into())
+                                        .child("This chat reached its quota"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(colors.muted))
+                                        .debug_selector(|| "chat-quota-detail".into())
+                                        .child(detail),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(colors.muted))
+                                        .child(
+                                            "Messages you send wait in the queue until it goes on.",
+                                        ),
+                                ),
                         )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(colors.muted))
-                                .child("Messages you send wait in the queue until it goes on."),
-                        ),
+                        .child(stamp("Waiting on you", colors.waiting)),
                 )
                 .child(
                     div()
@@ -208,19 +234,16 @@ impl XdDesktop {
                         .child(
                             div()
                                 .id("chat-quota-input")
-                                .w(px(52.0))
+                                .w(px(72.0))
                                 .h(px(30.0))
                                 .px(px(8.0))
                                 .flex()
                                 .items_center()
+                                .gap_1()
                                 .cursor_text()
                                 .rounded(px(6.0))
                                 .border_1()
-                                .border_color(rgb(if focused {
-                                    colors.selected_border
-                                } else {
-                                    colors.border
-                                }))
+                                .border_color(rgb(field_border))
                                 .bg(rgb(colors.background))
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -228,14 +251,14 @@ impl XdDesktop {
                                         this.quota_input.read(cx).focus_handle(cx).focus(window);
                                     }),
                                 )
-                                .child(div().w_full().child(self.quota_input.clone())),
-                        )
-                        .child(
-                            div()
-                                .mr_2()
-                                .text_size(px(12.5))
-                                .text_color(rgb(colors.muted))
-                                .child("%"),
+                                .child(div().flex_1().min_w_0().child(self.quota_input.clone()))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(12.5))
+                                        .text_color(rgb(colors.muted))
+                                        .child("%"),
+                                ),
                         )
                         .child(
                             ui_button("chat-quota-continue", ButtonKind::Primary, colors)
@@ -248,8 +271,10 @@ impl XdDesktop {
                                 })
                                 .child("Continue"),
                         )
+                        // No limit at all is the bigger step, so it asks for
+                        // less attention than going on with a quota.
                         .child(
-                            ui_button("chat-quota-lift", ButtonKind::Secondary, colors)
+                            ui_button("chat-quota-lift", ButtonKind::Ghost, colors)
                                 .debug_selector(|| "chat-quota-lift".into())
                                 .when(!can_lift, |button| button.opacity(0.5))
                                 .when(can_lift, |button| {
@@ -258,7 +283,16 @@ impl XdDesktop {
                                     }))
                                 })
                                 .child("Continue without a limit"),
-                        ),
+                        )
+                        .when(invalid, |row| {
+                            row.child(
+                                div()
+                                    .debug_selector(|| "chat-quota-invalid".into())
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(colors.danger))
+                                    .child("Enter a whole number from 1 to 100."),
+                            )
+                        }),
                 )
                 .into_any_element(),
         )
@@ -284,17 +318,78 @@ impl XdDesktop {
                 .text_color(rgb(tone))
                 .tooltip(move |_, cx| {
                     cx.new(|_| PaneTooltip {
-                        label: "This chat's quota of its account's 5-hour limit",
+                        label: "How much of its account's 5-hour limit this chat has used, \
+                                against its quota. An estimate: chats working on one \
+                                account share each rise.",
                         colors,
                     })
                     .into()
                 })
                 .child(format!(
-                    "Quota {} / {}%",
+                    "Quota {}% of {}%",
                     quota_points(quota.used),
                     quota.percent
                 ))
                 .into_any_element(),
         )
+    }
+
+    /// Tells the user about a chat that ended a turn or stopped, if they
+    /// want to hear: "{title} finished", "{title} stopped at its quota".
+    pub(super) fn notify_chat_ended(
+        &mut self,
+        chat_id: Option<String>,
+        title: &str,
+        ending: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.settings.notifications {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        self.turn_notifier.show(
+            notifications::chat_ended_body(title, ending),
+            TurnNotificationTarget {
+                endpoint: self.active_endpoint,
+                chat_id,
+            },
+            cx.background_executor(),
+        );
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (chat_id, cx);
+            notify_turn_finished(title, ending);
+        }
+    }
+
+    /// Notifies about each chat the tree newly shows stopped at its quota,
+    /// such as one that reached it as its turn ended, unless its turn's end
+    /// already said so or the user is looking at it.
+    pub(super) fn notify_new_quota_stops(&mut self, cx: &mut Context<Self>) {
+        let stopped = self
+            .model
+            .chats
+            .iter()
+            .filter(|chat| chat.quota_reached)
+            .map(|chat| (chat.id.clone(), chat.title.clone()))
+            .collect::<Vec<_>>();
+        let now = stopped
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<HashSet<_>>();
+        self.quota_stops_announced.retain(|id| now.contains(id));
+        let Some(seen) = self.quota_stops_seen.replace(now) else {
+            return;
+        };
+        for (chat_id, title) in stopped {
+            if seen.contains(&chat_id)
+                || !self.quota_stops_announced.insert(chat_id.clone())
+                || self.chat_is_active(&chat_id)
+            {
+                continue;
+            }
+            let title = title.unwrap_or_else(|| "Background chat".to_owned());
+            self.notify_chat_ended(Some(chat_id), &title, QUOTA_STOP_ENDING, cx);
+        }
     }
 }
