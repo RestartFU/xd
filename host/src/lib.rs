@@ -3018,10 +3018,13 @@ pub fn serve_daemon_connection(
                             .spawn(move || {
                                 let mut request = Some(request);
                                 while let Some(next) = request {
-                                    let answered = !engine.events.subscribed(subscriber) || {
-                                        let reply = engine.dispatch_for(subscriber, next);
-                                        outbound.try_send(reply).is_ok()
-                                    };
+                                    // A panic counts as no answer, so its slot is
+                                    // still given back and the connection can close.
+                                    let answered = !engine.events.subscribed(subscriber)
+                                        || std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                            || engine.dispatch_for(subscriber, next),
+                                        ))
+                                        .is_ok_and(|reply| outbound.try_send(reply).is_ok());
                                     if !answered {
                                         let _ = stream.shutdown(std::net::Shutdown::Both);
                                     }

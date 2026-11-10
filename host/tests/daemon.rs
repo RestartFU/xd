@@ -1724,7 +1724,16 @@ fn a_new_worktree_being_made_does_not_hold_up_the_clients_other_requests() {
     .unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
 
+    // Generous timeouts: on a loaded machine making six worktrees, even
+    // once let go, can take a while. The hooks hold every checkout until
+    // released, so a tree answered meanwhile was not waiting behind them.
+    let patient = Duration::from_secs(120);
     let mut client = daemon.client();
+    client
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(patient))
+        .unwrap();
     let folder = client.call(json!({"op":"new-folder", "name":"Repo", "repo":repo}));
     assert_eq!(folder["ok"], true, "{folder}");
     // More than are set up at once: the rest wait in their own line.
@@ -1745,7 +1754,7 @@ fn a_new_worktree_being_made_does_not_hold_up_the_clients_other_requests() {
     client
         .reader
         .get_ref()
-        .set_read_timeout(Some(Duration::from_secs(15)))
+        .set_read_timeout(Some(Duration::from_secs(60)))
         .unwrap();
     let tree = client.call(json!({"op":"tree"}));
     assert_eq!(tree["ok"], true, "{tree}");
@@ -1755,7 +1764,7 @@ fn a_new_worktree_being_made_does_not_hold_up_the_clients_other_requests() {
     client
         .reader
         .get_ref()
-        .set_read_timeout(Some(Duration::from_secs(60)))
+        .set_read_timeout(Some(patient))
         .unwrap();
     let mut made = Vec::new();
     while made.len() < creating.len() {
@@ -1785,7 +1794,7 @@ fn a_new_worktree_being_made_does_not_hold_up_the_clients_other_requests() {
     leaving
         .reader
         .get_ref()
-        .set_read_timeout(Some(Duration::from_secs(60)))
+        .set_read_timeout(Some(patient))
         .unwrap();
     let answer = loop {
         let frame = leaving.frame();

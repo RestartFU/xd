@@ -1593,6 +1593,26 @@ impl XdDesktop {
         self.chat_create_token = None;
         self.new_chat_submitted_prompt = None;
         self.new_chat_submitted_attachments.clear();
+        // Gone back to from the sidebar while it started, the view has no
+        // checkouts or branches to pick another from: ask for them again.
+        if self.creating_chat_session.is_none()
+            && self.chat_create_worktrees.is_empty()
+            && !self.chat_create_worktrees_loading
+            && let Some(folder_id) = self.creating_chat_folder.clone()
+            && let Some(host) = self.active_host().cloned()
+        {
+            self.chat_create_worktrees_loading = true;
+            self.chat_create_sources_loading = true;
+            self.chat_create_sources_error = None;
+            if let Err(error) = host.folder_settings(&folder_id) {
+                self.chat_create_worktrees_loading = false;
+                self.model.connection_error = Some(error);
+            }
+            if let Err(error) = host.new_chat_sources(&folder_id) {
+                self.chat_create_sources_loading = false;
+                self.chat_create_sources_error = Some(error);
+            }
+        }
         if let Some(key) = self.new_chat_draft_key()
             && let Some(saved) = self.read_new_chat_draft(&key).filter(draft_has_content)
         {
@@ -2871,6 +2891,71 @@ mod start_tests {
                 assert!(desktop.starting_chats.is_empty());
             });
         });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_starting_chat_that_fails_after_reopening_lists_its_checkouts_again(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::io::{BufRead, BufReader, Write};
+        let (client, server_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = server_end;
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut asked = Vec::new();
+            while !(asked.iter().any(|op: &String| op == "folder-settings")
+                && asked.iter().any(|op| op == "new-chat-sources"))
+            {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    break;
+                }
+                let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if request["folder"] == "atlas" {
+                    asked.push(request["op"].as_str().unwrap_or_default().to_owned());
+                }
+                if let Some(id) = request["_xd_request"].as_u64() {
+                    writeln!(stream, "{{\"ok\":false,\"_xd_request\":{id}}}").unwrap();
+                }
+            }
+            asked
+        });
+        let (host, _updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            std::env::temp_dir().join("xd-reopened-sources-identity"),
+        );
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.host = Some(host);
+                sent_off(desktop);
+                desktop.open_minimal_session(
+                    "atlas".into(),
+                    "review".into(),
+                    AgentCli::Claude,
+                    window,
+                    cx,
+                );
+                desktop.open_starting_chat(1, window, cx);
+                assert!(desktop.chat_create_worktrees.is_empty());
+                reply(
+                    desktop,
+                    made(1),
+                    serde_json::json!({"ok": false, "error": "No such branch."}),
+                    cx,
+                );
+                assert!(!desktop.chat_create_submitting);
+                assert!(desktop.chat_create_worktrees_loading);
+                assert!(desktop.chat_create_sources_loading);
+            });
+        });
+        let asked = server.join().unwrap();
+        assert!(asked.iter().any(|op| op == "folder-settings"), "{asked:?}");
+        assert!(asked.iter().any(|op| op == "new-chat-sources"), "{asked:?}");
     }
 
     #[gpui::test]
