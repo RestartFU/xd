@@ -188,6 +188,10 @@ impl Ledger {
             .filter(|_| !entry.restarted_after_idle)
             .map_or(0.0, |last| rise(last, reading));
         entry.restarted_after_idle = false;
+        // The next interval starts here; work going on now means no gap yet.
+        if !working.is_empty() {
+            entry.idle_since = None;
+        }
         let since_ms = std::mem::replace(&mut entry.asked_ms, asked_ms);
         entry.last = Some(reading);
         entry.read_at = Some(now);
@@ -247,7 +251,10 @@ pub(crate) struct QuotaMeter {
     /// Kept for tests, which look at what the runtime told the meter.
     #[cfg_attr(not(test), allow(dead_code))]
     ledger: Arc<Mutex<Ledger>>,
-    wake: Mutex<Sender<()>>,
+    /// The only strong hold on the wake channel's sender. The runtime's hook
+    /// holds it weakly, so dropping the meter disconnects the channel and
+    /// its thread ends, letting go of the runtime.
+    wake: Arc<Mutex<Sender<()>>>,
 }
 
 struct Pass {
@@ -270,9 +277,10 @@ impl QuotaMeter {
     ) -> Self {
         let ledger = Arc::new(Mutex::new(Ledger::default()));
         let (wake, wakes) = mpsc::channel::<()>();
+        let wake = Arc::new(Mutex::new(wake));
         {
             let ledger = ledger.clone();
-            let wake = Mutex::new(wake.clone());
+            let wake = Arc::downgrade(&wake);
             runtime.set_activity_handler(Box::new(move |chat_id, provider, tag, started| {
                 if let Ok(mut ledger) = ledger.lock() {
                     ledger.turn(
@@ -282,7 +290,9 @@ impl QuotaMeter {
                         started,
                     );
                 }
-                if let Ok(wake) = wake.lock() {
+                if let Some(wake) = wake.upgrade()
+                    && let Ok(wake) = wake.lock()
+                {
                     let _ = wake.send(());
                 }
             }));
@@ -312,10 +322,7 @@ impl QuotaMeter {
         if let Err(error) = spawned {
             eprintln!("xd-host: cannot start chat quotas: {error}");
         }
-        Self {
-            ledger,
-            wake: Mutex::new(wake),
-        }
+        Self { ledger, wake }
     }
 
     /// Looks again now, such as after a quota changed.
@@ -399,6 +406,16 @@ impl Pass {
                 .filter(|(_, p, a)| *p == provider && *a == account)
                 .map(|(chat_id, _, _)| chat_id.clone())
                 .collect::<Vec<_>>();
+            // Work goes on here, if only background tasks between turns, so
+            // the account has not gone idle whatever the turns say.
+            if !here.is_empty()
+                && let Ok(mut ledger) = self.ledger.lock()
+                && let Some(entry) = ledger
+                    .accounts
+                    .get_mut(&(provider.clone(), account.clone()))
+            {
+                entry.idle_since = None;
+            }
             let mut involved = sharers.iter().chain(&here).collect::<HashSet<_>>();
             involved.retain(|chat_id| limited(chat_id));
             if involved.is_empty() {
@@ -725,6 +742,14 @@ mod tests {
         let ab = chats(&["a", "b"]);
         let shares = record_in(&mut ledger, "claude", "default", reading(26.0, 1), &ab, now);
         assert_eq!(shares, vec![("a".to_owned(), 2.0), ("b".to_owned(), 2.0)]);
+        // A turn that ends while its background work goes on: a reading that
+        // finds the work still running means the account never went idle.
+        ledger.turn_at("claude", "default", "b", false, now);
+        ledger.turn_at("claude", "default", "a", false, now);
+        record_in(&mut ledger, "claude", "default", reading(27.0, 1), &a, now);
+        ledger.turn_at("claude", "default", "a", true, now + IDLE_GAP);
+        let shares = record_in(&mut ledger, "claude", "default", reading(29.0, 1), &a, now);
+        assert_eq!(shares, vec![("a".to_owned(), 2.0)]);
     }
 
     #[test]
@@ -778,6 +803,17 @@ mod tests {
         assert!(entry.sharers.contains("chat"));
         drop(ledger);
         meter.wake();
+        // Dropping the meter ends its thread, which lets go of the runtime.
+        let held = runtime.handles();
+        drop(meter);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.handles() >= held {
+            assert!(
+                Instant::now() < deadline,
+                "the meter's thread kept the runtime"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

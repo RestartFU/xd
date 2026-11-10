@@ -664,6 +664,12 @@ impl TurnRuntime {
         }
     }
 
+    /// How many handles share this runtime.
+    #[cfg(test)]
+    pub(crate) fn handles(&self) -> usize {
+        Arc::strong_count(&self.inner)
+    }
+
     #[cfg(test)]
     pub(crate) fn note_activity_for_test(
         &self,
