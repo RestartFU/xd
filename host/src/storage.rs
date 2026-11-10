@@ -9072,7 +9072,7 @@ fn plain_config(config: &str) -> bool {
         if setting.is_empty() {
             return true;
         }
-        // Git refuses a setting before any section.
+        // A setting before any section is left to Git to judge.
         if section.is_empty() {
             return false;
         }
@@ -10802,7 +10802,7 @@ mod tests {
             assert_eq!(worktree_branch(&refused), None, "{name}");
         }
 
-        // A setting before any section, which Git refuses.
+        // A setting before any section is left to Git.
         let sectionless = fixture.root.join("sectionless");
         fs::create_dir_all(&sectionless).unwrap();
         git(&sectionless, &["init", "-q", "-b", "main"]);
@@ -10812,8 +10812,8 @@ mod tests {
             format!("foo = bar\n{config}"),
         )
         .unwrap();
-        assert_eq!(listed(&sectionless), None);
-        assert_eq!(worktree_branch(&sectionless), None);
+        assert_eq!(worktree_branch(&sectionless), listed(&sectionless));
+        assert_eq!(head_branch(&fs::canonicalize(&sectionless).unwrap()), None);
 
         // A `.git` linked to another checkout's is listed at that checkout.
         let borrowed = fixture.root.join("borrowed");
