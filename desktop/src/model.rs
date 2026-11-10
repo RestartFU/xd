@@ -280,6 +280,10 @@ pub struct ChatSummary {
     /// Pausing every chat stopped this one, and it waits to resume.
     #[serde(default)]
     pub paused: bool,
+    /// The chat stopped at its quota and waits for the user to give it a new
+    /// one. Only a host with `chat_quotas` sends this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quota_reached: bool,
     /// Pull requests linked to the chat, oldest first. Only a host with
     /// `linked_pull_requests` sends these.
     #[serde(
@@ -402,6 +406,114 @@ impl AutoDeleteRules {
         } else {
             Self::STEPS.into_iter().rev().find(|step| *step < days)
         }
+    }
+}
+
+/// The host's default chat quota: the share of its account's usage limit
+/// each chat may use before it stops and asks to go on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatQuotaSettings {
+    /// A whole number from 1 to 100, or none while chats are not limited.
+    pub percent: Option<u8>,
+}
+
+impl ChatQuotaSettings {
+    pub const DEFAULT_PERCENT: u8 = 10;
+    /// The choices the stepper moves through. The host takes any whole
+    /// percent from 1 to 100, so a value set elsewhere steps to its neighbours.
+    pub const STEPS: [u8; 14] = [1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100];
+
+    pub fn from_value(value: &Value) -> Option<Self> {
+        Some(Self {
+            percent: match value.get("percent")? {
+                Value::Null => None,
+                percent => Some(quota_percent(percent)?),
+            },
+        })
+    }
+
+    /// The next choice after `percent`, larger or smaller, if there is one.
+    pub fn step(percent: u8, larger: bool) -> Option<u8> {
+        if larger {
+            Self::STEPS.into_iter().find(|step| *step > percent)
+        } else {
+            Self::STEPS.into_iter().rev().find(|step| *step < percent)
+        }
+    }
+}
+
+/// A whole percent the host accepts as a quota, from 1 to 100.
+fn quota_percent(value: &Value) -> Option<u8> {
+    u8::try_from(value.as_u64()?)
+        .ok()
+        .filter(|percent| (1..=100).contains(percent))
+}
+
+/// The quota that applies to the open chat, as its `chat` reply has it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChatQuota {
+    /// The quota, a share of the account's usage limit.
+    pub percent: u8,
+    /// How much of the limit the chat has used since its count began, in the
+    /// same percentage points.
+    pub used: f64,
+    /// The chat has a quota of its own rather than the host's default.
+    pub own: bool,
+}
+
+// `used` is always finite, so equality is total.
+impl Eq for ChatQuota {}
+
+impl ChatQuota {
+    /// The chat's `quota` member, or nothing when it is absent or malformed:
+    /// no quota applies.
+    pub fn from_chat(body: &Value) -> Option<Self> {
+        let quota = body.get("quota")?;
+        Some(Self {
+            percent: quota_percent(quota.get("percent")?)?,
+            used: quota
+                .get("used")
+                .and_then(Value::as_f64)
+                .filter(|used| used.is_finite())
+                .unwrap_or(0.0)
+                .max(0.0),
+            own: quota.get("own").and_then(Value::as_bool).unwrap_or(false),
+        })
+    }
+
+    /// What the card offers to go on with: double the last quota, up to the
+    /// whole limit.
+    pub fn next_percent(percent: u8) -> u8 {
+        percent.saturating_mul(2).min(100)
+    }
+}
+
+/// Whether a `chat` reply or `tree` entry says the chat stopped at its quota.
+fn quota_reached(body: &Value) -> bool {
+    body.get("quota_reached").and_then(Value::as_bool) == Some(true)
+}
+
+/// A quota the user typed: a whole percent from 1 to 100, with or without
+/// its percent sign.
+pub fn parse_quota_percent(text: &str) -> Option<u8> {
+    let text = text.trim();
+    let digits = text.strip_suffix('%').unwrap_or(text).trim_end();
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits
+        .parse::<u8>()
+        .ok()
+        .filter(|percent| (1..=100).contains(percent))
+}
+
+/// How a used share reads: whole points, or one decimal below ten.
+pub fn quota_points(used: f64) -> String {
+    let used = used.max(0.0);
+    if used < 10.0 && used.fract() >= 0.05 {
+        format!("{used:.1}")
+    } else {
+        format!("{:.0}", used.round())
     }
 }
 
@@ -700,6 +812,9 @@ pub struct AppModel {
     /// The connected host keeps pull requests linked to chats and lists them
     /// in the tree. An older one knows only the branch's pull request.
     pub linked_pull_requests_supported: bool,
+    /// The connected host can limit each chat to a share of its account's
+    /// usage limit.
+    pub chat_quotas_supported: bool,
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
@@ -718,6 +833,10 @@ pub struct AppModel {
     pub queue: Vec<String>,
     /// The chat's last turn was cut short and can be continued.
     pub resumable: bool,
+    /// The quota that applies to the open chat, if any.
+    pub quota: Option<ChatQuota>,
+    /// The open chat stopped at its quota and waits for a new one.
+    pub quota_reached: bool,
     pub working: bool,
     pub working_started_at: Option<Instant>,
     /// The running turn's label ("Sonnet · High"), which its stored reply
@@ -780,6 +899,10 @@ struct TreeSnapshot {
     /// The host keeps pull requests linked to chats; older hosts leave this out.
     #[serde(default)]
     linked_pull_requests: bool,
+    /// The host can limit chats to a share of their account's usage; older
+    /// hosts leave this out.
+    #[serde(default)]
+    chat_quotas: bool,
     #[serde(default)]
     terminal_activity_epoch: Option<String>,
     #[serde(default)]
@@ -1123,6 +1246,7 @@ impl AppModel {
         self.folder_groups_supported = snapshot.folder_groups;
         self.pause_folders_supported = snapshot.pause_folders;
         self.linked_pull_requests_supported = snapshot.linked_pull_requests;
+        self.chat_quotas_supported = snapshot.chat_quotas;
         self.refresh_session_activity();
         self.connected = true;
         self.unread_chats
@@ -1137,6 +1261,8 @@ impl AppModel {
             self.messages.clear();
             self.queue.clear();
             self.resumable = false;
+            self.quota = None;
+            self.quota_reached = false;
             self.working = false;
             self.working_started_at = None;
             self.new_worktree = false;
@@ -1179,6 +1305,8 @@ impl AppModel {
         self.messages.clear();
         self.queue.clear();
         self.resumable = false;
+        self.quota = None;
+        self.quota_reached = false;
         self.working = false;
         self.working_started_at = None;
         self.turn_label = None;
@@ -1409,6 +1537,7 @@ impl AppModel {
                 .find(|summary| summary.id == selected_chat)
         {
             summary.working = self.working;
+            summary.quota_reached = quota_reached(body);
             if let Some(count) = body.get("background_tasks").and_then(Value::as_u64) {
                 summary.background_tasks = u32::try_from(count).unwrap_or(u32::MAX);
             }
@@ -1429,6 +1558,8 @@ impl AppModel {
                 .get("resumable")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+        self.quota = ChatQuota::from_chat(body);
+        self.quota_reached = quota_reached(body);
         self.new_worktree = body
             .get("new_worktree")
             .and_then(Value::as_bool)
@@ -2003,6 +2134,7 @@ impl AppModel {
             folder_groups_supported: true,
             pause_folders_supported: false,
             linked_pull_requests_supported: false,
+            chat_quotas_supported: false,
             folders: vec![Folder {
                 id: "workspace-xd".into(),
                 name: "xd".into(),
@@ -2023,6 +2155,7 @@ impl AppModel {
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    quota_reached: false,
                     pull_requests: Vec::new(),
                 },
                 ChatSummary {
@@ -2037,6 +2170,7 @@ impl AppModel {
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    quota_reached: false,
                     pull_requests: Vec::new(),
                 },
             ],
@@ -2066,6 +2200,8 @@ impl AppModel {
             ],
             queue: vec!["Port workspace and chat shortcuts".into()],
             resumable: false,
+            quota: None,
+            quota_reached: false,
             working: true,
             working_started_at: Some(Instant::now()),
             turn_label: None,
@@ -2329,6 +2465,114 @@ mod tests {
         assert_eq!(AutoDeleteRules::step(45, false), Some(30));
         assert_eq!(AutoDeleteRules::step(365, true), None);
         assert_eq!(AutoDeleteRules::step(1, false), None);
+    }
+
+    #[test]
+    fn chat_quota_settings_read_the_host_and_step_through_the_choices() {
+        assert_eq!(
+            ChatQuotaSettings::from_value(&json!({"ok":true,"percent":null})),
+            Some(ChatQuotaSettings { percent: None })
+        );
+        assert_eq!(
+            ChatQuotaSettings::from_value(&json!({"percent":12})),
+            Some(ChatQuotaSettings { percent: Some(12) })
+        );
+        assert_eq!(ChatQuotaSettings::from_value(&json!({"ok":false})), None);
+        assert_eq!(ChatQuotaSettings::from_value(&json!({"percent":0})), None);
+        assert_eq!(ChatQuotaSettings::from_value(&json!({"percent":101})), None);
+        assert_eq!(
+            ChatQuotaSettings::from_value(&json!({"percent":"10"})),
+            None
+        );
+        assert_eq!(ChatQuotaSettings::step(10, true), Some(15));
+        assert_eq!(ChatQuotaSettings::step(10, false), Some(5));
+        assert_eq!(ChatQuotaSettings::step(12, true), Some(15));
+        assert_eq!(ChatQuotaSettings::step(12, false), Some(10));
+        assert_eq!(ChatQuotaSettings::step(100, true), None);
+        assert_eq!(ChatQuotaSettings::step(1, false), None);
+    }
+
+    #[test]
+    fn a_chats_quota_is_read_defensively_and_absent_means_none() {
+        let mut model = AppModel::default();
+        model.apply_tree(&grouped_tree()).unwrap();
+        assert!(!model.chat_quotas_supported, "an older host leaves it out");
+        let mut tree = grouped_tree();
+        tree["chat_quotas"] = json!(true);
+        tree["chats"][0]["quota_reached"] = json!(true);
+        model.apply_tree(&tree).unwrap();
+        assert!(model.chat_quotas_supported);
+        assert!(model.chats[0].quota_reached);
+        assert!(!model.chats[1].quota_reached);
+
+        let chat = model.chats[0].id.clone();
+        model.select_chat(chat.clone());
+        model.apply_chat(&json!({
+            "working": false,
+            "resumable": true,
+            "quota_reached": true,
+            "quota": {"percent": 10, "used": 10.4, "own": true},
+        }));
+        assert!(model.resumable && model.quota_reached);
+        assert_eq!(
+            model.quota,
+            Some(ChatQuota {
+                percent: 10,
+                used: 10.4,
+                own: true
+            })
+        );
+
+        model.apply_chat(&json!({"working": true, "quota": {"percent": 20}}));
+        assert!(!model.quota_reached);
+        assert!(
+            !model.chats[0].quota_reached,
+            "the sidebar follows the chat"
+        );
+        assert_eq!(
+            model.quota,
+            Some(ChatQuota {
+                percent: 20,
+                used: 0.0,
+                own: false
+            })
+        );
+        for quota in [
+            json!(null),
+            json!({"percent": 0, "used": 1}),
+            json!({"percent": 150}),
+            json!({"used": 3}),
+            json!("10"),
+        ] {
+            model.apply_chat(&json!({"working": false, "quota": quota}));
+            assert_eq!(model.quota, None, "{quota}");
+        }
+        model.apply_chat(&json!({"working": false}));
+        assert_eq!(model.quota, None);
+        assert!(!model.quota_reached);
+
+        model.apply_chat(&json!({"working": false, "quota_reached": true}));
+        model.select_chat(chat);
+        assert!(!model.quota_reached, "a new visit waits for the host");
+    }
+
+    #[test]
+    fn a_typed_quota_is_a_whole_percent_from_one_to_a_hundred() {
+        assert_eq!(parse_quota_percent("20"), Some(20));
+        assert_eq!(parse_quota_percent(" 20 % "), Some(20));
+        assert_eq!(parse_quota_percent("100"), Some(100));
+        assert_eq!(parse_quota_percent("1"), Some(1));
+        for text in ["", "%", "0", "101", "300", "-5", "+5", "2.5", "ten", "1 0"] {
+            assert_eq!(parse_quota_percent(text), None, "{text:?}");
+        }
+        assert_eq!(ChatQuota::next_percent(10), 20);
+        assert_eq!(ChatQuota::next_percent(60), 100);
+        assert_eq!(ChatQuota::next_percent(200), 100);
+        assert_eq!(quota_points(10.4), "10");
+        assert_eq!(quota_points(2.46), "2.5");
+        assert_eq!(quota_points(3.0), "3");
+        assert_eq!(quota_points(0.0), "0");
+        assert_eq!(quota_points(-1.0), "0");
     }
 
     #[test]
@@ -3451,6 +3695,7 @@ mod tests {
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                quota_reached: false,
                 pull_requests: Vec::new(),
             }],
             ..Default::default()

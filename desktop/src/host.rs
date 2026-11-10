@@ -21,7 +21,7 @@ use thiserror::Error;
 use crate::channel;
 #[cfg(all(test, unix))]
 use crate::local_socket::UnixStream;
-use crate::model::{Attachment, AutoDeleteRules, AutoSettleRules};
+use crate::model::{Attachment, AutoDeleteRules, AutoSettleRules, ChatQuotaSettings};
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
 const MESSAGE_PAGE_SIZE: usize = 120;
@@ -501,6 +501,13 @@ pub enum RequestKind {
     SetAutoSettleSettings,
     AutoDeleteSettings,
     SetAutoDeleteSettings,
+    ChatQuotaSettings,
+    SetChatQuotaSettings,
+    /// `set-chat-quota`: a new quota for one chat, which goes on if it had
+    /// stopped at its last one.
+    SetChatQuota {
+        chat_id: String,
+    },
     RenameChat {
         chat_id: String,
         title: String,
@@ -1499,6 +1506,32 @@ impl HostHandle {
         self.send(
             RequestKind::SetAutoDeleteSettings,
             json!({"op": "set-auto-delete-settings", "after_days": rules.after_days}),
+        )
+    }
+
+    pub fn chat_quota_settings(&self) -> Result<(), String> {
+        self.send(
+            RequestKind::ChatQuotaSettings,
+            json!({"op": "chat-quota-settings"}),
+        )
+    }
+
+    pub fn set_chat_quota_settings(&self, settings: ChatQuotaSettings) -> Result<(), String> {
+        self.send(
+            RequestKind::SetChatQuotaSettings,
+            json!({"op": "set-chat-quota-settings", "percent": settings.percent}),
+        )
+    }
+
+    /// Gives the chat its own quota, or with `None` no limit at all. The host
+    /// counts its use again from zero, and continues it if it had stopped at
+    /// its quota.
+    pub fn set_chat_quota(&self, chat_id: &str, percent: Option<u8>) -> Result<(), String> {
+        self.send(
+            RequestKind::SetChatQuota {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "set-chat-quota", "chat": chat_id, "percent": percent}),
         )
     }
 
@@ -3887,6 +3920,11 @@ mod tests {
                 json!({"op":"set-auto-settle-settings","after_days":null,"on_merge":false,"keep_pull_requests":true}),
                 json!({"op":"auto-delete-settings"}),
                 json!({"op":"set-auto-delete-settings","after_days":30}),
+                json!({"op":"chat-quota-settings"}),
+                json!({"op":"set-chat-quota-settings","percent":10}),
+                json!({"op":"set-chat-quota-settings","percent":null}),
+                json!({"op":"set-chat-quota","chat":"chat-1","percent":20}),
+                json!({"op":"set-chat-quota","chat":"chat-1","percent":null}),
             ] {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
@@ -4002,6 +4040,33 @@ mod tests {
                 ..
             }
         ));
+        host.chat_quota_settings().unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::ChatQuotaSettings,
+                ..
+            }
+        ));
+        for percent in [Some(10), None] {
+            host.set_chat_quota_settings(ChatQuotaSettings { percent })
+                .unwrap();
+            assert!(matches!(
+                updates.recv_blocking().unwrap(),
+                HostUpdate::Reply {
+                    kind: RequestKind::SetChatQuotaSettings,
+                    ..
+                }
+            ));
+        }
+        for percent in [Some(20), None] {
+            host.set_chat_quota("chat-1", percent).unwrap();
+            assert!(
+                matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+                kind: RequestKind::SetChatQuota { chat_id }, ..
+            } if chat_id == "chat-1")
+            );
+        }
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);
     }

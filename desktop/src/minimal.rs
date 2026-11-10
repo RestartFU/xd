@@ -600,6 +600,7 @@ mod tests {
             settled_at: None,
             auto_settle_disabled: false,
             paused: false,
+            quota_reached: false,
             pull_requests: Vec::new(),
         }
     }
