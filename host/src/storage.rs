@@ -872,7 +872,7 @@ impl StateStore {
         drop(database);
 
         // What Git listed this read, shared by the chats left to it.
-        let mut listed_worktrees = ListedWorktrees::default();
+        let mut listed_worktrees = ListedWorktrees::new(git_settings_readable());
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
         for (
@@ -8844,7 +8844,31 @@ fn normalize_existing_path(path: &Path) -> String {
 fn worktree_branch(workdir: &Path, listed: &mut ListedWorktrees) -> Option<String> {
     // Git looks for the repository from the physical directory, as here.
     let workdir = fs::canonicalize(workdir).ok()?;
-    head_branch(&workdir).unwrap_or_else(|| listed.branch(&workdir))
+    listed
+        .read_heads
+        .then(|| head_branch(&workdir))
+        .flatten()
+        .unwrap_or_else(|| listed.branch(&workdir))
+}
+
+/// Whether Git can read the settings outside any repository, its system and
+/// global config. Git refuses to run at all when it cannot, and then every
+/// branch is left to it. Checked at most every few seconds.
+fn git_settings_readable() -> bool {
+    const FRESH: Duration = Duration::from_secs(10);
+    static CHECKED: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    let mut checked = CHECKED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((at, readable)) = *checked
+        && at.elapsed() < FRESH
+    {
+        return readable;
+    }
+    let readable =
+        run_git(Path::new("/"), &["config", "--list"]).is_ok_and(|(status, _, _)| status.success());
+    *checked = Some((Instant::now(), readable));
+    readable
 }
 
 /// The branch HEAD names for the plain layouts, or `None` to ask Git.
@@ -9203,10 +9227,20 @@ fn config_bool(line: &str, key: &str) -> Option<Option<bool>> {
 
 /// The worktrees `git worktree list` named, by physical root, with what each
 /// has checked out. One listing answers every directory in its repository.
-#[derive(Default)]
-struct ListedWorktrees(Vec<(PathBuf, Option<String>)>);
+struct ListedWorktrees {
+    listed: Vec<(PathBuf, Option<String>)>,
+    /// Whether plain layouts may be read from their HEAD file.
+    read_heads: bool,
+}
 
 impl ListedWorktrees {
+    fn new(read_heads: bool) -> Self {
+        Self {
+            listed: Vec::new(),
+            read_heads,
+        }
+    }
+
     /// What Git says is checked out in the worktree holding the physical
     /// directory `workdir`, asking Git only when no listing covers it yet.
     fn branch(&mut self, workdir: &Path) -> Option<String> {
@@ -9214,22 +9248,24 @@ impl ListedWorktrees {
             return branch;
         }
         match list_git_worktrees(workdir) {
-            Ok(worktrees) => self.0.extend(worktrees.into_iter().filter_map(|worktree| {
-                let path = fs::canonicalize(&worktree.path).ok()?;
-                let branch = worktree
-                    .branch
-                    .or_else(|| worktree.detached.then(|| "Detached HEAD".into()));
-                Some((path, branch))
-            })),
+            Ok(worktrees) => self
+                .listed
+                .extend(worktrees.into_iter().filter_map(|worktree| {
+                    let path = fs::canonicalize(&worktree.path).ok()?;
+                    let branch = worktree
+                        .branch
+                        .or_else(|| worktree.detached.then(|| "Detached HEAD".into()));
+                    Some((path, branch))
+                })),
             // Asking again in this read would fail the same way.
-            Err(_) => self.0.push((workdir.to_owned(), None)),
+            Err(_) => self.listed.push((workdir.to_owned(), None)),
         }
         self.covering(workdir).flatten()
     }
 
     /// The listed worktree that most closely holds `workdir`.
     fn covering(&self, workdir: &Path) -> Option<Option<String>> {
-        self.0
+        self.listed
             .iter()
             .filter(|(root, _)| workdir.starts_with(root))
             .max_by_key(|(root, _)| root.as_os_str().len())
@@ -10692,9 +10728,9 @@ mod tests {
 
         // What Git lists for the worktree holding a directory.
         let listed =
-            |workdir: &Path| ListedWorktrees::default().branch(&fs::canonicalize(workdir).unwrap());
+            |workdir: &Path| ListedWorktrees::new(true).branch(&fs::canonicalize(workdir).unwrap());
         let worktree_branch =
-            |workdir: &Path| super::worktree_branch(workdir, &mut ListedWorktrees::default());
+            |workdir: &Path| super::worktree_branch(workdir, &mut ListedWorktrees::new(true));
         for (workdir, expected) in [
             (repository.clone(), Some("main")),
             (repository.join("nested/deeper"), Some("main")),
@@ -10918,7 +10954,7 @@ mod tests {
                 extended_linked.to_str().unwrap(),
             ],
         );
-        let mut shared = ListedWorktrees::default();
+        let mut shared = ListedWorktrees::new(true);
         assert_eq!(
             super::worktree_branch(&extended, &mut shared).as_deref(),
             Some("main")
@@ -10936,6 +10972,15 @@ mod tests {
         git(&unparsed, &["config", "core.filemode", "garbage"]);
         assert_eq!(worktree_branch(&unparsed), listed(&unparsed));
         assert_eq!(head_branch(&fs::canonicalize(&unparsed).unwrap()), None);
+
+        // When Git cannot read its own settings, every branch is left to it.
+        let mut unreadable_settings = ListedWorktrees::new(false);
+        assert_eq!(
+            super::worktree_branch(&repository, &mut unreadable_settings),
+            listed(&repository)
+        );
+        assert!(!unreadable_settings.listed.is_empty(), "Git was asked");
+        assert!(git_settings_readable());
 
         // A bare setting spelled as Git also reads it.
         let numbered = fixture.root.join("numbered");
@@ -10974,7 +11019,17 @@ mod tests {
         git(&corrupt, &["pack-refs", "--all"]);
         assert!(!corrupt.join(".git/refs/heads/main").exists());
         assert_eq!(worktree_branch(&corrupt).as_deref(), Some("main"));
-        assert!(head_branch(&fs::canonicalize(&corrupt).unwrap()).is_some());
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(head_branch(&fs::canonicalize(&corrupt).unwrap()).is_some());
+        }
+        // Git reads past a blank line in them.
+        let packed = corrupt.join(".git/packed-refs");
+        let refs = fs::read_to_string(&packed).unwrap();
+        let (header, rest) = refs.split_once('\n').unwrap();
+        fs::write(&packed, format!("{header}\n\n{rest}")).unwrap();
+        assert_eq!(worktree_branch(&corrupt), listed(&corrupt));
+        fs::write(&packed, refs).unwrap();
         let packed = corrupt.join(".git/packed-refs");
         let mut refs = fs::read_to_string(&packed).unwrap();
         refs.push_str("not a packed ref\n");
