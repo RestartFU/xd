@@ -1898,7 +1898,7 @@ impl Engine {
         // Asked again under the gate: a new quota may have come meanwhile.
         if !store
             .chat_quota(chat_id)
-            .is_ok_and(|quota| !quota.reached && quota.spent())
+            .is_ok_and(|quota| quota.reached || quota.spent())
         {
             return;
         }

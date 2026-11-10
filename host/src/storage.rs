@@ -3247,25 +3247,26 @@ impl StateStore {
 
     /// Marks a chat stopped at its quota, which holds it like a paused chat.
     /// A chat at work, or whose agent still runs something between turns
-    /// (`background`), can resume the turn the quota cuts short. False when
-    /// it already was marked.
+    /// (`background`), can resume the turn the quota cuts short. True when
+    /// the chat is at its quota, marked now or before, so whatever still runs
+    /// in it should stop; false when its quota allows more.
     pub fn stop_for_quota(&self, chat_id: &str, background: bool) -> Result<bool, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         // Asked as it is marked: a quota raised or lifted since the meter
         // decided, by a new default or the chat's own, lets the chat go on.
         let quota = read_chat_quota(&transaction, chat_id)?;
-        if quota.reached || !quota.spent() {
+        if !quota.reached && !quota.spent() {
             return Ok(false);
         }
-        let changed = transaction.execute(
+        transaction.execute(
             "UPDATE chats SET quota_reached = 1, paused = 1, \
              turn_resumable = CASE WHEN host_working = 1 OR ? THEN 1 ELSE turn_resumable END \
-             WHERE id = ? AND quota_reached = 0",
+             WHERE id = ?",
             params![background, chat_id],
         )?;
         transaction.commit()?;
-        Ok(changed == 1)
+        Ok(true)
     }
 
     /// What a chat's agent needs to start another: where it works and on what.
@@ -15931,7 +15932,8 @@ mod tests {
                 .spent()
         );
         assert!(store.stop_for_quota("chat", false).unwrap());
-        assert!(!store.stop_for_quota("chat", false).unwrap());
+        // Still at its quota, so anything still running there is stopped too.
+        assert!(store.stop_for_quota("chat", false).unwrap());
         // Nothing more counts once it stopped.
         assert_eq!(store.add_quota_use("chat", 1.0, i64::MAX).unwrap(), None);
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();

@@ -502,12 +502,13 @@ impl Pass {
                 .is_ok_and(|quota| quota.percent.is_some() && !quota.reached)
         };
         // A chat already past its quota, such as after the user lowered it,
-        // stops without waiting for a reading.
+        // stops without waiting for a reading, and so does one marked
+        // stopped whose background work still runs.
         for (chat_id, _, _) in &working {
             if self
                 .store
                 .chat_quota(chat_id)
-                .is_ok_and(|quota| !quota.reached && quota.spent())
+                .is_ok_and(|quota| quota.reached || quota.spent())
             {
                 (self.stopper)(chat_id);
             }
