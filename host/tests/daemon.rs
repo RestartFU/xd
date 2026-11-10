@@ -718,13 +718,18 @@ fn a_chat_stops_at_its_quota_until_the_user_gives_it_a_new_one() {
     });
     let reply = client.call(json!({"op":"send", "chat":chat, "text":"later"}));
     assert_eq!(reply["queued"], true, "{reply}");
+    let reply = client.call(json!({"op":"send", "chat":chat, "text":"steered", "steer":true}));
+    assert_eq!(reply["queued"], true, "{reply}");
     let refused = client.call(json!({"op":"resume-turn", "chat":chat}));
+    assert_eq!(refused["ok"], false, "{refused}");
+    let refused =
+        client.call(json!({"op":"steer-queue", "chat":chat, "index":1, "text":"steered"}));
     assert_eq!(refused["ok"], false, "{refused}");
     let reply = client.call(json!({"op":"resume-all"}));
     assert_eq!(reply["resumed"], json!([]), "{reply}");
     assert_eq!(
         client.call(json!({"op":"chat", "chat":chat}))["queue"],
-        json!(["later"])
+        json!(["later", "steered"])
     );
 
     // A new quota of its own lets it go on, and the queue runs.

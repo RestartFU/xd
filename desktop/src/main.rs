@@ -2386,6 +2386,12 @@ struct XdDesktop {
     auto_delete: Option<AutoDeleteRules>,
     /// The host's default chat quota, once a host with `chat_quotas` says it.
     chat_quota: Option<ChatQuotaSettings>,
+    /// How many `chat-quota-settings` broadcasts have arrived, and how many
+    /// had when the latest request about the default was sent. A reply is
+    /// older than any broadcast that came after its request, since the host
+    /// broadcasts each change before it answers.
+    chat_quota_broadcasts: u64,
+    chat_quota_asked_at: u64,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
@@ -3089,6 +3095,8 @@ impl XdDesktop {
             auto_settle: None,
             auto_delete: None,
             chat_quota: None,
+            chat_quota_broadcasts: 0,
+            chat_quota_asked_at: 0,
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
             sidebar_move: None,
@@ -5738,7 +5746,9 @@ impl XdDesktop {
                 self.auto_delete = AutoDeleteRules::from_value(&value);
             }
             RequestKind::ChatQuotaSettings | RequestKind::SetChatQuotaSettings => {
-                self.chat_quota = ChatQuotaSettings::from_value(&value);
+                if self.chat_quota_broadcasts == self.chat_quota_asked_at {
+                    self.chat_quota = ChatQuotaSettings::from_value(&value);
+                }
             }
             RequestKind::SetChatQuota { chat_id } => self.chat_quota_set(&chat_id),
             RequestKind::RenameFolder { .. } => self.request_tree(),
@@ -6445,6 +6455,7 @@ impl XdDesktop {
                 self.auto_delete = AutoDeleteRules::from_value(&body);
             }
             "chat-quota-settings" => {
+                self.chat_quota_broadcasts += 1;
                 self.chat_quota = ChatQuotaSettings::from_value(&body);
             }
             "owner-icon" => {
@@ -7494,7 +7505,7 @@ impl XdDesktop {
                         colors,
                     ))
                     .child(truncating_label(title))
-                    .when(self.model.is_waiting(&chat.id), |tab| {
+                    .when(self.model.needs_user(&chat.id), |tab| {
                         tab.child(waiting_ring(colors))
                     })
                     .when(can_close, |tab| {
@@ -12847,7 +12858,7 @@ impl XdDesktop {
             .map(|chat| {
                 SessionSignal::of(
                     chat.working || chat.terminal_working,
-                    self.model.is_waiting(&chat.id) || !self.model.interactions.is_empty(),
+                    self.model.needs_user(&chat.id) || !self.model.interactions.is_empty(),
                     false,
                     chat.waiting_on(),
                 )
@@ -13383,8 +13394,8 @@ impl XdDesktop {
         SessionSignal::of(
             session.working,
             members
-                .map(|ids| ids.iter().any(|id| self.model.is_waiting(id)))
-                .unwrap_or_else(|| self.model.is_waiting(&session.id)),
+                .map(|ids| ids.iter().any(|id| self.model.needs_user(id)))
+                .unwrap_or_else(|| self.model.needs_user(&session.id)),
             members
                 .map(|ids| ids.iter().any(|id| self.model.unread_chats.contains(id)))
                 .unwrap_or_else(|| self.model.unread_chats.contains(&session.id)),
@@ -24209,6 +24220,27 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(desktop.chat_quota_rows(colors, cx).len(), 3);
 
             desktop.change_chat_quota_settings(ChatQuotaSettings { percent: None }, cx);
+            // Another client's change broadcast after this request is newer
+            // than the reply to it, which must not undo it.
+            desktop.handle_event(
+                "chat-quota-settings",
+                serde_json::json!({"percent": 30}),
+                None,
+                cx,
+            );
+            desktop.handle_reply(
+                RequestKind::SetChatQuotaSettings,
+                serde_json::json!({"ok": true, "percent": null})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop.chat_quota,
+                Some(ChatQuotaSettings { percent: Some(30) })
+            );
         });
         // The first request the desktop sent is the tree's ask, not one before it.
         let mut first = String::new();

@@ -2233,7 +2233,10 @@ impl Engine {
                     ))
                 });
                 self.events.publish(event);
+                // A chat stopped at its quota keeps the message queued.
+                let held = store.chat_quota(chat_id).is_ok_and(|quota| quota.reached);
                 if request.get("steer").and_then(Value::as_bool) == Some(true)
+                    && !held
                     && let Some((index, text)) = newest
                 {
                     let steer = self.steer_queued(
@@ -2520,6 +2523,14 @@ impl Engine {
             },
             None => None,
         };
+        // A chat stopped at its quota keeps its queue as it is until the
+        // user gives it a new quota.
+        if store
+            .chat_quota(request["chat"].as_str().unwrap_or_default())
+            .is_ok_and(|quota| quota.reached)
+        {
+            return error_reply(storage::QUOTA_REACHED_MESSAGE);
+        }
         match store.take_queued(request) {
             Ok((mut reply, event)) => {
                 self.events.publish(event);

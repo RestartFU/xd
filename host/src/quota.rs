@@ -32,6 +32,12 @@ const READ_INTERVAL: Duration = Duration::from_millis(50);
 const MIN_READ_GAP: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const MIN_READ_GAP: Duration = Duration::ZERO;
+/// After a reading fails, the account is not tried again for this long, so a
+/// probe that keeps failing is not started for every turn.
+#[cfg(not(test))]
+const FAILED_READ_GAP: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const FAILED_READ_GAP: Duration = Duration::from_millis(10);
 /// How long a reading taken with nothing at work on the account stays the
 /// baseline for the next turn there. Use outside xd in that time is counted
 /// against the next turn; past it, the next turn reads afresh.
@@ -68,6 +74,9 @@ struct AccountLedger {
     /// The reading the next rise is measured from.
     last: Option<Reading>,
     read_at: Option<Instant>,
+    /// When a reading was last begun, and whether it failed.
+    tried_at: Option<Instant>,
+    failed: bool,
     /// When `last` was asked for, by the clock, so a chat whose count started
     /// again since is not charged with use from before.
     asked_ms: i64,
@@ -128,6 +137,7 @@ impl Ledger {
         let since_ms = std::mem::replace(&mut entry.asked_ms, asked_ms);
         entry.last = Some(reading);
         entry.read_at = Some(now);
+        entry.failed = false;
         entry.idle = working.is_empty();
         entry.sharers = working.iter().cloned().collect();
         if rise <= 0.0 || sharers.is_empty() {
@@ -289,11 +299,19 @@ impl Pass {
                         entry.sharers.iter().cloned().collect::<Vec<_>>(),
                         entry.baseline(now).is_some(),
                         entry.read_at,
+                        entry.tried_at.map(|at| {
+                            let gap = if entry.failed {
+                                FAILED_READ_GAP
+                            } else {
+                                MIN_READ_GAP
+                            };
+                            gap.saturating_sub(now.saturating_duration_since(at))
+                        }),
                     )
                 })
                 .collect::<Vec<_>>()
         };
-        for (provider, account, sharers, has_baseline, read_at) in due {
+        for (provider, account, sharers, has_baseline, read_at, held_for) in due {
             let here = working
                 .iter()
                 .filter(|(_, p, a)| *p == provider && *a == account)
@@ -331,14 +349,26 @@ impl Pass {
             } else {
                 since.map_or(Duration::ZERO, |since| READ_INTERVAL.saturating_sub(since))
             }
-            .max(since.map_or(Duration::ZERO, |since| MIN_READ_GAP.saturating_sub(since)));
+            .max(held_for.unwrap_or_default());
             if !due_in.is_zero() {
                 next = next.min(due_in);
                 continue;
             }
             // Read without the ledger, which turns starting and ending wait on.
             let asked_ms = crate::accounts::now_ms();
+            let key = (provider.clone(), account.clone());
+            if let Ok(mut ledger) = self.ledger.lock()
+                && let Some(entry) = ledger.accounts.get_mut(&key)
+            {
+                entry.tried_at = Some(Instant::now());
+            }
             let Some(reading) = (self.reader)(&provider, &account) else {
+                if let Ok(mut ledger) = self.ledger.lock()
+                    && let Some(entry) = ledger.accounts.get_mut(&key)
+                {
+                    entry.failed = true;
+                }
+                next = next.min(FAILED_READ_GAP);
                 continue;
             };
             // Who works on the account now, after the reading.

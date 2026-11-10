@@ -14973,7 +14973,7 @@ mod tests {
         let tree = store.tree().unwrap();
         assert_eq!(tree["chats"][0]["quota_reached"], true);
         assert!(tree["chats"][0].get("paused").is_none());
-        // Neither the host, `resume-all`, a steer, nor resuming picks it up,
+        // Neither the host, `resume-all`, nor resuming picks it up,
         // and what the user sends waits in its queue.
         assert!(store.paused_chats().unwrap().is_empty());
         assert!(!store.unpause_chat("chat").unwrap());

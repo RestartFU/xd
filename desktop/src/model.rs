@@ -1336,6 +1336,16 @@ impl AppModel {
     }
 
     /// Whether a chat has an approval or question waiting on the user.
+    /// Whether the chat waits on the user: for an answer, an approval, or a
+    /// new quota once it used its own.
+    pub fn needs_user(&self, chat_id: &str) -> bool {
+        self.is_waiting(chat_id)
+            || self
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id && chat.quota_reached)
+    }
+
     pub fn is_waiting(&self, chat_id: &str) -> bool {
         self.question_chats.contains(chat_id)
             || self
@@ -2504,6 +2514,9 @@ mod tests {
         assert!(model.chat_quotas_supported);
         assert!(model.chats[0].quota_reached);
         assert!(!model.chats[1].quota_reached);
+        // It waits on the user, like a chat with a question.
+        assert!(model.needs_user(&model.chats[0].id.clone()));
+        assert!(!model.needs_user(&model.chats[1].id.clone()));
 
         let chat = model.chats[0].id.clone();
         model.select_chat(chat.clone());

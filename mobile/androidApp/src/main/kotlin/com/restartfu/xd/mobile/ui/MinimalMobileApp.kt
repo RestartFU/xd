@@ -659,7 +659,8 @@ private fun MinimalProjectsHome(
     val unread by model.client.unreadChats.collectAsStateWithLifecycle()
     val signalOf = { session: MinimalSession ->
         when {
-            session.chatIds.any { it in waiting } -> SessionSignal.WAITING
+            // A chat stopped at its quota waits on the user's answer too.
+            session.quotaReached || session.chatIds.any { it in waiting } -> SessionSignal.WAITING
             session.working -> SessionSignal.WORKING
             session.backgroundTasks > 0 -> SessionSignal.BACKGROUND
             session.paused -> SessionSignal.PAUSED
