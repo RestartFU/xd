@@ -238,8 +238,9 @@ class ProjectsScreenshotTest {
             ShadowLooper.idleMainLooper()
             settle()
         }
-        // The scripted host makes them in either order; only the second may open.
-        check(model.createdDirectSession.value?.title in listOf(null, "Tidy the header")) {
+        // The scripted tree never lists the made chats, so the one to open
+        // stays unconsumed: it is the second, whichever was made first.
+        check(model.createdDirectSession.value?.title == "Tidy the header") {
             "opened ${model.createdDirectSession.value}"
         }
     }

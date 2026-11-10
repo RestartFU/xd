@@ -1419,6 +1419,7 @@ impl XdDesktop {
         if self.creating_chat_folder.is_some() {
             self.cancel_chat_create(cx);
         }
+        self.pending_minimal_session = None;
         let Some(index) = self
             .starting_chats
             .iter()
@@ -2836,6 +2837,14 @@ mod start_tests {
                     desktop.pending_minimal_session,
                     Some(("atlas".into(), "footer".into()))
                 );
+                // Another new chat before the tree arrives: the made one does
+                // not open over it.
+                desktop.begin_chat_create("atlas".into(), window, cx);
+                assert!(desktop.pending_minimal_session.is_none());
+                assert_eq!(desktop.first_chat_prompts["footer"].text, "Fix the footer");
+                desktop.reconcile_minimal_navigation(cx);
+                assert_eq!(desktop.creating_chat_folder.as_deref(), Some("atlas"));
+                assert_ne!(desktop.model.selected_chat.as_deref(), Some("footer"));
             });
         });
     }

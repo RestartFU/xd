@@ -7615,6 +7615,9 @@ impl XdDesktop {
         if self.creating_chat_folder.is_some() {
             self.cancel_chat_create(cx);
         }
+        // A chat made a moment ago no longer opens by itself: this one was
+        // picked instead.
+        self.pending_minimal_session = None;
         self.new_chat_generation += 1;
         self.new_chat_reading = 0;
         self.new_chat_prompt.clear();
