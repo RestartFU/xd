@@ -8840,18 +8840,7 @@ fn normalize_existing_path(path: &Path) -> String {
 fn worktree_branch(workdir: &Path) -> Option<String> {
     // Git looks for the repository from the physical directory, as here.
     let workdir = fs::canonicalize(workdir).ok()?;
-    let (root, git_dir) = workdir.ancestors().find_map(|directory| {
-        let dot_git = directory.join(".git");
-        let metadata = fs::metadata(&dot_git).ok()?;
-        if metadata.is_dir() {
-            return Some((directory, dot_git));
-        }
-        // A linked worktree's `.git` file names its own directory in the
-        // repository, relative to the worktree when it is not absolute.
-        let link = fs::read_to_string(&dot_git).ok()?;
-        let target = link.lines().next()?.strip_prefix("gitdir:")?.trim();
-        (!target.is_empty()).then(|| (directory, directory.join(target)))
-    })?;
+    let (root, git_dir) = git_directory(&workdir)?;
     // A linked worktree's directory in the repository names the worktree it
     // belongs to. Git lists the worktree there, and as prunable once nothing
     // is, so a worktree moved by hand is not where Git lists it: it has no
@@ -8881,15 +8870,51 @@ fn worktree_branch(workdir: &Path) -> Option<String> {
         Some(reference) if reference.trim() == "refs/heads/.invalid" => {
             listed_worktree_branch(&workdir)
         }
-        Some(reference) => reference
-            .trim()
-            .strip_prefix("refs/heads/")
-            .filter(|branch| !branch.is_empty())
-            .map(str::to_owned),
+        Some(reference) => {
+            let branch = reference
+                .trim()
+                .strip_prefix("refs/heads/")
+                .filter(|branch| !branch.is_empty())?;
+            // A branch that is itself a symbolic ref names another, which
+            // Git follows; a packed ref never is one.
+            let common = match fs::read_to_string(git_dir.join("commondir")) {
+                Ok(common) => git_dir.join(common.trim()),
+                Err(_) => git_dir.clone(),
+            };
+            let loose = common.join("refs/heads").join(branch);
+            let symbolic = fs::symlink_metadata(&loose)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                || fs::read(&loose).is_ok_and(|reference| reference.starts_with(b"ref:"));
+            if symbolic {
+                return listed_worktree_branch(&workdir);
+            }
+            Some(branch.to_owned())
+        }
         None => (matches!(head.len(), 40 | 64)
             && head.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| "Detached HEAD".into()),
     }
+}
+
+/// The worktree root and Git directory for the physical directory `workdir`,
+/// found as Git finds them: the nearest `.git` above it. A `.git` that is
+/// there but is not a repository ends the search, as it does for Git.
+fn git_directory(workdir: &Path) -> Option<(&Path, PathBuf)> {
+    for directory in workdir.ancestors() {
+        let dot_git = directory.join(".git");
+        if fs::symlink_metadata(&dot_git).is_err() {
+            continue;
+        }
+        if fs::metadata(&dot_git).ok()?.is_dir() {
+            return Some((directory, dot_git));
+        }
+        // A linked worktree's `.git` file names its own directory in the
+        // repository, relative to the worktree when it is not absolute.
+        let link = fs::read_to_string(&dot_git).ok()?;
+        let target = link.lines().next()?.strip_prefix("gitdir:")?.trim();
+        return (!target.is_empty()).then(|| (directory, directory.join(target)));
+    }
+    None
 }
 
 /// What `git worktree list` says is checked out in the worktree holding the
@@ -10389,6 +10414,23 @@ mod tests {
                 );
             }
         }
+
+        // A `.git` file that names no repository stops the search there.
+        let broken = repository.join("nested/broken");
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join(".git"), "not a gitfile\n").unwrap();
+        assert_eq!(listed(&broken), None);
+        assert_eq!(worktree_branch(&broken), None);
+
+        // A branch that is itself a symbolic ref names the one Git lists.
+        git(
+            &repository,
+            &["symbolic-ref", "refs/heads/alias", "refs/heads/main"],
+        );
+        git(&repository, &["symbolic-ref", "HEAD", "refs/heads/alias"]);
+        assert_eq!(listed(&repository).as_deref(), Some("main"));
+        assert_eq!(worktree_branch(&repository).as_deref(), Some("main"));
+        git(&repository, &["symbolic-ref", "HEAD", "refs/heads/main"]);
 
         // HEAD kept as a symbolic link to the branch, which Git still reads.
         let head = repository.join(".git/HEAD");
