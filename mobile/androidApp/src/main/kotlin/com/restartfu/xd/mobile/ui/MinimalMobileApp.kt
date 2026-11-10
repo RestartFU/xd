@@ -1397,7 +1397,8 @@ private fun SessionSignal.color(): Color {
     val signals = LocalXdSignals.current
     return when (this) {
         SessionSignal.IDLE, SessionSignal.PAUSED -> signals.faint
-        SessionSignal.WORKING, SessionSignal.BACKGROUND -> signals.working
+        SessionSignal.WORKING -> signals.working
+        SessionSignal.BACKGROUND -> MaterialTheme.colorScheme.onSurfaceVariant
         SessionSignal.WAITING -> signals.waiting
         SessionSignal.DONE -> signals.done
     }
