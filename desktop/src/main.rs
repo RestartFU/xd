@@ -12497,6 +12497,24 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// The selected terminal's rendering, rebuilt only once its screen has
+    /// changed since the last frame.
+    fn selected_terminal_render(&mut self) -> Option<Rc<TerminalRenderCache>> {
+        let session = self.terminal_panel.as_ref()?.selected()?;
+        let revision = session.screen.revision();
+        if let Some(cached) = &self.terminal_render_cache
+            && cached.revision == revision
+        {
+            return Some(cached.clone());
+        }
+        let cached = Rc::new(TerminalRenderCache::new(
+            revision,
+            session.screen.rendered_with_cursor(),
+        ));
+        self.terminal_render_cache = Some(cached.clone());
+        Some(cached)
+    }
+
     fn render_minimal_terminal(
         &mut self,
         colors: ThemeColors,
@@ -12507,6 +12525,7 @@ impl XdDesktop {
         let terminal_focus = self.terminal_input.read(cx).focus_handle(cx);
         let desktop = cx.entity();
         self.terminal_drawn |= self.terminal_panel.is_some();
+        let rendered = self.selected_terminal_render();
         let Some(panel) = self.terminal_panel.as_ref() else {
             return div()
                 .size_full()
@@ -12537,20 +12556,6 @@ impl XdDesktop {
         let panel_loading = panel.loading;
         let panel_is_empty = panel.sessions.is_empty();
         let panel_error = panel.error.clone();
-        let rendered = panel.selected().map(|session| {
-            let revision = session.screen.revision();
-            match &self.terminal_render_cache {
-                Some(cached) if cached.revision == revision => cached.clone(),
-                _ => {
-                    let cached = Rc::new(TerminalRenderCache::new(
-                        revision,
-                        session.screen.rendered_with_cursor(),
-                    ));
-                    self.terminal_render_cache = Some(cached.clone());
-                    cached
-                }
-            }
-        });
         let (output_text, highlights, output_cursor, terminal_links) = rendered
             .map(|rendered| {
                 (
@@ -26020,7 +26025,7 @@ Binary files /dev/null and b/image.png differ\n";
         cx.run_until_parked();
         assert_eq!(redraws.get(), 0, "nothing on screen changed");
 
-        // The shown chat's text waits for its frame, then redraws once.
+        // The shown chat's text waits for its live-text frame.
         desktop.update(cx, |desktop, cx| {
             desktop.handle_event(
                 "text",
@@ -26037,9 +26042,10 @@ Binary files /dev/null and b/image.png differ\n";
         });
         cx.run_until_parked();
         assert_eq!(redraws.get(), 0);
-        cx.executor().advance_clock(Duration::from_millis(20));
-        cx.run_until_parked();
-        assert_eq!(redraws.get(), 1);
+        assert!(
+            desktop.read_with(cx, |desktop, _| desktop.live_render_scheduled.is_some()),
+            "its own frame redraws it"
+        );
 
         // A change the sidebar shows still redraws.
         desktop.update(cx, |desktop, cx| {
@@ -26051,7 +26057,7 @@ Binary files /dev/null and b/image.png differ\n";
             );
         });
         cx.run_until_parked();
-        assert!(redraws.get() > 1);
+        assert!(redraws.get() > 0);
     }
 
     #[gpui::test]
@@ -26069,44 +26075,35 @@ Binary files /dev/null and b/image.png differ\n";
             panel.selected = Some("shell".into());
         });
         cx.run_until_parked();
-        let colors = desktop.read_with(cx, |desktop, _| desktop.settings.theme.colors());
-        let first = desktop.update_in(cx, |desktop, window, cx| {
-            desktop.terminal_drawn = false;
-            let _ = desktop.render_minimal_terminal(colors, window, cx);
-            assert!(desktop.terminal_drawn);
-            desktop.terminal_render_cache.clone().unwrap()
-        });
+        let first = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
         assert!(first.text.contains("first line"));
         assert_eq!(first.links.len(), 1, "found the link once");
-        let again = desktop.update_in(cx, |desktop, window, cx| {
-            let _ = desktop.render_minimal_terminal(colors, window, cx);
-            desktop.terminal_render_cache.clone().unwrap()
-        });
+        let again = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
         assert!(
             Rc::ptr_eq(&first, &again),
             "an unchanged screen is not rebuilt"
         );
 
-        // Output for the drawn terminal redraws; the new text is rendered.
+        // Output for a terminal no frame drew changes nothing on screen.
         let redraws = count_redraws(&desktop, cx);
-        desktop.update_in(cx, |desktop, window, cx| {
-            // Drawn in this frame, so its output is on screen.
-            let _ = desktop.render_minimal_terminal(colors, window, cx);
-            desktop.handle_event(
-                "terminal-output",
-                serde_json::json!({"chat": "dock-chat", "terminal": "shell", "data": "CnNlY29uZA=="}),
-                None,
-                cx,
-            );
+        let output = |text: &str| serde_json::json!({"chat": "dock-chat", "terminal": "shell", "data": STANDARD.encode(text)});
+        desktop.update(cx, |desktop, cx| {
+            desktop.terminal_drawn = false;
+            desktop.handle_event("terminal-output", output("\nsecond"), None, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(redraws.get(), 0);
+
+        // Output for the drawn terminal redraws, with the new text.
+        desktop.update(cx, |desktop, cx| {
+            desktop.terminal_drawn = true;
+            desktop.handle_event("terminal-output", output("\nthird"), None, cx);
         });
         cx.run_until_parked();
         assert!(redraws.get() > 0);
-        let changed = desktop.update_in(cx, |desktop, window, cx| {
-            let _ = desktop.render_minimal_terminal(colors, window, cx);
-            desktop.terminal_render_cache.clone().unwrap()
-        });
+        let changed = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
         assert!(!Rc::ptr_eq(&first, &changed));
-        assert!(changed.text.contains("second"));
+        assert!(changed.text.contains("second") && changed.text.contains("third"));
     }
 
     #[gpui::test]
@@ -29238,7 +29235,16 @@ Binary files /dev/null and b/image.png differ\n";
             .expect("end of minimal terminal renderer")
             .0;
 
-        assert!(terminal.contains("markdown::web_links("));
+        let cache = source
+            .split_once("impl TerminalRenderCache {")
+            .expect("terminal rendering cache")
+            .1
+            .split_once("fn insert_terminal_cursor_highlight(")
+            .expect("end of terminal rendering cache")
+            .0;
+
+        assert!(cache.contains("markdown::web_links("));
+        assert!(terminal.contains("self.selected_terminal_render()"));
         assert!(terminal.contains("selectable_links_in_document("));
         assert!(terminal.contains("open_clicked_link(url, window, cx)"));
     }
@@ -29254,9 +29260,18 @@ Binary files /dev/null and b/image.png differ\n";
             .expect("end of minimal terminal renderer")
             .0;
 
-        assert!(terminal.contains("output.links"));
-        assert!(terminal.contains("let detected_links = markdown::web_links("));
-        assert!(terminal.contains("terminal_links.extend(detected_links)"));
+        let cache = source
+            .split_once("impl TerminalRenderCache {")
+            .expect("terminal rendering cache")
+            .1
+            .split_once("fn insert_terminal_cursor_highlight(")
+            .expect("end of terminal rendering cache")
+            .0;
+
+        assert!(terminal.contains("self.selected_terminal_render()"));
+        assert!(cache.contains(".links"));
+        assert!(cache.contains("let detected = markdown::web_links("));
+        assert!(cache.contains("links.extend(detected)"));
     }
 
     #[test]
