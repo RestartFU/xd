@@ -62,6 +62,11 @@ const INTERRUPTED_TURN: &str = "The host stopped before this turn finished.";
 pub(crate) const CONTINUE_PROMPT: &str = "Continue where you left off.";
 pub(crate) const RESUME_PROMPT: &str =
     "Continue where you left off. xd restarted before your last turn finished.";
+/// For a chat whose turn had ended while its agent waited on background agents
+/// or commands, which a restart stops. They are gone, not still running.
+pub(crate) const WAITING_RESUME_PROMPT: &str = "Continue where you left off. xd restarted and \
+     stopped the background agents and commands you were waiting on, so start again any \
+     you still need.";
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
@@ -324,6 +329,18 @@ pub(crate) enum Continuation {
 pub struct ChatToResume {
     pub chat_id: String,
     pub last_message: i64,
+    /// The turn had finished; only background work it was waiting on stopped.
+    pub waiting: bool,
+}
+
+impl ChatToResume {
+    pub fn prompt(&self) -> &'static str {
+        if self.waiting {
+            WAITING_RESUME_PROMPT
+        } else {
+            RESUME_PROMPT
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2894,7 +2911,13 @@ impl StateStore {
             mark_chat_to_resume(&transaction, chat_id)?;
             end_interrupted_turn(&transaction, chat_id)?;
         }
-        stop_orphaned_agents(&transaction)?;
+        // An idle chat whose agents were still running had a kept process
+        // waiting on them in the background, which died with the host.
+        for chat_id in stop_orphaned_agents(&transaction)? {
+            if !interrupted.contains(&chat_id) {
+                mark_waiting_chat_to_resume(&transaction, &chat_id)?;
+            }
+        }
         transaction.commit()?;
         Ok(interrupted)
     }
@@ -2905,6 +2928,14 @@ impl StateStore {
     pub fn mark_resume_after_restart(&self, chat_id: &str) -> Result<(), StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         mark_chat_to_resume(&database, chat_id)?;
+        Ok(())
+    }
+
+    /// Notes an idle chat whose agent is still running background agents or
+    /// commands that the host is about to stop for shutting down.
+    pub fn mark_waiting_resume_after_restart(&self, chat_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        mark_waiting_chat_to_resume(&database, chat_id)?;
         Ok(())
     }
 
@@ -2989,31 +3020,35 @@ impl StateStore {
 
     /// The chats a restart cut off, once each. They stay in the database until
     /// the desktop decides, so another restart first does not lose them. A chat
-    /// cut off while answering the resume prompt is left alone, so a turn that
-    /// keeps taking the host down cannot restart itself forever.
+    /// cut off while answering either resume prompt is left alone, and so is one
+    /// whose background work stopped again after the prompt about that, so work
+    /// that keeps taking the host down cannot restart itself forever.
     pub fn take_chats_to_resume(&self) -> Result<Vec<ChatToResume>, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let resumable = {
             let mut statement = transaction.prepare(
-                "SELECT chats.id, chats.resume_after_restart FROM chats \
+                "SELECT chats.id, chats.resume_after_restart, chats.resume_waiting FROM chats \
                  JOIN messages ON messages.id = chats.resume_after_restart \
                    AND messages.chat_id = chats.id \
                  WHERE chats.resume_after_restart != 0 AND chats.paused = 0 \
-                   AND messages.content != ? \
+                   AND messages.content != ?2 \
+                   AND (chats.resume_waiting != 0 OR messages.content != ?1) \
                  ORDER BY chats.id",
             )?;
             statement
-                .query_map([RESUME_PROMPT], |row| {
+                .query_map([RESUME_PROMPT, WAITING_RESUME_PROMPT], |row| {
                     Ok(ChatToResume {
                         chat_id: row.get(0)?,
                         last_message: row.get(1)?,
+                        waiting: row.get(2)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?
         };
         transaction.execute(
-            "UPDATE chats SET resume_after_restart = 0 WHERE resume_after_restart != 0",
+            "UPDATE chats SET resume_after_restart = 0, resume_waiting = 0 \
+             WHERE resume_after_restart != 0 OR resume_waiting != 0",
             [],
         )?;
         transaction.commit()?;
@@ -5989,7 +6024,8 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            plan INTEGER NOT NULL DEFAULT 0, fast INTEGER NOT NULL DEFAULT 0, \
            claude_mode INTEGER NOT NULL DEFAULT 0, queued TEXT, new_worktree INTEGER NOT NULL DEFAULT 0, \
            terminal_open INTEGER NOT NULL DEFAULT 0, diff_open INTEGER NOT NULL DEFAULT 0, \
-           resume_after_restart INTEGER NOT NULL DEFAULT 0, turn_resumable INTEGER NOT NULL DEFAULT 0, \
+           resume_after_restart INTEGER NOT NULL DEFAULT 0, resume_waiting INTEGER NOT NULL DEFAULT 0, \
+           turn_resumable INTEGER NOT NULL DEFAULT 0, \
            original_workdir TEXT, \
            session_mode TEXT NOT NULL DEFAULT 'chat', \
            host_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
@@ -6393,6 +6429,12 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
     if !columns.contains("resume_after_restart") {
         database.execute(
             "ALTER TABLE chats ADD COLUMN resume_after_restart INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.contains("resume_waiting") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN resume_waiting INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
@@ -9212,7 +9254,24 @@ fn effort_label(effort: &str) -> &str {
 fn mark_chat_to_resume(database: &Connection, chat_id: &str) -> Result<(), rusqlite::Error> {
     database.execute(
         "UPDATE chats SET resume_after_restart = (SELECT COALESCE(MAX(id), 0) FROM messages \
-         WHERE chat_id = chats.id AND role = 'user') WHERE id = ?",
+         WHERE chat_id = chats.id AND role = 'user'), resume_waiting = 0 WHERE id = ?",
+        [chat_id],
+    )?;
+    Ok(())
+}
+
+/// As [`mark_chat_to_resume`], for an idle chat whose background work stopped.
+/// Its turn ended, so it offers the play button as a pause would. A turn
+/// already marked as cut off keeps that mark, which says more.
+fn mark_waiting_chat_to_resume(
+    database: &Connection,
+    chat_id: &str,
+) -> Result<(), rusqlite::Error> {
+    database.execute(
+        "UPDATE chats SET resume_after_restart = (SELECT COALESCE(MAX(id), 0) FROM messages \
+         WHERE chat_id = chats.id AND role = 'user'), resume_waiting = 1, turn_resumable = 1 \
+         WHERE id = ? AND host_working = 0 \
+           AND (resume_after_restart = 0 OR resume_waiting != 0)",
         [chat_id],
     )?;
     Ok(())
@@ -9260,21 +9319,30 @@ fn end_interrupted_turn(
     Ok(())
 }
 
-/// Marks every stored agent record that says it is running as stopped. No run
-/// time is added: when the agent really ended is unknown.
-fn stop_orphaned_agents(transaction: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
+/// Marks every stored agent record that says it is running as stopped, and
+/// names the chats they belonged to. No run time is added: when the agent really
+/// ended is unknown.
+fn stop_orphaned_agents(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<Vec<String>, rusqlite::Error> {
     let running = {
         let mut statement = transaction.prepare(
-            "SELECT id, content FROM messages WHERE role = 'tool' \
-             AND content LIKE 'subagent_run%' AND content LIKE '%\"status\":\"running\"%'",
+            "SELECT id, chat_id, content FROM messages WHERE role = 'tool' \
+             AND content LIKE 'subagent_run%' AND content LIKE '%\"status\":\"running\"%' \
+             ORDER BY id",
         )?;
         statement
             .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?
     };
-    for (id, content) in running {
+    let mut chats = Vec::new();
+    for (id, chat_id, content) in running {
         let Some(mut record) = content
             .strip_prefix(crate::subagent::PREFIX)
             .and_then(|record| serde_json::from_str::<Value>(record).ok())
@@ -9290,8 +9358,11 @@ fn stop_orphaned_agents(transaction: &rusqlite::Transaction<'_>) -> Result<(), r
             "UPDATE messages SET content = ? WHERE id = ?",
             params![format!("{}{record}", crate::subagent::PREFIX), id],
         )?;
+        if !chats.contains(&chat_id) {
+            chats.push(chat_id);
+        }
     }
-    Ok(())
+    Ok(chats)
 }
 
 fn queued_event(chat_id: &str, queue: &[String], revision: i64) -> Value {
@@ -14178,6 +14249,101 @@ mod tests {
         assert_eq!(
             ids(store.take_chats_to_resume().unwrap()),
             vec![crashed.clone()]
+        );
+    }
+
+    #[test]
+    fn a_restart_resumes_chats_waiting_on_background_work_without_looping() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        for chat in ["waiting", "cut", "done"] {
+            fixture.insert_chat(&database, chat, "folder");
+        }
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        // Each turn ends, as Claude's does once it leaves work in the background.
+        let finish = |chat: &str, text: &str, agent: Option<&str>| {
+            let SendDisposition::Start { .. } = store
+                .prepare_send(&json!({"chat": chat, "text": text}))
+                .unwrap()
+            else {
+                panic!("the send should start a turn");
+            };
+            if let Some(status) = agent {
+                store
+                    .append_turn_message(
+                        chat,
+                        "tool",
+                        &format!(
+                            "subagent_run\n{{\"key\":\"{text}\",\"background\":true,\"status\":\"{status}\"}}"
+                        ),
+                        None,
+                    )
+                    .unwrap();
+            }
+            store.finish_turn(chat, true, None, 1, false).unwrap();
+        };
+        let taken = |store: &StateStore| {
+            store
+                .take_chats_to_resume()
+                .unwrap()
+                .into_iter()
+                .map(|chat| (chat.chat_id.clone(), chat.prompt()))
+                .collect::<Vec<_>>()
+        };
+        finish("waiting", "watch CI", Some("running"));
+        finish("done", "finished", Some("completed"));
+        // Cut off mid-turn while an agent ran: the turn's own mark wins.
+        finish("cut", "earlier", None);
+        store
+            .prepare_send(&json!({"chat": "cut", "text": "build"}))
+            .unwrap();
+        store
+            .append_turn_message(
+                "cut",
+                "tool",
+                "subagent_run\n{\"key\":\"k\",\"status\":\"running\"}",
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(store.recover_interrupted_turns().unwrap(), vec!["cut"]);
+        assert_eq!(store.chat("waiting").unwrap()["working"], false);
+        assert_eq!(store.chat("waiting").unwrap()["resumable"], true);
+        assert_eq!(store.chat("done").unwrap()["resumable"], false);
+        let reopened = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert!(reopened.recover_interrupted_turns().unwrap().is_empty());
+        assert_eq!(
+            taken(&reopened),
+            vec![
+                ("cut".to_owned(), RESUME_PROMPT),
+                ("waiting".to_owned(), WAITING_RESUME_PROMPT),
+            ]
+        );
+        assert!(taken(&store).is_empty());
+
+        // A chat resumed after a cut-off turn may still wait on new work, but
+        // work that stops again after the prompt about it waits for the user.
+        finish("cut", RESUME_PROMPT, Some("running"));
+        finish("waiting", WAITING_RESUME_PROMPT, Some("running"));
+        store.recover_interrupted_turns().unwrap();
+        assert_eq!(
+            taken(&store),
+            vec![("cut".to_owned(), WAITING_RESUME_PROMPT)]
+        );
+        store
+            .prepare_send(&json!({"chat": "cut", "text": WAITING_RESUME_PROMPT}))
+            .unwrap();
+        store.recover_interrupted_turns().unwrap();
+        assert!(taken(&store).is_empty());
+
+        // The shutdown path marks a waiting chat the same way.
+        store.mark_waiting_resume_after_restart("done").unwrap();
+        assert_eq!(
+            taken(&store),
+            vec![("done".to_owned(), WAITING_RESUME_PROMPT)]
         );
     }
 

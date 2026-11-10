@@ -45,9 +45,12 @@ the chat.
 
 Turn on **Settings → General → Resume chats after a restart** to have xd continue
 any turn that a crash, reboot, or daemon stop cut off, the next time the app
-connects to that daemon, local or paired. It posts a visible message in the chat
-and the agent continues with no prompt from you, so it is off by default. A
-resumed turn that is cut off again waits for you.
+connects to that daemon, local or paired. A chat whose turn had ended while its
+agent waited on background agents or commands is continued too, since stopping
+the daemon stops that work; the agent is told so and can start it again. It
+posts a visible message in the chat and the agent continues with no prompt from
+you, so it is off by default. A resumed turn that is cut off again waits for
+you, and so does background work that stops again after being started over.
 
 The setting belongs to each device, but the host hands out the waiting chats
 only once: the first device to ask decides for all of them, and any device that
