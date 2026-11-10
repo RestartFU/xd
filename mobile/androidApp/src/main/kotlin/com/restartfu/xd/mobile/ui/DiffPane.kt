@@ -4,6 +4,24 @@ import com.restartfu.xd.protocol.GitStatusReply
 import com.restartfu.xd.mobile.DiffPane
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.ScrollableState
+import androidx.compose.foundation.gestures.scrollable
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.material3.OutlinedTextField
@@ -16,8 +34,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -26,7 +42,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -98,26 +113,107 @@ internal fun DiffPaneContent(model: DiffViewModel) {
                     color = MaterialTheme.colorScheme.outline,
                 )
             }
-            else -> {
-                val files = remember(state.patch) { CodeBlocks.diffFiles(state.patch) }
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .padding(vertical = 4.dp),
-                ) {
-                    files.forEach { file ->
-                        key(file.path) {
-                            DiffFileSection(
-                                file = file,
-                                collapsed = file.path in state.collapsedFiles,
-                                onToggle = { model.toggleFile(file.path) },
-                            )
-                        }
+            else -> PatchList(state.patch, state.collapsedFiles, model::toggleFile)
+        }
+    }
+}
+
+/** A patch's files, parsed and coloured away from the main thread. */
+private class PreparedDiff(val patch: String, val files: List<PreparedFile>)
+
+private class PreparedFile(val file: DiffFile, val lines: List<AnnotatedString>)
+
+/**
+ * Every file of a patch, each line its own row of a lazy list.
+ *
+ * A branch's patch can run to megabytes, so only the lines on screen are
+ * laid out, and parsing and colouring happen in the background. Until the
+ * colours are ready the lines show uncoloured.
+ */
+@Composable
+private fun PatchList(
+    patch: String,
+    collapsedFiles: Set<String>,
+    onToggle: (String) -> Unit,
+) {
+    val fallback = LocalContentColor.current
+    // Kept across a refresh, so the old patch stays up until the new one is ready.
+    val parsed by produceState<PreparedDiff?>(null, patch) {
+        val files = withContext(Dispatchers.Default) { CodeBlocks.diffFiles(patch) }
+        value = PreparedDiff(patch, files.map { PreparedFile(it, it.lines.map(::plainDiffLine)) })
+    }
+    // Paired with the parse it colours, so a newer parse is never shown in older colours.
+    val coloured by produceState<Pair<PreparedDiff, PreparedDiff>?>(null, parsed, fallback) {
+        val plain = parsed ?: return@produceState
+        value = plain to withContext(Dispatchers.Default) {
+            PreparedDiff(plain.patch, plain.files.map { PreparedFile(it.file, highlightDiff(it.file.lines, fallback)) })
+        }
+    }
+    val diff = coloured?.takeIf { it.first === parsed }?.second ?: parsed
+    if (diff == null) {
+        Centered { CircularProgressIndicator() }
+        return
+    }
+    // Each file's lines pan sideways together, as one block did before.
+    val pans = remember(diff.patch) { HashMap<String, LinePan>() }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 4.dp)) {
+        diff.files.forEachIndexed { index, prepared ->
+            val file = prepared.file
+            val collapsed = file.path in collapsedFiles
+            item(key = "file-$index-${file.path}", contentType = "file") {
+                DiffFileHeader(file, collapsed) { onToggle(file.path) }
+            }
+            if (!collapsed) {
+                val pan = pans.getOrPut("$index-${file.path}") { LinePan() }
+                items(
+                    count = prepared.lines.size,
+                    key = { line -> "line-$index-${file.path}-$line" },
+                    contentType = { "line" },
+                ) { line ->
+                    PannedLine(pan) { lineModifier ->
+                        DiffLineText(file.lines[line].kind, prepared.lines[line], lineModifier)
                     }
                 }
             }
+            item(key = "divider-$index-${file.path}", contentType = "divider") { HorizontalDivider() }
         }
+    }
+}
+
+/**
+ * How far one file's lines are panned sideways. Lines are laid out only while
+ * on screen, so the widest is the widest seen so far.
+ */
+private class LinePan {
+    var offset by mutableFloatStateOf(0f)
+    var widest by mutableIntStateOf(0)
+    var viewport by mutableIntStateOf(0)
+
+    val state = ScrollableState { delta ->
+        val limit = (widest - viewport).coerceAtLeast(0).toFloat()
+        val next = (offset - delta).coerceIn(0f, limit)
+        val consumed = offset - next
+        offset = next
+        consumed
+    }
+}
+
+/** A line drawn at its full width, panned by [pan] and clipped to the screen. */
+@Composable
+private fun PannedLine(pan: LinePan, line: @Composable (Modifier) -> Unit) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clipToBounds()
+            .onSizeChanged { pan.viewport = it.width }
+            .scrollable(pan.state, Orientation.Horizontal),
+    ) {
+        line(
+            Modifier
+                .wrapContentWidth(Alignment.Start, unbounded = true)
+                .offset { IntOffset(-pan.offset.roundToInt(), 0) }
+                .onSizeChanged { if (it.width > pan.widest) pan.widest = it.width },
+        )
     }
 }
 
@@ -187,7 +283,7 @@ internal fun pullRequestLabel(url: String): String =
     url.trimEnd('/').substringAfterLast('/').toLongOrNull()?.let { "#$it" } ?: "Pull request"
 
 @Composable
-private fun DiffFileSection(
+private fun DiffFileHeader(
     file: DiffFile,
     collapsed: Boolean,
     onToggle: () -> Unit,
@@ -212,8 +308,6 @@ private fun DiffFileSection(
         Text("+${file.additions}", color = LocalXdSignals.current.working)
         Text("−${file.deletions}", color = MaterialTheme.colorScheme.error)
     }
-    if (!collapsed) DiffText(file.lines, Modifier.fillMaxWidth())
-    HorizontalDivider()
 }
 
 @Composable
