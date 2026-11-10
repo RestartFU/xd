@@ -652,7 +652,12 @@ class MainViewModel @JvmOverloads constructor(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not create a session"
+                // The form comes back for another try, unless a newer one
+                // has been written there since; the message says which failed.
+                if (sentDraft != null && drafts.getString(draftKey, null) == null) {
+                    drafts.edit().putString(draftKey, sentDraft).apply()
+                }
+                _error.value = "Could not create “$named”: ${error.message ?: "the host refused it."}"
             } finally {
                 openWhenMade -= starting.id
                 _startingSessions.update { it - starting }

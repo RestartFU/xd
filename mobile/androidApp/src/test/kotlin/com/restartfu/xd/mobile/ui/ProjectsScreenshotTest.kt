@@ -245,6 +245,29 @@ class ProjectsScreenshotTest {
         }
     }
 
+    @Test fun aRefusedSessionGetsItsFormBack() = shoot("starting-refused-dark", MinimalThemePreset.DARK) {
+        holdNewChats = true
+        val sentBefore = sent("new-chat")
+        val drafts = this@ProjectsScreenshotTest.compose.activity.getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
+        drafts.edit().putString("xd/new", "{\"title\":\"Fix the footer (refused)\"}").commit()
+        model.createDirectSession("xd", "Fix the footer (refused)", DirectAgent.CLAUDE)
+        // A second form, sent while the first is still being set up.
+        drafts.edit().putString("xd/new", "{\"title\":\"Tidy the header\"}").commit()
+        model.createDirectSession("xd", "Tidy the header", DirectAgent.CODEX)
+        awaitSent("new-chat", sentBefore + 2)
+        // The second is made first, then the first is refused.
+        releaseNewChatsNewestFirst()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (model.startingSessions.value.isNotEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+        check(model.startingSessions.value.isEmpty()) { "still starting: ${model.startingSessions.value}" }
+        val draft = drafts.getString("xd/new", null)
+        check(draft?.contains("Fix the footer (refused)") == true) { "draft is $draft" }
+        check(model.error.value?.contains("Fix the footer (refused)") == true) { "error is ${model.error.value}" }
+    }
+
     /** Waits until the app has sent [count] [op] requests. */
     private fun Screen.awaitSent(op: String, count: Int) {
         val deadline = System.currentTimeMillis() + 10_000
@@ -568,6 +591,7 @@ class ProjectsScreenshotTest {
                     op,
                     request["owner"]?.jsonPrimitive?.content,
                     request["folder"]?.jsonPrimitive?.content,
+                    request["title"]?.jsonPrimitive?.content,
                 )
                     .removeSuffix("}") + (if (id != null) ""","_xd_request":$id}""" else "}")
                 val answer: () -> Unit = { listener?.onBytes((body + "\n").encodeToByteArray()) }
@@ -579,14 +603,15 @@ class ProjectsScreenshotTest {
 
         override fun close() = Unit
 
-        private fun reply(op: String?, owner: String?, folder: String?): String = when (op) {
+        private fun reply(op: String?, owner: String?, folder: String?, title: String? = null): String = when (op) {
             "tree" -> (if (longTree) TREE_LONG else TREE)
                 .let { paused(it) }
                 .let { if (canPauseAll) it else it.replace("\"pause_all\":true,\"pause_folders\":true,", "") }
             "pause-all" -> { pausedFolders = pausedFolders + folder.orEmpty(); """{"ok":true,"paused":[]}""" }
             "resume-all" -> { pausedFolders = pausedFolders - folder.orEmpty(); """{"ok":true,"resumed":[]}""" }
             "owner-icon" -> """{"ok":true,"owner":"$owner","mime":"image/png","data":"${avatar(owner.orEmpty())}"}"""
-            "new-chat" -> """{"ok":true,"id":"made-${madeChats.incrementAndGet()}"}"""
+            "new-chat" -> if (title?.contains("(refused)") == true) """{"ok":false,"error":"No such branch."}"""
+                else """{"ok":true,"id":"made-${madeChats.incrementAndGet()}"}"""
             else -> """{"ok":true}"""
         }
     }
@@ -614,6 +639,13 @@ class ProjectsScreenshotTest {
             holdNewChats = false
             val held = synchronized(HELD) { HELD.toList().also { HELD.clear() } }
             held.forEach { answer -> Thread { answer() }.start() }
+        }
+
+        /** Answers the held new chats one by one, the last asked first. */
+        fun releaseNewChatsNewestFirst() {
+            holdNewChats = false
+            val held = synchronized(HELD) { HELD.toList().also { HELD.clear() } }
+            Thread { held.reversed().forEach { answer -> answer(); Thread.sleep(300) } }.start()
         }
 
         fun paused(tree: String): String = tree
