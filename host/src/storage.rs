@@ -446,101 +446,6 @@ impl StateStore {
         )
     }
 
-    pub(crate) fn append_shared_event(
-        &self,
-        source: &str,
-        event: &Value,
-    ) -> Result<(), StorageError> {
-        let encoded = serde_json::to_string(event)
-            .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
-        let write = |database: &Connection| -> Result<(), StorageError> {
-            let transaction = database.unchecked_transaction()?;
-            let chunked = encoded.len() > DRAFT_CHUNK_BYTES;
-            transaction.execute(
-                "INSERT INTO shared_events (source, payload) VALUES (?, ?)",
-                (source, if chunked { CHUNKED_DRAFT } else { &encoded }),
-            )?;
-            let id = transaction.last_insert_rowid();
-            if chunked {
-                let mut insert = transaction.prepare(
-                    "INSERT INTO shared_event_chunks (event_id, ordinal, data) VALUES (?, ?, ?)",
-                )?;
-                for (ordinal, chunk) in encoded.as_bytes().chunks(DRAFT_CHUNK_BYTES).enumerate() {
-                    insert.execute(params![id, ordinal as i64, chunk])?;
-                }
-            }
-            if id % 256 == 0 {
-                transaction.execute(
-                    "DELETE FROM shared_events WHERE id <= ?",
-                    [id.saturating_sub(16_384)],
-                )?;
-            }
-            transaction.commit()?;
-            Ok(())
-        };
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        // These rows only relay live updates to other host processes; they are
-        // pruned soon after and nothing reads them back after a restart. A
-        // reply streams one per token, so syncing each to disk queued every
-        // chat behind a busy disk. Write-ahead logging keeps them in order
-        // without a sync, and the next real commit makes them durable anyway.
-        if self.readers.is_some() {
-            database::without_sync(&database, write)
-        } else {
-            write(&database)
-        }
-    }
-
-    pub(crate) fn latest_shared_event_id(&self) -> Result<i64, StorageError> {
-        let database = self.reader()?;
-        database
-            .query_row(
-                "SELECT COALESCE(MAX(id), 0) FROM shared_events",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(StorageError::from)
-    }
-
-    pub(crate) fn shared_events_after(
-        &self,
-        after: i64,
-    ) -> Result<Vec<(i64, String, Value)>, StorageError> {
-        let database = self.reader()?;
-        let mut statement = database.prepare(
-            "SELECT id, source, payload FROM shared_events WHERE id > ? ORDER BY id LIMIT 512",
-        )?;
-        let rows = statement.query_map([after], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut events = Vec::new();
-        for row in rows {
-            let (id, source, payload) = row?;
-            let payload = if payload == CHUNKED_DRAFT {
-                let mut chunks = database.prepare(
-                    "SELECT data FROM shared_event_chunks WHERE event_id = ? ORDER BY ordinal",
-                )?;
-                let mut bytes = Vec::new();
-                for chunk in chunks.query_map([id], |row| row.get::<_, Vec<u8>>(0))? {
-                    bytes.extend_from_slice(&chunk?);
-                }
-                String::from_utf8(bytes)
-                    .map_err(|error| StorageError::InvalidRequest(error.to_string()))?
-            } else {
-                payload
-            };
-            let event = serde_json::from_str(&payload).map_err(|error| {
-                StorageError::InvalidRequest(format!("Saved host event is invalid: {error}"))
-            })?;
-            events.push((id, source, event));
-        }
-        Ok(events)
-    }
-
     pub fn remote_listener(&self) -> Result<Option<(String, u16)>, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let encoded = database
@@ -2991,11 +2896,23 @@ impl StateStore {
         label: Option<&str>,
     ) -> Result<(), StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        database.execute(
-            "UPDATE chats SET partial_reply = ?, partial_reply_label = ? WHERE id = ?",
-            params![text, label, chat_id],
-        )?;
-        Ok(())
+        let write = |database: &Connection| -> Result<(), StorageError> {
+            database
+                .prepare_cached(
+                    "UPDATE chats SET partial_reply = ?, partial_reply_label = ? WHERE id = ?",
+                )?
+                .execute(params![text, label, chat_id])?;
+            Ok(())
+        };
+        // A streaming reply saves itself every half second only so that a
+        // crash of this process keeps what was said. Write-ahead logging
+        // survives that without a sync, and waiting on the disk for each copy
+        // held up every other chat's writes. Clearing it stays fully synced.
+        if self.readers.is_some() && !text.is_empty() {
+            database::without_sync(&database, write)
+        } else {
+            write(&database)
+        }
     }
 
     /// Explicitly repair every `host_working` row after an operator has proved
@@ -6363,7 +6280,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_workspace_sort_order(database)?;
             ensure_workspace_group_columns(database)?;
             ensure_chat_sort_order(database)?;
-            ensure_shared_events_table(database)?;
+            retire_shared_events(database)?;
             disable_claude_mode(database)?;
             remove_terminal_chats(database)?;
             ensure_workspace_sessions(database)?;
@@ -6430,8 +6347,6 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); \
          CREATE TABLE IF NOT EXISTS devices (token_hash TEXT PRIMARY KEY, name TEXT NOT NULL, \
            created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL); \
-         CREATE TABLE IF NOT EXISTS shared_events (id INTEGER PRIMARY KEY AUTOINCREMENT, \
-           source TEXT NOT NULL, payload TEXT NOT NULL); \
          CREATE TRIGGER IF NOT EXISTS remember_agent_defaults \
            AFTER UPDATE OF backend, model, effort, access, plan, fast, claude_mode ON chats \
            WHEN OLD.backend IS NOT NEW.backend OR OLD.model IS NOT NEW.model \
@@ -6462,7 +6377,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_workspace_sort_order(database)?;
     ensure_workspace_group_columns(database)?;
     ensure_chat_sort_order(database)?;
-    ensure_shared_events_table(database)?;
+    retire_shared_events(database)?;
     disable_claude_mode(database)?;
     remove_terminal_chats(database)?;
     ensure_workspace_sessions(database)?;
@@ -6600,12 +6515,25 @@ fn ensure_session_mode(database: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn ensure_shared_events_table(database: &Connection) -> Result<(), StorageError> {
-    database.execute(
-        "CREATE TABLE IF NOT EXISTS shared_events (id INTEGER PRIMARY KEY AUTOINCREMENT, \
-         source TEXT NOT NULL, payload TEXT NOT NULL)",
-        [],
+/// Host processes once relayed live events to each other through these
+/// tables. Only the daemon opens the database now, so they only cost a write
+/// per streamed token. An older xd creates them again if it opens this file.
+fn retire_shared_events(database: &Connection) -> Result<(), StorageError> {
+    database.execute_batch(
+        "DROP TABLE IF EXISTS shared_event_chunks; \
+         DROP TABLE IF EXISTS shared_events;",
     )?;
+    let has_sequence: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_sequence {
+        database.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'shared_events'",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -10669,10 +10597,6 @@ fn ensure_draft_chunks(database: &Connection) -> Result<(), StorageError> {
             chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
             ordinal INTEGER NOT NULL, data BLOB NOT NULL,
             PRIMARY KEY(chat_id, ordinal));
-         CREATE TABLE IF NOT EXISTS shared_event_chunks (
-            event_id INTEGER NOT NULL REFERENCES shared_events(id) ON DELETE CASCADE,
-            ordinal INTEGER NOT NULL, data BLOB NOT NULL,
-            PRIMARY KEY(event_id, ordinal));
          UPDATE meta SET value = '26' WHERE key = 'schema_version';",
     )?;
     Ok(())
@@ -11903,32 +11827,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shared_event_append_waits_for_transient_database_contention() {
-        let fixture = Fixture::new();
-        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        let database_path = fixture.database.clone();
-        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-        let lock = thread::spawn(move || {
-            let database = Connection::open(database_path).unwrap();
-            database.execute_batch("BEGIN IMMEDIATE").unwrap();
-            locked_tx.send(()).unwrap();
-            thread::sleep(Duration::from_millis(100));
-            database.execute_batch("COMMIT").unwrap();
-        });
-
-        locked_rx.recv().unwrap();
-        store
-            .append_shared_event("other-host", &json!({"event": "text", "text": "hello"}))
-            .unwrap();
-        lock.join().unwrap();
-
-        let events = store.shared_events_after(0).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].1, "other-host");
-        assert_eq!(events[0].2["text"], "hello");
-    }
-
     /// A store with one chat holding `messages` user messages.
     fn store_with_chat(fixture: &Fixture, messages: usize) -> (StateStore, String) {
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
@@ -12156,12 +12054,9 @@ mod tests {
     }
 
     #[test]
-    fn relayed_events_skip_the_sync_but_other_commits_stay_fully_synced() {
+    fn unsynced_writes_relax_only_their_own_commit() {
         let fixture = Fixture::new();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        store
-            .append_shared_event("this-host", &json!({"event": "text", "text": "token"}))
-            .unwrap();
         let database = store.database.lock().unwrap();
         let level = |database: &Connection| -> i64 {
             database
@@ -12170,10 +12065,7 @@ mod tests {
         };
         assert_eq!(level(&database), 2);
         let inside = database::without_sync(&database, |database| Ok(level(database))).unwrap();
-        assert_eq!(
-            inside, 1,
-            "relayed events commit without waiting for the disk"
-        );
+        assert_eq!(inside, 1, "the write commits without waiting for the disk");
         let failed = database::without_sync(&database, |_| -> Result<(), StorageError> {
             Err(StorageError::InvalidRequest("write failed".into()))
         });
@@ -12181,13 +12073,8 @@ mod tests {
         assert_eq!(
             level(&database),
             2,
-            "a failed relay must not relax later commits"
+            "a failed write must not relax later commits"
         );
-        drop(database);
-        let other = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        let events = other.shared_events_after(0).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].2["text"], "token");
     }
 
     #[test]
@@ -12368,9 +12255,6 @@ mod tests {
         {
             let (store, chat) = store_with_chat(&fixture, 2);
             store.messages(&json!({"chat": chat})).unwrap();
-            store
-                .append_shared_event("this-host", &json!({"event": "text", "text": "token"}))
-                .unwrap();
         }
         assert!(!fixture.root.join("chats.db-wal").exists());
         let backup = Connection::open_with_flags(
@@ -16977,40 +16861,35 @@ mod tests {
     }
 
     #[test]
-    fn chunked_shared_events_roundtrip_and_expire() {
+    fn opening_drops_the_retired_event_relay_tables() {
         let fixture = Fixture::new();
-        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        let event =
-            json!({"event": "draft", "draft_files": [{"data": "a".repeat(DRAFT_CHUNK_BYTES + 1)}]});
-        store.append_shared_event("test", &event).unwrap();
-        assert_eq!(store.shared_events_after(0).unwrap()[0].2, event);
+        drop(StateStore::open(&fixture.database, &fixture.workspaces).unwrap());
         {
-            let database = store.database.lock().unwrap();
-            assert!(
-                database
-                    .query_row("SELECT count(*) FROM shared_event_chunks", [], |row| row
-                        .get::<_, i64>(0))
-                    .unwrap()
-                    > 1
-            );
+            // As an older xd left them, with relayed rows still in place.
+            let database = Connection::open(&fixture.database).unwrap();
             database
-                .execute(
-                    "UPDATE sqlite_sequence SET seq = 16639 WHERE name = 'shared_events'",
-                    [],
+                .execute_batch(
+                    "CREATE TABLE shared_events (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                       source TEXT NOT NULL, payload TEXT NOT NULL); \
+                     CREATE TABLE shared_event_chunks ( \
+                       event_id INTEGER NOT NULL REFERENCES shared_events(id) ON DELETE CASCADE, \
+                       ordinal INTEGER NOT NULL, data BLOB NOT NULL, \
+                       PRIMARY KEY(event_id, ordinal)); \
+                     INSERT INTO shared_events (source, payload) VALUES ('old', '{}'); \
+                     INSERT INTO shared_event_chunks VALUES (1, 0, x'00');",
                 )
                 .unwrap();
         }
-        store
-            .append_shared_event("test", &json!({"event": "draft"}))
-            .unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         let database = store.database.lock().unwrap();
-        assert_eq!(
-            database
-                .query_row("SELECT count(*) FROM shared_event_chunks", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
+        let tables: i64 = database
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE 'shared_event%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
     }
 
     #[test]
