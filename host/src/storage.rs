@@ -8907,10 +8907,7 @@ fn git_directory(workdir: &Path) -> Option<(&Path, PathBuf)> {
             continue;
         }
         if fs::metadata(&dot_git).ok()?.is_dir() {
-            let repository = dot_git.join("HEAD").is_file()
-                && (dot_git.join("commondir").is_file()
-                    || (dot_git.join("objects").is_dir() && dot_git.join("refs").is_dir()));
-            if repository {
+            if is_git_directory(&dot_git) {
                 return Some((directory, dot_git));
             }
             continue;
@@ -8919,9 +8916,25 @@ fn git_directory(workdir: &Path) -> Option<(&Path, PathBuf)> {
         // repository, relative to the worktree when it is not absolute.
         let link = fs::read_to_string(&dot_git).ok()?;
         let target = link.lines().next()?.strip_prefix("gitdir:")?.trim();
-        return (!target.is_empty()).then(|| (directory, directory.join(target)));
+        if target.is_empty() {
+            return None;
+        }
+        let target = directory.join(target);
+        return is_git_directory(&target).then_some((directory, target));
     }
     None
+}
+
+/// Whether `directory` is a Git directory by Git's own test: a HEAD, and the
+/// objects and refs of the repository it shares them with.
+fn is_git_directory(directory: &Path) -> bool {
+    let common = match fs::read_to_string(directory.join("commondir")) {
+        Ok(common) => directory.join(common.trim()),
+        Err(_) => directory.to_owned(),
+    };
+    fs::symlink_metadata(directory.join("HEAD")).is_ok()
+        && common.join("objects").is_dir()
+        && common.join("refs").is_dir()
 }
 
 /// What `git worktree list` says is checked out in the worktree holding the
@@ -10434,6 +10447,16 @@ mod tests {
         fs::write(broken.join(".git"), "not a gitfile\n").unwrap();
         assert_eq!(listed(&broken), None);
         assert_eq!(worktree_branch(&broken), None);
+
+        // So does one that names a directory that is no repository.
+        let stray = repository.join("nested/stray");
+        let admin = fixture.root.join("broken-admin");
+        fs::create_dir_all(&stray).unwrap();
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(stray.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        assert_eq!(listed(&stray), None);
+        assert_eq!(worktree_branch(&stray), None);
 
         // A branch that is itself a symbolic ref names the one Git lists.
         git(
