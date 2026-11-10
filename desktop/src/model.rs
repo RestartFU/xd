@@ -500,6 +500,18 @@ pub enum TodoStatus {
 }
 
 impl Message {
+    /// Whether two rows hold the same message. The parsed forms follow from
+    /// the text, so this skips comparing them.
+    pub fn same_row(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.role == other.role
+            && self.label == other.label
+            && self.sent_from == other.sent_from
+            && self.image_paths == other.image_paths
+            && self.file_paths == other.file_paths
+            && self.content == other.content
+    }
+
     pub fn new(
         id: Option<i64>,
         role: impl Into<String>,
@@ -1028,7 +1040,8 @@ impl AppModel {
     }
 
     pub fn apply_tree(&mut self, body: &Value) -> Result<(), serde_json::Error> {
-        let mut snapshot: TreeSnapshot = serde_json::from_value(body.clone())?;
+        // Read straight from the reply: cloning it first copied the whole tree.
+        let mut snapshot = TreeSnapshot::deserialize(body)?;
         normalize_sessions(&mut snapshot, body);
         // New hosts persist final-reply questions in the tree, including chats
         // whose transcript has never been opened on this desktop.
@@ -1498,7 +1511,8 @@ impl AppModel {
         body: &Value,
         direction: MessagePageDirection,
     ) -> Result<MessagePageChange, serde_json::Error> {
-        let mut snapshot: MessagesSnapshot = serde_json::from_value(body.clone())?;
+        // Read straight from the reply: cloning it first copied every message.
+        let mut snapshot = MessagesSnapshot::deserialize(body)?;
         snapshot
             .messages
             .iter_mut()
@@ -1776,7 +1790,11 @@ impl AppModel {
                 self.question_chats.remove(chat_id);
             }
         }
-        self.refresh_session_activity();
+        // Streamed output changes no chat's working, terminal, or background
+        // state, and arrives a token at a time.
+        if !matches!(name, "text" | "tool") {
+            self.refresh_session_activity();
+        }
         if name == "turn-finished"
             && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
             && self.selected_chat.as_deref() != Some(chat_id)
