@@ -635,6 +635,25 @@ class XdClientVerticalSliceTest {
         client.setVisibleChat("one")
         runCurrent()
         assertEquals(2, reads("one"), "a chat read since it was marked is not read again")
+
+        // A deferred read that fails leaves the chat marked, so the next
+        // visit tries again.
+        socket.receive("""{"event":"tree"}""")
+        runCurrent()
+        socket.receive(treeReply(working = false), chatReply(working = false))
+        runCurrent()
+        socket.receive(messagesReply("""{"role":"user","content":"Earlier","at":1,"id":1}"""))
+        runCurrent()
+        client.setVisibleChat("two")
+        runCurrent()
+        assertEquals(3, reads("two"))
+        socket.receive("""{"ok":false,"error":"chat read failed"}""")
+        runCurrent()
+        client.setVisibleChat("one")
+        runCurrent()
+        client.setVisibleChat("two")
+        runCurrent()
+        assertEquals(4, reads("two"), "a failed read is tried again on the next visit")
         sessions.forEach { it.close() }
     }
 

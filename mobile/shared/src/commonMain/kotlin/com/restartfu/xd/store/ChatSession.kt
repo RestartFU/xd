@@ -305,6 +305,8 @@ internal class ChatSessionCore(
                 clearReloadAfterCancellation()
                 throw error
             } catch (error: Throwable) {
+                // Still out of date: the next visit reads it again.
+                stale.value = true
                 stateMutex.withLock {
                     if (invalidated) return@withLock
                     reloadInProgress = false
