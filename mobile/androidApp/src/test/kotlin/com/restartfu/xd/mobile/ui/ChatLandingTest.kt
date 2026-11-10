@@ -97,6 +97,26 @@ class ChatLandingTest {
     }
 
     @Test
+    fun aStreamingReplyIsFollowedToItsLastWords() = withApp {
+        click(TITLE)
+        waitFor { endOnScreen(LAST_LINE_OF_LATEST) }
+        STREAMING = true
+        socket?.push("""{"event":"turn-started","chat":"c1","turn_id":1,"turn_sequence":1}""")
+        settle()
+        // The reply streams in as a burst of words, faster than it is drawn.
+        val words = (longReply(FIRST_LINE_OF_NEXT, LAST_LINE_OF_NEXT).second + " ")
+            .split(Regex("(?<= )"))
+        socket?.push(
+            words.mapIndexed { index, word ->
+                """{"event":"text","chat":"c1","turn_id":1,"turn_sequence":${index + 2},"text":${JsonPrimitive(word)}}"""
+            }.joinToString("\n"),
+        )
+        waitFor { shows(LAST_LINE_OF_NEXT) }
+        settle()
+        check(endOnScreen(LAST_LINE_OF_NEXT)) { "A streaming reply was not followed to its last words" }
+    }
+
+    @Test
     fun aReaderWhoScrolledBackIsLeftThereWhenAReplyArrives() = withApp {
         click(TITLE)
         waitFor { endOnScreen(LAST_LINE_OF_LATEST) }
@@ -127,6 +147,7 @@ class ChatLandingTest {
     private fun withApp(steps: () -> Unit) {
         MESSAGES.clear()
         MESSAGES += HISTORY
+        STREAMING = false
         val activity = compose.activity
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         model = MainViewModel(activity.application, XdClient({ ScriptedSocket().also { socket = it } }, NoCredentials, scope))
@@ -250,7 +271,8 @@ class ChatLandingTest {
                 """"sessions":[{"id":"s1","folder":"xd","title":"$TITLE","chats":["c1"],"terminal_chat":"session:s1"}],""" +
                 """"chats":[{"id":"c1","folder":"xd","title":"$TITLE","backend":"claude","working":false,"session":"s1"}]}"""
             "chat" -> """{"ok":true,"title":"$TITLE","backend":"claude","commands":[],"plan":false,""" +
-                """"queue":[],"working":false,"label":"Claude","items":[],"new_worktree":false,""" +
+                (if (STREAMING) """"turn_id":1,"turn_sequence":1,"segment":"",""" else "") +
+                """"queue":[],"working":$STREAMING,"label":"Claude","items":[],"new_worktree":false,""" +
                 """"has_messages":true,"model":"claude-opus-5-5","effort":"high"}"""
             "messages" -> MESSAGES.toList().let { messages -> """{"ok":true,"total_messages":${messages.size},"last_message_id":${messages.size},"messages":[""" +
                 messages.mapIndexed { i, (role, text) ->
@@ -266,6 +288,9 @@ class ChatLandingTest {
         const val LAST_LINE_OF_LATEST = "That is everything; the branch is ready for review."
         const val FIRST_LINE_OF_NEXT = "One more pass over the reconnect work."
         const val LAST_LINE_OF_NEXT = "That pass is done too; nothing else is left."
+
+        /** Whether the scripted chat has a turn running. */
+        @Volatile var STREAMING = false
 
         /** The socket the app opened last, to send events on. */
         @Volatile var socket: ScriptedSocket? = null

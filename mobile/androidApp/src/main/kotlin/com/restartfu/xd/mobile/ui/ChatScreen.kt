@@ -367,16 +367,19 @@ internal fun ChatScreen(
     )
     LaunchedEffect(listState, model) {
         var lastFollowed: Pair<FollowTarget?, Int?> = null to null
-        // The newest row's drawn height too: a streaming reply is drawn at a
-        // pace, so its last words can land after the text that woke this.
+        // The newest message's drawn height too: a streaming reply is drawn
+        // at a pace, so its last words can land after the text that woke
+        // this. It is the row above the working row while a turn runs, and
+        // the end stays the place scrolled to.
         snapshotFlow {
             val target = followTarget.value
+            val newest = target.lastIndex - target.trailing
             val drawnHeight = listState.layoutInfo.visibleItemsInfo
-                .firstOrNull { it.index == target.lastIndex }?.size
+                .firstOrNull { it.index == newest }?.size
             target to drawnHeight
         }.collect { (target, drawnHeight) ->
-            // Only new output, or the newest row growing while in view, moves
-            // the list; the row leaving or entering the view is the reader's.
+            // Only new output, or the newest message growing while in view,
+            // moves the list; it leaving or entering the view is the reader's.
             val grew = target == lastFollowed.first &&
                 drawnHeight != null &&
                 (lastFollowed.second ?: Int.MAX_VALUE) < drawnHeight
