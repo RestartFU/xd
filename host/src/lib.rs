@@ -588,13 +588,15 @@ impl Engine {
             .unwrap_or_default();
         let mut resumed = Vec::new();
         if request.get("resume").and_then(Value::as_bool) == Some(true) {
-            for ChatToResume {
-                chat_id,
-                last_message,
-            } in chats
-            {
+            for chat in chats {
+                let prompt = chat.prompt();
+                let ChatToResume {
+                    chat_id,
+                    last_message,
+                    ..
+                } = chat;
                 let reply = self.send_message_inner(
-                    &json!({"op": "send", "chat": chat_id, "text": storage::RESUME_PROMPT}),
+                    &json!({"op": "send", "chat": chat_id, "text": prompt}),
                     Some(Continuation::AfterRestart(last_message)),
                 );
                 if reply["ok"] == true {
