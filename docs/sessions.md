@@ -21,10 +21,11 @@ between them. Swipe horizontally on a supported touchpad to go back or forward.
 
 ## Linked pull requests
 
-A chat can link any number of pull requests. The chat's branch PR, PRs opened from
-xd, and PRs the agent opens with `gh pr create` are linked by themselves. Agents
-link others through xd's `link_pull_requests` tool, and you can add or remove
-links from the session header on desktop or the chat menu on Android.
+A chat can link up to 32 pull requests. The chat's branch PR, PRs opened from xd,
+and PRs the agent opens with `gh pr create` are linked by themselves. Agents link
+others through xd's `link_pull_requests` tool, and you can add or remove links from
+the session header on desktop or the chat menu on Android. Once a chat has 32, no
+more are linked, including ones found automatically, until you remove one.
 
 ## Settling sessions
 
@@ -49,10 +50,18 @@ Settings.
 
 ### Auto-settle
 
-By default the host settles sessions after three days without activity and once
-all of their linked pull requests have merged or closed. Change this in **Settings → General →
-Auto-settle**. Those rules belong to the host, so they keep running while the app
-is closed, and each host keeps its own. To keep one session out of them, choose
+The host settles a session when either rule applies, whichever comes first:
+
+- **Auto-settle merged sessions** (on by default): every pull request linked to
+  the session has merged or closed. A closed pull request counts while either
+  rule is on.
+- **Auto-settle inactive sessions** (on by default, after three days): the session
+  has had no activity for the chosen number of days, even if a pull request is
+  still open. Turn on **Keep sessions with a PR** to stop inactivity from
+  settling sessions that have one; merging and closing still do.
+
+Change these in **Settings → General → Auto-settle**. The rules belong to the
+host, so they keep running while the app is closed, and each host keeps its own. To keep one session out of them, choose
 **Disable auto-settle** from its right-click menu.
 
 ## Auto-delete
@@ -65,7 +74,8 @@ a session may sit idle. It is off until you do, because deleting can't be undone
   for it, but its branch and every commit on it stay in the repository.
 - A worktree xd made for the session, and that no other session uses, keeps the
   whole session while it has uncommitted changes or untracked files, or commits
-  on a detached HEAD that no branch holds, until you commit or clean it up.
+  on a detached HEAD that no branch, remote branch, or tag holds, until you commit
+  or clean it up.
 - Ignored files, such as `.env` or build output, don't count: they are deleted
   with the worktree. Copy anything you need out of it first.
 - Any other worktree, such as an existing checkout or one another session also

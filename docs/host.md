@@ -49,14 +49,17 @@ connects to that daemon, local or paired. It posts a visible message in the chat
 and the agent continues with no prompt from you, so it is off by default. A
 resumed turn that is cut off again waits for you.
 
-With the setting off, connecting drops those waiting chats instead, so a later
-change of mind does not restart old work; the play button still works.
+The setting belongs to each device, but the host hands out the waiting chats
+only once: the first device to ask decides for all of them, and any device that
+connects later finds nothing to resume.
 
-The setting belongs to each device, but the host offers the waiting chats only
-once. The first desktop to connect decides for all of them: with its setting on
-it resumes them, and with it off it drops them, so a desktop that connects later
-finds nothing to resume. An Android device with the setting off leaves them for
-the next device instead.
+- A desktop always asks when it connects. With its setting on it resumes the
+  chats; with it off it drops them, so a later change of mind does not restart
+  old work.
+- An Android device asks only when its setting is on, and then resumes them.
+  With the setting off it leaves them waiting for the next device.
+
+Either way, the play button still continues any chat by hand.
 
 ## Memory limits
 
