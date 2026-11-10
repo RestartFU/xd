@@ -8897,8 +8897,9 @@ fn worktree_branch(workdir: &Path) -> Option<String> {
 }
 
 /// The worktree root and Git directory for the physical directory `workdir`,
-/// found as Git finds them: the nearest `.git` above it. A `.git` that is
-/// there but is not a repository ends the search, as it does for Git.
+/// found as Git finds them: the nearest `.git` above it. Git passes over a
+/// `.git` directory that is no repository, and stops at a `.git` file that
+/// names none.
 fn git_directory(workdir: &Path) -> Option<(&Path, PathBuf)> {
     for directory in workdir.ancestors() {
         let dot_git = directory.join(".git");
@@ -8906,7 +8907,13 @@ fn git_directory(workdir: &Path) -> Option<(&Path, PathBuf)> {
             continue;
         }
         if fs::metadata(&dot_git).ok()?.is_dir() {
-            return Some((directory, dot_git));
+            let repository = dot_git.join("HEAD").is_file()
+                && (dot_git.join("commondir").is_file()
+                    || (dot_git.join("objects").is_dir() && dot_git.join("refs").is_dir()));
+            if repository {
+                return Some((directory, dot_git));
+            }
+            continue;
         }
         // A linked worktree's `.git` file names its own directory in the
         // repository, relative to the worktree when it is not absolute.
@@ -10414,6 +10421,12 @@ mod tests {
                 );
             }
         }
+
+        // An empty `.git` directory is no repository, so Git looks above it.
+        let hollow = repository.join("nested/hollow");
+        fs::create_dir_all(hollow.join(".git")).unwrap();
+        assert_eq!(listed(&hollow).as_deref(), Some("main"));
+        assert_eq!(worktree_branch(&hollow).as_deref(), Some("main"));
 
         // A `.git` file that names no repository stops the search there.
         let broken = repository.join("nested/broken");
