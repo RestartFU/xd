@@ -2423,10 +2423,14 @@ impl Engine {
         Ok(owner)
     }
 
-    fn unsubscribe(&self, id: u64) {
+    fn release_app_client(&self, id: u64) {
         if let Ok(mut clients) = self.app_clients.lock() {
             clients.remove(&id);
         }
+    }
+
+    fn unsubscribe(&self, id: u64) {
+        self.release_app_client(id);
         self.pairing.unregister(id);
         self.events.unsubscribe(id);
     }
@@ -2847,6 +2851,8 @@ pub fn serve_daemon_connection(
         }
     })();
     drop(commands);
+    // The app has gone even while requests it sent are still being answered.
+    engine.release_app_client(subscriber);
     if result.is_err() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
     }
