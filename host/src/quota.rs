@@ -410,16 +410,18 @@ impl QuotaMeter {
 }
 
 impl Pass {
-    /// Takes the turns the runtime reported into the ledger, in order.
-    fn take_activity(&self, ledger: &mut Ledger) {
+    /// Takes the turns the runtime reported into the ledger, in order, and
+    /// returns them.
+    fn take_activity(&self, ledger: &mut Ledger) -> Vec<Activity> {
         let queued = self
             .activity
             .lock()
             .map(|mut activity| std::mem::take(&mut *activity))
             .unwrap_or_default();
-        for (chat_id, provider, tag, working, at) in queued {
-            ledger.turn_tagged(&provider, &tag, &chat_id, working, at);
+        for (chat_id, provider, tag, working, at) in &queued {
+            ledger.turn_tagged(provider, tag, chat_id, *working, *at);
         }
+        queued
     }
 
     /// A reading of the account told nothing: it failed, or read another
@@ -608,8 +610,22 @@ impl Pass {
                 // Who works on the account now, then every start and end
                 // reported up to here, so the ledger records no older picture
                 // than this. Nothing but this thread takes the ledger.
-                let working_now = self.working_on(&provider, &account);
-                self.take_activity(&mut ledger);
+                let asked_at = Instant::now();
+                let mut working_now = self.working_on(&provider, &account);
+                // A start or end reported from when the runtime was asked is
+                // newer than what it said, and wins.
+                for (chat_id, p, tag, working, at) in self.take_activity(&mut ledger) {
+                    if at < asked_at
+                        || p != provider
+                        || crate::accounts::tag_account(&tag) != account
+                    {
+                        continue;
+                    }
+                    working_now.retain(|(id, _)| *id != chat_id);
+                    if working {
+                        working_now.push((chat_id, tag));
+                    }
+                }
                 // A turn known to run as another login than the one read, such
                 // as after the user's own CLI signed in to someone else, is not
                 // measured by this reading, nor is anyone beside it: whether it
