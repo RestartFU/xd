@@ -8833,27 +8833,42 @@ fn normalize_existing_path(path: &Path) -> String {
 /// The branch checked out in the worktree holding `workdir`, as `git worktree
 /// list` names it: the branch, "Detached HEAD", or nothing.
 ///
-/// Every tree read asks this for every chat. It reads the worktree's HEAD file
-/// instead of starting Git: one `git worktree list` per repository took
-/// seconds on a busy host, and a connection's chat and transcript requests
-/// waited behind it.
+/// Every tree read asks this for every chat. One `git worktree list` per
+/// repository took seconds on a busy host, and a connection's chat and
+/// transcript requests waited behind it. So the plain layouts xd makes, a
+/// checkout or a linked worktree, are read from their HEAD file; anything
+/// else is still left to Git.
 fn worktree_branch(workdir: &Path) -> Option<String> {
     // Git looks for the repository from the physical directory, as here.
     let workdir = fs::canonicalize(workdir).ok()?;
-    let (root, git_dir) = git_directory(&workdir)?;
-    // A linked worktree's directory in the repository names the worktree it
-    // belongs to. Git lists the worktree there, and as prunable once nothing
-    // is, so a worktree moved by hand is not where Git lists it: it has no
-    // branch, as before. A submodule's directory has no such entry.
-    if git_dir.join("commondir").is_file() {
-        let backlink = fs::read_to_string(git_dir.join("gitdir")).ok()?;
-        let listed = git_dir.join(backlink.trim());
-        if fs::canonicalize(listed.parent()?).ok()? != root {
-            return None;
-        }
-    } else if bare_repository(&git_dir) {
-        // Git lists a bare repository without a branch.
+    head_branch(&workdir).unwrap_or_else(|| listed_worktree_branch(&workdir))
+}
+
+/// The branch HEAD names for the plain layouts, or `None` to ask Git.
+fn head_branch(workdir: &Path) -> Option<Option<String>> {
+    let (root, git_dir) = match git_directory(workdir)? {
+        Some(found) => found,
+        // Git finds no repository there either.
+        None => return Some(None),
+    };
+    let common = common_directory(&git_dir);
+    let config = fs::read_to_string(common.join("config")).unwrap_or_default();
+    // Included files can set anything, so only Git can say.
+    if config_includes(&config) {
         return None;
+    }
+    if git_dir.join("commondir").is_file() {
+        // A linked worktree's directory in the repository names the worktree
+        // it belongs to. Git lists the worktree there, and as prunable once
+        // nothing is, so one moved by hand has no branch, as before.
+        let backlink = fs::read_to_string(git_dir.join("gitdir")).ok()?;
+        let listed = git_dir.join(backlink.trim_end_matches(['\n', '\r']));
+        if fs::canonicalize(listed.parent()?).ok() != Some(root.to_owned()) {
+            return Some(None);
+        }
+    } else if bare_repository(&config) {
+        // Git lists a bare repository without a branch.
+        return Some(None);
     }
     let head_path = git_dir.join("HEAD");
     // Git may keep HEAD as a symbolic link to the branch, which reading the
@@ -8863,76 +8878,107 @@ fn worktree_branch(workdir: &Path) -> Option<String> {
         .file_type()
         .is_symlink()
     {
-        return listed_worktree_branch(&workdir);
+        return None;
     }
     let head = fs::read_to_string(&head_path).ok()?;
     let head = head.trim_end();
-    match head.strip_prefix("ref:") {
+    match head.strip_prefix("ref:").map(str::trim) {
         // A repository with reftable keeps this placeholder in HEAD and its
-        // real refs elsewhere, so only Git can say.
-        Some(reference) if reference.trim() == "refs/heads/.invalid" => {
-            listed_worktree_branch(&workdir)
-        }
+        // real refs elsewhere.
+        Some("refs/heads/.invalid") => None,
         Some(reference) => {
-            let branch = reference
-                .trim()
+            let Some(branch) = reference
                 .strip_prefix("refs/heads/")
-                .filter(|branch| !branch.is_empty())?;
+                .filter(|branch| !branch.is_empty())
+            else {
+                return Some(None);
+            };
             // A branch that is itself a symbolic ref names another, which
             // Git follows; a packed ref never is one.
-            let common = match fs::read_to_string(git_dir.join("commondir")) {
-                Ok(common) => git_dir.join(common.trim()),
-                Err(_) => git_dir.clone(),
-            };
             let loose = common.join("refs/heads").join(branch);
             let symbolic = fs::symlink_metadata(&loose)
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
                 || fs::read(&loose).is_ok_and(|reference| reference.starts_with(b"ref:"));
-            if symbolic {
-                return listed_worktree_branch(&workdir);
-            }
-            Some(branch.to_owned())
+            (!symbolic).then(|| Some(branch.to_owned()))
         }
         None => (matches!(head.len(), 40 | 64)
             && head.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| "Detached HEAD".into()),
+        .then(|| Some("Detached HEAD".into())),
     }
 }
 
-/// The worktree root and Git directory for the physical directory `workdir`,
-/// found as Git finds them: the nearest `.git` above it. Git passes over a
-/// `.git` directory that is no repository, and stops at a `.git` file that
-/// names none.
-fn git_directory(workdir: &Path) -> Option<(&Path, PathBuf)> {
+/// The worktree root and Git directory for the physical directory `workdir`:
+/// the nearest `.git` above it, as Git finds it. `Some(None)` when there is
+/// none or it names no repository, and `None` where only Git can say: a
+/// directory that is a repository itself (bare, or inside `.git`), or a
+/// search that crosses into another file system, where Git stops.
+fn git_directory(workdir: &Path) -> Option<Option<(&Path, PathBuf)>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let device = fs::metadata(workdir).ok()?.dev();
     for directory in workdir.ancestors() {
+        if fs::metadata(directory).ok()?.dev() != device || is_git_directory(directory) {
+            return None;
+        }
         let dot_git = directory.join(".git");
         if fs::symlink_metadata(&dot_git).is_err() {
             continue;
         }
         if fs::metadata(&dot_git).ok()?.is_dir() {
+            // Git passes over a `.git` directory that is no repository.
             if is_git_directory(&dot_git) {
-                return Some((directory, dot_git));
+                return Some(Some((directory, dot_git)));
             }
             continue;
         }
         // A linked worktree's `.git` file names its own directory in the
-        // repository, relative to the worktree when it is not absolute.
+        // repository, relative to the worktree when it is not absolute. Git
+        // stops at one that names no repository.
         let link = fs::read_to_string(&dot_git).ok()?;
-        let target = link.lines().next()?.strip_prefix("gitdir:")?.trim();
-        if target.is_empty() {
-            return None;
-        }
+        let Some(target) = link
+            .trim_end_matches(['\n', '\r'])
+            .strip_prefix("gitdir: ")
+            .filter(|target| !target.is_empty())
+        else {
+            return Some(None);
+        };
         let target = directory.join(target);
-        return is_git_directory(&target).then_some((directory, target));
+        return Some(is_git_directory(&target).then_some((directory, target)));
     }
-    None
+    Some(None)
 }
 
-/// Whether the repository in `git_dir` says it is bare (`core.bare`).
-fn bare_repository(git_dir: &Path) -> bool {
-    let Ok(config) = fs::read_to_string(git_dir.join("config")) else {
-        return false;
-    };
+/// The directory a Git directory shares its objects, refs and config with.
+fn common_directory(git_dir: &Path) -> PathBuf {
+    match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(common) => git_dir.join(common.trim_end_matches(['\n', '\r'])),
+        Err(_) => git_dir.to_owned(),
+    }
+}
+
+/// Whether `directory` is a Git directory by Git's own test: a HEAD, and the
+/// objects and refs of the repository it shares them with.
+fn is_git_directory(directory: &Path) -> bool {
+    let common = common_directory(directory);
+    fs::symlink_metadata(directory.join("HEAD")).is_ok()
+        && common.join("objects").is_dir()
+        && common.join("refs").is_dir()
+}
+
+/// Whether a Git config file includes others (`include` or `includeIf`).
+fn config_includes(config: &str) -> bool {
+    config.lines().any(|line| {
+        line.trim_start().strip_prefix('[').is_some_and(|header| {
+            header
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("include")
+        })
+    })
+}
+
+/// Whether a repository's config says it is bare (`core.bare`).
+fn bare_repository(config: &str) -> bool {
     let mut core = false;
     let mut bare = false;
     for line in config.lines() {
@@ -8965,18 +9011,6 @@ fn config_bool(line: &str, key: &str) -> Option<bool> {
         "false" | "no" | "off" | "0" | "" => Some(false),
         _ => None,
     }
-}
-
-/// Whether `directory` is a Git directory by Git's own test: a HEAD, and the
-/// objects and refs of the repository it shares them with.
-fn is_git_directory(directory: &Path) -> bool {
-    let common = match fs::read_to_string(directory.join("commondir")) {
-        Ok(common) => directory.join(common.trim()),
-        Err(_) => directory.to_owned(),
-    };
-    fs::symlink_metadata(directory.join("HEAD")).is_ok()
-        && common.join("objects").is_dir()
-        && common.join("refs").is_dir()
 }
 
 /// What `git worktree list` says is checked out in the worktree holding the
@@ -10532,6 +10566,53 @@ mod tests {
         );
         assert_eq!(listed(&bare_linked).as_deref(), Some("orphan"));
         assert_eq!(worktree_branch(&bare_linked).as_deref(), Some("orphan"));
+
+        // A bare repository inside a checkout is a repository of its own.
+        let nested_bare = repository.join("nested/bare.git");
+        git(
+            &repository,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "dev",
+                nested_bare.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(listed(&nested_bare), None);
+        assert_eq!(worktree_branch(&nested_bare), None);
+
+        // Config included from elsewhere is read as Git reads it.
+        let included = fixture.root.join("included");
+        let settings = fixture.root.join("bare.cfg");
+        fs::create_dir_all(&included).unwrap();
+        fs::write(&settings, "[core]\n\tbare = true\n").unwrap();
+        git(&included, &["init", "-q", "-b", "main"]);
+        git(
+            &included,
+            &["config", "include.path", settings.to_str().unwrap()],
+        );
+        assert_eq!(listed(&included), None);
+        assert_eq!(worktree_branch(&included), None);
+
+        // A separate Git directory whose name ends in a space.
+        let separate = fixture.root.join("separate");
+        let spaced = fixture.root.join("admin ");
+        fs::create_dir_all(&separate).unwrap();
+        git(
+            &separate,
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                spaced.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(listed(&separate).as_deref(), Some("main"));
+        assert_eq!(worktree_branch(&separate).as_deref(), Some("main"));
 
         // A branch that is itself a symbolic ref names the one Git lists.
         git(
