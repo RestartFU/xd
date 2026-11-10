@@ -124,9 +124,25 @@ impl Ledger {
             .insert(chat_id.to_owned());
     }
 
-    /// A chat started or ended a turn on the account.
-    pub(crate) fn turn(&mut self, provider: &str, account: &str, chat_id: &str, started: bool) {
-        self.turn_at(provider, account, chat_id, started, Instant::now());
+    /// A chat started a turn on the account (`working`), or ended one,
+    /// still `working` when background work of its own goes on.
+    pub(crate) fn turn(&mut self, provider: &str, account: &str, chat_id: &str, working: bool) {
+        self.turn_at(provider, account, chat_id, working, Instant::now());
+    }
+
+    /// Takes in who works on the account now: a chat whose background work
+    /// has ended since its turn did no longer keeps the account busy.
+    fn settle_running(&mut self, provider: &str, account: &str, here: &[String], now: Instant) {
+        if let Some(entry) = self
+            .accounts
+            .get_mut(&(provider.to_owned(), account.to_owned()))
+        {
+            let before = entry.running.len();
+            entry.running.retain(|chat_id| here.contains(chat_id));
+            if before > 0 && entry.running.is_empty() && entry.idle_since.is_none() {
+                entry.idle_since = Some(now);
+            }
+        }
     }
 
     fn turn_at(
@@ -134,7 +150,7 @@ impl Ledger {
         provider: &str,
         account: &str,
         chat_id: &str,
-        started: bool,
+        working: bool,
         now: Instant,
     ) {
         self.note(provider, account, chat_id);
@@ -144,7 +160,7 @@ impl Ledger {
         else {
             return;
         };
-        if started {
+        if working {
             entry.running.insert(chat_id.to_owned());
             if entry
                 .idle_since
@@ -228,10 +244,14 @@ fn by_account(working: Vec<(String, String, String)>) -> Vec<(String, String, St
 
 /// How much of the limit was used between two readings.
 fn rise(last: Reading, now: Reading) -> f64 {
+    // Readings that say when their window resets tell a new window by that
+    // alone, so use that fell within one window, such as after a reset
+    // credit or a correction, is no rise. Without it a clear fall is taken
+    // for a new window.
     let new_window = match (last.resets_at_ms, now.resets_at_ms) {
         (Some(before), Some(after)) => after - before > NEW_WINDOW_MS,
-        _ => false,
-    } || now.percent + 0.5 < last.percent;
+        _ => now.percent + 0.5 < last.percent,
+    };
     if new_window {
         now.percent.max(0.0)
     } else {
@@ -281,13 +301,13 @@ impl QuotaMeter {
         {
             let ledger = ledger.clone();
             let wake = Arc::downgrade(&wake);
-            runtime.set_activity_handler(Box::new(move |chat_id, provider, tag, started| {
+            runtime.set_activity_handler(Box::new(move |chat_id, provider, tag, working| {
                 if let Ok(mut ledger) = ledger.lock() {
                     ledger.turn(
                         provider,
                         crate::accounts::tag_account(tag),
                         chat_id,
-                        started,
+                        working,
                     );
                 }
                 if let Some(wake) = wake.upgrade()
@@ -435,15 +455,8 @@ impl Pass {
                 .filter(|(_, p, a)| *p == provider && *a == account)
                 .map(|(chat_id, _, _)| chat_id.clone())
                 .collect::<Vec<_>>();
-            // Work goes on here, if only background tasks between turns, so
-            // the account has not gone idle whatever the turns say.
-            if !here.is_empty()
-                && let Ok(mut ledger) = self.ledger.lock()
-                && let Some(entry) = ledger
-                    .accounts
-                    .get_mut(&(provider.clone(), account.clone()))
-            {
-                entry.idle_since = None;
+            if let Ok(mut ledger) = self.ledger.lock() {
+                ledger.settle_running(&provider, &account, &here, now);
             }
             let mut involved = sharers.iter().chain(&here).collect::<HashSet<_>>();
             involved.retain(|chat_id| limited(chat_id));
@@ -726,6 +739,18 @@ mod tests {
     }
 
     #[test]
+    fn a_fall_within_one_window_is_no_rise() {
+        let mut ledger = Ledger::default();
+        let now = Instant::now();
+        let a = chats(&["a"]);
+        record_in(&mut ledger, "codex", "default", reading(70.0, 5), &a, now);
+        // Same reset time, less used: a reset credit, not a new window.
+        assert!(record_in(&mut ledger, "codex", "default", reading(50.0, 5), &a, now).is_empty());
+        let shares = record_in(&mut ledger, "codex", "default", reading(52.0, 5), &a, now);
+        assert_eq!(shares, vec![("a".to_owned(), 2.0)]);
+    }
+
+    #[test]
     fn an_idle_gap_between_readings_is_counted_for_nobody() {
         let mut ledger = Ledger::default();
         let now = Instant::now();
@@ -766,6 +791,21 @@ mod tests {
         ledger.turn_at("claude", "default", "a", true, now + IDLE_GAP);
         let shares = record_in(&mut ledger, "claude", "default", reading(29.0, 1), &a, now);
         assert_eq!(shares, vec![("a".to_owned(), 2.0)]);
+        // A turn that ends with background work going on keeps the account
+        // busy until a pass finds that work gone.
+        ledger.turn_at("claude", "default", "a", false, now);
+        ledger.turn_at("claude", "default", "c", true, now);
+        ledger.turn_at("claude", "default", "c", true, now + IDLE_GAP);
+        ledger.settle_running("claude", "default", &chats(&["c"]), now + IDLE_GAP);
+        ledger.turn_at("claude", "default", "a", true, now + IDLE_GAP * 2);
+        let ac = chats(&["a", "c"]);
+        let shares = record_in(&mut ledger, "claude", "default", reading(33.0, 1), &ac, now);
+        assert_eq!(shares, vec![("a".to_owned(), 2.0), ("c".to_owned(), 2.0)]);
+        // Once that work is gone, the account is idle from then on.
+        ledger.turn_at("claude", "default", "a", false, now);
+        ledger.settle_running("claude", "default", &[], now);
+        ledger.turn_at("claude", "default", "a", true, now + IDLE_GAP);
+        assert!(record_in(&mut ledger, "claude", "default", reading(40.0, 1), &a, now).is_empty());
     }
 
     #[test]

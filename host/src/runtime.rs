@@ -105,7 +105,8 @@ pub(crate) type TurnSettledHandler = Box<dyn Fn(SettledTurn) + Send + Sync>;
 /// Hears that a chat's turn started or ended, with its assistant and the
 /// account and login it runs as.
 /// Called with the chat's succession held, so it must only note it, never wait.
-/// The last argument says whether the turn started (or else ended).
+/// The last argument says whether the chat still works: true as a turn starts,
+/// and as it ends while background work of its own goes on.
 pub(crate) type ActivityHandler = Box<dyn Fn(&str, &str, &str, bool) + Send + Sync>;
 
 /// A turn that ended for good: neither stopped nor going on elsewhere.
@@ -676,16 +677,16 @@ impl TurnRuntime {
         chat_id: &str,
         provider: &str,
         account: &str,
-        started: bool,
+        working: bool,
     ) {
-        self.note_activity(chat_id, provider, account, started);
+        self.note_activity(chat_id, provider, account, working);
     }
 
-    fn note_activity(&self, chat_id: &str, provider: &str, account: &str, started: bool) {
+    fn note_activity(&self, chat_id: &str, provider: &str, account: &str, working: bool) {
         if let Ok(handler) = self.inner.on_activity.lock()
             && let Some(handler) = handler.as_ref()
         {
-            handler(chat_id, provider, account, started);
+            handler(chat_id, provider, account, working);
         }
     }
 
@@ -2963,7 +2964,9 @@ impl TurnRuntime {
         {
             active.remove(&turn.chat_id);
         }
-        self.note_activity(&turn.chat_id, &turn.backend, &turn.account, false);
+        // Still working if background agents or shells of its own go on.
+        let background = self.background_tasks(&turn.chat_id) > 0;
+        self.note_activity(&turn.chat_id, &turn.backend, &turn.account, background);
         if let Ok(mut interactions) = self.inner.interactions.lock() {
             let pending = interactions.entry(turn.chat_id.clone()).or_default();
             pending.requests.clear();
