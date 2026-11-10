@@ -32,10 +32,11 @@ const READ_INTERVAL: Duration = Duration::from_millis(50);
 const MIN_READ_GAP: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const MIN_READ_GAP: Duration = Duration::ZERO;
-/// After a reading fails, the account is not tried again for this long, so a
-/// probe that keeps failing is not started for every turn.
+/// After a reading fails, or reads a login no turn there runs as, the account
+/// is not tried again for this long, so a probe that keeps failing is not
+/// started for every turn.
 #[cfg(not(test))]
-const FAILED_READ_GAP: Duration = Duration::from_secs(30);
+const FAILED_READ_GAP: Duration = READ_INTERVAL;
 #[cfg(test)]
 const FAILED_READ_GAP: Duration = Duration::from_millis(10);
 /// A limit whose reset moved later by more than this has started a new window.
@@ -430,7 +431,9 @@ impl Pass {
                     && let Some(entry) = ledger.accounts.get_mut(&key)
                 {
                     entry.last = None;
+                    entry.failed = true;
                 }
+                next = next.min(FAILED_READ_GAP);
                 continue;
             }
             let here_now = working_now
