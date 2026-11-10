@@ -89,6 +89,9 @@ impl Engine {
             return created;
         };
         self.worktree_names.start(child.clone(), new_chat.clone());
+        // Before its turn starts, so a turn that ends at once is not then
+        // shown as running again.
+        self.publish_agent_record(store.open_agent_record(&child, prompt));
         let sent = self.send_message(
             &json!({"op": "send", "chat": child, "text": prompt, "from_parent": true}),
         );
@@ -99,7 +102,6 @@ impl Engine {
         }
         self.events
             .publish(json!({"event": "changed", "chat": child}));
-        self.write_agent_record(&child, "running", None);
         let started = store.agent_origin(&child).ok();
         json!({
             "ok": true,
@@ -312,7 +314,14 @@ impl Engine {
         let Some(store) = self.store.as_ref() else {
             return;
         };
-        match store.write_agent_record(child, status, summary) {
+        self.publish_agent_record(store.write_agent_record(child, status, summary));
+    }
+
+    fn publish_agent_record(
+        &self,
+        written: Result<Option<crate::storage::AgentRecord>, crate::StorageError>,
+    ) {
+        match written {
             Ok(Some(record)) if record.created => self
                 .events
                 .publish(json!({"event": "changed", "chat": record.parent})),
@@ -324,7 +333,7 @@ impl Engine {
                 "text": record.text,
             })),
             Ok(None) => {}
-            Err(error) => eprintln!("xd-host: cannot write the card for agent {child}: {error}"),
+            Err(error) => eprintln!("xd-host: cannot write an agent's card: {error}"),
         }
     }
 }

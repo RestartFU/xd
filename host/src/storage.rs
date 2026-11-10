@@ -3078,6 +3078,27 @@ impl StateStore {
         status: &str,
         summary: Option<&str>,
     ) -> Result<Option<AgentRecord>, StorageError> {
+        self.write_agent_record_with(child, status, summary, None)
+    }
+
+    /// The card for an agent about to start its first turn, whose task is
+    /// `prompt`. Made only if there is none yet: written before the turn
+    /// starts, it can never replace what a finished turn wrote.
+    pub fn open_agent_record(
+        &self,
+        child: &str,
+        prompt: &str,
+    ) -> Result<Option<AgentRecord>, StorageError> {
+        self.write_agent_record_with(child, "running", None, Some(prompt))
+    }
+
+    fn write_agent_record_with(
+        &self,
+        child: &str,
+        status: &str,
+        summary: Option<&str>,
+        opening: Option<&str>,
+    ) -> Result<Option<AgentRecord>, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let Some((parent, record, title, backend, model, created_at, prompt)) = transaction
@@ -3105,6 +3126,20 @@ impl StateStore {
         let Some(parent) = parent else {
             return Ok(None);
         };
+        if opening.is_some()
+            && let Some(id) = record
+            && transaction
+                .query_row(
+                    "SELECT 1 FROM messages WHERE id = ? AND chat_id = ? AND role = 'tool'",
+                    params![id, parent],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+        {
+            return Ok(None);
+        }
+        let prompt = prompt.or_else(|| opening.map(str::to_owned));
         let key = format!("chat:{child}");
         let mut card = json!({
             "key": key,
@@ -13029,6 +13064,22 @@ mod tests {
         assert_eq!(children[0].id, child_id);
         assert_eq!(children[0].title, "Worker");
         assert_eq!(children[0].backend, "codex");
+        // A card opening for a turn about to start never replaces one a
+        // finished turn already wrote.
+        let opened = store
+            .open_agent_record(child_id, "Fix it")
+            .unwrap()
+            .unwrap();
+        assert!(opened.created);
+        assert!(opened.text.contains("\"status\":\"running\""));
+        let done = store
+            .write_agent_record(child_id, "completed", Some("All green."))
+            .unwrap()
+            .unwrap();
+        assert!(!done.created);
+        assert_eq!(done.message_id, opened.message_id);
+        assert_eq!(store.open_agent_record(child_id, "Fix it").unwrap(), None);
+        assert!(store.open_agent_record(parent_id, "x").unwrap().is_none());
         // What a worker said before it was last spoken to is not its reply.
         {
             let database = store.database.lock().unwrap();

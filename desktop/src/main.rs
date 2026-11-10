@@ -11830,9 +11830,6 @@ impl XdDesktop {
         cx.notify();
     }
 
-    /// Takes the user to the window and, if it is still there, the chat that a
-    /// clicked notification was about.
-    #[cfg(target_os = "linux")]
     /// Opens one of this host's chats by id, as the sidebar would.
     fn open_agent_chat(&mut self, chat_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some((project_id, agent)) = self
@@ -11847,6 +11844,9 @@ impl XdDesktop {
         self.open_minimal_session(project_id, chat_id.to_owned(), agent, window, cx);
     }
 
+    /// Takes the user to the window and, if it is still there, the chat that a
+    /// clicked notification was about.
+    #[cfg(target_os = "linux")]
     fn open_clicked_notification(
         &mut self,
         activation: notifications::Activation<TurnNotificationTarget>,
