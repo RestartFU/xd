@@ -193,6 +193,35 @@ class ProjectsScreenshotTest {
         check(!shows("Resume chats in web") && shows("Resume chats in shop"))
     }
 
+    @Test fun workersNestUnderTheSessionThatStartedThem() = workers("workers-dark", MinimalThemePreset.DARK)
+
+    @Test fun workersLight() = workers("workers-light", MinimalThemePreset.LIGHT)
+
+    /**
+     * Two sessions Reconnect backoff's agent started list right below it,
+     * indented, though the host lists them first as the newest; Usage page,
+     * which nobody started, stays level with it.
+     */
+    private fun workers(name: String, theme: MinimalThemePreset) {
+        withWorkers = true
+        try {
+            shoot(name, theme) {
+                val lead = bounds { hasText("Reconnect backoff") }
+                val first = bounds { hasText("Retry jitter") }
+                val second = bounds { hasText("Backoff tests") }
+                val other = bounds { hasText("Usage page") }
+                check(lead.top < first.top && first.top < second.top && second.top < other.top) {
+                    "rows run $lead, $first, $second, $other"
+                }
+                check(first.left > lead.left && second.left == first.left && other.left == lead.left) {
+                    "indents are ${lead.left}, ${first.left}, ${second.left}, ${other.left}"
+                }
+            }
+        } finally {
+            withWorkers = false
+        }
+    }
+
     @Test fun anOlderHostHasNoPauseButton() = shoot("no-pause-dark", MinimalThemePreset.DARK, pauseAll = false) {
         check(shows("Projects") && !shows("Pause chats in web") && !shows("Resume chats in web"))
     }
@@ -510,7 +539,7 @@ class ProjectsScreenshotTest {
         override fun close() = Unit
 
         private fun reply(op: String?, owner: String?, folder: String?): String = when (op) {
-            "tree" -> (if (longTree) TREE_LONG else TREE)
+            "tree" -> (if (longTree) TREE_LONG else if (withWorkers) TREE_WORKERS else TREE)
                 .let { paused(it) }
                 .let { if (canPauseAll) it else it.replace("\"pause_all\":true,\"pause_folders\":true,", "") }
             "pause-all" -> { pausedFolders = pausedFolders + folder.orEmpty(); """{"ok":true,"paused":[]}""" }
@@ -524,6 +553,26 @@ class ProjectsScreenshotTest {
         /** Every request the app sent, in order. */
         /** Whether the scripted host answers with [TREE_LONG]. */
         @Volatile var longTree = false
+
+        /** Whether the scripted host answers with [TREE_WORKERS]. */
+        @Volatile var withWorkers = false
+
+        /**
+         * [TREE] where Reconnect backoff's agent started two sessions of its
+         * own, which the host lists first, as the newest.
+         */
+        val TREE_WORKERS by lazy {
+            val workers = listOf("w1" to "Retry jitter", "w2" to "Backoff tests")
+            val sessions = workers.joinToString(",") { (id, title) ->
+                """{"id":"$id","folder":"xd","title":"$title","chats":["$id-c"],"terminal_chat":"session:$id","parent":"s1"}"""
+            }
+            val chats = workers.joinToString(",") { (id, title) ->
+                """{"id":"$id-c","folder":"xd","title":"$title","backend":"codex","working":false,"session":"$id","parent":"c1"}"""
+            }
+            TREE.replace("\"sessions\":[", "\"sessions\":[$sessions,")
+                .replace("\"chats\":[{", "\"chats\":[$chats,{")
+                .replace("{\"ok\":true,", "{\"ok\":true,\"child_chats\":true,")
+        }
 
         /** The projects the scripted host has paused: web's turn and shop's task stop with theirs. */
         @Volatile var pausedFolders = emptySet<String>()

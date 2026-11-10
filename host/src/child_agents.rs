@@ -8,7 +8,7 @@
 //! Each finished turn is reported back to the parent chat when asked to.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
 };
 
@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Engine, error_reply, required_string,
+    runtime::SettledTurn,
     storage::{AgentOrigin, ChildAgent},
 };
 
@@ -154,6 +155,11 @@ impl Engine {
         if text.is_empty() {
             return error_reply("Give the message some text.");
         }
+        // Waking an agent that finished counts against the agents at work.
+        let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+        if let Err(error) = self.room_for_another(request, &child) {
+            return error_reply(error);
+        }
         let reply = self.send_message(&json!({"op": "send", "chat": child.id, "text": text}));
         if reply["ok"] == true {
             self.events
@@ -175,6 +181,33 @@ impl Engine {
         reply
     }
 
+    /// Whether `child` may start a turn without going past [`MAX_WORKING`]:
+    /// always when it is already at work, since its message only queues.
+    fn room_for_another(&self, request: &Value, child: &ChildAgent) -> Result<(), String> {
+        let parent = required_string(request, "chat", "That needs a chat id.")?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or("Rust host state storage is not configured.")?;
+        let children = store
+            .child_agents(parent)
+            .map_err(|error| error.to_string())?;
+        if children
+            .iter()
+            .any(|other| other.id == child.id && other.working)
+        {
+            return Ok(());
+        }
+        let working = children.iter().filter(|other| other.working).count();
+        if working >= MAX_WORKING {
+            return Err(format!(
+                "{working} agents are already at work for this chat, the most it may have at \
+                 once. Wait for one to finish, or stop one."
+            ));
+        }
+        Ok(())
+    }
+
     /// The agent `request` names, when `request`'s chat started it.
     fn own_agent(&self, request: &Value) -> Result<ChildAgent, String> {
         let parent = required_string(request, "chat", "That needs a chat id.")?;
@@ -192,51 +225,57 @@ impl Engine {
     }
 
     /// Reports each finished turn of an agent that asked for it back to the
-    /// chat that started it. A paused parent gets the report in its queue, so
-    /// it does not wake for it.
+    /// chat that started it, one at a time and in the order they ended. A
+    /// paused parent gets the report in its queue, so it does not wake for it.
     pub fn start_reporting_agents(self: &Arc<Self>) {
         let Some(runtime) = self.runtime.as_ref() else {
             return;
         };
-        // Weak, since the engine owns the runtime that holds this.
+        let (sender, receiver) = mpsc::channel::<SettledTurn>();
+        // Weak, since the engine owns the runtime that holds the sender.
         let engine = Arc::downgrade(self);
-        runtime.set_turn_settled_handler(Box::new(move |chat_id| {
-            let engine = engine.clone();
-            // Off the turn's thread: sending takes the parent's own locks.
-            let _ = thread::Builder::new()
-                .name("xd-agent-report".into())
-                .spawn(move || {
-                    if let Some(engine) = engine.upgrade() {
-                        engine.report_to_parent(&chat_id);
-                    }
-                });
+        // Off the turns' threads: sending takes the parent's own locks.
+        let spawned = thread::Builder::new()
+            .name("xd-agent-reports".into())
+            .spawn(move || {
+                for settled in receiver {
+                    let Some(engine) = engine.upgrade() else {
+                        return;
+                    };
+                    engine.report_to_parent(&settled);
+                }
+            });
+        if spawned.is_err() {
+            return;
+        }
+        let sender = Mutex::new(sender);
+        runtime.set_turn_settled_handler(Box::new(move |settled| {
+            if let Ok(sender) = sender.lock() {
+                let _ = sender.send(settled);
+            }
         }));
     }
 
-    fn report_to_parent(&self, child: &str) {
+    fn report_to_parent(&self, settled: &SettledTurn) {
         let Some(store) = self.store.as_ref() else {
             return;
         };
+        let child = settled.chat_id.as_str();
         let Ok(Some((parent, true))) = store.chat_parent(child) else {
             return;
         };
-        let Some(agent) = store
+        let title = store
             .child_agents(&parent)
             .ok()
             .and_then(|children| children.into_iter().find(|agent| agent.id == child))
-        else {
-            return;
-        };
-        // A queued message already started its next turn; that one reports.
-        if agent.working || agent.paused {
-            return;
-        }
-        let text = report(&agent);
-        let reply = if store.chat_is_paused(&parent).unwrap_or(false) {
-            self.event_mutation(|store| store.queue(&json!({"chat": parent, "text": text})))
-        } else {
-            self.send_message(&json!({"op": "send", "chat": parent, "text": text}))
-        };
+            .map(|agent| agent.title)
+            .unwrap_or_default();
+        let text = report(child, &title, settled);
+        // Decided under the parent's own gate, as one with any pause: a paused
+        // parent keeps it queued, a busy one queues it, an idle one takes it.
+        let reply = self.send_message(
+            &json!({"op": "send", "chat": parent, "text": text, "keep_paused": true}),
+        );
         if reply["ok"] == true {
             self.events
                 .publish(json!({"event": "changed", "chat": parent}));
@@ -331,27 +370,27 @@ fn describe(agent: &ChildAgent, limit: usize) -> Value {
     described
 }
 
-/// The message a parent chat gets when one of its agents finishes a turn.
-fn report(agent: &ChildAgent) -> String {
-    let name = if agent.title.trim().is_empty() {
+/// The message a parent chat gets when its agent `id`, called `title`, ends
+/// a turn the way `settled` says.
+fn report(id: &str, title: &str, settled: &SettledTurn) -> String {
+    let name = if title.trim().is_empty() {
         "An agent".to_owned()
     } else {
-        format!("Agent \"{}\"", agent.title.trim())
+        format!("Agent \"{}\"", title.trim())
     };
-    let mut text = format!(
-        "[xd] {name} ({}) is {}.",
-        agent.id,
-        match status(agent) {
-            "stopped with an error" => "stopped with an error",
-            "waiting for an answer" => "waiting for an answer",
-            _ => "done with its turn",
-        }
-    );
-    if let Some(reply) = &agent.reply {
+    let ending = if settled.error.is_some() {
+        "stopped with an error"
+    } else if settled.waiting {
+        "waiting for an answer"
+    } else {
+        "done with its turn"
+    };
+    let mut text = format!("[xd] {name} ({id}) is {ending}.");
+    if !settled.reply.is_empty() {
         text.push_str("\n\nIts reply:\n\n");
-        text.push_str(&clip(reply, REPORT_CHARS));
+        text.push_str(&clip_start(&settled.reply, REPORT_CHARS));
     }
-    if let Some(error) = &agent.error {
+    if let Some(error) = &settled.error {
         text.push_str("\n\nThe error:\n\n");
         text.push_str(&clip(error, REPORT_CHARS));
     }
@@ -360,6 +399,21 @@ fn report(agent: &ChildAgent) -> String {
          list_agents.",
     );
     text
+}
+
+/// The end of `text`, where an agent's final answer is, within `limit`
+/// characters.
+fn clip_start(text: &str, limit: usize) -> String {
+    let text = text.trim();
+    let count = text.chars().count();
+    if count <= limit {
+        return text.to_owned();
+    }
+    let start = text
+        .char_indices()
+        .nth(count - limit)
+        .map_or(0, |(start, _)| start);
+    format!("…{}", text[start..].trim_start())
 }
 
 fn clip(text: &str, limit: usize) -> String {
@@ -430,25 +484,41 @@ mod tests {
 
     #[test]
     fn a_report_says_how_the_turn_ended_and_what_the_agent_said() {
+        let settled = SettledTurn {
+            chat_id: "child".into(),
+            reply: "All green.".into(),
+            error: None,
+            waiting: false,
+        };
         assert_eq!(
-            report(&agent()),
+            report("child", "Fix the tests", &settled),
             "[xd] Agent \"Fix the tests\" (child) is done with its turn.\n\nIts reply:\n\n\
              All green.\n\nAnswer it with message_agent if it needs more, or check on every \
              agent with list_agents."
         );
-        let failed = ChildAgent {
-            title: String::new(),
-            reply: None,
+        let failed = SettledTurn {
+            reply: String::new(),
             error: Some("Usage limit".into()),
-            ..agent()
+            ..settled.clone()
         };
-        assert!(report(&failed).starts_with("[xd] An agent (child) is stopped with an error."));
-        assert!(report(&failed).contains("The error:\n\nUsage limit"));
+        assert!(
+            report("child", " ", &failed)
+                .starts_with("[xd] An agent (child) is stopped with an error.")
+        );
+        assert!(!report("child", "", &failed).contains("Its reply"));
+        assert!(report("child", "", &failed).contains("The error:\n\nUsage limit"));
+        let asking = SettledTurn {
+            waiting: true,
+            ..settled
+        };
+        assert!(report("child", "", &asking).contains("is waiting for an answer."));
     }
 
     #[test]
     fn long_replies_are_clipped_on_a_character() {
         assert_eq!(clip("ééé", 2), "éé…");
+        assert_eq!(clip_start("abc déf", 3), "…déf");
+        assert_eq!(clip_start(" short ", 10), "short");
         assert_eq!(clip("  short ", 10), "short");
         let described = describe(
             &ChildAgent {

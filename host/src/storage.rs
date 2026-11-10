@@ -1976,7 +1976,11 @@ impl StateStore {
             }
             None => {}
         }
-        if working {
+        // The host's own messages, such as an agent's report to the chat
+        // that started it, wait in a paused chat's queue instead of resuming it.
+        let keep_paused =
+            paused && request.get("keep_paused").and_then(Value::as_bool) == Some(true);
+        if working || keep_paused {
             let stored = transaction.query_row(
                 "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
                 [chat_id],
@@ -1988,9 +1992,10 @@ impl StateStore {
             // Writing to a chat still stopping for a pause picks it back up,
             // so the message runs once the stopped turn ends.
             transaction.execute(
-                "UPDATE chats SET queued = ?, paused = 0, updated_at = ? WHERE id = ?",
+                "UPDATE chats SET queued = ?, paused = ? AND paused, updated_at = ? WHERE id = ?",
                 params![
                     serde_json::to_string(&queue).unwrap(),
+                    keep_paused,
                     now_seconds(),
                     chat_id
                 ],
@@ -14228,6 +14233,18 @@ mod tests {
         assert!(store.prepare_continuation(&go_on, latest).is_err());
         assert!(!store.begin_background_turn("chat").unwrap());
         assert!(store.chat_is_paused("chat").unwrap());
+        // An agent's report waits in the queue of a paused chat, which stays
+        // paused, both idle and still stopping.
+        let report = json!({"chat": "chat", "text": "[xd] report", "keep_paused": true});
+        assert!(matches!(
+            store.prepare_send(&report).unwrap(),
+            SendDisposition::Queued { .. }
+        ));
+        assert!(store.chat_is_paused("chat").unwrap());
+        assert_eq!(
+            store.chat("chat").unwrap()["queue"],
+            json!(["queued", "[xd] report"])
+        );
 
         // Resuming starts a turn, and any turn picks the chat back up.
         store

@@ -95,8 +95,20 @@ struct RuntimeInner {
 /// message, which must still be its newest for the continuation to go ahead.
 pub(crate) type AccountSwitchHandler = Box<dyn Fn(String, i64) + Send + Sync>;
 
-/// Hears that a chat's turn ended for good. Takes the chat.
-pub(crate) type TurnSettledHandler = Box<dyn Fn(String) + Send + Sync>;
+/// Hears that a chat's turn ended for good, and how.
+pub(crate) type TurnSettledHandler = Box<dyn Fn(SettledTurn) + Send + Sync>;
+
+/// A turn that ended for good: neither stopped nor going on elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SettledTurn {
+    pub(crate) chat_id: String,
+    /// Everything the agent said in the turn, its final answer last.
+    pub(crate) reply: String,
+    /// What it failed with, when it failed.
+    pub(crate) error: Option<String>,
+    /// It ended on a question for whoever reads it.
+    pub(crate) waiting: bool,
+}
 
 /// Marks a `tool` row that says a chat moved to another account. A client that
 /// does not know it shows the sentence after it as a small tool row.
@@ -2867,6 +2879,14 @@ impl TurnRuntime {
         // A chat that goes on elsewhere was not stopped, so the limit is no
         // error to show: the notice of the move says what happened.
         let error = error.filter(|_| !matches!(limited, Some((AfterLimit::Switches(_), _))));
+        // How this turn ended, kept for whoever hears of it: by the time they
+        // read the chat, its next turn may already have begun.
+        let settled = SettledTurn {
+            chat_id: chat_id.clone(),
+            reply: assistant_text.trim().to_owned(),
+            error: error.clone().filter(|_| !success),
+            waiting: asked.is_some(),
+        };
         self.finish(
             turn,
             turn_id,
@@ -2888,7 +2908,7 @@ impl TurnRuntime {
             && let Ok(handler) = self.inner.on_turn_settled.lock()
             && let Some(handler) = handler.as_ref()
         {
-            handler(chat_id.clone());
+            handler(settled);
         }
         if keeps_process {
             self.pump_idle(&chat_id);
