@@ -51,7 +51,9 @@ This matters because the host answers requests concurrently. The operations
 that must stay responsive — `cancel`, `pause-all`, `voice-cancel`,
 `agent-auth-cancel`, and `ping` — bypass the serialized command path entirely. Without ids, a `cancel`
 answered promptly by the host would still sit behind a slow `diff-read` in
-the reply stream.
+the reply stream. A `new-chat` that carries an id is also set up beside the
+connection's other requests, a few at a time, since making its worktree can
+take a while; its reply can come after replies to requests sent later.
 
 A host that does not echo the id answers strictly in order. A client
 supporting that compatibility path must keep a FIFO slot for every request

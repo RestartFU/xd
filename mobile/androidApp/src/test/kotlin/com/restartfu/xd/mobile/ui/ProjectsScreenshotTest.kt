@@ -18,17 +18,17 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.performTextReplacement
-import androidx.compose.ui.test.SemanticsMatcher
-import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.AndroidComposeTestRule
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.credentials.CredentialStore
@@ -38,6 +38,7 @@ import com.restartfu.xd.credentials.SshHostKey
 import com.restartfu.xd.credentials.StoredCredentials
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
+import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.net.PlatformSocket
 import com.restartfu.xd.net.PlatformSocketListener
@@ -53,9 +54,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.junit.Rule
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
@@ -194,6 +195,133 @@ class ProjectsScreenshotTest {
         check(sent("resume-all") == 1) { "resume-all was sent ${sent("resume-all")} times" }
         check(folderOf("resume-all") == "web") { "resume-all went to ${folderOf("resume-all")}" }
         check(!shows("Resume chats in web") && shows("Resume chats in shop"))
+    }
+
+    @Test fun sessionsStartSideBySide() = shoot("starting-dark", MinimalThemePreset.DARK) {
+        holdNewChats = true
+        val sentBefore = sent("new-chat")
+        // A second session starts while the host still sets up the first.
+        model.createDirectSession("xd", "Fix the footer", DirectAgent.CLAUDE)
+        model.createDirectSession("xd", "Tidy the header", DirectAgent.CODEX)
+        awaitSent("new-chat", sentBefore + 2)
+        awaitShown("Tidy the header")
+        check(shows("Fix the footer") && shows("Tidy the header"))
+        val starting = this@ProjectsScreenshotTest.compose
+            .onAllNodes(hasText("Starting…"), useUnmergedTree = true).fetchSemanticsNodes().size
+        check(starting == 2) { "$starting rows say Starting…" }
+        check(model.startingSessions.value.map { it.title } == listOf("Fix the footer", "Tidy the header"))
+        out?.let { dir ->
+            dir.mkdirs()
+            File(dir, "starting-held-dark.png").outputStream().use { capture().compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        // Going somewhere else meanwhile: the made ones do not take its place.
+        click("Terminal")
+        releaseNewChats()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (model.startingSessions.value.isNotEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+        check(model.startingSessions.value.isEmpty()) { "still starting: ${model.startingSessions.value}" }
+        check(model.createdDirectSession.value == null) { "opened ${model.createdDirectSession.value}" }
+        check(shows("Terminal"))
+        click("Projects")
+        check(!shows("Starting…"))
+    }
+
+    @Test fun onlyTheNewestStartedSessionOpens() = shoot("starting-newest-dark", MinimalThemePreset.DARK) {
+        holdNewChats = true
+        val sentBefore = sent("new-chat")
+        model.createDirectSession("xd", "Fix the footer", DirectAgent.CLAUDE)
+        model.createDirectSession("xd", "Tidy the header", DirectAgent.CODEX)
+        awaitSent("new-chat", sentBefore + 2)
+        releaseNewChats()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (model.startingSessions.value.isNotEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+        // The scripted tree never lists the made chats, so the one to open
+        // stays unconsumed: it is the second, whichever was made first.
+        check(model.createdDirectSession.value?.title == "Tidy the header") {
+            "opened ${model.createdDirectSession.value}"
+        }
+    }
+
+    @Test fun aRefusedSessionGetsItsFormBack() = shoot("starting-refused-dark", MinimalThemePreset.DARK) {
+        holdNewChats = true
+        val sentBefore = sent("new-chat")
+        val drafts = this@ProjectsScreenshotTest.compose.activity.getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
+        drafts.edit().putString("xd/new", "{\"title\":\"Fix the footer (refused)\"}").commit()
+        model.createDirectSession("xd", "Fix the footer (refused)", DirectAgent.CLAUDE)
+        // A second form, sent while the first is still being set up.
+        drafts.edit().putString("xd/new", "{\"title\":\"Tidy the header\"}").commit()
+        model.createDirectSession("xd", "Tidy the header", DirectAgent.CODEX)
+        awaitSent("new-chat", sentBefore + 2)
+        // The second is made first, then the first is refused.
+        releaseNewChatsNewestFirst()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (model.startingSessions.value.isNotEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+        check(model.startingSessions.value.isEmpty()) { "still starting: ${model.startingSessions.value}" }
+        val draft = drafts.getString("xd/new", null)
+        check(draft?.contains("Fix the footer (refused)") == true) { "draft is $draft" }
+        check(model.error.value?.contains("Fix the footer (refused)") == true) { "error is ${model.error.value}" }
+    }
+
+    @Test fun openingAnotherFormKeepsAStartingSessionFromOpening() = shoot("starting-form-dark", MinimalThemePreset.DARK) {
+        holdNewChats = true
+        val sentBefore = sent("new-chat")
+        model.createDirectSession("xd", "Fix the footer", DirectAgent.CLAUDE)
+        awaitSent("new-chat", sentBefore + 1)
+        // Its form never lets Compose go idle, so nothing waits on the screen after this.
+        click("New session in web")
+        releaseNewChats()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (model.startingSessions.value.isNotEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+        check(model.startingSessions.value.isEmpty()) { "still starting: ${model.startingSessions.value}" }
+        check(model.createdDirectSession.value == null) { "opened ${model.createdDirectSession.value}" }
+    }
+
+    @Test fun anIdenticalFormSentAgainKeepsItsDraftWhenRefused() = shoot("starting-identical-dark", MinimalThemePreset.DARK) {
+        holdNewChats = true
+        val sentBefore = sent("new-chat")
+        val drafts = this@ProjectsScreenshotTest.compose.activity.getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
+        val form = "{\"title\":\"Fix the footer\"}"
+        drafts.edit().putString("xd/new", form).commit()
+        // The host refuses the second.
+        refuseNewChat = newChatsAsked.get() + 2
+        model.createDirectSession("xd", "Fix the footer", DirectAgent.CLAUDE)
+        awaitSent("new-chat", sentBefore + 1)
+        // The same form again.
+        drafts.edit().putString("xd/new", form).commit()
+        model.createDirectSession("xd", "Fix the footer", DirectAgent.CLAUDE)
+        awaitSent("new-chat", sentBefore + 2)
+        // The second is refused first, then the first is made.
+        releaseNewChatsNewestFirst()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (model.startingSessions.value.isNotEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+        check(model.startingSessions.value.isEmpty()) { "still starting: ${model.startingSessions.value}" }
+        val draft = drafts.getString("xd/new", null)
+        check(draft?.contains("Fix the footer") == true) { "draft is $draft" }
+    }
+
+    /** Waits until the app has sent [count] [op] requests. */
+    private fun Screen.awaitSent(op: String, count: Int) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (sent(op) < count && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+        check(sent(op) >= count) { "$op was sent ${sent(op)} times" }
     }
 
     @Test fun workersNestUnderTheSessionThatStartedThem() = workers("workers-dark", MinimalThemePreset.DARK)
@@ -390,6 +518,9 @@ class ProjectsScreenshotTest {
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
 
+    /** The app's view model, for steps that start what a form would. */
+    private lateinit var model: MainViewModel
+
     /** Opens the page, lets [steps] act on it, and captures the result. */
     private fun shoot(
         name: String,
@@ -400,9 +531,12 @@ class ProjectsScreenshotTest {
     ) {
         pausedFolders = if (paused) setOf("web", "shop") else emptySet()
         canPauseAll = pauseAll
+        holdNewChats = false
+        HELD.clear()
+        refuseNewChat = 0
         val activity = compose.activity
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val model = MainViewModel(activity.application, XdClient({ ScriptedSocket() }, NoCredentials, scope))
+        model = MainViewModel(activity.application, XdClient({ ScriptedSocket() }, NoCredentials, scope))
         val connected = runBlocking { model.client.connect(connection) }
         check(connected is ConnectResult.Success) { "Could not reach the scripted host: $connected" }
         val settings = MobileSettings(activity)
@@ -588,15 +722,19 @@ class ProjectsScreenshotTest {
                     request["owner"]?.jsonPrimitive?.content,
                     request["folder"]?.jsonPrimitive?.content,
                     request["chat"]?.jsonPrimitive?.content,
+                    request["title"]?.jsonPrimitive?.content,
                 )
                     .removeSuffix("}") + (if (id != null) ""","_xd_request":$id}""" else "}")
-                Thread { Thread.sleep(5); listener?.onBytes((body + "\n").encodeToByteArray()) }.start()
+                val answer: () -> Unit = { listener?.onBytes((body + "\n").encodeToByteArray()) }
+                // Held as a slow worktree would hold it, until the test lets it go.
+                if (op == "new-chat" && holdNewChats) synchronized(HELD) { HELD.add(answer) }
+                else Thread { Thread.sleep(5); answer() }.start()
             }
         }
 
         override fun close() = Unit
 
-        private fun reply(op: String?, owner: String?, folder: String?, chat: String?): String = when (op) {
+        private fun reply(op: String?, owner: String?, folder: String?, chat: String?, newChatTitle: String? = null): String = when (op) {
             "tree" -> (if (longTree) TREE_LONG else if (withWorkers) TREE_WORKERS else TREE)
                 .let { if (workerChats) it.replace(WORKER_IDLE, WORKER_WORKING) else it }
                 .let { paused(it) }
@@ -625,6 +763,8 @@ class ProjectsScreenshotTest {
             "pause-all" -> { pausedFolders = pausedFolders + folder.orEmpty(); """{"ok":true,"paused":[]}""" }
             "resume-all" -> { pausedFolders = pausedFolders - folder.orEmpty(); """{"ok":true,"resumed":[]}""" }
             "owner-icon" -> """{"ok":true,"owner":"$owner","mime":"image/png","data":"${avatar(owner.orEmpty())}"}"""
+            "new-chat" -> if (newChatTitle?.contains("(refused)") == true || newChatsAsked.incrementAndGet() == refuseNewChat) """{"ok":false,"error":"No such branch."}"""
+                else """{"ok":true,"id":"made-${madeChats.incrementAndGet()}"}"""
             else -> """{"ok":true}"""
         }
     }
@@ -675,6 +815,31 @@ class ProjectsScreenshotTest {
 
         /** Whether the scripted host says it can pause every chat. */
         @Volatile var canPauseAll = true
+
+        /** Whether the scripted host holds new chats' answers until [releaseNewChats]. */
+        @Volatile var holdNewChats = false
+
+        /** The answers held back. */
+        val HELD = mutableListOf<() -> Unit>()
+
+        val madeChats = java.util.concurrent.atomic.AtomicInteger()
+
+        /** New chats asked for so far, and which of them (counting from 1) to refuse. */
+        val newChatsAsked = java.util.concurrent.atomic.AtomicInteger()
+        @Volatile var refuseNewChat = 0
+
+        fun releaseNewChats() {
+            holdNewChats = false
+            val held = synchronized(HELD) { HELD.toList().also { HELD.clear() } }
+            held.forEach { answer -> Thread { answer() }.start() }
+        }
+
+        /** Answers the held new chats one by one, the last asked first. */
+        fun releaseNewChatsNewestFirst() {
+            holdNewChats = false
+            val held = synchronized(HELD) { HELD.toList().also { HELD.clear() } }
+            Thread { held.reversed().forEach { answer -> answer(); Thread.sleep(300) } }.start()
+        }
 
         fun paused(tree: String): String = tree
             .let {

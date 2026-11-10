@@ -94,12 +94,27 @@ data class OpenedMessage(
     val draft: String = text,
 )
 
+/**
+ * A session or chat sent to the host and not made yet. It shows under its
+ * project meanwhile, and others can start beside it.
+ */
+data class StartingSession(
+    val id: Long,
+    val projectId: String,
+    /** The session a chat joins, or null for a new session. */
+    val sessionId: String?,
+    val title: String,
+    val agent: DirectAgent,
+)
+
 data class CreatedDirectSession(
     val projectId: String,
     val chatId: String,
     val agent: DirectAgent,
     val title: String,
     val sessionId: String? = null,
+    /** Where the app was when it was asked for: it opens only if still there. */
+    val place: Any? = null,
 )
 
 data class PendingHostKeyConfirmation(
@@ -121,7 +136,16 @@ class MainViewModel @JvmOverloads constructor(
     private var shortcutOpenings = 0L
     private var privateKeyBytes: ByteArray? = null
     private val _forgetting = MutableStateFlow(false)
-    private val _creatingChat = MutableStateFlow(false)
+    private val _startingSessions = MutableStateFlow<List<StartingSession>>(emptyList())
+    private var startingIds = 0L
+    /** Starting sessions to open once made: leaving for another place forgets them. */
+    private val openWhenMade = mutableSetOf<Long>()
+
+    /**
+     * Where the app is (its page, session and tabs), as the screen last drew
+     * it. A session made after the reader went elsewhere is not opened.
+     */
+    var place: Any? = null
     private val _creatingWorkspace = MutableStateFlow(false)
     private val _createdDirectSession = MutableStateFlow<CreatedDirectSession?>(null)
     private val _deletingChat = MutableStateFlow(false)
@@ -135,6 +159,7 @@ class MainViewModel @JvmOverloads constructor(
     val privateKeyName: StateFlow<String?> = _privateKeyName.asStateFlow()
     val createdDirectSession: StateFlow<CreatedDirectSession?> =
         _createdDirectSession.asStateFlow()
+    val startingSessions: StateFlow<List<StartingSession>> = _startingSessions.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val creatingWorkspace: StateFlow<Boolean> = _creatingWorkspace.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
@@ -604,9 +629,24 @@ class MainViewModel @JvmOverloads constructor(
         access: String? = null,
         plan: Boolean? = null,
     ) {
-        if (_creatingChat.value) return
-        _creatingChat.value = true
         _error.value = null
+        val named = title.takeIf(String::isNotBlank) ?: if (sessionId == null) "New Session" else "New chat"
+        val starting = StartingSession(++startingIds, folderId, sessionId, named, agent)
+        _startingSessions.update { it + starting }
+        // Only the newest opens when made: one started earlier and made
+        // later must not take the reader from it.
+        openWhenMade.clear()
+        _createdDirectSession.value = null
+        openWhenMade += starting.id
+        val drafts = getApplication<Application>().getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
+        val draftKey = "$folderId/${sessionId ?: "new"}"
+        // The form as it was sent, marked as this attempt's, so an identical
+        // form sent again is not taken for it. A draft written since stays.
+        val sentDraft = drafts.getString(draftKey, null)?.let { saved ->
+            runCatching { org.json.JSONObject(saved).put("attempt", starting.id).toString() }.getOrNull()
+        }
+        if (sentDraft != null) drafts.edit().putString(draftKey, sentDraft).apply()
+        val place = place
         viewModelScope.launch {
             try {
                 val chatId = client.createChat(
@@ -618,23 +658,34 @@ class MainViewModel @JvmOverloads constructor(
                     effort = effort, access = access, plan = plan,
                     startFromRemote = startFromRemote,
                 )
-                getApplication<Application>().getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
-                    .edit().remove("$folderId/${sessionId ?: "new"}").apply()
-                _createdDirectSession.value = CreatedDirectSession(
-                    folderId,
-                    chatId,
-                    agent,
-                    title.takeIf(String::isNotBlank) ?: if (sessionId == null) "New Session" else "New chat",
-                    sessionId,
-                )
+                if (drafts.getString(draftKey, null) == sentDraft) drafts.edit().remove(draftKey).apply()
+                if (openWhenMade.remove(starting.id)) {
+                    _createdDirectSession.value = CreatedDirectSession(folderId, chatId, agent, named, sessionId, place)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not create a session"
+                // The form comes back for another try, unless a newer one
+                // has been written there since; the message says which failed.
+                if (sentDraft != null && drafts.getString(draftKey, null) == null) {
+                    drafts.edit().putString(draftKey, sentDraft).apply()
+                }
+                _error.value = "Could not create “$named”: ${error.message ?: "the host refused it."}"
             } finally {
-                _creatingChat.value = false
+                openWhenMade -= starting.id
+                _startingSessions.update { it - starting }
             }
         }
+    }
+
+    /**
+     * The reader went somewhere else: sessions still starting are not opened
+     * when made, and show up in their projects instead.
+     */
+    fun stopOpeningStartingSessions() {
+        openWhenMade.clear()
+        // Made already but not shown yet: it stays in its project instead.
+        _createdDirectSession.value = null
     }
 
     fun consumeCreatedDirectSession(session: CreatedDirectSession) {

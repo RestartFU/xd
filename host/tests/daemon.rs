@@ -1690,3 +1690,117 @@ fn shell_panes_are_shared_and_outlive_their_client() {
     let reused = second.call(json!({"op":"terminal-open","chat":"global:daemon-test","columns":80,"rows":24,"reuse":true}));
     assert_eq!(reused["id"], id);
 }
+
+#[test]
+fn a_new_worktree_being_made_does_not_hold_up_the_clients_other_requests() {
+    let daemon = Daemon::start();
+    let repo = daemon.root.join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(["-c", "user.name=xd", "-c", "user.email=xd@example.com"])
+            .args(args)
+            .current_dir(&repo)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(repo.join("README.md"), "hello\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-q", "-m", "first"]);
+    // Checking out the new worktree waits until the test lets it go.
+    let release = daemon.root.join("release-checkout");
+    let hook = repo.join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.05; done\n",
+            release.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Generous timeouts: on a loaded machine making six worktrees, even
+    // once let go, can take a while. The hooks hold every checkout until
+    // released, so a tree answered meanwhile was not waiting behind them.
+    let patient = Duration::from_secs(120);
+    let mut client = daemon.client();
+    client
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(patient))
+        .unwrap();
+    let folder = client.call(json!({"op":"new-folder", "name":"Repo", "repo":repo}));
+    assert_eq!(folder["ok"], true, "{folder}");
+    // More than are set up at once: the rest wait in their own line.
+    let creating = (9_000..9_006).collect::<Vec<u64>>();
+    for id in &creating {
+        writeln!(
+            client.writer,
+            "{}",
+            json!({"op":"new-chat", "folder":folder["id"], "backend":"codex",
+                "worktree":{"kind":"new"}, "_xd_request":id})
+        )
+        .unwrap();
+    }
+    client.writer.flush().unwrap();
+
+    // The tree comes back while the worktrees are still being checked out,
+    // rather than this read timing out.
+    client
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let tree = client.call(json!({"op":"tree"}));
+    assert_eq!(tree["ok"], true, "{tree}");
+    assert!(!release.exists());
+
+    fs::write(&release, "").unwrap();
+    client
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(patient))
+        .unwrap();
+    let mut made = Vec::new();
+    while made.len() < creating.len() {
+        let frame = client.frame();
+        if frame.get("_xd_request").is_some() {
+            assert_eq!(frame["ok"], true, "{frame}");
+            made.push(frame["id"].as_str().unwrap().to_owned());
+        }
+    }
+    let tree = client.call(json!({"op":"tree"}));
+    let listed = tree["chats"].as_array().unwrap();
+    for id in &made {
+        assert!(listed.iter().any(|chat| chat["id"] == *id), "{tree}");
+    }
+
+    // A client that half-closes after asking still gets its answer.
+    let mut leaving = daemon.client();
+    writeln!(
+        leaving.writer,
+        "{}",
+        json!({"op":"new-chat", "folder":folder["id"], "backend":"codex",
+            "worktree":{"kind":"new"}, "_xd_request":7})
+    )
+    .unwrap();
+    leaving.writer.flush().unwrap();
+    leaving.writer.shutdown(Shutdown::Write).unwrap();
+    leaving
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(patient))
+        .unwrap();
+    let answer = loop {
+        let frame = leaving.frame();
+        if frame["_xd_request"] == 7 {
+            break frame;
+        }
+    };
+    assert_eq!(answer["ok"], true, "{answer}");
+}

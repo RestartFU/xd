@@ -465,6 +465,9 @@ pub enum RequestKind {
         folder_id: String,
         title: String,
         workdir: Option<String>,
+        /// Which new chat this is, for one started from the new-chat view;
+        /// 0 otherwise.
+        token: u64,
     },
     RenameFolder {
         folder_id: String,
@@ -1194,6 +1197,7 @@ impl HostHandle {
                 folder_id: folder_id.to_owned(),
                 title: title.to_owned(),
                 workdir: workdir.map(str::to_owned),
+                token: 0,
             },
             body,
         )
@@ -1211,6 +1215,7 @@ impl HostHandle {
         worktree: Option<&NewSessionWorktree>,
         start_from_remote: bool,
         first_message: Option<FirstMessage<'_>>,
+        token: u64,
     ) -> Result<(), String> {
         let mut body = json!({"op":"new-chat", "folder":folder, "title":title, "backend":backend});
         body["start_from_remote"] = json!(start_from_remote);
@@ -1271,6 +1276,7 @@ impl HostHandle {
                 folder_id: folder.into(),
                 title: title.into(),
                 workdir: None,
+                token,
             },
             body,
         )
@@ -1288,6 +1294,7 @@ impl HostHandle {
                 folder_id: folder_id.to_owned(),
                 title: title.to_owned(),
                 workdir: None,
+                token: 0,
             },
             json!({"op": "new-chat", "folder": folder_id, "session": session_id,
                 "title": title, "backend": backend}),
@@ -3722,6 +3729,7 @@ mod tests {
                     worktree_backend: Some("claude"),
                     worktree_model: Some("claude-sonnet-5"),
                 }),
+                0,
             )
             .unwrap();
             assert!(matches!(
@@ -3911,7 +3919,7 @@ mod tests {
             .unwrap();
         assert!(
             matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
-            kind:RequestKind::NewChat { folder_id, title, workdir:None }, body, ..
+            kind:RequestKind::NewChat { folder_id, title, workdir:None, token: 0 }, body, ..
         } if folder_id == "project" && title == "Claude tab" && body["id"] == "new-chat-id" && body["session"] == "workspace-session")
         );
         host.rename_session("workspace-session", "Shared task")
@@ -4171,6 +4179,7 @@ mod tests {
                     folder_id,
                     title,
                     workdir: Some(workdir),
+                    ..
                 },
                 ..
             } if folder_id == "folder-1"
@@ -4186,6 +4195,7 @@ mod tests {
                     folder_id,
                     title,
                     workdir: None,
+                    ..
                 },
                 ..
             } if folder_id == "folder-1" && title == "Workspace default"
@@ -4199,6 +4209,7 @@ mod tests {
                     folder_id,
                     title,
                     workdir: None,
+                    ..
                 },
                 ..
             } if folder_id == "folder-1" && title == "Direct Claude"
@@ -4217,6 +4228,7 @@ mod tests {
                     folder_id,
                     title,
                     workdir: None,
+                    ..
                 },
                 ..
             } if folder_id == "folder-1" && title == "Fresh worktree"
@@ -4235,6 +4247,7 @@ mod tests {
                     folder_id,
                     title,
                     workdir: None,
+                    ..
                 },
                 ..
             } if folder_id == "folder-1" && title == "Existing worktree"
