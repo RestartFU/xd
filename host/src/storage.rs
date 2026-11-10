@@ -183,6 +183,7 @@ struct MaterializedMessage {
     keep: bool,
 }
 
+#[derive(Clone)]
 struct GitWorktree {
     path: PathBuf,
     head: Option<String>,
@@ -1098,7 +1099,7 @@ impl StateStore {
         drop(database);
         if let Ok(workdir) = workdir {
             response["workdir"] = Value::String(workdir.clone());
-            if let Ok(worktrees) = list_git_worktrees(Path::new(&workdir)) {
+            if let Ok(worktrees) = cached_git_worktrees(Path::new(&workdir)) {
                 let current_path = normalize_existing_path(Path::new(&workdir));
                 let values = worktrees
                     .iter()
@@ -3831,35 +3832,30 @@ impl StateStore {
         Ok(repository_action_state(Path::new(&workdir)))
     }
 
+    /// What changes when the chat's checkout commits or switches branch,
+    /// which the repository monitor compares every second. Read from Git's
+    /// files where it can, since `git status` refreshed the whole index each
+    /// time only to report the branch and commit.
     pub(crate) fn repository_head_signature(&self, chat_id: &str) -> String {
-        let workdir = match self.database.lock().ok().and_then(|database| {
+        let workdir = match self.reader().ok().and_then(|database| {
             resolve_chat_workdir(&database, &self.workspace_root, chat_id).ok()
         }) {
             Some(workdir) => workdir,
             None => return String::new(),
         };
+        if let Some(signature) = head_file_signature(Path::new(&workdir)) {
+            return signature;
+        }
         let Ok((status, stdout, _)) = run_git(
             Path::new(&workdir),
-            &[
-                "status",
-                "--porcelain=v2",
-                "--branch",
-                "--untracked-files=no",
-            ],
+            &["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"],
         ) else {
             return String::new();
         };
         if !status.success() {
             return String::new();
         }
-        String::from_utf8_lossy(&stdout)
-            .lines()
-            .filter(|line| line.starts_with("# branch.oid ") || line.starts_with("# branch.head "))
-            .fold(String::new(), |mut signature, line| {
-                signature.push_str(line);
-                signature.push('\n');
-                signature
-            })
+        String::from_utf8_lossy(&stdout).into_owned()
     }
 
     pub(crate) fn perform_git_action(&self, request: &Value) -> Result<Value, StorageError> {
@@ -8640,9 +8636,148 @@ thread_local! {
     /// what the read that asked for them still holds.
     static BEFORE_GIT_WORKTREES: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
+    /// How many times this thread has run `git worktree list`.
+    static GIT_WORKTREE_LISTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The Git directory of the checkout `workdir` is in: its own `.git`
+/// directory, or a linked worktree's directory inside the common one.
+fn git_dir(workdir: &Path) -> Option<PathBuf> {
+    let mut directory = Some(workdir);
+    while let Some(current) = directory {
+        let dot_git = current.join(".git");
+        let Ok(metadata) = fs::metadata(&dot_git) else {
+            directory = current.parent();
+            continue;
+        };
+        if metadata.is_dir() {
+            return Some(dot_git);
+        }
+        let link = fs::read_to_string(&dot_git).ok()?;
+        return Some(current.join(link.strip_prefix("gitdir:")?.trim()));
+    }
+    None
+}
+
+/// HEAD and the commit it points at, read from Git's files: HEAD itself, then
+/// the branch's loose ref, or packed refs when there is none. Changes when the
+/// checkout commits, switches branch, or detaches. None when the repository
+/// keeps its refs some other way.
+fn head_file_signature(workdir: &Path) -> Option<String> {
+    let git_dir = git_dir(workdir)?;
+    let common = match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(relative) => git_dir.join(relative.trim()),
+        Err(_) => git_dir.clone(),
+    };
+    if common.join("reftable").exists() {
+        return None;
+    }
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let Some(reference) = head.strip_prefix("ref:").map(str::trim) else {
+        return Some(head);
+    };
+    if !reference.starts_with("refs/") || reference.contains("..") {
+        return None;
+    }
+    let target = match fs::read_to_string(common.join(reference)) {
+        Ok(oid) => oid,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::metadata(common.join("packed-refs")) {
+                Ok(packed) => format!("packed {} {:?}", packed.len(), packed.modified().ok()?),
+                // An unborn branch.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(_) => return None,
+            }
+        }
+        Err(_) => return None,
+    };
+    Some(format!("{head}{target}"))
+}
+
+/// Repositories' worktree lists, by common Git directory, with the signature
+/// of the files they were read from.
+type WorktreeLists = HashMap<PathBuf, (String, Vec<GitWorktree>)>;
+static WORKTREE_LISTS: Mutex<Option<WorktreeLists>> = Mutex::new(None);
+
+/// `git worktree list` for the tree and chat reads, which every client
+/// repeats after most changes. What they show of each worktree, its path,
+/// branch and whether HEAD is detached, all comes from files in the common
+/// Git directory, so the list is listed again only when one of those files
+/// changes. Anything this cannot read runs git as before.
+fn cached_git_worktrees(workdir: &Path) -> Result<Vec<GitWorktree>, StorageError> {
+    let Some(common) = git_common_dir(workdir) else {
+        return list_git_worktrees(workdir);
+    };
+    let Some(signature) = worktree_signature(&common) else {
+        return list_git_worktrees(workdir);
+    };
+    if let Ok(lists) = WORKTREE_LISTS.lock()
+        && let Some((cached, worktrees)) = lists.as_ref().and_then(|lists| lists.get(&common))
+        && *cached == signature
+    {
+        #[cfg(test)]
+        BEFORE_GIT_WORKTREES.with_borrow_mut(|hook| {
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+        return Ok(worktrees.clone());
+    }
+    let worktrees = list_git_worktrees(workdir)?;
+    // Kept only when nothing changed while git listed them.
+    if worktree_signature(&common).as_ref() == Some(&signature)
+        && let Ok(mut lists) = WORKTREE_LISTS.lock()
+    {
+        let lists = lists.get_or_insert_with(HashMap::new);
+        if lists.len() >= 256 {
+            lists.clear();
+        }
+        lists.insert(common, (signature, worktrees.clone()));
+    }
+    Ok(worktrees)
+}
+
+/// The common Git directory of the repository `workdir` is in, found from
+/// its `.git` entry without running git.
+fn git_common_dir(workdir: &Path) -> Option<PathBuf> {
+    let git_dir = git_dir(workdir)?;
+    let common = match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(relative) => git_dir.join(relative.trim()),
+        Err(_) => git_dir,
+    };
+    fs::canonicalize(common).ok()
+}
+
+/// Everything `git worktree list` reports that the tree and chat show: each
+/// worktree's HEAD, where its checkout is, and whether that still exists.
+fn worktree_signature(common: &Path) -> Option<String> {
+    let mut signature = fs::read_to_string(common.join("HEAD")).ok()?;
+    let mut names = match fs::read_dir(common.join("worktrees")) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return None,
+    };
+    names.sort();
+    for name in names {
+        let admin = common.join("worktrees").join(&name);
+        let checkout = fs::read_to_string(admin.join("gitdir")).unwrap_or_default();
+        let present = Path::new(checkout.trim()).exists();
+        signature.push_str(&format!(
+            "\0{}\0{}\0{}\0{present}\0{}",
+            name.to_string_lossy(),
+            fs::read_to_string(admin.join("HEAD")).unwrap_or_default(),
+            checkout,
+            admin.join("locked").exists(),
+        ));
+    }
+    Some(signature)
 }
 
 fn list_git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, StorageError> {
+    #[cfg(test)]
+    GIT_WORKTREE_LISTS.set(GIT_WORKTREE_LISTS.get() + 1);
     #[cfg(test)]
     BEFORE_GIT_WORKTREES.with_borrow_mut(|hook| {
         if let Some(hook) = hook {
@@ -16787,6 +16922,106 @@ mod tests {
             )
             .unwrap();
         repository
+    }
+
+    #[test]
+    fn cached_worktree_lists_follow_branches_and_worktrees() {
+        let fixture = Fixture::new();
+        let repository = slow_checkout_repository(&fixture, "0");
+        let git = |arguments: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        let listed = || {
+            let before = GIT_WORKTREE_LISTS.get();
+            let worktrees = cached_git_worktrees(&repository).unwrap();
+            let summary = worktrees
+                .iter()
+                .map(|worktree| {
+                    worktree
+                        .branch
+                        .clone()
+                        .unwrap_or_else(|| format!("detached:{}", worktree.detached))
+                })
+                .collect::<Vec<_>>();
+            (summary, GIT_WORKTREE_LISTS.get() - before)
+        };
+        assert_eq!(listed(), (vec!["main".to_owned()], 1));
+        assert_eq!(listed().1, 0, "unchanged, the list comes from the cache");
+        git(&["checkout", "-q", "-b", "feature"]);
+        assert_eq!(listed(), (vec!["feature".to_owned()], 1));
+        let linked = fixture.root.join("linked");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "other",
+            linked.to_str().unwrap(),
+        ]);
+        assert_eq!(listed().0, vec!["feature".to_owned(), "other".to_owned()]);
+        git(&["-C", linked.to_str().unwrap(), "checkout", "-q", "--detach"]);
+        assert_eq!(listed().0[1], "detached:true");
+        assert_eq!(listed().1, 0);
+        fs::remove_dir_all(&linked).unwrap();
+        assert_eq!(listed(), (vec!["feature".to_owned()], 1));
+    }
+
+    #[test]
+    fn head_signatures_change_with_commits_and_branches_only() {
+        let fixture = Fixture::new();
+        let repository = slow_checkout_repository(&fixture, "0");
+        let git = |arguments: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        let signature = || head_file_signature(&repository.join("src")).unwrap();
+        fs::create_dir_all(repository.join("src")).unwrap();
+        let first = signature();
+        fs::write(repository.join("src/edit.txt"), "not committed\n").unwrap();
+        assert_eq!(signature(), first, "a working tree edit is not a new head");
+        git(&["commit", "-q", "--allow-empty", "-m", "second"]);
+        let committed = signature();
+        assert_ne!(committed, first);
+        git(&["pack-refs", "--all"]);
+        let packed = signature();
+        git(&["commit", "-q", "--allow-empty", "-m", "third"]);
+        assert_ne!(
+            signature(),
+            packed,
+            "a commit after packing writes a loose ref"
+        );
+        git(&["checkout", "-q", "-b", "feature"]);
+        let branch = signature();
+        assert!(branch.contains("refs/heads/feature"));
+        git(&["checkout", "-q", "--detach"]);
+        assert_ne!(signature(), branch);
+        let linked = fixture.root.join("linked");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "other",
+            linked.to_str().unwrap(),
+        ]);
+        assert!(
+            head_file_signature(&linked)
+                .unwrap()
+                .contains("refs/heads/other")
+        );
     }
 
     #[test]
