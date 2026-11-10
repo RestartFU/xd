@@ -742,6 +742,78 @@ fn a_chat_stops_at_its_quota_until_the_user_gives_it_a_new_one() {
 }
 
 #[test]
+fn a_chat_at_work_is_stopped_once_it_passes_its_quota() {
+    let daemon = Daemon::start_with_discovery(true);
+    let mut client = daemon.client();
+    let folder = client.call(json!({"op":"new-folder", "name":"Project"}));
+    assert_eq!(folder["ok"], true, "{folder}");
+    let mut new_chat = || {
+        let chat = client.call(json!({"op":"new-chat", "folder":folder["id"], "backend":"codex"}));
+        assert_eq!(chat["ok"], true, "{chat}");
+        chat["id"].as_str().unwrap().to_owned()
+    };
+    let busy = new_chat();
+    let helper = new_chat();
+    let readings = || {
+        fs::read_to_string(daemon.root.join("codex.usage"))
+            .ok()
+            .and_then(|used| used.trim().parse::<i64>().ok())
+    };
+    let reply = client.call(json!({"op":"set-chat-quota-settings", "percent":3}));
+    assert_eq!(reply["percent"], 3, "{reply}");
+    let reply = client.call(json!({"op":"set-chat-quota", "chat":helper, "percent":null}));
+    assert_eq!(reply["ok"], true, "{reply}");
+
+    // A long turn takes the baseline as it starts.
+    let reply = client.call(json!({"op":"send", "chat":busy, "text":"forever"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while readings().is_none() {
+        assert!(Instant::now() < deadline, "the limit was never read");
+        thread::sleep(Duration::from_millis(20));
+    }
+    thread::sleep(Duration::from_secs(2));
+
+    // Short turns beside it on the same account are each read as they end,
+    // and the long turn takes its share of every rise until it passes its
+    // quota and is stopped while still at work.
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let stopped = loop {
+        let state = client.call(json!({"op":"chat", "chat":busy}));
+        if state["quota_reached"] == true {
+            break state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the working chat was never stopped: {state}"
+        );
+        assert_eq!(state["working"], true, "{state}");
+        let reply = client.call(json!({"op":"send", "chat":helper, "text":"hello"}));
+        assert_eq!(reply["ok"], true, "{reply}");
+        client.wait_for(json!({"op":"chat", "chat":helper}), |reply| {
+            reply["working"] == false
+        });
+        thread::sleep(Duration::from_secs(1));
+    };
+    assert!(
+        stopped["quota"]["used"].as_f64().unwrap() >= 3.0,
+        "{stopped}"
+    );
+    let ended = client.wait_for(json!({"op":"chat", "chat":busy}), |reply| {
+        reply["working"] == false
+    });
+    assert_eq!(ended["resumable"], true, "{ended}");
+    assert_eq!(ended["quota_reached"], true, "{ended}");
+    // The chat without a limit is never held.
+    let helper_state = client.call(json!({"op":"chat", "chat":helper}));
+    assert!(
+        helper_state.get("quota_reached").is_none(),
+        "{helper_state}"
+    );
+    assert!(helper_state.get("quota").is_none(), "{helper_state}");
+}
+
+#[test]
 fn pausing_a_project_leaves_the_others_running() {
     let daemon = Daemon::start();
     let mut client = daemon.client();
