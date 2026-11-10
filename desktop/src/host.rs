@@ -162,40 +162,12 @@ impl ConnectionRequests {
         }
     }
 
+    /// Held while a tree read is claimed and sent, so a caller asking for one
+    /// meanwhile cannot be lost if the send fails.
     fn tree_read(&self) -> MutexGuard<'_, TreeRead> {
         self.tree
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Whether to send a tree read now. With one on its way already, the tree
-    /// is read again once that one is answered instead.
-    fn claim_tree(&self) -> bool {
-        let mut tree = self.tree_read();
-        if tree.in_flight {
-            tree.again = true;
-            false
-        } else {
-            tree.in_flight = true;
-            true
-        }
-    }
-
-    /// Notes that the tree read was answered, and whether it is wanted again:
-    /// the read then stays claimed for the one sent next.
-    fn tree_answered(&self) -> bool {
-        let mut tree = self.tree_read();
-        if std::mem::take(&mut tree.again) {
-            true
-        } else {
-            tree.in_flight = false;
-            false
-        }
-    }
-
-    /// No tree read is on its way after all.
-    fn release_tree(&self) {
-        *self.tree_read() = TreeRead::default();
     }
 
     /// A request about to be sent, with its snapshot deadline as of now.
@@ -805,17 +777,17 @@ impl HostHandle {
     /// Reads the sidebar tree, or once more after the read already on its
     /// way, which may predate whatever the caller wants to see.
     pub fn tree(&self) -> Result<(), String> {
+        let mut tree = self.requests.tree_read();
         if self.requests.closed.load(Ordering::Acquire) {
             return Err(CONNECTION_CLOSED.to_owned());
         }
-        if !self.requests.claim_tree() {
+        if tree.in_flight {
+            tree.again = true;
             return Ok(());
         }
-        let result = send_command(&self.commands, &self.requests, tree_command());
-        if result.is_err() {
-            self.requests.release_tree();
-        }
-        result
+        send_command(&self.commands, &self.requests, tree_command())?;
+        tree.in_flight = true;
+        Ok(())
     }
 
     pub fn agent_catalog(&self) -> Result<(), String> {
@@ -2535,18 +2507,24 @@ fn spawn_reader(
                 }
                 // Asked for while this read was on its way, so it may predate
                 // what that caller wants to see.
-                if tree_answered && requests.tree_answered() {
+                if tree_answered {
+                    let mut tree = requests.tree_read();
                     // Without a handle the app has let go of this connection.
-                    let Some(commands) = commands.upgrade() else {
-                        requests.release_tree();
+                    let commands = commands.upgrade();
+                    if !std::mem::take(&mut tree.again) || commands.is_none() {
+                        tree.in_flight = false;
                         continue;
-                    };
-                    if let Err(error) = send_command(&commands, &requests, tree_command()) {
+                    }
+                    // The read stays claimed for the one sent now.
+                    if let Some(commands) = commands
+                        && let Err(error) = send_command(&commands, &requests, tree_command())
+                    {
                         // A full queue means the host has stopped reading.
                         // Reconnecting reads the tree afresh; dropping the
                         // read here would leave it stale with nothing to
                         // notice.
-                        requests.release_tree();
+                        tree.in_flight = false;
+                        drop(tree);
                         close_connection(&updates, &requests, error);
                         return;
                     }

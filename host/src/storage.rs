@@ -8851,6 +8851,9 @@ fn worktree_branch(workdir: &Path) -> Option<String> {
         if fs::canonicalize(listed.parent()?).ok()? != root {
             return None;
         }
+    } else if bare_repository(&git_dir) {
+        // Git lists a bare repository without a branch.
+        return None;
     }
     let head_path = git_dir.join("HEAD");
     // Git may keep HEAD as a symbolic link to the branch, which reading the
@@ -8923,6 +8926,45 @@ fn git_directory(workdir: &Path) -> Option<(&Path, PathBuf)> {
         return is_git_directory(&target).then_some((directory, target));
     }
     None
+}
+
+/// Whether the repository in `git_dir` says it is bare (`core.bare`).
+fn bare_repository(git_dir: &Path) -> bool {
+    let Ok(config) = fs::read_to_string(git_dir.join("config")) else {
+        return false;
+    };
+    let mut core = false;
+    let mut bare = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            let (name, rest) = header.split_once(']').unwrap_or((header, ""));
+            core = name.trim().eq_ignore_ascii_case("core");
+            // A key may follow the header on the same line.
+            let rest = rest.trim();
+            if core && !rest.is_empty() {
+                bare = config_bool(rest, "bare").unwrap_or(bare);
+            }
+        } else if core {
+            bare = config_bool(line, "bare").unwrap_or(bare);
+        }
+    }
+    bare
+}
+
+/// The boolean `line` sets `key` to, if it sets that key. A key alone is true.
+fn config_bool(line: &str, key: &str) -> Option<bool> {
+    let line = line.split(['#', ';']).next().unwrap_or_default().trim();
+    let (name, value) = line.split_once('=').unwrap_or((line, "true"));
+    if !name.trim().eq_ignore_ascii_case(key) {
+        return None;
+    }
+    let value = value.trim().trim_matches('"').to_ascii_lowercase();
+    match value.as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" | "" => Some(false),
+        _ => None,
+    }
 }
 
 /// Whether `directory` is a Git directory by Git's own test: a HEAD, and the
@@ -10457,6 +10499,39 @@ mod tests {
         fs::write(stray.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
         assert_eq!(listed(&stray), None);
         assert_eq!(worktree_branch(&stray), None);
+
+        // A bare repository kept as `.git` has no branch in Git's list.
+        let bare = fixture.root.join("bare-project");
+        fs::create_dir_all(&bare).unwrap();
+        git(
+            &bare,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                bare.join(".git").to_str().unwrap(),
+            ],
+        );
+        assert_eq!(listed(&bare), None);
+        assert_eq!(worktree_branch(&bare), None);
+        let bare_linked = fixture.root.join("bare-linked");
+        git(
+            &bare,
+            &[
+                "--git-dir",
+                bare.join(".git").to_str().unwrap(),
+                "worktree",
+                "add",
+                "--orphan",
+                "-b",
+                "orphan",
+                bare_linked.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(listed(&bare_linked).as_deref(), Some("orphan"));
+        assert_eq!(worktree_branch(&bare_linked).as_deref(), Some("orphan"));
 
         // A branch that is itself a symbolic ref names the one Git lists.
         git(
