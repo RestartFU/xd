@@ -11,7 +11,8 @@ struct HostOptions {
 
 enum CliCommand {
     Stdio(HostOptions),
-    Daemon(HostOptions),
+    /// Runs the daemon. `true` stops it once the xd app that started it closes.
+    Daemon(HostOptions, bool),
     DaemonStatus(HostOptions),
     DaemonStop(HostOptions),
     /// Serves an agent its link tool, bound to one chat.
@@ -31,7 +32,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(CliCommand::Stdio(options)) => finish(daemon::bridge(options)),
-        Ok(CliCommand::Daemon(options)) => finish(daemon::run(options)),
+        Ok(CliCommand::Daemon(options, stop_with_app)) => {
+            finish(daemon::run(options, stop_with_app))
+        }
         Ok(CliCommand::DaemonStatus(options)) => finish(daemon::control(options, "daemon-info")),
         Ok(CliCommand::DaemonStop(options)) => finish(daemon::control(options, "daemon-stop")),
         Ok(CliCommand::Mcp(options, chat)) => finish(mcp::serve(options, &chat)),
@@ -57,7 +60,12 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
     let mut arguments = arguments.into_iter();
     match arguments.next().as_deref() {
         Some("stdio") => host_arguments(arguments).map(CliCommand::Stdio),
-        Some("daemon") => host_arguments(arguments).map(CliCommand::Daemon),
+        Some("daemon") => {
+            let (stop_with_app, rest): (Vec<_>, Vec<_>) =
+                arguments.partition(|argument| argument == daemon::STOP_WITH_APP);
+            host_arguments(rest.into_iter())
+                .map(|options| CliCommand::Daemon(options, !stop_with_app.is_empty()))
+        }
         Some("daemon-status") => host_arguments(arguments).map(CliCommand::DaemonStatus),
         Some("daemon-stop") => host_arguments(arguments).map(CliCommand::DaemonStop),
         Some("mcp") => {
@@ -156,7 +164,7 @@ fn version_string() -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: xd-host <stdio|daemon|daemon-status|daemon-stop> --data DIR\n\nstdio connects to the persistent daemon, starting it if needed.\ndaemon runs it in the foreground. Remote clients use TLS pairing on port 4001."
+    "usage: xd-host <stdio|daemon|daemon-status|daemon-stop> --data DIR\n\nstdio connects to the persistent daemon, starting it if needed.\ndaemon runs it in the foreground; with --stop-with-app it stops once no xd app is connected. Remote clients use TLS pairing on port 4001."
 }
 
 #[cfg(test)]
@@ -188,6 +196,30 @@ mod tests {
         );
         assert!(arguments(["stdio".into(), "--bind=::".into()]).is_err());
         assert!(arguments(["stdio".into(), "--socket=/tmp/xd.sock".into()]).is_err());
+    }
+
+    #[test]
+    fn only_the_daemon_accepts_stopping_with_the_app() {
+        let Ok(CliCommand::Daemon(_, true)) = arguments([
+            "daemon".into(),
+            "--data=/state/xd".into(),
+            "--stop-with-app".into(),
+        ]) else {
+            panic!("expected a daemon that stops with the app");
+        };
+        let Ok(CliCommand::Daemon(_, false)) =
+            arguments(["daemon".into(), "--data=/state/xd".into()])
+        else {
+            panic!("expected a daemon that keeps running");
+        };
+        assert!(
+            arguments([
+                "stdio".into(),
+                "--data=/state/xd".into(),
+                "--stop-with-app".into(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

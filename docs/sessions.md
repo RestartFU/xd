@@ -61,7 +61,7 @@ The host settles a session when either rule applies, whichever comes first:
   settling sessions that have one; merging and closing still do.
 
 Change these in **Settings → General → Auto-settle**. The rules belong to the
-host, so they keep running while the app is closed, and each host keeps its own. To keep one session out of them, choose
+host, so they run whenever the host does, and each host keeps its own. To keep one session out of them, choose
 **Disable auto-settle** from its right-click menu.
 
 ## Auto-delete

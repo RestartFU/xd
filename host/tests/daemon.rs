@@ -1215,6 +1215,97 @@ fn bridges_autostart_one_daemon_and_preserve_pairing_after_restart() {
     assert!(start.elapsed() < Duration::from_secs(1));
 }
 
+/// A bridge on `root`'s data, run as the xd app's when `app` is set.
+fn bridge(
+    root: &Path,
+    app: bool,
+) -> (
+    Child,
+    Client<std::process::ChildStdout, std::process::ChildStdin>,
+) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xd-host"));
+    command
+        .env("XD_DISABLE_AUTO_UPDATE", "1")
+        .env("XD_APP_CLOSE_GRACE_MS", "300")
+        .env_remove("XD_APP_BRIDGE")
+        .args(["stdio", "--data"])
+        .arg(root)
+        .env("XD_CODEX_EXECUTABLE", root.join("codex"))
+        .env("HOME", root)
+        .env("SHELL", "/bin/sh")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(daemon_log(root));
+    if app {
+        command.env("XD_APP_BRIDGE", "1");
+    }
+    let mut child = command.spawn().unwrap();
+    let mut client = Client {
+        reader: BufReader::new(child.stdout.take().unwrap()),
+        writer: child.stdin.take().unwrap(),
+        next: 1,
+    };
+    let reply = client.call(json!({"op":"daemon-info"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    (child, client)
+}
+
+#[track_caller]
+fn assert_stops(daemon: &Daemon) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while daemon.socket.exists() || daemon.answers() {
+        assert!(Instant::now() < deadline, "daemon kept running");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_daemon_the_app_started_stops_once_no_app_is_left() {
+    let mut daemon = Daemon::start();
+    daemon.child.kill().unwrap();
+    daemon.child.wait().unwrap();
+    let root = daemon.root.clone();
+
+    let (mut first, mut first_client) = bridge(&root, true);
+    let pid = first_client.call(json!({"op":"daemon-info"}))["pid"]
+        .as_u64()
+        .unwrap();
+    let command = fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+    assert!(
+        command
+            .split(|byte| *byte == 0)
+            .any(|part| part == b"--stop-with-app"),
+        "{}",
+        String::from_utf8_lossy(&command)
+    );
+    // Another app window and a plain client connect too.
+    let (mut second, mut second_client) = bridge(&root, true);
+    let mut plain = daemon.client();
+    thread::sleep(Duration::from_millis(800));
+    first.kill().unwrap();
+    first.wait().unwrap();
+    // Past the grace period, the other window still holds it.
+    thread::sleep(Duration::from_millis(800));
+    assert_eq!(second_client.call(json!({"op":"ping"}))["ok"], true);
+    assert_eq!(plain.call(json!({"op":"ping"}))["ok"], true);
+    // Closing the last one stops it, even with a plain client still connected.
+    drop(second_client);
+    second.kill().unwrap();
+    second.wait().unwrap();
+    assert_stops(&daemon);
+    drop(plain);
+
+    // A daemon a plain bridge started keeps running when the app leaves.
+    let (mut plain_bridge, _plain_client) = bridge(&root, false);
+    let (mut app, _app_client) = bridge(&root, true);
+    app.kill().unwrap();
+    app.wait().unwrap();
+    plain_bridge.kill().unwrap();
+    plain_bridge.wait().unwrap();
+    thread::sleep(Duration::from_millis(800));
+    assert!(daemon.answers(), "a daemon started without the app stopped");
+}
+
 /// Stands in for the previous build's daemon, which a test binary cannot be.
 struct StaleDaemon {
     root: PathBuf,

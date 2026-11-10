@@ -1,8 +1,24 @@
 # The host: assistants, updates, and memory
 
-One persistent daemon, the xd host, owns local and remote sessions. Work continues
-when clients disconnect, and the host applies its own rules (such as
-[auto-settle](sessions.md#auto-settle)) while the app is closed.
+One daemon, the xd host, owns local and remote sessions. Work continues when
+clients disconnect, and the host applies its own rules (such as
+[auto-settle](sessions.md#auto-settle)) while it runs.
+
+## When the host stops
+
+When the xd app starts the host, the host stops about ten seconds after the last
+xd app connected to it closes, including after a crash. Its running turns,
+background agents and shells stop with it, as with any daemon stop. Paired
+devices and other clients don't keep it running. Reopening xd starts it again,
+and [Resume chats after a restart](#resuming-cut-off-turns) can continue the
+turns it cut off.
+
+A host started any other way keeps running until you stop it: one you run
+yourself with `xd-host daemon` (see [Shared sessions](remote.md#shared-sessions)),
+one the app reaches over SSH, or one started by a plain `xd-host stdio`. To keep
+work going while the app is closed, start the host yourself before opening xd. A
+host that was already running when you updated to this version keeps running
+until it next stops.
 
 ## Installed assistants
 

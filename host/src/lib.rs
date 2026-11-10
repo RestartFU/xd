@@ -96,6 +96,9 @@ const REQUEST_ID: &str = "_xd_request";
 
 pub struct Engine {
     shutdown: AtomicBool,
+    /// Local connections the xd app's own bridge opened. A daemon the app
+    /// started stops once none is left.
+    app_clients: Mutex<HashSet<u64>>,
     store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
@@ -163,6 +166,7 @@ impl Engine {
         let self_update = SelfUpdate::new(events.clone());
         Self {
             shutdown: AtomicBool::new(false),
+            app_clients: Mutex::default(),
             store: None,
             auth: AuthManager::new(events.clone(), accounts::Accounts::new(None)),
             cli_updates: CliUpdates::new(events.clone()),
@@ -230,6 +234,7 @@ impl Engine {
         let shared_event_monitor = Some(SharedEventMonitor::start(events.clone()));
         let engine = Self {
             shutdown: AtomicBool::new(false),
+            app_clients: Mutex::default(),
             runtime: Some(runtime),
             store: Some(store),
             auth,
@@ -285,6 +290,12 @@ impl Engine {
             Some("resume-interrupted") => self.resume_interrupted(&request),
             Some("daemon-stop") if self.pairing.is_local(owner) => {
                 self.shutdown.store(true, Ordering::Release);
+                json!({"ok": true})
+            }
+            Some("app-client") if self.pairing.is_local(owner) => {
+                if let Ok(mut clients) = self.app_clients.lock() {
+                    clients.insert(owner);
+                }
                 json!({"ok": true})
             }
             Some("pair") => self.pair(owner, &request),
@@ -613,6 +624,16 @@ impl Engine {
 
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// How many connections from the xd app are open.
+    pub fn app_clients(&self) -> usize {
+        self.app_clients.lock().map_or(0, |clients| clients.len())
+    }
+
+    /// Whether an app update is being installed, which a stop must not cut off.
+    pub fn installing_update(&self) -> bool {
+        self.self_update.installing()
     }
 
     pub fn shutdown(&self) {
@@ -2403,6 +2424,9 @@ impl Engine {
     }
 
     fn unsubscribe(&self, id: u64) {
+        if let Ok(mut clients) = self.app_clients.lock() {
+            clients.remove(&id);
+        }
         self.pairing.unregister(id);
         self.events.unsubscribe(id);
     }
@@ -2795,6 +2819,7 @@ pub fn serve_daemon_connection(
                             | "subagent"
                             | "agent-auth-cancel"
                             | "daemon-stop"
+                            | "app-client"
                     )
                 );
             if authenticated && request["op"] == "pause-all" {

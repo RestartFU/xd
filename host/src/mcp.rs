@@ -43,7 +43,7 @@ pub(super) fn serve(options: HostOptions, chat: &str) -> Result<(), String> {
 }
 
 fn link(options: &HostOptions, chat: &str, urls: &[String]) -> Result<Value, String> {
-    let mut stream = daemon::connect(options, false).map_err(|error| error.to_string())?;
+    let mut stream = daemon::connect(options, false, false).map_err(|error| error.to_string())?;
     daemon::request(
         &mut stream,
         json!({"op": "link-pull-requests", "chat": chat, "urls": urls, "source": "agent"}),
