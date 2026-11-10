@@ -1928,12 +1928,20 @@ impl Engine {
             return;
         };
         let auth = self.auth.clone();
-        let reader: quota::Reader = Box::new(move |provider, account| {
+        // `tag` is the account and the login the turns ran as.
+        let reader: quota::Reader = Box::new(move |provider, tag| {
+            let account = accounts::tag_account(tag);
             if !auth.signed_in(provider, account) {
                 return None;
             }
             let asked = accounts::now_ms();
             usage::check_account(auth.accounts(), provider, account)?;
+            // Another login's usage says nothing of these turns, such as after
+            // the user's own CLI signed in to someone else.
+            let current = auth.accounts().session_tag(provider, account);
+            if !tag.ends_with("#?") && !accounts::same_login(tag, &current) {
+                return None;
+            }
             let (windows, checked_at) = auth.accounts().limits(provider, account)?;
             // A reading from before this one says nothing of the turn.
             if checked_at < asked {
@@ -1945,16 +1953,37 @@ impl Engine {
         let engine = Arc::downgrade(self);
         // Off the meter's thread: stopping waits for any message being sent
         // to the chat, which must not hold up readings for other chats.
+        // One stop at a time per chat, however often the meter looks while
+        // a slow send holds the chat's gate.
+        let stopping = Arc::new(Mutex::new(HashSet::<String>::new()));
         let stopper: quota::Stopper = Box::new(move |chat_id| {
+            let fresh = stopping
+                .lock()
+                .map(|mut stopping| stopping.insert(chat_id.to_owned()))
+                .unwrap_or(false);
+            if !fresh {
+                return;
+            }
             let engine = engine.clone();
+            let stopping = stopping.clone();
             let chat_id = chat_id.to_owned();
-            let _ = thread::Builder::new()
-                .name("xd-quota-stop".into())
-                .spawn(move || {
+            let spawned = thread::Builder::new().name("xd-quota-stop".into()).spawn({
+                let stopping = stopping.clone();
+                let chat_id = chat_id.clone();
+                move || {
                     if let Some(engine) = engine.upgrade() {
                         engine.stop_for_quota(&chat_id);
                     }
-                });
+                    if let Ok(mut stopping) = stopping.lock() {
+                        stopping.remove(&chat_id);
+                    }
+                }
+            });
+            if spawned.is_err()
+                && let Ok(mut stopping) = stopping.lock()
+            {
+                stopping.remove(&chat_id);
+            }
         });
         if let Ok(mut meter) = self.quota_meter.lock() {
             meter.get_or_insert_with(|| {

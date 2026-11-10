@@ -102,7 +102,8 @@ pub(crate) type AccountSwitchHandler = Box<dyn Fn(String, i64) + Send + Sync>;
 /// succession held, so it must only hand the news on, never wait.
 pub(crate) type TurnSettledHandler = Box<dyn Fn(SettledTurn) + Send + Sync>;
 
-/// Hears that a chat's turn started or ended, with its assistant and account.
+/// Hears that a chat's turn started or ended, with its assistant and the
+/// account and login it runs as.
 /// Called with the chat's succession held, so it must only note it, never wait.
 pub(crate) type ActivityHandler = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
 
@@ -499,7 +500,8 @@ struct ActiveProcess {
     started: Instant,
     label: String,
     progress: Arc<TurnProgress>,
-    /// The assistant and account the turn runs on.
+    /// The assistant the turn runs on, and the account and login, as
+    /// [`crate::accounts::Accounts::session_tag`] gives them.
     provider: String,
     account: String,
 }
@@ -670,12 +672,12 @@ impl TurnRuntime {
         if let Ok(handler) = self.inner.on_activity.lock()
             && let Some(handler) = handler.as_ref()
         {
-            handler(chat_id, provider, crate::accounts::tag_account(account));
+            handler(chat_id, provider, account);
         }
     }
 
-    /// Every chat whose agent is at work now, with the assistant and account
-    /// it works on: running a turn, or running background agents or shells
+    /// Every chat whose agent is at work now, with the assistant it works on
+    /// and the account and login it runs as: running a turn, or running background agents or shells
     /// between turns.
     pub(crate) fn working_accounts(&self) -> Vec<(String, String, String)> {
         let mut working = self
@@ -707,7 +709,7 @@ impl TurnRuntime {
                     working.push((
                         chat_id.clone(),
                         router.backend.clone(),
-                        crate::accounts::tag_account(&session.account).to_owned(),
+                        session.account.clone(),
                     ));
                 }
             }
@@ -1604,7 +1606,7 @@ impl TurnRuntime {
                     label: turn.label.clone(),
                     progress: progress.clone(),
                     provider: turn.backend.clone(),
-                    account: crate::accounts::tag_account(&turn.account).to_owned(),
+                    account: turn.account.clone(),
                 },
             );
         }
@@ -3120,6 +3122,15 @@ impl TurnRuntime {
         });
         if let Some(error) = error {
             event["error"] = Value::String(error);
+        }
+        // Stopped at its quota, so clients can say so rather than "finished".
+        if self
+            .inner
+            .store
+            .chat_quota(&turn.chat_id)
+            .is_ok_and(|quota| quota.reached)
+        {
+            event["quota_reached"] = Value::Bool(true);
         }
         if let Some(asked) = asked {
             event["question"] = Value::String(asked.question);

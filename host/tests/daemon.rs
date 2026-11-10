@@ -672,20 +672,18 @@ fn a_chat_stops_at_its_quota_until_the_user_gives_it_a_new_one() {
     let quota = client.call(json!({"op":"chat", "chat":chat}))["quota"].clone();
     assert_eq!(quota, json!({"percent":3, "used":0.0, "own":false}));
 
-    // The first turn reads where the limit stands; the next one finds five
-    // more points used, more than the chat's quota, and stops the chat.
-    let reply = client.call(json!({"op":"send", "chat":chat, "text":"hello"}));
+    // A turn reads where the limit stands as it starts; the reading as it
+    // ends finds five more points used, more than the chat's quota.
+    let reply = client.call(json!({"op":"send", "chat":chat, "text":"forever"}));
     assert_eq!(reply["ok"], true, "{reply}");
     let deadline = Instant::now() + Duration::from_secs(20);
     while readings().is_none() {
         assert!(Instant::now() < deadline, "the limit was never read");
         thread::sleep(Duration::from_millis(20));
     }
-    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
-        reply["working"] == false
-    });
-    let reply = client.call(json!({"op":"send", "chat":chat, "text":"hello"}));
-    assert_eq!(reply["ok"], true, "{reply}");
+    // Long enough for the host to take in the reading the fake has answered.
+    thread::sleep(Duration::from_secs(2));
+    assert_eq!(client.call(json!({"op":"cancel", "chat":chat}))["ok"], true);
     let deadline = Instant::now() + Duration::from_secs(20);
     let stopped = loop {
         let reply = client.call(json!({"op":"chat", "chat":chat}));

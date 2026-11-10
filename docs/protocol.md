@@ -848,6 +848,9 @@ Once `used` reaches `percent`, the host stops the chat as
 in its queue. It is not `paused`. `resume-turn`, `steer-queue`, and
 `resume-all` leave it alone; the host never continues it by itself. A chat that
 reaches its quota as a turn ends is marked the same way, with nothing to resume.
+A turn the quota stops ends with `quota_reached:true` on its `turn-finished`.
+Clients that notify about finished turns say the chat stopped at its quota
+instead, and notify too when `tree` first shows a chat with `quota_reached`.
 Clients show the chat's quota in place of its resume button and offer to
 continue with a new one, prefilled with a larger quota than the last, or
 without a limit.
@@ -1304,7 +1307,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `text` | `chat`, `text`, `turn_id`, `turn_sequence` | Assistant text delta. |
 | `tool` | `chat`, `text`, `workdir`, `context`, `turn_id`, `turn_sequence`, optional `record`, `message_id` | Tool row. `record` marks a row the host will rewrite; `message_id` is its stored id. |
 | `record` | `chat`, `text`, `record`, `message_id`, optional `turn_id`, `turn_sequence` | A record row was rewritten, such as a subagent's progress; replace the row with that `message_id`. Arrives without turn members when a background agent reports while no turn is running. |
-| `turn-finished` | `chat`, `turn_id`, `turn_sequence`, `ok`, `waiting`, `silent`, `duration`, `last_message_id`, optional `error`, `question`, `options`, `accepts_input` | The turn ended. |
+| `turn-finished` | `chat`, `turn_id`, `turn_sequence`, `ok`, `waiting`, `silent`, `duration`, `last_message_id`, optional `error`, `question`, `options`, `accepts_input`, `quota_reached` | The turn ended. `quota_reached` is true when the chat's quota stopped it. |
 | `background-tasks` | `chat`, `background_tasks` | How many background agents and shells the chat's agent process is still running changed. Between turns a chat with any is waiting on them; see `tree`. |
 | `repository-changed` | `chat` | HEAD moved outside the app. |
 | `git-state`, `git-action-finished`, `git-draft-finished` | `chat`, … | Git pane state. |

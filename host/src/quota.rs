@@ -38,10 +38,6 @@ const MIN_READ_GAP: Duration = Duration::ZERO;
 const FAILED_READ_GAP: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const FAILED_READ_GAP: Duration = Duration::from_millis(10);
-/// How long a reading taken with nothing at work on the account stays the
-/// baseline for the next turn there. Use outside xd in that time is counted
-/// against the next turn; past it, the next turn reads afresh.
-const IDLE_BASELINE_LIFETIME: Duration = Duration::from_secs(10 * 60);
 /// A limit whose reset moved later by more than this has started a new window.
 const NEW_WINDOW_MS: i64 = 15 * 60 * 1000;
 
@@ -93,14 +89,12 @@ pub(crate) struct Ledger {
 }
 
 impl AccountLedger {
-    /// Whether the next rise can be measured from `last`: it is not an old
-    /// reading from while nothing worked here.
-    fn baseline(&self, now: Instant) -> Option<Reading> {
-        let stale = self.idle
-            && self
-                .read_at
-                .is_none_or(|at| now.saturating_duration_since(at) > IDLE_BASELINE_LIFETIME);
-        self.last.filter(|_| !stale)
+    /// Whether the next rise can be measured from `last`: it was not read
+    /// while nothing worked here. What the account used while idle, perhaps
+    /// outside xd, is nobody's here, so the next turn reads afresh. A turn
+    /// shorter than a reading takes is then counted short, never long.
+    fn baseline(&self) -> Option<Reading> {
+        self.last.filter(|_| !self.idle)
     }
 }
 
@@ -133,7 +127,7 @@ impl Ledger {
             .or_default();
         let mut sharers = std::mem::take(&mut entry.sharers);
         sharers.extend(working.iter().cloned());
-        let rise = entry.baseline(now).map_or(0.0, |last| rise(last, reading));
+        let rise = entry.baseline().map_or(0.0, |last| rise(last, reading));
         let since_ms = std::mem::replace(&mut entry.asked_ms, asked_ms);
         entry.last = Some(reading);
         entry.read_at = Some(now);
@@ -297,7 +291,7 @@ impl Pass {
                         provider.clone(),
                         account.clone(),
                         entry.sharers.iter().cloned().collect::<Vec<_>>(),
-                        entry.baseline(now).is_some(),
+                        entry.baseline().is_some(),
                         entry.read_at,
                         entry.tried_at.map(|at| {
                             let gap = if entry.failed {
@@ -528,8 +522,9 @@ mod tests {
             now,
         );
         assert_eq!(shares, vec![("a".to_owned(), 4.0)]);
-        // Nothing works on the account after this reading. A turn soon after
-        // counts from it, but one after a long gap starts from its own.
+        // Nothing works on the account after this reading, so the next turn
+        // starts from a reading of its own, however soon it comes: what the
+        // account used in between is nobody's here.
         let shares = record_in(
             &mut ledger,
             "codex",
@@ -540,18 +535,7 @@ mod tests {
         );
         assert_eq!(shares, vec![("a".to_owned(), 1.0)]);
         ledger.note("codex", "default", "b");
-        let soon = now + Duration::from_secs(60);
-        let shares = record_in(
-            &mut ledger,
-            "codex",
-            "default",
-            reading(7.0, 6 * hour),
-            &[],
-            soon,
-        );
-        assert_eq!(shares, vec![("b".to_owned(), 2.0)]);
-        ledger.note("codex", "default", "b");
-        let later = soon + IDLE_BASELINE_LIFETIME + Duration::from_secs(1);
+        let soon = now + Duration::from_secs(1);
         assert!(
             record_in(
                 &mut ledger,
@@ -559,10 +543,19 @@ mod tests {
                 "default",
                 reading(30.0, 6 * hour),
                 &chats(&["b"]),
-                later
+                soon
             )
             .is_empty()
         );
+        let shares = record_in(
+            &mut ledger,
+            "codex",
+            "default",
+            reading(31.0, 6 * hour),
+            &chats(&["b"]),
+            soon,
+        );
+        assert_eq!(shares, vec![("b".to_owned(), 1.0)]);
         // Accounts are apart.
         assert!(
             record_in(
@@ -623,7 +616,8 @@ mod tests {
         runtime.note_activity_for_test("chat", "claude", "second#login");
         let ledger = meter.ledger();
         let ledger = ledger.lock().unwrap();
-        let entry = &ledger.accounts[&("claude".to_owned(), "second".to_owned())];
+        // Filed by account and login, so another login's usage never mixes in.
+        let entry = &ledger.accounts[&("claude".to_owned(), "second#login".to_owned())];
         assert!(entry.sharers.contains("chat"));
         drop(ledger);
         meter.wake();
