@@ -303,19 +303,14 @@ impl Pass {
                         entry.sharers.iter().cloned().collect::<Vec<_>>(),
                         entry.last.is_some() && !entry.idle,
                         entry.read_at,
-                        entry.tried_at.map(|at| {
-                            let gap = if entry.failed {
-                                FAILED_READ_GAP
-                            } else {
-                                MIN_READ_GAP
-                            };
-                            gap.saturating_sub(now.saturating_duration_since(at))
-                        }),
+                        entry
+                            .tried_at
+                            .map(|at| (now.saturating_duration_since(at), entry.failed)),
                     )
                 })
                 .collect::<Vec<_>>()
         };
-        for (provider, account, sharers, has_baseline, read_at, held_for) in due {
+        for (provider, account, sharers, has_baseline, read_at, tried) in due {
             let here = working
                 .iter()
                 .filter(|(_, p, a)| *p == provider && *a == account)
@@ -348,12 +343,26 @@ impl Pass {
             }
             let since = read_at.map(|at| now.saturating_duration_since(at));
             let ended = sharers.iter().any(|chat_id| !here.contains(chat_id));
+            // A turn that leaves the account idle is read at once, not after
+            // the gap between readings: a turn starting meanwhile would
+            // otherwise have the idle time between them charged to it.
+            let leaves_idle = ended && here.is_empty();
+            let held_for = tried.map_or(Duration::ZERO, |(since_try, failed)| {
+                let gap = if failed {
+                    FAILED_READ_GAP
+                } else if leaves_idle {
+                    Duration::ZERO
+                } else {
+                    MIN_READ_GAP
+                };
+                gap.saturating_sub(since_try)
+            });
             let due_in = if !has_baseline || ended {
                 Duration::ZERO
             } else {
                 since.map_or(Duration::ZERO, |since| READ_INTERVAL.saturating_sub(since))
             }
-            .max(held_for.unwrap_or_default());
+            .max(held_for);
             if !due_in.is_zero() {
                 next = next.min(due_in);
                 continue;

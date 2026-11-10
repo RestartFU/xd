@@ -3126,7 +3126,10 @@ impl StateStore {
             return read_default_quota(&database);
         };
         let percent = quota_percent(percent)?;
-        database.execute(
+        let mut database = database;
+        let transaction = database.transaction()?;
+        let before = read_default_quota(&transaction)?;
+        transaction.execute(
             "INSERT INTO meta (key, value) VALUES (?, ?) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![
@@ -3134,6 +3137,16 @@ impl StateStore {
                 percent.map_or_else(|| "null".to_owned(), |percent| percent.to_string())
             ],
         )?;
+        // Turning the default on starts the count of every chat that follows
+        // it, so nothing they used while unlimited counts against it.
+        if before.is_none() && percent.is_some() {
+            transaction.execute(
+                "UPDATE chats SET quota_used = 0, quota_since_ms = ? \
+                 WHERE quota_own = 0 AND quota_reached = 0",
+                [crate::accounts::now_ms()],
+            )?;
+        }
+        transaction.commit()?;
         Ok(percent)
     }
 
@@ -15766,6 +15779,33 @@ mod tests {
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_some());
         assert!(!store.unpause_chat("chat").unwrap());
+    }
+
+    #[test]
+    fn turning_the_default_quota_on_starts_each_following_chats_count() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let set = |percent: Value| {
+            store
+                .set_chat_quota_settings(&json!({ "percent": percent }))
+                .unwrap()
+        };
+        set(json!(10));
+        store.add_quota_use("chat", 4.0, i64::MAX).unwrap();
+        // Changing the number keeps the count.
+        set(json!(20));
+        assert_eq!(store.chat_quota("chat").unwrap().used, 4.0);
+        // Off and on again starts it afresh, and use read from before then
+        // is not counted.
+        set(Value::Null);
+        set(json!(10));
+        assert_eq!(store.chat_quota("chat").unwrap().used, 0.0);
+        assert_eq!(store.add_quota_use("chat", 5.0, 0).unwrap(), None);
     }
 
     #[test]
