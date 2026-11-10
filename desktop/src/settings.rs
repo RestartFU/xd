@@ -4,7 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock, mpsc},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -303,7 +303,9 @@ pub fn flush_saves() {
     }
     let (reply, done) = mpsc::channel();
     if save_writer().send(SaveJob::Flush(reply)).is_ok() {
-        let _ = done.recv_timeout(Duration::from_secs(3));
+        // Every save the app made is on disk before it goes, as when saving
+        // was synchronous, however long the disk takes.
+        let _ = done.recv();
     }
 }
 

@@ -8784,7 +8784,20 @@ fn git_common_dir(workdir: &Path) -> Option<PathBuf> {
 /// Everything `git worktree list` reports that the tree and chat show: each
 /// worktree's HEAD, where its checkout is, and whether that still exists.
 fn worktree_signature(common: &Path) -> Option<String> {
+    // The branch git reports follows a branch that names another ref, which
+    // the files read here would not show, so such a checkout is listed by git.
+    let names_a_symbolic_branch = |head: &str| {
+        head.strip_prefix("ref:")
+            .map(str::trim)
+            .is_some_and(|reference| {
+                fs::read_to_string(common.join(reference))
+                    .is_ok_and(|target| target.trim_start().starts_with("ref:"))
+            })
+    };
     let mut signature = fs::read_to_string(common.join("HEAD")).ok()?;
+    if names_a_symbolic_branch(&signature) {
+        return None;
+    }
     let mut names = match fs::read_dir(common.join("worktrees")) {
         Ok(entries) => entries
             .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
@@ -8797,10 +8810,14 @@ fn worktree_signature(common: &Path) -> Option<String> {
         let admin = common.join("worktrees").join(&name);
         let checkout = fs::read_to_string(admin.join("gitdir")).unwrap_or_default();
         let present = Path::new(checkout.trim()).exists();
+        let head = fs::read_to_string(admin.join("HEAD")).unwrap_or_default();
+        if names_a_symbolic_branch(&head) {
+            return None;
+        }
         signature.push_str(&format!(
             "\0{}\0{}\0{}\0{present}\0{}",
             name.to_string_lossy(),
-            fs::read_to_string(admin.join("HEAD")).unwrap_or_default(),
+            head,
             checkout,
             admin.join("locked").exists(),
         ));
@@ -17004,6 +17021,33 @@ mod tests {
         assert_eq!(listed().1, 0);
         fs::remove_dir_all(&linked).unwrap();
         assert_eq!(listed(), (vec!["feature".to_owned()], 1));
+        // A branch that names another ref can be pointed elsewhere without
+        // touching HEAD, so a checkout on one is always listed by git.
+        git(&["symbolic-ref", "refs/heads/alias", "refs/heads/feature"]);
+        git(&["symbolic-ref", "HEAD", "refs/heads/alias"]);
+        let fresh = || {
+            list_git_worktrees(&repository)
+                .unwrap()
+                .into_iter()
+                .map(|worktree| worktree.branch)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed().1, 1);
+        assert_eq!(
+            listed().1,
+            1,
+            "not cached while HEAD names a symbolic branch"
+        );
+        git(&["symbolic-ref", "refs/heads/alias", "refs/heads/other"]);
+        let (summary, lists) = listed();
+        assert_eq!(lists, 1);
+        assert_eq!(
+            summary,
+            fresh()
+                .into_iter()
+                .map(Option::unwrap_or_default)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
