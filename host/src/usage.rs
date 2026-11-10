@@ -265,7 +265,7 @@ struct CodexUnreported {
 
 /// Codex `token_count` events carry no model or service tier, so both carry
 /// forward from the latest `turn_context` and `thread_settings_applied`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CodexScanState {
     model: Arc<str>,
     speed: Speed,
@@ -1187,6 +1187,22 @@ struct CachedFile {
     modified_ms: i64,
     records: Arc<Vec<UsageRecord>>,
     malformed: u64,
+    /// Where reading left off, so a transcript that only grew is read on
+    /// from there.
+    resume: Resume,
+}
+
+/// A transcript read up to the end of its last complete line.
+#[derive(Clone)]
+struct Resume {
+    /// Device and inode: a replaced file is read again from the start.
+    identity: (u64, u64),
+    offset: u64,
+    /// The bytes just before `offset`, checked again before reading on, so
+    /// a file rewritten rather than appended to is read again in full.
+    check: Vec<u8>,
+    records: Vec<UsageRecord>,
+    codex: CodexScanState,
 }
 
 fn modified_ms(metadata: &fs::Metadata) -> i64 {
@@ -1226,18 +1242,24 @@ fn list_transcripts(root: &Path, failed: &mut u64) -> Vec<PathBuf> {
     files
 }
 
-/// Calls `line` per newline-terminated line, and for an unterminated tail.
-/// Oversized lines are dropped while reading, not after buffering them.
-fn for_each_line(mut reader: impl BufRead, mut line: impl FnMut(&[u8])) -> std::io::Result<()> {
+/// Calls `line` per newline-terminated line, and for an unterminated tail
+/// (with `false`). Oversized lines are dropped while reading, not after
+/// buffering them. Returns how many bytes the complete lines took.
+fn for_each_line(
+    mut reader: impl BufRead,
+    mut line: impl FnMut(&[u8], bool),
+) -> std::io::Result<u64> {
     let mut pending = Vec::new();
     let mut skipping = false;
+    let mut read = 0_u64;
+    let mut complete = 0_u64;
     loop {
         let chunk = reader.fill_buf()?;
         if chunk.is_empty() {
             if !skipping && !pending.is_empty() {
-                line(&pending);
+                line(&pending, false);
             }
-            return Ok(());
+            return Ok(complete);
         }
         let newline = chunk.iter().position(|byte| *byte == b'\n');
         let end = newline.unwrap_or(chunk.len());
@@ -1246,27 +1268,38 @@ fn for_each_line(mut reader: impl BufRead, mut line: impl FnMut(&[u8])) -> std::
                 skipping = true;
                 pending = Vec::new();
             } else if pending.is_empty() && newline.is_some() {
-                line(&chunk[..end]);
+                line(&chunk[..end], true);
             } else {
                 pending.extend_from_slice(&chunk[..end]);
             }
         }
         let consumed = newline.map_or(chunk.len(), |index| index + 1);
         reader.consume(consumed);
+        read += consumed as u64;
         if newline.is_some() {
             if !skipping && !pending.is_empty() {
-                line(&pending);
+                line(&pending, true);
             }
             pending.clear();
             skipping = false;
+            complete = read;
         }
     }
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+    let Some((&first, rest)) = needle.split_first() else {
+        return true;
+    };
+    let mut start = 0;
+    while let Some(found) = haystack[start..].iter().position(|byte| *byte == first) {
+        let at = start + found;
+        if haystack[at + 1..].starts_with(rest) {
+            return true;
+        }
+        start = at + 1;
+    }
+    false
 }
 
 const CODEX_MARKERS: [&[u8]; 5] = [
@@ -1279,39 +1312,100 @@ const CODEX_MARKERS: [&[u8]; 5] = [
 
 /// `None` means the file could not be read; caching that as empty would hide
 /// its usage until its size or time changed.
+#[cfg(test)]
 fn read_transcript(
     provider: &str,
     path: &Path,
     retain_from_ms: i64,
 ) -> Option<(Vec<UsageRecord>, u64)> {
-    let file = fs::File::open(path).ok()?;
-    let reader = BufReader::with_capacity(256 * 1024, file);
-    let mut records = Vec::new();
-    let mut codex = CodexScanState::default();
-    // Old Codex events still run through the parser to keep its counters right.
-    let mut keep = |parsed: Vec<UsageRecord>| {
-        records.extend(
-            parsed
-                .into_iter()
-                .filter(|record| record.timestamp_ms >= retain_from_ms),
-        );
+    let file = read_transcript_from(provider, path, retain_from_ms, None)?;
+    Some((Arc::unwrap_or_clone(file.records), file.malformed))
+}
+
+/// Reads a transcript, from where `resume` left off when the file has only
+/// grown since. `None` means the file could not be read.
+fn read_transcript_from(
+    provider: &str,
+    path: &Path,
+    retain_from_ms: i64,
+    resume: Option<&Resume>,
+) -> Option<CachedFile> {
+    use std::io::{Seek, SeekFrom};
+    use std::os::unix::fs::{FileExt, MetadataExt};
+    let mut file = fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let identity = (metadata.dev(), metadata.ino());
+    let resume = resume.filter(|resume| {
+        resume.identity == identity && resume.offset <= metadata.len() && {
+            let mut check = vec![0; resume.check.len()];
+            let at = resume.offset - resume.check.len() as u64;
+            file.read_exact_at(&mut check, at).is_ok() && check == resume.check
+        }
+    });
+    let (offset, mut records, mut codex) = match resume {
+        Some(resume) => (resume.offset, resume.records.clone(), resume.codex.clone()),
+        None => (0, Vec::new(), CodexScanState::default()),
     };
-    for_each_line(reader, |line| {
-        if provider == "claude" {
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let reader = BufReader::with_capacity(256 * 1024, &file);
+    // An unterminated last line is still being written; it counts for now
+    // but is read again next time, from a copy of the Codex state.
+    let mut tail = Vec::new();
+    let mut tail_codex = None::<CodexScanState>;
+    let complete = for_each_line(reader, |line, terminated| {
+        let codex = if terminated {
+            &mut codex
+        } else {
+            tail_codex.insert(codex.clone())
+        };
+        let parsed = if provider == "claude" {
             if contains(line, b"\"usage\"")
                 && let Ok(value) = serde_json::from_slice::<Value>(line)
             {
-                keep(parse_claude_record(&value));
+                parse_claude_record(&value)
+            } else {
+                Vec::new()
             }
         } else if CODEX_MARKERS.iter().any(|marker| contains(line, marker))
             && let Ok(value) = serde_json::from_slice::<Value>(line)
         {
-            keep(parse_codex_record(&value, &mut codex));
+            // Old Codex events still run through the parser to keep its
+            // counters right.
+            parse_codex_record(&value, codex)
+        } else {
+            Vec::new()
+        };
+        let kept = parsed
+            .into_iter()
+            .filter(|record| record.timestamp_ms >= retain_from_ms);
+        if terminated {
+            records.extend(kept);
+        } else {
+            tail.extend(kept);
         }
     })
     .ok()?;
+    let end = offset + complete;
+    let length = end.min(64);
+    let mut check = vec![0; length as usize];
+    file.read_exact_at(&mut check, end - length).ok()?;
+    let malformed = tail_codex.as_ref().unwrap_or(&codex).malformed;
     records.shrink_to_fit();
-    Some((records, codex.malformed))
+    let mut all = records.clone();
+    all.extend(tail);
+    Some(CachedFile {
+        size: metadata.len(),
+        modified_ms: modified_ms(&metadata),
+        records: Arc::new(all),
+        malformed,
+        resume: Resume {
+            identity,
+            offset: end,
+            check,
+            records,
+            codex,
+        },
+    })
 }
 
 #[derive(Default)]
@@ -1411,24 +1505,21 @@ fn scan_source(
             scan.scanned_files += 1;
             continue;
         }
-        let Some((records, malformed)) = read_transcript(provider, path, retain_from_ms) else {
+        // Only a file that grew is read on; anything else starts over.
+        let resume = cache
+            .files
+            .get(path)
+            .filter(|cached| cached.size < metadata.len())
+            .map(|cached| &cached.resume);
+        let Some(file) = read_transcript_from(provider, path, retain_from_ms, resume) else {
             cache.files.remove(path);
             unread += 1;
             continue;
         };
-        let records = Arc::new(records);
-        cache.files.insert(
-            path.clone(),
-            CachedFile {
-                size: metadata.len(),
-                modified_ms: modified,
-                records: records.clone(),
-                malformed,
-            },
-        );
-        scan.records.push(records);
-        scan.malformed_records += malformed;
+        scan.records.push(file.records.clone());
+        scan.malformed_records += file.malformed;
         scan.scanned_files += 1;
+        cache.files.insert(path.clone(), file);
     }
     scan.skipped_files = unread;
     // Skipped records leave the totals short, which the page says out loud.
@@ -2967,6 +3058,82 @@ mod tests {
     }
 
     #[test]
+    fn a_grown_transcript_is_read_on_from_where_it_left_off() {
+        let directory = temporary_directory("incremental");
+        let path = directory.join("rollout.jsonl");
+        let line = |value: Value| format!("{value}\n");
+        let lines = [
+            line(
+                json!({"timestamp":"2026-11-05T12:00:00Z","type":"session_meta","payload":{"id":"thread"}}),
+            ),
+            line(
+                json!({"timestamp":"2026-11-05T12:00:00Z","type":"turn_context","payload":{"model":"gpt-5.5"}}),
+            ),
+            line(token_count_line(
+                "2026-11-05T12:00:01Z",
+                usage(100, 40, 10, 2),
+                usage(100, 40, 10, 2),
+            )),
+            line(token_count_line(
+                "2026-11-05T12:00:02Z",
+                usage(50, 0, 5, 0),
+                usage(150, 40, 15, 2),
+            )),
+            // Inconsistent with the line before: one malformed record.
+            line(token_count_line(
+                "2026-11-05T12:00:03Z",
+                usage(5, 0, 1, 0),
+                usage(500, 40, 90, 2),
+            )),
+            line(token_count_line(
+                "2026-11-05T12:00:04Z",
+                usage(7, 0, 1, 0),
+                usage(507, 40, 91, 2),
+            )),
+        ];
+        let full = |text: &str| {
+            fs::write(&path, text).unwrap();
+            read_transcript_from("codex", &path, 0, None).unwrap()
+        };
+        let append = |text: &str| {
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(text.as_bytes()).unwrap();
+        };
+        let same = |left: &CachedFile, right: &CachedFile| {
+            assert_eq!(left.records, right.records);
+            assert_eq!(left.malformed, right.malformed);
+            assert_eq!(left.resume.offset, right.resume.offset);
+        };
+        let expected = |count: usize, partial: &str| {
+            let mut text = lines[..count].concat();
+            text.push_str(partial);
+            full(&text)
+        };
+
+        let first = full(&lines[..3].concat());
+        assert_eq!(first.records.len(), 1);
+        // The next line arrives with half of the one after it.
+        let (half, rest) = lines[4].split_at(20);
+        append(&format!("{}{half}", lines[3]));
+        let grown = read_transcript_from("codex", &path, 0, Some(&first.resume)).unwrap();
+        same(&grown, &expected(4, half));
+        append(&format!("{rest}{}", lines[5]));
+        let finished = read_transcript_from("codex", &path, 0, Some(&grown.resume)).unwrap();
+        same(&finished, &expected(6, ""));
+        assert_eq!(finished.malformed, 1);
+
+        // Rewritten rather than appended to: read again from the start.
+        let rewritten = format!("{}{}", lines[..2].concat(), lines[3]).repeat(4);
+        assert!(rewritten.len() as u64 > finished.size);
+        let read = {
+            fs::write(&path, &rewritten).unwrap();
+            read_transcript_from("codex", &path, 0, Some(&finished.resume)).unwrap()
+        };
+        same(&read, &full(&rewritten));
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
     fn codex_bills_each_request_once_and_splits_cached_input() {
         let mut state = codex_state();
         let first = token_count_line(
@@ -3375,10 +3542,15 @@ mod tests {
         let mut input = b"one\n".to_vec();
         input.extend(vec![b'x'; LINE_LIMIT + 10]);
         input.extend_from_slice(b"\ntwo\ntail");
-        for_each_line(BufReader::with_capacity(1024, &input[..]), |line| {
+        let complete = for_each_line(BufReader::with_capacity(1024, &input[..]), |line, _| {
             lines.push(String::from_utf8_lossy(line).into_owned());
         })
         .unwrap();
+        assert_eq!(
+            complete,
+            input.len() as u64 - 4,
+            "all but the unterminated tail"
+        );
         assert_eq!(lines, ["one", "two", "tail"]);
     }
 
