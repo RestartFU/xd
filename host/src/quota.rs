@@ -159,6 +159,17 @@ impl Ledger {
     }
 }
 
+/// Who works where, with each turn's login dropped from its account.
+fn by_account(working: Vec<(String, String, String)>) -> Vec<(String, String, String)> {
+    working
+        .into_iter()
+        .map(|(chat_id, provider, tag)| {
+            let account = crate::accounts::tag_account(&tag).to_owned();
+            (chat_id, provider, account)
+        })
+        .collect()
+}
+
 /// How much of the limit was used between two readings.
 fn rise(last: Reading, now: Reading) -> f64 {
     let new_window = match (last.resets_at_ms, now.resets_at_ms) {
@@ -172,8 +183,9 @@ fn rise(last: Reading, now: Reading) -> f64 {
     }
 }
 
-/// Reads an account's limit for the meter, given the assistant and the
-/// account and login turns ran as, and says which login it read.
+/// Reads an account's limit for the meter, given the assistant and account
+/// id, and says which login it read, as
+/// [`crate::accounts::Accounts::session_tag`] gives it.
 pub(crate) type Reader = Box<dyn Fn(&str, &str) -> Option<(Reading, String)> + Send + Sync>;
 /// Stops a chat that has used its quota.
 pub(crate) type Stopper = Box<dyn Fn(&str) + Send + Sync>;
@@ -209,9 +221,9 @@ impl QuotaMeter {
         {
             let ledger = ledger.clone();
             let wake = Mutex::new(wake.clone());
-            runtime.set_activity_handler(Box::new(move |chat_id, provider, account| {
+            runtime.set_activity_handler(Box::new(move |chat_id, provider, tag| {
                 if let Ok(mut ledger) = ledger.lock() {
-                    ledger.note(provider, account, chat_id);
+                    ledger.note(provider, crate::accounts::tag_account(tag), chat_id);
                 }
                 if let Ok(wake) = wake.lock() {
                     let _ = wake.send(());
@@ -267,7 +279,10 @@ impl Pass {
     /// long until the next reading is due.
     fn run(&self, now: Instant) -> Duration {
         let mut next = READ_INTERVAL;
-        let working = self.runtime.working_accounts();
+        // Filed by account: turns on one account share its every rise, even
+        // if some began before its login was known. The logins they ran as
+        // decide below whether a reading is theirs at all.
+        let working = by_account(self.runtime.working_accounts());
         for (chat_id, provider, account) in &working {
             if let Ok(mut ledger) = self.ledger.lock() {
                 ledger.note(provider, account, chat_id);
@@ -396,11 +411,29 @@ impl Pass {
                 continue;
             };
             // Who works on the account now, after the reading.
-            let here_now = self
+            let working_now = self
                 .runtime
                 .working_accounts()
                 .into_iter()
-                .filter(|(_, p, a)| *p == provider && *a == account)
+                .filter(|(_, p, tag)| {
+                    *p == provider && crate::accounts::tag_account(tag) == account
+                })
+                .collect::<Vec<_>>();
+            // A turn known to run as another login than the one read, such as
+            // after the user's own CLI signed in to someone else, is not
+            // measured by this reading, nor is anyone beside it.
+            if working_now.iter().any(|(_, _, tag)| {
+                !tag.ends_with("#?") && !crate::accounts::same_login(tag, &login)
+            }) {
+                if let Ok(mut ledger) = self.ledger.lock()
+                    && let Some(entry) = ledger.accounts.get_mut(&key)
+                {
+                    entry.last = None;
+                }
+                continue;
+            }
+            let here_now = working_now
+                .into_iter()
                 .map(|(chat_id, _, _)| chat_id)
                 .collect::<Vec<_>>();
             let (shares, since_ms) = match self.ledger.lock() {
@@ -645,8 +678,8 @@ mod tests {
         runtime.note_activity_for_test("chat", "claude", "second#login");
         let ledger = meter.ledger();
         let ledger = ledger.lock().unwrap();
-        // Filed by account and login, so another login's usage never mixes in.
-        let entry = &ledger.accounts[&("claude".to_owned(), "second#login".to_owned())];
+        // Filed by account; which login a reading was of is checked apart.
+        let entry = &ledger.accounts[&("claude".to_owned(), "second".to_owned())];
         assert!(entry.sharers.contains("chat"));
         drop(ledger);
         meter.wake();

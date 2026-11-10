@@ -1928,28 +1928,21 @@ impl Engine {
             return;
         };
         let auth = self.auth.clone();
-        // `tag` is the account and the login the turns ran as.
-        let reader: quota::Reader = Box::new(move |provider, tag| {
-            let account = accounts::tag_account(tag);
+        let reader: quota::Reader = Box::new(move |provider, account| {
             if !auth.signed_in(provider, account) {
                 return None;
             }
             let asked = accounts::now_ms();
             usage::check_account(auth.accounts(), provider, account)?;
-            // Another login's usage says nothing of these turns, such as after
-            // the user's own CLI signed in to someone else. A turn whose login
-            // was not known yet is measured against the login read first; the
-            // meter starts afresh whenever the login it reads changes.
-            let current = auth.accounts().session_tag(provider, account);
-            if !tag.ends_with("#?") && !accounts::same_login(tag, &current) {
-                return None;
-            }
             let (windows, checked_at) = auth.accounts().limits(provider, account)?;
             // A reading from before this one says nothing of the turn.
             if checked_at < asked {
                 return None;
             }
-            Some((quota::quota_window(&windows)?, current))
+            // Which login was read, so the meter never measures one login's
+            // usage against another's.
+            let login = auth.accounts().session_tag(provider, account);
+            Some((quota::quota_window(&windows)?, login))
         });
         // Weak, since the engine owns the meter that holds this.
         let engine = Arc::downgrade(self);

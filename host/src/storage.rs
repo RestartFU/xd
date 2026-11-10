@@ -3230,13 +3230,21 @@ impl StateStore {
     /// (`background`), can resume the turn the quota cuts short. False when
     /// it already was marked.
     pub fn stop_for_quota(&self, chat_id: &str, background: bool) -> Result<bool, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        let changed = database.execute(
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        // Asked as it is marked: a quota raised or lifted since the meter
+        // decided, by a new default or the chat's own, lets the chat go on.
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        if quota.reached || !quota.spent() {
+            return Ok(false);
+        }
+        let changed = transaction.execute(
             "UPDATE chats SET quota_reached = 1, paused = 1, \
              turn_resumable = CASE WHEN host_working = 1 OR ? THEN 1 ELSE turn_resumable END \
              WHERE id = ? AND quota_reached = 0",
             params![background, chat_id],
         )?;
+        transaction.commit()?;
         Ok(changed == 1)
     }
 
@@ -15857,6 +15865,8 @@ mod tests {
             store.chat("chat").unwrap()["quota"],
             json!({"percent": 10, "used": 4.0, "own": false})
         );
+        // A stop decided before the quota allows more does not hold.
+        assert!(!store.stop_for_quota("chat", false).unwrap());
         assert!(
             store
                 .add_quota_use("chat", 6.0, i64::MAX)
