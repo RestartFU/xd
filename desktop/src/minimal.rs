@@ -93,8 +93,9 @@ pub(crate) struct SessionCard {
     pub(crate) working: bool,
     /// Background tasks it is waiting on while no turn runs.
     pub(crate) background_tasks: u32,
-    /// Started by the agent of the session listed just above it.
-    pub(crate) nested: bool,
+    /// How many sessions up the line of agents that started one another this
+    /// one sits: 0 for a session no listed session started.
+    pub(crate) depth: usize,
 }
 
 /// A session on the Settled shelf, which lists every project's together.
@@ -274,16 +275,16 @@ pub(crate) fn project_sessions(project_id: &str, chats: &[ChatSummary]) -> Vec<S
                     .unwrap_or_else(|| "Project directory".into()),
                 working: chat.working || chat.terminal_working,
                 background_tasks: chat.waiting_on(),
-                nested: false,
+                depth: 0,
             })
         })
         .collect()
 }
 
 /// Lists each session an agent started right below the session that started
-/// it, marked as nested, in the order they came. `session` names a card's
-/// session and the session it was started from. A session whose parent is not
-/// listed, such as one the search hid, stays where it was.
+/// it, a level deeper, in the order they came, and so on down. `session`
+/// names a card's session and the session it was started from. A session
+/// whose parent is not listed, such as one the search hid, stays where it was.
 pub(crate) fn nest_sessions(
     cards: Vec<SessionCard>,
     session: impl Fn(&SessionCard) -> (String, Option<String>),
@@ -301,25 +302,28 @@ pub(crate) fn nest_sessions(
     };
     let mut slots = cards.into_iter().map(Some).collect::<Vec<_>>();
     let mut nested = Vec::with_capacity(slots.len());
-    for index in 0..slots.len() {
-        if parent_of(index).is_some() {
-            continue;
-        }
-        let Some(card) = slots[index].take() else {
+    // Depth first, each row's children in their own order. A row is taken
+    // once, so a loop of parents cannot repeat one.
+    let mut pending = (0..slots.len())
+        .rev()
+        .filter(|index| parent_of(*index).is_none())
+        .map(|index| (index, 0))
+        .collect::<Vec<_>>();
+    while let Some((index, depth)) = pending.pop() {
+        let Some(mut card) = slots[index].take() else {
             continue;
         };
+        card.depth = depth;
         nested.push(card);
         let id = keys[index].0.as_str();
-        for (child, slot) in slots.iter_mut().enumerate() {
-            if parent_of(child) == Some(id)
-                && let Some(mut card) = slot.take()
-            {
-                card.nested = true;
-                nested.push(card);
-            }
-        }
+        pending.extend(
+            (0..slots.len())
+                .rev()
+                .filter(|child| slots[*child].is_some() && parent_of(*child) == Some(id))
+                .map(|child| (child, depth + 1)),
+        );
     }
-    // A chain deeper than one level, which the host never makes, still shows.
+    // Sessions whose parents start one another in a loop still show.
     nested.extend(slots.into_iter().flatten());
     nested
 }
@@ -666,7 +670,7 @@ mod tests {
                     branch: "session/a".into(),
                     working: true,
                     background_tasks: 0,
-                    nested: false,
+                    depth: 0,
                 },
                 SessionCard {
                     id: "b".into(),
@@ -675,7 +679,7 @@ mod tests {
                     branch: "session/b".into(),
                     working: false,
                     background_tasks: 2,
-                    nested: false,
+                    depth: 0,
                 },
             ]
         );
@@ -690,20 +694,25 @@ mod tests {
             branch: String::new(),
             working: false,
             background_tasks: 0,
-            nested: false,
+            depth: 0,
         };
         // The host lists the newest first, so workers come before their lead.
+        // A tab added to a worker's session can start a worker of its own.
         let parents = [
             ("w2", "lead"),
             ("w1", "lead"),
             ("orphan", "gone"),
             ("deep", "w1"),
+            ("loop-a", "loop-b"),
+            ("loop-b", "loop-a"),
         ];
         let nested = nest_sessions(
-            ["w2", "other", "w1", "lead", "orphan", "deep"]
-                .into_iter()
-                .map(card)
-                .collect(),
+            [
+                "w2", "other", "deep", "w1", "lead", "orphan", "loop-a", "loop-b",
+            ]
+            .into_iter()
+            .map(card)
+            .collect(),
             |card| {
                 let parent = parents
                     .iter()
@@ -715,15 +724,17 @@ mod tests {
         assert_eq!(
             nested
                 .iter()
-                .map(|card| (card.id.as_str(), card.nested))
+                .map(|card| (card.id.as_str(), card.depth))
                 .collect::<Vec<_>>(),
             [
-                ("other", false),
-                ("lead", false),
-                ("w2", true),
-                ("w1", true),
-                ("orphan", false),
-                ("deep", false),
+                ("other", 0),
+                ("lead", 0),
+                ("w2", 1),
+                ("w1", 1),
+                ("deep", 2),
+                ("orphan", 0),
+                ("loop-a", 0),
+                ("loop-b", 0),
             ]
         );
     }

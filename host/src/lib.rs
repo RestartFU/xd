@@ -2015,6 +2015,11 @@ impl Engine {
                 Err(error) => {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
                     self.keep_paused_after_failed_start(chat_id, was_paused);
+                    // The chat that started this one hears of it, unless it
+                    // sent the message itself and has this answer already.
+                    if request.get("from_parent").and_then(Value::as_bool) != Some(true) {
+                        runtime.report_start_failure(chat_id, &error);
+                    }
                     error_reply(error)
                 }
             },
@@ -3578,6 +3583,35 @@ done
         assert_eq!(stranger["ok"], false);
         let stopped = engine.dispatch(json!({"op": "stop-agent", "chat": parent, "agent": child}));
         assert_eq!(stopped, json!({"ok": true, "was_working": false}));
+
+        // A message the user sends the worker that cannot start a turn is
+        // reported too; the parent's own message_agent just gets the error.
+        engine.runtime.as_ref().unwrap().discard_chat(&child);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CLAUDE_EXECUTABLE", root.join("missing")) };
+        let failed = engine.dispatch(json!({"op": "send", "chat": child, "text": "Again"}));
+        assert_eq!(failed["ok"], false, "{failed}");
+        wait_for("the failure to reach the parent", &|| {
+            parent_reply(&format!(
+                "[xd] Agent \"Tests\" ({child}) is stopped with an error."
+            ))
+        });
+        let refused = engine.dispatch(
+            json!({"op": "message-agent", "chat": parent, "agent": child, "text": "Again"}),
+        );
+        assert_eq!(refused["ok"], false, "{refused}");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let reports = store.messages(&json!({"chat": parent})).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("is stopped with an error"))
+            })
+            .count();
+        assert_eq!(reports, 1);
 
         for chat in [&parent, &child] {
             engine.runtime.as_ref().unwrap().discard_chat(chat);

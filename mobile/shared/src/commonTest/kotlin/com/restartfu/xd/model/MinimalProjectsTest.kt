@@ -218,8 +218,12 @@ class MinimalProjectsTest {
 
     @Test
     fun sessionsAnAgentStartedListRightBelowTheSessionThatStartedThem() {
-        val ids = listOf("w2", "other", "w1", "lead", "orphan", "settledWorker", "gone")
-        val parents = mapOf("w2" to "lead", "w1" to "lead", "orphan" to "missing", "settledWorker" to "gone")
+        // A tab added to a worker's session can start a worker of its own.
+        val ids = listOf("w2", "other", "deep", "w1", "lead", "orphan", "settledWorker", "gone", "loopA", "loopB")
+        val parents = mapOf(
+            "w2" to "lead", "w1" to "lead", "deep" to "w1", "orphan" to "missing", "settledWorker" to "gone",
+            "loopA" to "loopB", "loopB" to "loopA",
+        )
         val snapshot = TreeSnapshot(
             chats = ids.map { chat(it, "compiler", it, "claude") },
             sessions = ids.map {
@@ -235,8 +239,11 @@ class MinimalProjectsTest {
         )
 
         assertEquals(
-            listOf("other" to false, "lead" to false, "w2" to true, "w1" to true, "orphan" to false, "settledWorker" to false),
-            snapshot.activeSessions("compiler").map { it.id to it.nested },
+            listOf(
+                "other" to 0, "lead" to 0, "w2" to 1, "w1" to 1, "deep" to 2, "orphan" to 0, "settledWorker" to 0,
+                "loopA" to 0, "loopB" to 0,
+            ),
+            snapshot.activeSessions("compiler").map { it.id to it.depth },
         )
         assertEquals("lead", snapshot.minimalSessions("compiler").first { it.id == "w1" }.parentId)
     }

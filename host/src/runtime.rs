@@ -3049,8 +3049,18 @@ impl TurnRuntime {
         None
     }
 
-    /// Tells whoever listens that a turn ended for good. Called with the
-    /// chat's succession held, so turns are told of in the order they ended.
+    /// Tells whoever listens that a turn a message asked for could not start.
+    pub(crate) fn report_start_failure(&self, chat_id: &str, error: &str) {
+        self.settled(SettledTurn {
+            chat_id: chat_id.to_owned(),
+            reply: String::new(),
+            error: Some(error.to_owned()),
+            waiting: false,
+        });
+    }
+
+    /// Tells whoever listens that a turn ended for good. A turn that ran is
+    /// told of with the chat's succession held, so in the order turns ended.
     fn settled(&self, settled: SettledTurn) {
         if let Ok(handler) = self.inner.on_turn_settled.lock()
             && let Some(handler) = handler.as_ref()

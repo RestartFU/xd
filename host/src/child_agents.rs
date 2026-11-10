@@ -89,7 +89,9 @@ impl Engine {
             return created;
         };
         self.worktree_names.start(child.clone(), new_chat.clone());
-        let sent = self.send_message(&json!({"op": "send", "chat": child, "text": prompt}));
+        let sent = self.send_message(
+            &json!({"op": "send", "chat": child, "text": prompt, "from_parent": true}),
+        );
         if sent["ok"] != true {
             // Nothing ran in it, so nothing is lost: the agent can try again.
             self.delete_chat(&json!({"op": "delete-chat", "chat": child}));
@@ -160,7 +162,9 @@ impl Engine {
         if let Err(error) = self.room_for_another(request, &child) {
             return error_reply(error);
         }
-        let reply = self.send_message(&json!({"op": "send", "chat": child.id, "text": text}));
+        let reply = self.send_message(
+            &json!({"op": "send", "chat": child.id, "text": text, "from_parent": true}),
+        );
         if reply["ok"] == true {
             self.events
                 .publish(json!({"event": "changed", "chat": child.id}));

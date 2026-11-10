@@ -2005,10 +2005,10 @@ private fun SessionRow(
             .fillMaxWidth()
             .padding(start = 18.dp)
             .then(
-                // Started by the agent of the session above: indented under
-                // it, along a guide line, as on the desktop.
-                if (session.nested) {
-                    Modifier
+                // Started by the agent of a session above: indented under it,
+                // along a guide line for each level, as on the desktop.
+                (0 until session.depth).fold<Int, Modifier>(Modifier) { modifier, _ ->
+                    modifier
                         .padding(start = SESSION_NEST_INDENT.dp)
                         .drawBehind {
                             drawLine(
@@ -2019,8 +2019,6 @@ private fun SessionRow(
                             )
                         }
                         .padding(start = 4.dp)
-                } else {
-                    Modifier
                 },
             )
             .heightIn(min = 64.dp)

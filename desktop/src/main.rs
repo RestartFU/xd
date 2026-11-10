@@ -14369,8 +14369,8 @@ impl XdDesktop {
                     let instance = session_instance;
                     session_instance += 1;
                     let selected = active_chat_id == Some(session.id.as_str());
-                    let nested = session.nested;
-                    let card = self.render_session_card(
+                    let depth = session.depth;
+                    let mut card = self.render_session_card(
                         colors,
                         &project.id,
                         session_index,
@@ -14379,19 +14379,18 @@ impl XdDesktop {
                         selected,
                         cx,
                     );
-                    cards.push(if nested {
-                        // Started by the agent of the session above: indented
-                        // under it, along a guide line.
-                        div()
+                    // Started by the agent of a session above: indented under
+                    // it, along a guide line for each level.
+                    for _ in 0..depth {
+                        card = div()
                             .ml(px(SESSION_NEST_INDENT))
                             .pl(px(4.0))
                             .border_l_1()
                             .border_color(rgb(colors.border))
                             .child(card)
-                            .into_any_element()
-                    } else {
-                        card
-                    });
+                            .into_any_element();
+                    }
+                    cards.push(card);
                 }
             } else {
                 session_instance += sessions.len();
