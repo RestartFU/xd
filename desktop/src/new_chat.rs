@@ -1192,10 +1192,10 @@ impl XdDesktop {
             .update(cx, |input, cx| input.set_text(text, cx));
     }
 
+    /// Waits for every draft write asked for so far, whichever drafts.
     pub(super) fn flush_new_chat_draft(&mut self) {
         if !cfg!(test)
-            && let Some(key) = self.new_chat_draft_key()
-            && let Err(error) = new_chat_store::read(key)
+            && let Err(error) = new_chat_store::flush()
         {
             self.model.connection_error = Some(error);
         }
@@ -1618,6 +1618,10 @@ impl XdDesktop {
     pub(super) fn keep_starting_messages(&mut self, cx: &mut Context<Self>) {
         if self.chat_create_in_flight() {
             self.detach_chat_create();
+            // Its draft holds whatever was written there since, not the
+            // emptied view: the message goes back beside that.
+            self.creating_chat_folder = None;
+            self.creating_chat_session = None;
         }
         for chat in std::mem::take(&mut self.starting_chats) {
             self.return_starting_chat(chat, cx);
@@ -2832,6 +2836,30 @@ mod start_tests {
                     desktop.pending_minimal_session,
                     Some(("atlas".into(), "footer".into()))
                 );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn closing_xd_while_watching_a_starting_chat_keeps_the_newer_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                sent_off(desktop);
+                desktop.begin_chat_create("atlas".into(), window, cx);
+                desktop.new_chat_prompt = "Then the header".into();
+                desktop.persist_new_chat_draft();
+                // Back to watch the first one start, then xd closes.
+                desktop.open_starting_chat(1, window, cx);
+                desktop.keep_starting_messages(cx);
+                let key = format!("{}/new", desktop.new_chat_choices_key("atlas"));
+                assert_eq!(
+                    desktop.settings.new_chat_drafts[&key]["text"],
+                    "Fix the footer\n\nThen the header"
+                );
+                assert!(desktop.starting_chats.is_empty());
             });
         });
     }

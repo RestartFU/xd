@@ -20,6 +20,9 @@ enum Job {
     List {
         reply: mpsc::Sender<Vec<(String, Value)>>,
     },
+    Flush {
+        reply: mpsc::Sender<()>,
+    },
 }
 static ERROR: Mutex<Option<String>> = Mutex::new(None);
 
@@ -188,6 +191,9 @@ fn worker() -> &'static mpsc::Sender<Job> {
                         })();
                         let _ = reply.send(result);
                     }
+                    Job::Flush { reply } => {
+                        let _ = reply.send(());
+                    }
                     Job::List { reply } => {
                         let mut keys = Vec::new();
                         list_keys(&root(), &[], &mut keys);
@@ -221,6 +227,17 @@ pub(super) fn read(key: String) -> Result<Value, String> {
         return Err(error);
     }
     result
+}
+
+/// Waits until every write asked for before has been made, and says if one
+/// failed.
+pub(super) fn flush() -> Result<(), String> {
+    let (reply, receive) = mpsc::channel();
+    worker()
+        .send(Job::Flush { reply })
+        .map_err(|e| e.to_string())?;
+    receive.recv().map_err(|e| e.to_string())?;
+    ERROR.lock().unwrap().take().map_or(Ok(()), Err)
 }
 
 /// The saved drafts that hold something to send, by key, without their
