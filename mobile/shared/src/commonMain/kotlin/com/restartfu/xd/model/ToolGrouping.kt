@@ -43,7 +43,13 @@ public sealed interface TranscriptRow {
  * The same rule is in the desktop transcript renderer.
  */
 public object ToolGrouping {
-    public fun rows(items: List<TranscriptItem>): List<TranscriptRow> {
+    public fun rows(items: List<TranscriptItem>): List<TranscriptRow> = rows(items, ::classify)
+
+    /** As [rows], reading each item's shape through [shapes], which may remember them. */
+    public fun rows(
+        items: List<TranscriptItem>,
+        shapes: (TranscriptItem) -> ToolShape,
+    ): List<TranscriptRow> {
         val rows = mutableListOf<TranscriptRow>()
         var run = mutableListOf<TranscriptItem>()
 
@@ -57,36 +63,50 @@ public object ToolGrouping {
         }
 
         items.forEach { item ->
-            val pipeline = if (item.kind == TranscriptKind.TOOL) {
-                PipelineRun.parse(item.text)
-            } else {
-                null
-            }
-            val subagent = if (item.kind == TranscriptKind.TOOL) {
-                SubagentRun.parse(item.text)
-            } else {
-                null
-            }
-            val switched = if (item.kind == TranscriptKind.TOOL) AccountSwitch.sentence(item.text) else null
-            if (switched != null) {
-                flush()
-                rows += TranscriptRow.AccountSwitch(item, switched)
-            } else if (pipeline != null) {
-                flush()
-                rows += TranscriptRow.Pipeline(item, pipeline)
-            } else if (subagent != null) {
-                flush()
-                rows += TranscriptRow.Subagent(item, subagent)
-            } else if (item.kind == TranscriptKind.TOOL && ToolText.patch(item.text) == null) {
-                run += item
-            } else {
-                flush()
-                rows += TranscriptRow.Single(item)
+            when (val shape = shapes(item)) {
+                is ToolShape.Switch -> {
+                    flush()
+                    rows += TranscriptRow.AccountSwitch(item, shape.sentence)
+                }
+                is ToolShape.Pipeline -> {
+                    flush()
+                    rows += TranscriptRow.Pipeline(item, shape.run)
+                }
+                is ToolShape.Subagent -> {
+                    flush()
+                    rows += TranscriptRow.Subagent(item, shape.run)
+                }
+                ToolShape.Ordinary -> run += item
+                ToolShape.Alone -> {
+                    flush()
+                    rows += TranscriptRow.Single(item)
+                }
             }
         }
         flush()
         return rows
     }
+
+    /** What kind of row [item] makes, before runs are grouped. */
+    public fun classify(item: TranscriptItem): ToolShape {
+        if (item.kind != TranscriptKind.TOOL) return ToolShape.Alone
+        AccountSwitch.sentence(item.text)?.let { return ToolShape.Switch(it) }
+        PipelineRun.parse(item.text)?.let { return ToolShape.Pipeline(it) }
+        SubagentRun.parse(item.text)?.let { return ToolShape.Subagent(it) }
+        return if (ToolText.isPatch(item.text)) ToolShape.Alone else ToolShape.Ordinary
+    }
+}
+
+/** How one transcript item is drawn on its own, as [ToolGrouping.classify] reads it. */
+public sealed interface ToolShape {
+    /** A user, assistant or system row, or an inline diff: never grouped. */
+    public data object Alone : ToolShape
+
+    /** An ordinary tool call, which joins a run of its neighbours. */
+    public data object Ordinary : ToolShape
+    public data class Switch(val sentence: String) : ToolShape
+    public data class Pipeline(val run: PipelineRun) : ToolShape
+    public data class Subagent(val run: SubagentRun) : ToolShape
 }
 
 /** The row the host adds when a chat moves to another account. */

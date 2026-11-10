@@ -82,17 +82,27 @@ public data class ChatState(
             addAll(messages)
             pendingUser?.let(::add)
             addAll(liveItems)
-            if (liveSegment.isNotEmpty()) {
-                add(
-                    TranscriptItem(
-                        id = "live-segment",
-                        kind = TranscriptKind.ASSISTANT,
-                        text = liveSegment,
-                        live = true,
-                    ),
-                )
-            }
+            segmentItem?.let(::add)
         }
+
+    /** The reply still streaming in, drawn after everything else. */
+    public val segmentItem: TranscriptItem?
+        get() = liveSegment.takeIf(String::isNotEmpty)?.let {
+            TranscriptItem(
+                id = LIVE_SEGMENT_ID,
+                kind = TranscriptKind.ASSISTANT,
+                text = it,
+                live = true,
+            )
+        }
+
+    /** The last of [visibleItems], without building the list. */
+    public val lastVisibleItem: TranscriptItem?
+        get() = segmentItem ?: liveItems.lastOrNull() ?: pendingUser ?: messages.lastOrNull()
+
+    public companion object {
+        public const val LIVE_SEGMENT_ID: String = "live-segment"
+    }
 }
 
 public data class PendingInteraction(

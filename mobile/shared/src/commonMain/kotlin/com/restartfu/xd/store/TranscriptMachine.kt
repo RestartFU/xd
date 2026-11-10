@@ -7,6 +7,7 @@ import com.restartfu.xd.model.TodoItem
 import com.restartfu.xd.model.TodoStatus
 import com.restartfu.xd.protocol.toModel
 import com.restartfu.xd.protocol.ChatReply
+import com.restartfu.xd.protocol.MessageReply
 import com.restartfu.xd.protocol.MessagesReply
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.protocol.PngAttachment
@@ -30,6 +31,9 @@ public sealed interface TranscriptInput {
     ) : TranscriptInput
 
     public data class MessagesLoaded(val messages: MessagesReply) : TranscriptInput
+
+    /** A page of messages from before the oldest one shown, read by cursor. */
+    public data class OlderLoaded(val messages: MessagesReply) : TranscriptInput
 
     public data class TurnStarted(
         val label: String?,
@@ -104,6 +108,9 @@ public object TranscriptMachine {
                 loadingOlder = false,
             ),
         )
+        is TranscriptInput.OlderLoaded -> TranscriptTransition(
+            state.withOlderMessages(input.messages).copy(loadingOlder = false),
+        )
         is TranscriptInput.TurnStarted -> if (state.isStaleTurn(input.turnId)) {
             TranscriptTransition(state)
         } else {
@@ -147,7 +154,7 @@ public object TranscriptMachine {
                 state.liveItems
             } else {
                 state.liveItems + TranscriptItem(
-                    id = "live-${state.liveItems.size}",
+                    id = liveItemId(state.liveItems.size, null),
                     kind = TranscriptKind.ASSISTANT,
                     text = state.liveSegment,
                     live = true,
@@ -156,7 +163,7 @@ public object TranscriptMachine {
             TranscriptTransition(
                 state.copy(
                     liveItems = closedSegment + TranscriptItem(
-                        id = "tool-${closedSegment.size}",
+                        id = liveItemId(closedSegment.size, input.messageId),
                         kind = if (input.name.startsWith(STEER_ROW_PREFIX)) {
                             TranscriptKind.USER
                         } else {
@@ -309,7 +316,7 @@ public object TranscriptMachine {
         val liveItems = if (chat.working) {
             chat.items.filterNot { it.text.todoSnapshot() != null }.mapIndexed { index, item ->
                 TranscriptItem(
-                    id = "loaded-live-$index",
+                    id = liveItemId(index, item.messageId),
                     kind = when {
                         item.tool && item.text.startsWith(STEER_ROW_PREFIX) -> TranscriptKind.USER
                         item.tool -> TranscriptKind.TOOL
@@ -369,26 +376,47 @@ public object TranscriptMachine {
     }
 
     private fun ChatState.withMessages(reply: MessagesReply): ChatState {
-        val snapshot = reply.messages.asReversed().firstNotNullOfOrNull {
-            it.content.todoSnapshot()
-        }
-        val visible = reply.messages.filterNot {
-            it.role == "duration" || it.content.todoSnapshot() != null
-        }
+        val snapshot = reply.messages.latestTodos()
         return copy(
-            messages = visible.mapIndexed { index, message ->
-                TranscriptItem(
-                    id = "persisted-${message.at}-${visible.size - index}",
-                    kind = message.role.toKind(),
-                    text = message.content,
-                    atMillis = message.at * 1000,
-                    label = message.label ?: if (message.role == "error") "Host" else null,
-                    messageId = message.id,
-                )
-            },
+            messages = reply.messages.transcriptItems(),
             todos = snapshot ?: todos,
             hasOlderMessages = reply.messages.size < reply.totalMessages,
         )
+    }
+
+    /** Puts an older page in front of the messages shown, which stay as they are. */
+    private fun ChatState.withOlderMessages(reply: MessagesReply): ChatState {
+        val shown = messages.mapNotNullTo(HashSet()) { it.messageId }
+        val older = reply.messages.filter { it.id == null || it.id !in shown }
+        return copy(
+            messages = older.transcriptItems() + messages,
+            // A newer list already in hand wins over one from further back.
+            todos = todos.ifEmpty { older.latestTodos() ?: todos },
+            hasOlderMessages = reply.hasOlder ?: hasOlderMessages,
+        )
+    }
+
+    private fun List<MessageReply>.latestTodos(): List<TodoItem>? =
+        asReversed().firstNotNullOfOrNull { it.content.todoSnapshot() }
+
+    private fun List<MessageReply>.transcriptItems(): List<TranscriptItem> {
+        val visible = filterNot {
+            it.role == "duration" || it.content.todoSnapshot() != null
+        }
+        return visible.mapIndexed { index, message ->
+            TranscriptItem(
+                // The host's id is stable as rows are added and older ones
+                // load, so a row keeps its place and state in the list. A
+                // host that sends none falls back to the row's position.
+                id = message.id?.let(::persistedItemId)
+                    ?: "persisted-${message.at}-${visible.size - index}",
+                kind = message.role.toKind(),
+                text = message.content,
+                atMillis = message.at * 1000,
+                label = message.label ?: if (message.role == "error") "Host" else null,
+                messageId = message.id,
+            )
+        }
     }
 
     private fun String.toKind(): TranscriptKind = when (this) {
@@ -398,6 +426,17 @@ public object TranscriptMachine {
         else -> TranscriptKind.SYSTEM
     }
 }
+
+/** The list id of a stored row, shared by its live tool row so the row keeps its state. */
+internal fun persistedItemId(messageId: Long): String = "message-$messageId"
+
+/**
+ * A live row's id. A row the host has stored already uses the stored row's id,
+ * so it keeps its place when the turn ends; the rest are numbered in turn order,
+ * the same way whether they streamed in or came with a reload.
+ */
+private fun liveItemId(index: Int, messageId: Long?): String =
+    messageId?.let(::persistedItemId) ?: "live-$index"
 
 /** Marks a live tool row that is a message the user sent into the running turn. */
 private const val STEER_ROW_PREFIX = "steer\n"

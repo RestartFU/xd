@@ -77,7 +77,7 @@ public object AskBlock {
      */
     public fun pending(state: ChatState): Ask? {
         if (state.working || state.queue.isNotEmpty()) return null
-        val last = state.visibleItems.lastOrNull() ?: return null
+        val last = state.lastVisibleItem ?: return null
         if (last.kind != TranscriptKind.ASSISTANT) return null
         return parse(last.text)?.ask
     }
