@@ -1187,9 +1187,11 @@ parent gets it in its queue without resuming. Statuses in `list-agents` are
 The parent's transcript also gets one card per agent: a `tool` row holding a
 `subagent_run` record (see the subagent records above) with `key` set to
 `chat:<agent chat id>` and `chat` set to that id. The host writes it when the
-agent starts and rewrites it in place, with a `record` event, after each turn
-that ends for good: `status` is `completed` or `failed` and `summary` the start
-of the reply or the error. The card says only how the last turn went; clients
+agent's first turn starts, removes it if that start fails, and rewrites it in
+place, with a `record` event, whenever a turn ends: `status` is `completed` or
+`failed`, with `summary` the start of the reply or the error (a message that
+could not start a turn is a failure too), or `stopped` for a turn that was
+stopped. The card says only how the last turn went; clients
 show what the tree says of the chat now (`working`, `paused`,
 `question_waiting`) over it, and open the chat when the card is clicked. Older
 clients show it as an ordinary agent card. The report message itself starts

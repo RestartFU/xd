@@ -3081,6 +3081,36 @@ impl StateStore {
         self.write_agent_record_with(child, status, summary, None)
     }
 
+    /// Removes the card standing for agent chat `child` from its parent's
+    /// transcript, and returns the parent it was in.
+    pub fn remove_agent_record(&self, child: &str) -> Result<Option<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let Some((Some(parent), Some(record))) = database
+            .query_row(
+                "SELECT parent_chat_id, agent_record_id FROM chats WHERE id = ?",
+                [child],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        database.execute(
+            "DELETE FROM messages WHERE id = ? AND chat_id = ? AND role = 'tool'",
+            params![record, parent],
+        )?;
+        database.execute(
+            "UPDATE chats SET agent_record_id = NULL WHERE id = ?",
+            [child],
+        )?;
+        Ok(Some(parent))
+    }
+
     /// The card for an agent about to start its first turn, whose task is
     /// `prompt`. Made only if there is none yet: written before the turn
     /// starts, it can never replace what a finished turn wrote.
@@ -3126,17 +3156,20 @@ impl StateStore {
         let Some(parent) = parent else {
             return Ok(None);
         };
-        if opening.is_some()
-            && let Some(id) = record
-            && transaction
+        let exists = match record {
+            Some(id) => transaction
                 .query_row(
                     "SELECT 1 FROM messages WHERE id = ? AND chat_id = ? AND role = 'tool'",
                     params![id, parent],
                     |_| Ok(()),
                 )
                 .optional()?
-                .is_some()
-        {
+                .is_some(),
+            None => false,
+        };
+        // Only a start makes a card, and only once; later turns rewrite it.
+        // A card taken away, with a worker that never started, stays away.
+        if opening.is_some() == exists {
             return Ok(None);
         }
         let prompt = prompt.or_else(|| opening.map(str::to_owned));

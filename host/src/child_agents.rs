@@ -97,6 +97,11 @@ impl Engine {
         );
         if sent["ok"] != true {
             // Nothing ran in it, so nothing is lost: the agent can try again.
+            // Its card goes with it.
+            if let Ok(Some(parent)) = store.remove_agent_record(&child) {
+                self.events
+                    .publish(json!({"event": "changed", "chat": parent}));
+            }
             self.delete_chat(&json!({"op": "delete-chat", "chat": child}));
             return sent;
         }
@@ -271,18 +276,15 @@ impl Engine {
         let Ok(Some((parent, reports))) = store.chat_parent(child) else {
             return;
         };
-        // The card follows every turn; the message only when it was asked for.
-        let summary = match &settled.error {
-            Some(error) => clip(error, SUMMARY_CHARS),
-            None => clip_start(&settled.reply, SUMMARY_CHARS),
+        // The card follows every turn; the message only when it was asked
+        // for and has something to say.
+        let (status, summary) = match &settled.error {
+            _ if settled.stopped => ("stopped", None),
+            Some(error) => ("failed", Some(clip(error, SUMMARY_CHARS))),
+            None => ("completed", Some(clip_start(&settled.reply, SUMMARY_CHARS))),
         };
-        let status = if settled.error.is_some() {
-            "failed"
-        } else {
-            "completed"
-        };
-        self.write_agent_record(child, status, Some(&summary));
-        if !reports {
+        self.write_agent_record(child, status, summary.as_deref());
+        if !reports || settled.quiet || settled.stopped {
             return;
         }
         let title = store
@@ -544,6 +546,8 @@ mod tests {
             reply: "All green.".into(),
             error: None,
             waiting: false,
+            stopped: false,
+            quiet: false,
         };
         assert_eq!(
             report("child", "Fix the tests", &settled),

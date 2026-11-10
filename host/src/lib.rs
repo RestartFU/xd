@@ -2015,11 +2015,11 @@ impl Engine {
                 Err(error) => {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
                     self.keep_paused_after_failed_start(chat_id, was_paused);
-                    // The chat that started this one hears of it, unless it
-                    // sent the message itself and has this answer already.
-                    if request.get("from_parent").and_then(Value::as_bool) != Some(true) {
-                        runtime.report_start_failure(chat_id, &error);
-                    }
+                    // An agent's card says so either way; the chat that
+                    // started it is told too, unless it sent the message
+                    // itself and has this answer already.
+                    let quiet = request.get("from_parent").and_then(Value::as_bool) == Some(true);
+                    runtime.report_start_failure(chat_id, &error, quiet);
                     error_reply(error)
                 }
             },
@@ -3628,6 +3628,25 @@ done
             })
             .count();
         assert_eq!(reports, 1);
+        let cards = |store: &StateStore| {
+            store.messages(&json!({"chat": parent})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|row| row["content"].as_str()?.strip_prefix("subagent_run\n"))
+                .map(|text| serde_json::from_str::<Value>(text).unwrap())
+                .collect::<Vec<_>>()
+        };
+        // The card says the latest attempt failed, though the parent's own
+        // message_agent was told directly and got no report.
+        let card = cards(store);
+        assert_eq!(card.len(), 1);
+        assert_eq!(card[0]["status"], "failed");
+        // A worker that cannot start at all leaves no card behind.
+        let failed_start = engine.dispatch(json!({"op": "start-agent", "chat": parent,
+            "prompt": "More", "workspace": "this_worktree"}));
+        assert_eq!(failed_start["ok"], false, "{failed_start}");
+        assert_eq!(cards(store).len(), 1);
 
         for chat in [&parent, &child] {
             engine.runtime.as_ref().unwrap().discard_chat(chat);

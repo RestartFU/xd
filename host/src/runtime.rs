@@ -109,6 +109,11 @@ pub(crate) struct SettledTurn {
     pub(crate) error: Option<String>,
     /// It ended on a question for whoever reads it.
     pub(crate) waiting: bool,
+    /// It was stopped rather than finished, so there is no answer to pass on.
+    pub(crate) stopped: bool,
+    /// Whoever asked for the turn already knows how it went, so only the
+    /// agent's card needs to change.
+    pub(crate) quiet: bool,
 }
 
 /// Marks a `tool` row that says a chat moved to another account. A client that
@@ -2310,6 +2315,8 @@ impl TurnRuntime {
                     reply: String::new(),
                     error: Some(error.clone()),
                     waiting: false,
+                    stopped: false,
+                    quiet: false,
                 };
                 let next = self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
                 self.settled(settled);
@@ -2897,6 +2904,8 @@ impl TurnRuntime {
             reply: assistant_text.trim().to_owned(),
             error: error.clone().filter(|_| !success),
             waiting: asked.is_some(),
+            stopped: false,
+            quiet: false,
         };
         let next_failed = self.finish(
             turn,
@@ -2912,8 +2921,14 @@ impl TurnRuntime {
         // Told while the chat's succession is still held: the next turn, which
         // `finish` may have started, cannot end and be told of first.
         let moves_on = matches!(limited, Some((AfterLimit::Switches(_), _)));
-        if !was_cancelled && !moves_on {
-            self.settled(settled);
+        // A turn going on under another account ends later, and is told of
+        // then. A stopped one has nothing to report, but has ended.
+        if !moves_on {
+            self.settled(SettledTurn {
+                stopped: was_cancelled,
+                quiet: was_cancelled,
+                ..settled
+            });
         }
         if let Some(next_failed) = next_failed {
             self.settled(next_failed);
@@ -3044,18 +3059,22 @@ impl TurnRuntime {
                 reply: String::new(),
                 error: Some(error),
                 waiting: false,
+                stopped: false,
+                quiet: false,
             });
         }
         None
     }
 
     /// Tells whoever listens that a turn a message asked for could not start.
-    pub(crate) fn report_start_failure(&self, chat_id: &str, error: &str) {
+    pub(crate) fn report_start_failure(&self, chat_id: &str, error: &str, quiet: bool) {
         self.settled(SettledTurn {
             chat_id: chat_id.to_owned(),
             reply: String::new(),
             error: Some(error.to_owned()),
             waiting: false,
+            stopped: false,
+            quiet,
         });
     }
 
