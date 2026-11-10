@@ -1267,9 +1267,9 @@ fn a_daemon_the_app_started_stops_once_no_app_is_left() {
     let root = daemon.root.clone();
 
     let (mut first, mut first_client) = bridge(&root, true);
-    let pid = first_client.call(json!({"op":"daemon-info"}))["pid"]
-        .as_u64()
-        .unwrap();
+    let info = first_client.call(json!({"op":"daemon-info"}));
+    assert_eq!(info["stops_with_app"], true, "{info}");
+    let pid = info["pid"].as_u64().unwrap();
     let command = fs::read(format!("/proc/{pid}/cmdline")).unwrap();
     assert!(
         command
@@ -1403,7 +1403,17 @@ impl StaleDaemon {
         fs::canonicalize(host).unwrap()
     }
     fn bridge(&self, host: &Path) -> Child {
-        Command::new(host)
+        self.bridge_as(host, false)
+    }
+    /// A bridge, run as the xd app's when `app` is set.
+    fn bridge_as(&self, host: &Path, app: bool) -> Child {
+        let mut command = Command::new(host);
+        if app {
+            command.env("XD_APP_BRIDGE", "1");
+        } else {
+            command.env_remove("XD_APP_BRIDGE");
+        }
+        command
             .args(["stdio", "--data"])
             .arg(self.root.join("data"))
             .env("HOME", &self.root)
@@ -1438,8 +1448,11 @@ impl Drop for StaleDaemon {
     }
 }
 
-fn assert_bridge_replaces(stale: &StaleDaemon, host: &Path) {
-    let mut bridge = stale.bridge(host);
+fn assert_bridge_replaces(stale: &StaleDaemon, host: &Path) -> Value {
+    assert_bridge_replaces_as(stale, host, false)
+}
+fn assert_bridge_replaces_as(stale: &StaleDaemon, host: &Path, app: bool) -> Value {
+    let mut bridge = stale.bridge_as(host, app);
     let mut stdin = bridge.stdin.take().unwrap();
     let mut stdout = BufReader::new(bridge.stdout.take().unwrap());
     writeln!(stdin, "{}", json!({"op":"daemon-info","_xd_request":1})).unwrap();
@@ -1462,6 +1475,7 @@ fn assert_bridge_replaces(stale: &StaleDaemon, host: &Path) {
     // Only cleanup: this test isn't about the stop acknowledgement.
     writeln!(stdin, "{}", json!({"op":"daemon-stop"})).unwrap();
     bridge.wait().unwrap();
+    info
 }
 
 #[test]
@@ -1470,6 +1484,25 @@ fn bridge_replaces_an_idle_daemon_left_behind_by_an_update() {
     let host = stale.install_host();
     stale.report("executable", json!(host));
     assert_bridge_replaces(&stale, &host);
+}
+
+#[test]
+fn a_daemon_started_during_replacement_keeps_the_old_one_s_lifetime() {
+    // One started by hand, replaced by the app's bridge, keeps running.
+    let stale = StaleDaemon::start(true);
+    let host = stale.install_host();
+    stale.report("executable", json!(host));
+    let info = assert_bridge_replaces_as(&stale, &host, true);
+    assert_eq!(info["stops_with_app"], false, "{info}");
+    drop(stale);
+
+    // One the app started, replaced by a plain bridge, still stops with it.
+    let stale = StaleDaemon::start(true);
+    let host = stale.install_host();
+    stale.report("executable", json!(host));
+    stale.report("stops_with_app", json!(true));
+    let info = assert_bridge_replaces_as(&stale, &host, false);
+    assert_eq!(info["stops_with_app"], true, "{info}");
 }
 
 #[test]

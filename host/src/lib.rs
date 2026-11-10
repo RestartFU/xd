@@ -114,6 +114,8 @@ pub struct Engine {
     /// Local connections the xd app's own bridge opened. A daemon the app
     /// started stops once none has been open for a while.
     app_clients: Mutex<AppClients>,
+    /// Whether this daemon stops once the xd app that started it closes.
+    stops_with_app: AtomicBool,
     store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
@@ -182,6 +184,7 @@ impl Engine {
         Self {
             shutdown: AtomicBool::new(false),
             app_clients: Mutex::default(),
+            stops_with_app: AtomicBool::new(false),
             store: None,
             auth: AuthManager::new(events.clone(), accounts::Accounts::new(None)),
             cli_updates: CliUpdates::new(events.clone()),
@@ -250,6 +253,7 @@ impl Engine {
         let engine = Self {
             shutdown: AtomicBool::new(false),
             app_clients: Mutex::default(),
+            stops_with_app: AtomicBool::new(false),
             runtime: Some(runtime),
             store: Some(store),
             auth,
@@ -300,7 +304,7 @@ impl Engine {
         let mut reply = match operation {
             Some("ping") => json!({"ok": true}),
             Some("daemon-info") => {
-                json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 2, "build": option_env!("XD_COMMIT").unwrap_or("development"), "pid": std::process::id(), "workspaces": self.store.as_ref().and_then(|store| fs::canonicalize(store.workspace_path()).ok()), "executable": self.self_update.host_executable().and_then(std::path::Path::to_str)})
+                json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 2, "build": option_env!("XD_COMMIT").unwrap_or("development"), "pid": std::process::id(), "workspaces": self.store.as_ref().and_then(|store| fs::canonicalize(store.workspace_path()).ok()), "executable": self.self_update.host_executable().and_then(std::path::Path::to_str), "stops_with_app": self.stops_with_app.load(Ordering::Acquire)})
             }
             Some("resume-interrupted") => self.resume_interrupted(&request),
             Some("daemon-stop") if self.pairing.is_local(owner) => {
@@ -639,6 +643,11 @@ impl Engine {
 
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// Records that this daemon stops once the xd app that started it closes.
+    pub fn stop_with_app(&self) {
+        self.stops_with_app.store(true, Ordering::Release);
     }
 
     /// How long no connection from the xd app has been open, counted from the

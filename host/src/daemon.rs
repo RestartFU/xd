@@ -209,6 +209,9 @@ fn run_inner(options: HostOptions, stop_with_app: bool) -> io::Result<()> {
     engine.start_account_switching();
     #[cfg(target_os = "linux")]
     engine.start_memory_guard();
+    if stop_with_app {
+        engine.stop_with_app();
+    }
     let listener = UnixListener::bind(&paths.socket)?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
@@ -368,7 +371,7 @@ pub(super) fn bridge(options: HostOptions) -> Result<(), String> {
         let _ = rpc(&mut stream, "app-client");
     }
     if !matches_this_build(&info) {
-        (stream, info) = replace_stale_daemon(&options, stream, &info, app)?;
+        (stream, info) = replace_stale_daemon(&options, stream, &info)?;
         check_workspaces(&options, &info)?;
         if app {
             let _ = rpc(&mut stream, "app-client");
@@ -408,8 +411,10 @@ fn replace_stale_daemon(
     options: &HostOptions,
     mut stale: UnixStream,
     info: &Value,
-    app: bool,
 ) -> Result<(UnixStream, Value), String> {
+    // A daemon this has to start while the old one re-executes takes the old
+    // one's place, so it keeps its lifetime rather than this bridge's.
+    let stops_with_app = info["stops_with_app"] == true;
     let stop = stop_command(options);
     let status = request(&mut stale, json!({"op": "host-update"})).unwrap_or_default();
     if !restarts_into_this_host(info, &status) {
@@ -434,7 +439,7 @@ fn replace_stale_daemon(
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
         // The old process answers until it re-executes, then refuses briefly.
-        if let Ok(mut stream) = connect(options, true, app)
+        if let Ok(mut stream) = connect(options, true, stops_with_app)
             && let Ok(info) = rpc(&mut stream, "daemon-info")
             && matches_this_build(&info)
         {
