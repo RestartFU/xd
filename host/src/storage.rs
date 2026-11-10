@@ -8785,13 +8785,16 @@ fn git_common_dir(workdir: &Path) -> Option<PathBuf> {
 /// worktree's HEAD, where its checkout is, and whether that still exists.
 fn worktree_signature(common: &Path) -> Option<String> {
     // The branch git reports follows a branch that names another ref, which
-    // the files read here would not show, so such a checkout is listed by git.
+    // the files read here would not show, and refs outside `refs/heads/` can
+    // live in a worktree's own directory, so such a checkout is listed by git.
     let names_a_symbolic_branch = |head: &str| {
         head.strip_prefix("ref:")
             .map(str::trim)
             .is_some_and(|reference| {
-                fs::read_to_string(common.join(reference))
-                    .is_ok_and(|target| target.trim_start().starts_with("ref:"))
+                !reference.starts_with("refs/heads/")
+                    || reference.contains("..")
+                    || fs::read_to_string(common.join(reference))
+                        .is_ok_and(|target| target.trim_start().starts_with("ref:"))
             })
     };
     let mut signature = fs::read_to_string(common.join("HEAD")).ok()?;
@@ -17048,6 +17051,13 @@ mod tests {
                 .map(Option::unwrap_or_default)
                 .collect::<Vec<_>>()
         );
+        // A worktree-local ref lives in that worktree's own directory, so a
+        // checkout on one is listed by git too.
+        git(&["checkout", "-q", "feature"]);
+        git(&["update-ref", "refs/worktree/local", "HEAD"]);
+        git(&["symbolic-ref", "HEAD", "refs/worktree/local"]);
+        assert_eq!(listed().1, 1);
+        assert_eq!(listed().1, 1, "not cached while HEAD names a worktree ref");
     }
 
     #[test]
