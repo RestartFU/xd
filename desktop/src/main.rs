@@ -1690,6 +1690,15 @@ struct RunningAgent {
     view: SubagentView,
 }
 
+/// A chat this chat's agent started with xd's start_agent tool that is at
+/// work or waiting on the user, as the tree has it now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrayWorker {
+    chat: String,
+    title: String,
+    needs_you: bool,
+}
+
 /// Where an image in the transcript has got to.
 #[derive(Clone)]
 enum MessageImageState {
@@ -11620,6 +11629,31 @@ impl XdDesktop {
         }
     }
 
+    /// The open chat's agent chats that are at work or waiting on the user, in
+    /// the tree's order, for the tray: their rows may be far up the chat.
+    fn tray_workers(&self) -> Vec<TrayWorker> {
+        let Some(selected) = self.model.selected_chat.as_ref() else {
+            return Vec::new();
+        };
+        self.model
+            .chats
+            .iter()
+            .filter(|chat| self.model.chat_parents.get(&chat.id) == Some(selected))
+            .filter_map(|chat| {
+                let needs_you = !chat.working && self.model.question_chats.contains(&chat.id);
+                (chat.working || needs_you).then(|| TrayWorker {
+                    chat: chat.id.clone(),
+                    title: chat
+                        .title
+                        .clone()
+                        .filter(|title| !title.trim().is_empty())
+                        .unwrap_or_else(|| "New Chat".into()),
+                    needs_you,
+                })
+            })
+            .collect()
+    }
+
     /// Whether anything on screen shows motion: a turn, a session card, a
     /// terminal, or an agent still at work.
     fn anything_working(&self) -> bool {
@@ -15513,21 +15547,43 @@ impl XdDesktop {
     }
 
     /// What the tray says is at work. A backgrounded shell command shares the
-    /// agents' cards but is no agent, so it is counted as what it is.
-    fn agents_tray_label(agents: &[RunningAgent]) -> String {
+    /// agents' cards but is no agent, so it is counted as what it is. This
+    /// chat's agent chats at work count as agents working, and those waiting
+    /// on the user are said apart, since they are what the user acts on.
+    fn tray_label(agents: &[RunningAgent], workers: &[TrayWorker]) -> String {
+        let needs_you = workers.iter().filter(|worker| worker.needs_you).count();
+        let working = workers.len() - needs_you;
+        let commands = agents.iter().filter(|agent| agent.view.is_shell()).count();
+        let delegated = agents.len() - commands + working;
         let count = |count: usize, noun: &str| {
             format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
         };
-        let commands = agents.iter().filter(|agent| agent.view.is_shell()).count();
-        match (agents.len() - commands, commands) {
-            (delegated, 0) => format!("{} working", count(delegated, "agent")),
-            (0, commands) => format!("{} running", count(commands, "command")),
-            (delegated, commands) => format!(
+        // Worded as the tray words its own agents alone.
+        let base = match (delegated, commands) {
+            (0, 0) => None,
+            (delegated, 0) => Some(format!("{} working", count(delegated, "agent"))),
+            (0, commands) => Some(format!("{} running", count(commands, "command"))),
+            (delegated, commands) => Some(format!(
                 "{} and {} running",
                 count(delegated, "agent"),
                 count(commands, "command")
-            ),
-        }
+            )),
+        };
+        let waiting = (needs_you > 0).then(|| {
+            format!(
+                "{needs_you} {}",
+                if needs_you == 1 {
+                    "needs you"
+                } else {
+                    "need you"
+                }
+            )
+        });
+        [base, waiting]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     /// What an agent is doing, in a few words. Everything in the tray is
@@ -15555,15 +15611,19 @@ impl XdDesktop {
     fn render_agents_tray(
         colors: ThemeColors,
         agents: &[RunningAgent],
+        workers: &[TrayWorker],
         open: bool,
     ) -> Option<gpui::AnyElement> {
-        if agents.is_empty() {
+        if agents.is_empty() && workers.is_empty() {
             return None;
         }
         let now = Self::now_millis();
-        let tasks = agents
+        // Only what waits on the user stops the dot pulsing.
+        let all_waiting = agents.is_empty() && workers.iter().all(|worker| worker.needs_you);
+        let tasks = workers
             .iter()
-            .map(|agent| Self::tray_task(&agent.view))
+            .map(|worker| worker.title.clone())
+            .chain(agents.iter().map(|agent| Self::tray_task(&agent.view)))
             .collect::<Vec<_>>()
             .join(", ");
         let summary = div()
@@ -15584,8 +15644,12 @@ impl XdDesktop {
                     .size(px(6.0))
                     .flex_none()
                     .rounded_full()
-                    .bg(rgb(colors.working))
-                    .opacity(pulse_opacity()),
+                    .bg(rgb(if all_waiting {
+                        colors.waiting
+                    } else {
+                        colors.working
+                    }))
+                    .when(!all_waiting, |dot| dot.opacity(pulse_opacity())),
             )
             .child(
                 div()
@@ -15593,7 +15657,7 @@ impl XdDesktop {
                     .text_size(px(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(colors.text))
-                    .child(Self::agents_tray_label(agents)),
+                    .child(Self::tray_label(agents, workers)),
             )
             .child(
                 div()
@@ -15613,6 +15677,50 @@ impl XdDesktop {
                 13.0,
                 colors.faint,
             ));
+        // Agent chats first: each is a chat of its own, which a row opens.
+        let worker_rows = workers.iter().enumerate().map(|(index, worker)| {
+            let chat = worker.chat.clone();
+            div()
+                .id(("agents-tray-worker", index))
+                .w_full()
+                .h(px(26.0))
+                .pl(px(25.0))
+                .pr(px(10.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(colors.surface_high)))
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(OpenAgentChat { chat: chat.clone() }), cx);
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.text))
+                        .child(worker.title.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(12.0))
+                        .text_color(rgb(if worker.needs_you {
+                            colors.waiting
+                        } else {
+                            colors.faint
+                        }))
+                        .child(if worker.needs_you {
+                            "Needs you"
+                        } else {
+                            "Running"
+                        }),
+                )
+                .into_any_element()
+        });
         let rows = agents.iter().enumerate().map(|(index, agent)| {
             let key = agent.view.key.clone();
             let elapsed = agent
@@ -15652,7 +15760,9 @@ impl XdDesktop {
                             .child(elapsed),
                     )
                 })
+                .into_any_element()
         });
+        let rows = worker_rows.chain(rows).collect::<Vec<_>>();
         Some(
             div()
                 .w(px(736.0))
@@ -18163,6 +18273,7 @@ impl XdDesktop {
         let agents_tray = Self::render_agents_tray(
             colors,
             &self.transcript_snapshot.running_agents,
+            &self.tray_workers(),
             self.agents_tray_open,
         );
         let supports_effort = self
@@ -24007,7 +24118,7 @@ Binary files /dev/null and b/image.png differ\n";
                 .collect();
             let mut snapshot = TranscriptSnapshot::default();
             snapshot.sync_messages(&model);
-            XdDesktop::agents_tray_label(&snapshot.running_agents)
+            XdDesktop::tray_label(&snapshot.running_agents, &[])
         };
         assert_eq!(label(&["Explore"]), "1 agent working");
         assert_eq!(label(&["Explore", "Plan"]), "2 agents working");
@@ -24016,6 +24127,27 @@ Binary files /dev/null and b/image.png differ\n";
         assert_eq!(
             label(&["Explore", "Shell", "Plan"]),
             "2 agents and 1 command running"
+        );
+    }
+
+    #[test]
+    fn the_tray_counts_agent_chats_at_work_and_those_waiting_on_the_user() {
+        let worker = |needs_you: bool| TrayWorker {
+            chat: "c".into(),
+            title: "Worker".into(),
+            needs_you,
+        };
+        assert_eq!(
+            XdDesktop::tray_label(&[], &[worker(false)]),
+            "1 agent working"
+        );
+        assert_eq!(
+            XdDesktop::tray_label(&[], &[worker(false), worker(false), worker(true)]),
+            "2 agents working · 1 needs you"
+        );
+        assert_eq!(
+            XdDesktop::tray_label(&[], &[worker(true), worker(true)]),
+            "2 need you"
         );
     }
 

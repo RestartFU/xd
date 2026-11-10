@@ -21,6 +21,15 @@ class AgentChatsTest {
     }
 
     @Test
+    fun theTrayCountsAgentChatsAtWorkAndThoseWaitingOnTheUser() {
+        val working = ChatSummary("a", "p", "A", "claude", working = true)
+        val asking = ChatSummary("b", "p", "B", "claude", working = false, questionWaiting = true)
+        assertEquals("1 agent working", AgentsTray.label(emptyList(), listOf(working)))
+        assertEquals("2 agents working · 1 needs you", AgentsTray.label(emptyList(), listOf(working, working, asking)))
+        assertEquals("2 need you", AgentsTray.label(emptyList(), listOf(asking, asking)))
+    }
+
+    @Test
     fun theChatAsItIsNowWinsOverTheCardsLastTurn() {
         val card = SubagentRun.parse("subagent_run\n{\"key\":\"chat:c\",\"chat\":\"c\",\"agent\":\"T\",\"status\":\"running\"}")!!
         assertEquals("c", card.chat)

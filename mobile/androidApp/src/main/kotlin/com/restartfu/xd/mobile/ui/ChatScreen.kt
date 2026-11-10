@@ -494,6 +494,10 @@ internal fun ChatScreen(
                         onToggle = { trayOpen = !trayOpen },
                         onOpenAgent = agents.open,
                         compact = sessionChats != null,
+                        // The chat's agent chats as the tree has them now: their
+                        // rows may be far up the chat, or not loaded at all.
+                        workers = agentChats.values.filter { it.working || com.restartfu.xd.model.AgentsTray.needsYou(it) },
+                        onOpenChat = openChat,
                     )
                     state.interactions.firstOrNull()?.let { request -> InteractionCard(request, model) }
                 Composer(

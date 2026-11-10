@@ -66,16 +66,30 @@ public object AgentsTray {
      * A backgrounded shell command shares the agents' cards but is no agent, so
      * it is counted as what it is.
      */
-    public fun label(running: List<SubagentRun>): String {
+    public fun label(running: List<SubagentRun>): String = label(running, emptyList())
+
+    /**
+     * [label], with the chat's agent chats that are at work or waiting on the
+     * user: those at work count as agents working, and those waiting are said
+     * apart, since they are what the user has to act on.
+     */
+    public fun label(running: List<SubagentRun>, workers: List<ChatSummary>): String {
         fun count(count: Int, noun: String) = "$count $noun${if (count == 1) "" else "s"}"
+        val needsYou = workers.count(::needsYou)
         val commands = running.count { it.isShell }
-        val agents = running.size - commands
-        return when {
+        val agents = running.size - commands + workers.size - needsYou
+        val base = when {
+            agents == 0 && commands == 0 -> null
             commands == 0 -> "${count(agents, "agent")} working"
             agents == 0 -> "${count(commands, "command")} running"
             else -> "${count(agents, "agent")} and ${count(commands, "command")} running"
         }
+        val waiting = if (needsYou == 0) null else "$needsYou ${if (needsYou == 1) "needs you" else "need you"}"
+        return listOfNotNull(base, waiting).joinToString(" · ")
     }
+
+    /** An agent chat that is idle on a question for the user. */
+    public fun needsYou(chat: ChatSummary): Boolean = !chat.working && chat.questionWaiting
 
     /**
      * What an agent is doing, in a few words. Every agent in the tray is

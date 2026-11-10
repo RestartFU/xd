@@ -7,6 +7,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -68,6 +69,16 @@ class AgentChatsScreenshotTest {
 
     @Test fun leadLight() = shoot("agents-lead-light", LEAD, MESSAGES, MinimalThemePreset.LIGHT)
 
+    /** Scrolled away from their rows, the tray above the composer still says what is at work. */
+    @Test fun trayOpen() = shoot("agents-tray-dark", LEAD, MESSAGES, before = {
+        compose.onNodeWithText("1 agent working · 1 needs you").performClick()
+        settle()
+    }) {
+        // On the worker's row in the chat, and in the tray.
+        assertEquals(2, compose.onAllNodesWithText("Needs you").fetchSemanticsNodes().size)
+        assertEquals(2, compose.onAllNodesWithText("DoubleClick e2e test").fetchSemanticsNodes().size)
+    }
+
     @Test fun workerDark() = shoot("agents-worker-dark", WORKER, WORKER_MESSAGES, startedBy = LEAD) {
         compose.onNodeWithText("Started by").performClick()
         settle()
@@ -85,6 +96,7 @@ class AgentChatsScreenshotTest {
         messages: List<Pair<String, String>>,
         theme: MinimalThemePreset = MinimalThemePreset.DARK,
         startedBy: ChatSummary? = null,
+        before: () -> Unit = {},
         act: () -> Unit = {},
     ) {
         script = messages
@@ -117,6 +129,7 @@ class AgentChatsScreenshotTest {
             Thread.sleep(30)
         }
         check(chat.state.value.visibleItems.size >= messages.size) { "loaded ${chat.state.value.visibleItems.size} of ${messages.size}: ${chat.state.value.error}" }
+        before()
         // Drawn directly: a working chat's indicator never lets Compose go
         // idle, which captureToImage waits for.
         org.robolectric.shadows.ShadowLooper.idleMainLooper()
@@ -189,7 +202,7 @@ class AgentChatsScreenshotTest {
         )
         val WORKERS = listOf(
             WORKER,
-            ChatSummary("way", "lunar", "Waypoints e2e test", "claude", false, parentId = "lead"),
+            ChatSummary("way", "lunar", "Waypoints e2e test", "claude", false, parentId = "lead", questionWaiting = true),
             ChatSummary("double", "lunar", "DoubleClick e2e test", "claude", true, parentId = "lead"),
         )
 
