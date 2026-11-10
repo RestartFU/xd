@@ -567,6 +567,50 @@ class TranscriptMachineTest {
     }
 
     @Test
+    fun anOlderPageOfHiddenRowsStillMovesTheCursorAndKeepsAClearedTodoList() {
+        val oldList = "todo_list\n" +
+            "[{\"id\":\"1\",\"text\":\"Old step\",\"status\":\"pending\"}]"
+        val loaded = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat(),
+                messagesWithTotal(
+                    6,
+                    MessageReply("user", "hi", 1, id = 5),
+                    // The newest snapshot cleared the list.
+                    MessageReply("tool", "todo_list\n[]", 2, id = 6),
+                ),
+                nowMillis = 0,
+            ),
+        ).state
+        assertTrue(loaded.todos.isEmpty())
+        assertEquals(5L, loaded.oldestFetchedMessageId)
+
+        val older = reduce(
+            loaded,
+            TranscriptInput.OlderLoaded(
+                MessagesReply(
+                    ok = true,
+                    totalMessages = 6,
+                    lastMessageId = 6,
+                    // Nothing on this page is drawn.
+                    messages = listOf(
+                        MessageReply("tool", oldList, 0, id = 3),
+                        MessageReply("duration", "3", 0, id = 4),
+                    ),
+                    hasOlder = true,
+                ),
+            ),
+        ).state
+        assertEquals(listOf("hi"), older.messages.map { it.text })
+        // The next page is asked for from before the hidden rows, not again from "hi".
+        assertEquals(3L, older.oldestFetchedMessageId)
+        assertTrue(older.hasOlderMessages)
+        // The cleared list stays cleared rather than coming back from further back.
+        assertTrue(older.todos.isEmpty())
+    }
+
+    @Test
     fun aStoredLiveRowKeepsItsIdWhenTheTurnEnds() {
         var state = reduce(ChatState("chat"), TranscriptInput.TurnStarted("Working", 0, turnId = 1, turnSequence = 0)).state
         state = reduce(state, TranscriptInput.Text("Looking", turnId = 1, turnSequence = 1)).state

@@ -75,6 +75,14 @@ public data class ChatState(
     val loading: Boolean = false,
     val loadingOlder: Boolean = false,
     val hasOlderMessages: Boolean = false,
+    /**
+     * Host id of the oldest stored message fetched so far, hidden rows
+     * included, so "Load older" asks for the page before it even when a
+     * whole page held only hidden rows.
+     */
+    val oldestFetchedMessageId: Long? = null,
+    /** Whether [todos] came from a snapshot, which may be an empty list. */
+    val todosFromSnapshot: Boolean = false,
     val error: String? = null,
 ) {
     public val visibleItems: List<TranscriptItem>

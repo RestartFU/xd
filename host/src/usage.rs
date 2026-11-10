@@ -1182,6 +1182,12 @@ impl TranscriptRoots {
     }
 }
 
+/// How long a transcript is read on from where it left off before it is
+/// read from the start again.
+const FULL_REREAD_AFTER: Duration = Duration::from_secs(10 * 60);
+/// How much of a transcript's start is compared before reading on.
+const RESUME_HEAD_BYTES: u64 = 4096;
+
 struct CachedFile {
     size: u64,
     modified_ms: i64,
@@ -1198,9 +1204,15 @@ struct Resume {
     /// Device and inode: a replaced file is read again from the start.
     identity: (u64, u64),
     offset: u64,
-    /// The bytes just before `offset`, checked again before reading on, so
-    /// a file rewritten rather than appended to is read again in full.
+    /// The bytes just before `offset` and the file's first bytes, checked
+    /// again before reading on, so a file rewritten rather than appended to
+    /// is read again in full.
     check: Vec<u8>,
+    head: Vec<u8>,
+    /// When the file was last read from the start. Transcripts are only ever
+    /// appended to, but a rewrite that leaves the checked bytes alone would
+    /// go unnoticed, so every file is read in full again now and then.
+    full_read_at: Instant,
     records: Vec<UsageRecord>,
     codex: CodexScanState,
 }
@@ -1335,16 +1347,25 @@ fn read_transcript_from(
     let mut file = fs::File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
     let identity = (metadata.dev(), metadata.ino());
+    let unchanged = |at: u64, expected: &[u8]| {
+        let mut bytes = vec![0; expected.len()];
+        file.read_exact_at(&mut bytes, at).is_ok() && bytes == expected
+    };
     let resume = resume.filter(|resume| {
-        resume.identity == identity && resume.offset <= metadata.len() && {
-            let mut check = vec![0; resume.check.len()];
-            let at = resume.offset - resume.check.len() as u64;
-            file.read_exact_at(&mut check, at).is_ok() && check == resume.check
-        }
+        resume.identity == identity
+            && resume.offset <= metadata.len()
+            && resume.full_read_at.elapsed() < FULL_REREAD_AFTER
+            && unchanged(0, &resume.head)
+            && unchanged(resume.offset - resume.check.len() as u64, &resume.check)
     });
-    let (offset, mut records, mut codex) = match resume {
-        Some(resume) => (resume.offset, resume.records.clone(), resume.codex.clone()),
-        None => (0, Vec::new(), CodexScanState::default()),
+    let (offset, mut records, mut codex, full_read_at) = match resume {
+        Some(resume) => (
+            resume.offset,
+            resume.records.clone(),
+            resume.codex.clone(),
+            resume.full_read_at,
+        ),
+        None => (0, Vec::new(), CodexScanState::default(), Instant::now()),
     };
     file.seek(SeekFrom::Start(offset)).ok()?;
     let reader = BufReader::with_capacity(256 * 1024, &file);
@@ -1389,6 +1410,8 @@ fn read_transcript_from(
     let length = end.min(64);
     let mut check = vec![0; length as usize];
     file.read_exact_at(&mut check, end - length).ok()?;
+    let mut head = vec![0; end.min(RESUME_HEAD_BYTES) as usize];
+    file.read_exact_at(&mut head, 0).ok()?;
     let malformed = tail_codex.as_ref().unwrap_or(&codex).malformed;
     records.shrink_to_fit();
     let mut all = records.clone();
@@ -1402,6 +1425,8 @@ fn read_transcript_from(
             identity,
             offset: end,
             check,
+            head,
+            full_read_at,
             records,
             codex,
         },
@@ -3130,6 +3155,32 @@ mod tests {
             read_transcript_from("codex", &path, 0, Some(&finished.resume)).unwrap()
         };
         same(&read, &full(&rewritten));
+
+        // Rewritten in place at the same length, with the bytes before the
+        // resume point untouched, then appended to: the start differs.
+        let edited = rewritten.replacen("12:00:02Z", "12:00:09Z", 1);
+        assert_eq!(edited.len(), rewritten.len());
+        let resumed = {
+            fs::write(&path, &edited).unwrap();
+            append(&lines[5]);
+            read_transcript_from("codex", &path, 0, Some(&read.resume)).unwrap()
+        };
+        let edited = format!("{edited}{}", lines[5]);
+        same(&resumed, &full(&edited));
+
+        // A rewrite past the bytes checked is caught by the next full read.
+        let mut stale = resumed.resume.clone();
+        stale.head.clear();
+        stale.check.clear();
+        stale.full_read_at = Instant::now()
+            .checked_sub(FULL_REREAD_AFTER + Duration::from_secs(1))
+            .unwrap();
+        let edited_again = edited.replacen("12:00:09Z", "12:00:08Z", 1);
+        let reread = {
+            fs::write(&path, &edited_again).unwrap();
+            read_transcript_from("codex", &path, 0, Some(&stale)).unwrap()
+        };
+        same(&reread, &full(&edited_again));
         fs::remove_dir_all(directory).ok();
     }
 

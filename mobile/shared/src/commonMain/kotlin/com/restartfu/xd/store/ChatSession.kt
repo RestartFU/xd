@@ -341,7 +341,7 @@ internal class ChatSessionCore(
                 messageLimit.toLong() + MESSAGE_PAGE_SIZE,
                 Int.MAX_VALUE.toLong(),
             ).toInt()
-            val oldest = stateMutex.withLock { _state.value.messages.firstOrNull()?.messageId }
+            val oldest = stateMutex.withLock { _state.value.oldestStoredId() }
             try {
                 // One page from before the oldest message shown, rather than
                 // every page shown again with one more in front.
@@ -355,7 +355,7 @@ internal class ChatSessionCore(
                 }
                 stateMutex.withLock {
                     if (invalidated) return@withLock
-                    val stillOldest = _state.value.messages.firstOrNull()?.messageId == oldest
+                    val stillOldest = _state.value.oldestStoredId() == oldest
                     if (page != null && !stillOldest) {
                         // A reload replaced the list meanwhile; this page may
                         // not join onto it, and the next tap asks again.
@@ -758,3 +758,7 @@ internal class ChatSessionCore(
 
 /** GitHub can be slow; past this the header and Changes just keep what they showed. */
 private const val GIT_STATE_TIMEOUT_MILLIS = 60_000L
+
+/** The cursor for the page before what is loaded; hidden rows count, so a page of them still moves it. */
+private fun ChatState.oldestStoredId(): Long? =
+    oldestFetchedMessageId ?: messages.firstOrNull()?.messageId

@@ -146,7 +146,7 @@ public object TranscriptMachine {
             TranscriptTransition(state)
         } else if (input.name.todoSnapshot() != null) {
             TranscriptTransition(
-                state.copy(todos = input.name.todoSnapshot().orEmpty())
+                state.copy(todos = input.name.todoSnapshot().orEmpty(), todosFromSnapshot = true)
                     .advancedTo(input.turnId, input.turnSequence),
             )
         } else {
@@ -370,7 +370,7 @@ public object TranscriptMachine {
                 error = null,
             ).withMessages(input.messages).let { loaded ->
                 val liveTodos = chat.items.asReversed().firstNotNullOfOrNull { it.text.todoSnapshot() }
-                if (liveTodos != null) loaded.copy(todos = liveTodos) else loaded
+                if (liveTodos != null) loaded.copy(todos = liveTodos, todosFromSnapshot = true) else loaded
             },
         )
     }
@@ -380,7 +380,9 @@ public object TranscriptMachine {
         return copy(
             messages = reply.messages.transcriptItems(),
             todos = snapshot ?: todos,
+            todosFromSnapshot = snapshot != null || todosFromSnapshot,
             hasOlderMessages = reply.messages.size < reply.totalMessages,
+            oldestFetchedMessageId = reply.messages.oldestId(),
         )
     }
 
@@ -390,11 +392,17 @@ public object TranscriptMachine {
         val older = reply.messages.filter { it.id == null || it.id !in shown }
         return copy(
             messages = older.transcriptItems() + messages,
-            // A newer list already in hand wins over one from further back.
-            todos = todos.ifEmpty { older.latestTodos() ?: todos },
+            // A newer snapshot already in hand wins over one from further
+            // back, even an empty one that cleared the list.
+            todos = if (todosFromSnapshot) todos else older.latestTodos() ?: todos,
+            todosFromSnapshot = todosFromSnapshot || older.latestTodos() != null,
             hasOlderMessages = reply.hasOlder ?: hasOlderMessages,
+            oldestFetchedMessageId = listOfNotNull(reply.messages.oldestId(), oldestFetchedMessageId)
+                .minOrNull(),
         )
     }
+
+    private fun List<MessageReply>.oldestId(): Long? = mapNotNull { it.id }.minOrNull()
 
     private fun List<MessageReply>.latestTodos(): List<TodoItem>? =
         asReversed().firstNotNullOfOrNull { it.content.todoSnapshot() }
