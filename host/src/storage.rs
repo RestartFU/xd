@@ -8840,34 +8840,46 @@ fn normalize_existing_path(path: &Path) -> String {
 fn worktree_branch(workdir: &Path) -> Option<String> {
     // Git looks for the repository from the physical directory, as here.
     let workdir = fs::canonicalize(workdir).ok()?;
-    let git_dir = workdir.ancestors().find_map(|directory| {
+    let (root, git_dir) = workdir.ancestors().find_map(|directory| {
         let dot_git = directory.join(".git");
         let metadata = fs::metadata(&dot_git).ok()?;
         if metadata.is_dir() {
-            return Some(dot_git);
+            return Some((directory, dot_git));
         }
         // A linked worktree's `.git` file names its own directory in the
         // repository, relative to the worktree when it is not absolute.
         let link = fs::read_to_string(&dot_git).ok()?;
         let target = link.lines().next()?.strip_prefix("gitdir:")?.trim();
-        (!target.is_empty()).then(|| directory.join(target))
+        (!target.is_empty()).then(|| (directory, directory.join(target)))
     })?;
-    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    // A linked worktree's directory in the repository names the worktree it
+    // belongs to. Git lists the worktree there, and as prunable once nothing
+    // is, so a worktree moved by hand is not where Git lists it: it has no
+    // branch, as before. A submodule's directory has no such entry.
+    if git_dir.join("commondir").is_file() {
+        let backlink = fs::read_to_string(git_dir.join("gitdir")).ok()?;
+        let listed = git_dir.join(backlink.trim());
+        if fs::canonicalize(listed.parent()?).ok()? != root {
+            return None;
+        }
+    }
+    let head_path = git_dir.join("HEAD");
+    // Git may keep HEAD as a symbolic link to the branch, which reading the
+    // file would follow to its commit.
+    if fs::symlink_metadata(&head_path)
+        .ok()?
+        .file_type()
+        .is_symlink()
+    {
+        return listed_worktree_branch(&workdir);
+    }
+    let head = fs::read_to_string(&head_path).ok()?;
     let head = head.trim_end();
     match head.strip_prefix("ref:") {
         // A repository with reftable keeps this placeholder in HEAD and its
         // real refs elsewhere, so only Git can say.
         Some(reference) if reference.trim() == "refs/heads/.invalid" => {
-            list_git_worktrees(&workdir)
-                .ok()?
-                .into_iter()
-                .filter(|worktree| workdir.starts_with(&worktree.path))
-                .max_by_key(|worktree| worktree.path.as_os_str().len())
-                .and_then(|worktree| {
-                    worktree
-                        .branch
-                        .or_else(|| worktree.detached.then(|| "Detached HEAD".into()))
-                })
+            listed_worktree_branch(&workdir)
         }
         Some(reference) => reference
             .trim()
@@ -8878,6 +8890,24 @@ fn worktree_branch(workdir: &Path) -> Option<String> {
             && head.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| "Detached HEAD".into()),
     }
+}
+
+/// What `git worktree list` says is checked out in the worktree holding the
+/// physical directory `workdir`, for a HEAD only Git can read.
+fn listed_worktree_branch(workdir: &Path) -> Option<String> {
+    list_git_worktrees(workdir)
+        .ok()?
+        .into_iter()
+        .filter_map(|worktree| {
+            let path = fs::canonicalize(&worktree.path).ok()?;
+            workdir.starts_with(&path).then_some((path, worktree))
+        })
+        .max_by_key(|(path, _)| path.as_os_str().len())
+        .and_then(|(_, worktree)| {
+            worktree
+                .branch
+                .or_else(|| worktree.detached.then(|| "Detached HEAD".into()))
+        })
 }
 
 struct BrowsableEntry {
@@ -10333,19 +10363,8 @@ mod tests {
         let outside = fixture.root.join("outside");
         fs::create_dir_all(&outside).unwrap();
 
-        let listed = |workdir: &Path| {
-            let workdir = fs::canonicalize(workdir).unwrap();
-            list_git_worktrees(&workdir)
-                .ok()?
-                .into_iter()
-                .filter(|worktree| workdir.starts_with(fs::canonicalize(&worktree.path).unwrap()))
-                .max_by_key(|worktree| worktree.path.as_os_str().len())
-                .and_then(|worktree| {
-                    worktree
-                        .branch
-                        .or_else(|| worktree.detached.then(|| "Detached HEAD".into()))
-                })
-        };
+        // What Git lists for the worktree holding a directory.
+        let listed = |workdir: &Path| listed_worktree_branch(&fs::canonicalize(workdir).unwrap());
         for (workdir, expected) in [
             (repository.clone(), Some("main")),
             (repository.join("nested/deeper"), Some("main")),
@@ -10370,6 +10389,22 @@ mod tests {
                 );
             }
         }
+
+        // HEAD kept as a symbolic link to the branch, which Git still reads.
+        let head = repository.join(".git/HEAD");
+        fs::remove_file(&head).unwrap();
+        std::os::unix::fs::symlink("refs/heads/main", &head).unwrap();
+        assert_eq!(listed(&repository).as_deref(), Some("main"));
+        assert_eq!(worktree_branch(&repository).as_deref(), Some("main"));
+
+        // A worktree moved by hand is not where Git lists it, so neither has
+        // a branch for it.
+        let moved = fixture.root.join("moved");
+        fs::rename(&linked, &moved).unwrap();
+        assert_eq!(listed(&moved), None);
+        assert_eq!(worktree_branch(&moved), None);
+        fs::rename(&moved, &linked).unwrap();
+        assert_eq!(worktree_branch(&linked).as_deref(), Some("feature/x"));
 
         // A worktree whose entry in the repository is gone has no branch,
         // as Git then reports none.

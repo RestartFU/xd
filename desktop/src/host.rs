@@ -2536,11 +2536,19 @@ fn spawn_reader(
                 // Asked for while this read was on its way, so it may predate
                 // what that caller wants to see.
                 if tree_answered && requests.tree_answered() {
-                    let sent = commands.upgrade().is_some_and(|commands| {
-                        send_command(&commands, &requests, tree_command()).is_ok()
-                    });
-                    if !sent {
+                    // Without a handle the app has let go of this connection.
+                    let Some(commands) = commands.upgrade() else {
                         requests.release_tree();
+                        continue;
+                    };
+                    if let Err(error) = send_command(&commands, &requests, tree_command()) {
+                        // A full queue means the host has stopped reading.
+                        // Reconnecting reads the tree afresh; dropping the
+                        // read here would leave it stale with nothing to
+                        // notice.
+                        requests.release_tree();
+                        close_connection(&updates, &requests, error);
+                        return;
                     }
                 }
             }
@@ -3217,7 +3225,8 @@ mod tests {
             BlockingWriter { gate: gate.clone() },
             PathBuf::from("blocked-host"),
         );
-        host.tree().unwrap();
+        // Not tree reads: only one of those is ever out at a time.
+        host.agent_catalog().unwrap();
         let (gate_state, wake) = &*gate;
         let mut state = gate_state.lock().unwrap();
         while !state.entered {
@@ -3225,7 +3234,7 @@ mod tests {
         }
         drop(state);
 
-        let failure = (0..2_048).find_map(|_| host.tree().err());
+        let failure = (0..2_048).find_map(|_| host.agent_catalog().err());
         let mut state = gate_state.lock().unwrap();
         state.released = true;
         wake.notify_all();
