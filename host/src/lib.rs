@@ -9,7 +9,7 @@ use std::{
         mpsc::{SyncSender, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
@@ -94,8 +94,28 @@ pub const FRAME_LIMIT: usize = isize::MAX as usize - 1;
 pub const AUTH_FRAME_LIMIT: usize = 64 * 1024;
 const REQUEST_ID: &str = "_xd_request";
 
+struct AppClients {
+    open: HashSet<u64>,
+    /// When the last one closed, or when the engine started.
+    last_seen: Instant,
+}
+
+impl Default for AppClients {
+    fn default() -> Self {
+        Self {
+            open: HashSet::new(),
+            last_seen: Instant::now(),
+        }
+    }
+}
+
 pub struct Engine {
     shutdown: AtomicBool,
+    /// Local connections the xd app's own bridge opened. A daemon the app
+    /// started stops once none has been open for a while.
+    app_clients: Mutex<AppClients>,
+    /// Whether this daemon stops once the xd app that started it closes.
+    stops_with_app: AtomicBool,
     store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
@@ -163,6 +183,8 @@ impl Engine {
         let self_update = SelfUpdate::new(events.clone());
         Self {
             shutdown: AtomicBool::new(false),
+            app_clients: Mutex::default(),
+            stops_with_app: AtomicBool::new(false),
             store: None,
             auth: AuthManager::new(events.clone(), accounts::Accounts::new(None)),
             cli_updates: CliUpdates::new(events.clone()),
@@ -230,6 +252,8 @@ impl Engine {
         let shared_event_monitor = Some(SharedEventMonitor::start(events.clone()));
         let engine = Self {
             shutdown: AtomicBool::new(false),
+            app_clients: Mutex::default(),
+            stops_with_app: AtomicBool::new(false),
             runtime: Some(runtime),
             store: Some(store),
             auth,
@@ -280,11 +304,17 @@ impl Engine {
         let mut reply = match operation {
             Some("ping") => json!({"ok": true}),
             Some("daemon-info") => {
-                json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 2, "build": option_env!("XD_COMMIT").unwrap_or("development"), "pid": std::process::id(), "workspaces": self.store.as_ref().and_then(|store| fs::canonicalize(store.workspace_path()).ok()), "executable": self.self_update.host_executable().and_then(std::path::Path::to_str)})
+                json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 2, "build": option_env!("XD_COMMIT").unwrap_or("development"), "pid": std::process::id(), "workspaces": self.store.as_ref().and_then(|store| fs::canonicalize(store.workspace_path()).ok()), "executable": self.self_update.host_executable().and_then(std::path::Path::to_str), "stops_with_app": self.stops_with_app.load(Ordering::Acquire)})
             }
             Some("resume-interrupted") => self.resume_interrupted(&request),
             Some("daemon-stop") if self.pairing.is_local(owner) => {
                 self.shutdown.store(true, Ordering::Release);
+                json!({"ok": true})
+            }
+            Some("app-client") if self.pairing.is_local(owner) => {
+                if let Ok(mut clients) = self.app_clients.lock() {
+                    clients.open.insert(owner);
+                }
                 json!({"ok": true})
             }
             Some("pair") => self.pair(owner, &request),
@@ -613,6 +643,23 @@ impl Engine {
 
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// Records that this daemon stops once the xd app that started it closes.
+    pub fn stop_with_app(&self) {
+        self.stops_with_app.store(true, Ordering::Release);
+    }
+
+    /// How long no connection from the xd app has been open, counted from the
+    /// last one closing or the engine starting. `None` while one is open.
+    pub fn app_absent_for(&self) -> Option<Duration> {
+        let clients = self.app_clients.lock().ok()?;
+        clients.open.is_empty().then(|| clients.last_seen.elapsed())
+    }
+
+    /// Whether an app update is being installed, which a stop must not cut off.
+    pub fn installing_update(&self) -> bool {
+        self.self_update.installing()
     }
 
     pub fn shutdown(&self) {
@@ -2403,7 +2450,16 @@ impl Engine {
         Ok(owner)
     }
 
+    fn release_app_client(&self, id: u64) {
+        if let Ok(mut clients) = self.app_clients.lock()
+            && clients.open.remove(&id)
+        {
+            clients.last_seen = Instant::now();
+        }
+    }
+
     fn unsubscribe(&self, id: u64) {
+        self.release_app_client(id);
         self.pairing.unregister(id);
         self.events.unsubscribe(id);
     }
@@ -2796,6 +2852,7 @@ pub fn serve_daemon_connection(
                             | "subagent"
                             | "agent-auth-cancel"
                             | "daemon-stop"
+                            | "app-client"
                     )
                 );
             if authenticated && request["op"] == "pause-all" {
@@ -2823,6 +2880,8 @@ pub fn serve_daemon_connection(
         }
     })();
     drop(commands);
+    // The app has gone even while requests it sent are still being answered.
+    engine.release_app_client(subscriber);
     if result.is_err() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
     }

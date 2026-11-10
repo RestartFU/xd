@@ -11,7 +11,7 @@ payload=$(wslpath -u "$1") || { printf '%s\n' 'xd: Cannot locate the bundled hos
 for dependency in git tmux; do
     command -v "$dependency" >/dev/null 2>&1 || { printf 'xd: Install %s in your WSL distribution (Ubuntu: sudo apt install git tmux), then reopen xd.\n' "$dependency" >&2; exit 1; }
 done
-export XD_DATA_NAME="$2" XD_UPDATE_CHANNEL="$3"
+export XD_DATA_NAME="$2" XD_UPDATE_CHANNEL="$3" XD_APP_BRIDGE=1
 data="$HOME/.local/share/$XD_DATA_NAME"
 runtime="$data/runtime/v1"
 mkdir -p "$runtime"
@@ -163,7 +163,7 @@ mod tests {
             (bin.join("uname"), "#!/bin/sh\nprintf '%s\\n' x86_64\n"),
             (
                 payload.clone(),
-                "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$XD_DATA_NAME\" \"$XD_UPDATE_CHANNEL\" \"$@\"\ncat\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$XD_DATA_NAME\" \"$XD_UPDATE_CHANNEL\" \"$XD_APP_BRIDGE\" \"$@\"\ncat\n",
             ),
         ] {
             fs::write(&path, content).unwrap();
@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
             format!(
-                "{}\nxd-nightly\nnightly\nstdio\n--data\n{}/.local/share/xd-nightly\n",
+                "{}\nxd-nightly\nnightly\n1\nstdio\n--data\n{}/.local/share/xd-nightly\n",
                 home.display(),
                 home.display(),
             )

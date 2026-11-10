@@ -260,6 +260,13 @@ impl SelfUpdate {
         self.publish();
     }
 
+    pub(crate) fn installing(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .is_ok_and(|state| state.phase == "installing")
+    }
+
     pub(crate) fn snapshot(&self) -> Value {
         let (phase, latest, error) = self
             .inner
