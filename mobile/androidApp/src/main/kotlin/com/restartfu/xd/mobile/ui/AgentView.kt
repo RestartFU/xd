@@ -156,10 +156,13 @@ internal fun AgentsTray(
                                 .fillMaxWidth()
                                 .heightIn(min = 48.dp)
                                 .clickable(onClickLabel = "Open chat") { onOpenChat(worker.id) }
-                                .padding(start = 31.dp, end = 14.dp),
+                                .padding(horizontal = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
+                            AgentAvatar(if (needsYou) signals.waiting else signals.working, size = 24.dp) {
+                                BackendIcon(worker.backend, size = 12.dp)
+                            }
                             Text(
                                 worker.title.ifBlank { "New Chat" },
                                 modifier = Modifier.weight(1f),
@@ -183,11 +186,22 @@ internal fun AgentsTray(
                                 .clickable(enabled = key != null, onClickLabel = "Open agent") {
                                     key?.let(onOpenAgent)
                                 }
-                                // Lined up under the label, past the dot.
-                                .padding(start = 31.dp, end = 14.dp),
+                                .padding(horizontal = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
+                            AgentAvatar(signals.working, size = 24.dp) {
+                                if (run.isShell) {
+                                    Icon(
+                                        painterResource(R.drawable.ic_terminal),
+                                        contentDescription = null,
+                                        tint = signals.faint,
+                                        modifier = Modifier.size(12.dp),
+                                    )
+                                } else {
+                                    BackendIcon(run.provider.lowercase(), size = 12.dp)
+                                }
+                            }
                             Text(
                                 trayTask(run),
                                 modifier = Modifier.weight(1f),

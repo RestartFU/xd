@@ -19,7 +19,9 @@ import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.isRoot
@@ -47,6 +49,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -221,6 +224,60 @@ class ProjectsScreenshotTest {
             withWorkers = false
         }
     }
+
+    /**
+     * A worker at work shows in the lead's tray; tapping it opens the worker's
+     * own chat, with its work and a way back, where a message goes to it.
+     */
+    @Test fun aWorkerInTheTrayOpensItsChat() = withWorkerChats("worker-from-tray-dark") {
+        click("Reconnect backoff")
+        awaitShown("1 agent working")
+        click("1 agent working")
+        awaitShown("Retry jitter")
+        click("Retry jitter")
+        awaitWorkerChat("w1-c", "Retry jitter")
+        compose.onNode(hasSetTextAction()).performTextReplacement("Also cover the jitter cap.")
+        settle()
+        click("Send")
+        val deadline = System.currentTimeMillis() + 10_000
+        while (sentTo("send") != "w1-c" && System.currentTimeMillis() < deadline) settle()
+        check(sentTo("send") == "w1-c") { "the message went to ${sentTo("send")}" }
+    }
+
+    /** A worker's row in the lead's chat opens its chat too, whether or not it still works. */
+    @Test fun aWorkersRowOpensItsChat() = withWorkerChats("worker-from-row-dark") {
+        click("Reconnect backoff")
+        awaitShown("Backoff tests")
+        click("Backoff tests")
+        awaitWorkerChat("w2-c", "Backoff tests")
+    }
+
+    private fun withWorkerChats(name: String, steps: Screen.() -> Unit) {
+        withWorkers = true
+        workerChats = true
+        try {
+            shoot(name, MinimalThemePreset.DARK, steps = steps)
+        } finally {
+            withWorkers = false
+            workerChats = false
+        }
+    }
+
+    /** Waits for [chat], titled [title], to be the open chat, with its link back to the lead. */
+    private fun Screen.awaitWorkerChat(chat: String, title: String) {
+        awaitShown("Started by")
+        check(shows("Started by") && shows(title)) { "the worker's chat did not open" }
+        check(sentTo("messages") == chat) { "the app loaded ${sentTo("messages")}" }
+        // Its own work, as the host has it.
+        awaitShown(WORKER_REPLY)
+        check(shows(WORKER_REPLY)) { "the worker's reply is not shown" }
+    }
+
+    /** The chat the last [op] request named. */
+    private fun sentTo(op: String): String? = synchronized(SENT) { SENT.toList() }
+        .map { Json.parseToJsonElement(it).jsonObject }
+        .lastOrNull { it["op"]?.jsonPrimitive?.content == op }
+        ?.get("chat")?.jsonPrimitive?.content
 
     @Test fun anOlderHostHasNoPauseButton() = shoot("no-pause-dark", MinimalThemePreset.DARK, pauseAll = false) {
         check(shows("Projects") && !shows("Pause chats in web") && !shows("Resume chats in web"))
@@ -530,6 +587,7 @@ class ProjectsScreenshotTest {
                     op,
                     request["owner"]?.jsonPrimitive?.content,
                     request["folder"]?.jsonPrimitive?.content,
+                    request["chat"]?.jsonPrimitive?.content,
                 )
                     .removeSuffix("}") + (if (id != null) ""","_xd_request":$id}""" else "}")
                 Thread { Thread.sleep(5); listener?.onBytes((body + "\n").encodeToByteArray()) }.start()
@@ -538,10 +596,32 @@ class ProjectsScreenshotTest {
 
         override fun close() = Unit
 
-        private fun reply(op: String?, owner: String?, folder: String?): String = when (op) {
+        private fun reply(op: String?, owner: String?, folder: String?, chat: String?): String = when (op) {
             "tree" -> (if (longTree) TREE_LONG else if (withWorkers) TREE_WORKERS else TREE)
+                .let { if (workerChats) it.replace(WORKER_IDLE, WORKER_WORKING) else it }
                 .let { paused(it) }
                 .let { if (canPauseAll) it else it.replace("\"pause_all\":true,\"pause_folders\":true,", "") }
+            "chat" -> if (!workerChats) """{"ok":true}""" else {
+                val title = when (chat) { "w1-c" -> "Retry jitter"; "w2-c" -> "Backoff tests"; else -> "Reconnect backoff" }
+                """{"ok":true,"title":"$title","backend":"claude","commands":[],"plan":false,"queue":[],""" +
+                    """"working":false,"label":"Claude","items":[],"new_worktree":false,"has_messages":true,""" +
+                    """"model":"claude-opus-5-5","effort":"high"}"""
+            }
+            "messages" -> if (!workerChats) """{"ok":true}""" else {
+                val rows = when (chat) {
+                    "c1" -> listOf(
+                        "user" to "Split the reconnect work.",
+                        "tool" to workerCard("w1-c", "Retry jitter", "running", ""),
+                        "tool" to workerCard("w2-c", "Backoff tests", "completed", WORKER_REPLY),
+                    )
+                    else -> listOf("user" to "Do your part of the reconnect work.", "assistant" to WORKER_REPLY)
+                }
+                """{"ok":true,"total_messages":${rows.size},"last_message_id":${rows.size},"messages":[""" +
+                    rows.mapIndexed { i, (role, text) ->
+                        """{"id":${i + 1},"role":"$role","content":${JsonPrimitive(text)},"at":${1762500000 + i}}"""
+                    }.joinToString(",") + "]}"
+            }
+
             "pause-all" -> { pausedFolders = pausedFolders + folder.orEmpty(); """{"ok":true,"paused":[]}""" }
             "resume-all" -> { pausedFolders = pausedFolders - folder.orEmpty(); """{"ok":true,"resumed":[]}""" }
             "owner-icon" -> """{"ok":true,"owner":"$owner","mime":"image/png","data":"${avatar(owner.orEmpty())}"}"""
@@ -556,6 +636,22 @@ class ProjectsScreenshotTest {
 
         /** Whether the scripted host answers with [TREE_WORKERS]. */
         @Volatile var withWorkers = false
+
+        /**
+         * Whether the scripted host also answers for the lead's and workers'
+         * chats, with Retry jitter at work and Backoff tests done.
+         */
+        @Volatile var workerChats = false
+
+        const val WORKER_REPLY = "Added the jitter cap and a test for it."
+        const val WORKER_IDLE = """"title":"Retry jitter","backend":"codex","working":false"""
+        const val WORKER_WORKING = """"title":"Retry jitter","backend":"codex","working":true"""
+
+        fun workerCard(chat: String, title: String, status: String, summary: String): String =
+            "subagent_run\n" + """{"key":"chat:$chat","chat":"$chat","provider":"Codex","agent":"$title",""" +
+                """"description":"$title","status":"$status","background":true,"steps":[],"tool_uses":0,""" +
+                """"prompt":"Do your part of the reconnect work."""" +
+                (if (summary.isEmpty()) "" else ""","summary":${JsonPrimitive(summary)}""") + "}"
 
         /**
          * [TREE] where Reconnect backoff's agent started two sessions of its

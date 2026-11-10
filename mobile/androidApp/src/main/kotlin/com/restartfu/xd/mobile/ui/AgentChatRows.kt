@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.mobile.R
 import com.restartfu.xd.model.AgentChatStatus
@@ -35,6 +36,35 @@ import com.restartfu.xd.model.AgentReport
 import com.restartfu.xd.model.ChatSummary
 import com.restartfu.xd.model.SubagentRun
 import com.restartfu.xd.model.agentChatStatus
+
+/**
+ * An agent's mark in a ring, with a dot for how it stands, as its rows show
+ * it in the chat and in the tray.
+ */
+@Composable
+internal fun AgentAvatar(tone: Color, size: Dp = 28.dp, mark: @Composable () -> Unit) {
+    Box(Modifier.size(size)) {
+        Box(
+            Modifier
+                .size(size)
+                .clip(CircleShape)
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentAlignment = Alignment.Center,
+        ) { mark() }
+        Box(
+            Modifier
+                .align(Alignment.BottomEnd)
+                .offset(x = 2.dp, y = 2.dp)
+                .size(11.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.background)
+                .padding(2.dp)
+                .clip(CircleShape)
+                .background(tone),
+        )
+    }
+}
 
 /** The colour each status of an agent chat is told in, as on the desktop. */
 @Composable
@@ -77,27 +107,7 @@ internal fun AgentChatRow(run: SubagentRun, chat: ChatSummary?, onOpen: () -> Un
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Box(Modifier.size(28.dp)) {
-            Box(
-                Modifier
-                    .size(28.dp)
-                    .clip(CircleShape)
-                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceContainer),
-                contentAlignment = Alignment.Center,
-            ) { BackendIcon(run.provider.lowercase(), size = 14.dp) }
-            Box(
-                Modifier
-                    .align(Alignment.BottomEnd)
-                    .offset(x = 2.dp, y = 2.dp)
-                    .size(11.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.background)
-                    .padding(2.dp)
-                    .clip(CircleShape)
-                    .background(tone),
-            )
-        }
+        AgentAvatar(tone) { BackendIcon(run.provider.lowercase(), size = 14.dp) }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
                 title,

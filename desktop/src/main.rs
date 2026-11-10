@@ -1700,6 +1700,8 @@ struct RunningAgent {
 struct TrayWorker {
     chat: String,
     title: String,
+    /// The assistant it runs on, as the tree names it.
+    backend: String,
     needs_you: bool,
 }
 
@@ -11658,6 +11660,7 @@ impl XdDesktop {
                     || (!chat.working && self.model.question_chats.contains(&chat.id));
                 (chat.working || needs_you).then(|| TrayWorker {
                     chat: chat.id.clone(),
+                    backend: chat.backend.clone(),
                     title: chat
                         .title
                         .clone()
@@ -15697,18 +15700,27 @@ impl XdDesktop {
             div()
                 .id(("agents-tray-worker", index))
                 .w_full()
-                .h(px(34.0))
-                // Lined up under the label, past the dot.
-                .pl(px(31.0))
-                .pr(px(14.0))
+                .h(px(36.0))
+                .px(px(12.0))
                 .flex()
                 .items_center()
-                .gap(px(12.0))
+                .gap(px(10.0))
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(colors.surface_high)))
                 .on_click(move |_, window, cx| {
                     window.dispatch_action(Box::new(OpenAgentChat { chat: chat.clone() }), cx);
                 })
+                .child(Self::agent_avatar(
+                    colors,
+                    Self::assistant_mark(&worker.backend),
+                    24.0,
+                    if worker.needs_you {
+                        colors.waiting
+                    } else {
+                        colors.working
+                    },
+                    !worker.needs_you,
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -15744,18 +15756,27 @@ impl XdDesktop {
             div()
                 .id(("agents-tray-row", index))
                 .w_full()
-                .h(px(34.0))
-                // Lined up under the label, past the dot.
-                .pl(px(31.0))
-                .pr(px(14.0))
+                .h(px(36.0))
+                .px(px(12.0))
                 .flex()
                 .items_center()
-                .gap(px(12.0))
+                .gap(px(10.0))
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(colors.surface_high)))
                 .on_click(move |_, window, cx| {
                     window.dispatch_action(Box::new(OpenAgentTab { key: key.clone() }), cx);
                 })
+                .child(Self::agent_avatar(
+                    colors,
+                    if agent.view.is_shell() {
+                        TERMINAL_ICON
+                    } else {
+                        Self::assistant_mark(&agent.view.provider)
+                    },
+                    24.0,
+                    colors.working,
+                    true,
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -15797,7 +15818,7 @@ impl XdDesktop {
                         div()
                             .id("agents-tray-rows")
                             .w_full()
-                            .max_h(px(34.0 * 6.0))
+                            .max_h(px(36.0 * 6.0))
                             .overflow_y_scroll()
                             .pb(px(4.0))
                             .flex()
@@ -16007,6 +16028,55 @@ impl XdDesktop {
 
     /// One delegated agent: who it is, what it is doing right now, and, once
     /// opened, its task, every step it took, and its report.
+    /// An agent's assistant mark in a ring, with a dot for how it stands, as
+    /// its rows show it in the chat and in the tray.
+    fn agent_avatar(
+        colors: ThemeColors,
+        icon: &'static str,
+        size: f32,
+        tone: u32,
+        pulsing: bool,
+    ) -> gpui::Div {
+        div()
+            .relative()
+            .flex_none()
+            .size(px(size))
+            .rounded_full()
+            .border_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.surface_high))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(assistant_icon(
+                icon,
+                (size * 0.57).round(),
+                colors.muted,
+                colors,
+            ))
+            .child(
+                div()
+                    .absolute()
+                    .right(px(-2.0))
+                    .bottom(px(-2.0))
+                    .size(px((size * 0.38).round()))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(rgb(colors.background))
+                    .bg(rgb(tone))
+                    .when(pulsing, |dot| dot.opacity(pulse_opacity())),
+            )
+    }
+
+    /// The mark for an assistant named as the host does: `claude`, `Codex`.
+    fn assistant_mark(name: &str) -> &'static str {
+        match name.to_ascii_lowercase().as_str() {
+            "codex" => CODEX_ICON,
+            "copilot" => COPILOT_ICON,
+            _ => CLAUDE_ICON,
+        }
+    }
+
     /// One agent an agent started with xd's start_agent tool: its assistant
     /// with a status dot, its name and latest word on one line each, and how it
     /// stands. The row is its chat's way in, so a click opens that chat.
@@ -16028,10 +16098,7 @@ impl XdDesktop {
             _ if !view.summary.is_empty() => first_line(&view.summary),
             _ => first_line(&view.prompt),
         };
-        let icon = match view.provider.to_ascii_lowercase().as_str() {
-            "codex" => CODEX_ICON,
-            _ => CLAUDE_ICON,
-        };
+        let icon = Self::assistant_mark(&view.provider);
         let chat = view.chat.clone();
         div()
             .id(("agent-chat-row", index))
@@ -16049,34 +16116,13 @@ impl XdDesktop {
             .on_click(move |_, window, cx| {
                 window.dispatch_action(Box::new(OpenAgentChat { chat: chat.clone() }), cx);
             })
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .size(px(24.0))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .bg(rgb(colors.surface_high))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(assistant_icon(icon, 13.0, colors.muted, colors))
-                    .child(
-                        div()
-                            .absolute()
-                            .right(px(-2.0))
-                            .bottom(px(-2.0))
-                            .size(px(9.0))
-                            .rounded_full()
-                            .border_2()
-                            .border_color(rgb(colors.background))
-                            .bg(rgb(tone))
-                            .when(status == AgentChatStatus::Running, |dot| {
-                                dot.opacity(pulse_opacity())
-                            }),
-                    ),
-            )
+            .child(Self::agent_avatar(
+                colors,
+                icon,
+                28.0,
+                tone,
+                status == AgentChatStatus::Running,
+            ))
             .child(
                 div()
                     .min_w_0()
@@ -24193,6 +24239,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn the_tray_counts_agent_chats_at_work_and_those_waiting_on_the_user() {
         let worker = |needs_you: bool| TrayWorker {
             chat: "c".into(),
+            backend: "claude".into(),
             title: "Worker".into(),
             needs_you,
         };
