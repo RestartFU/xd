@@ -555,53 +555,50 @@ impl Pass {
                 next = next.min(FAILED_READ_GAP);
                 continue;
             };
-            // Who works on the account now, after the reading.
-            let working_now = self.working_on(&provider, &account);
-            // A turn known to run as another login than the one read, such as
-            // after the user's own CLI signed in to someone else, is not
-            // measured by this reading, nor is anyone beside it: whether it
-            // still works or worked since the last reading.
-            let known = self
-                .ledger
-                .lock()
-                .ok()
-                .and_then(|ledger| {
-                    Some(
+            let recorded = {
+                let Ok(mut ledger) = self.ledger.lock() else {
+                    return next;
+                };
+                // Who works on the account now, read with the ledger held, so
+                // no turn's start or end lands between this and recording it.
+                let working_now = self.working_on(&provider, &account);
+                // A turn known to run as another login than the one read, such
+                // as after the user's own CLI signed in to someone else, is not
+                // measured by this reading, nor is anyone beside it: whether it
+                // still works or worked since the last reading.
+                let other_login = working_now
+                    .iter()
+                    .map(|(_, tag)| tag)
+                    .chain(
                         ledger
                             .accounts
-                            .get(&key)?
-                            .logins
-                            .values()
-                            .cloned()
-                            .collect::<Vec<_>>(),
+                            .get(&key)
+                            .into_iter()
+                            .flat_map(|entry| entry.logins.values()),
                     )
-                })
-                .unwrap_or_default();
-            if working_now
-                .iter()
-                .map(|(_, tag)| tag)
-                .chain(&known)
-                .any(|tag| !tag.ends_with("#?") && !crate::accounts::same_login(tag, &login))
-            {
+                    .any(|tag| !tag.ends_with("#?") && !crate::accounts::same_login(tag, &login));
+                if other_login {
+                    None
+                } else {
+                    let here_now = working_now
+                        .into_iter()
+                        .map(|(chat_id, _)| chat_id)
+                        .collect::<Vec<_>>();
+                    Some(ledger.record(
+                        &provider,
+                        &account,
+                        reading,
+                        &login,
+                        &here_now,
+                        Instant::now(),
+                        asked_ms,
+                    ))
+                }
+            };
+            let Some((shares, since_ms)) = recorded else {
                 self.unreadable(&key, &sharers, true);
                 next = next.min(FAILED_READ_GAP);
                 continue;
-            }
-            let here_now = working_now
-                .into_iter()
-                .map(|(chat_id, _)| chat_id)
-                .collect::<Vec<_>>();
-            let (shares, since_ms) = match self.ledger.lock() {
-                Ok(mut ledger) => ledger.record(
-                    &provider,
-                    &account,
-                    reading,
-                    &login,
-                    &here_now,
-                    Instant::now(),
-                    asked_ms,
-                ),
-                Err(_) => return next,
             };
             for (chat_id, share) in shares {
                 let counted = match self.store.add_quota_use(&chat_id, share, since_ms) {
