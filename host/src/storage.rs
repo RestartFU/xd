@@ -8883,13 +8883,16 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
     }
     if linked {
         // A linked worktree's directory in the repository names the worktree
-        // it belongs to. Git lists the worktree there, and as prunable once
-        // nothing is, so one moved by hand has no branch, as before.
+        // it belongs to, which Git checks. Only an entry naming exactly this
+        // worktree's own `.git` file is read here; one moved by hand, made
+        // prunable or reached through links is left to Git.
         let backlink = fs::read_to_string(git_dir.join("gitdir")).ok()?;
         let listed = git_dir.join(backlink.trim_end_matches(['\n', '\r']));
-        // Git checks the file the entry names, not just its directory.
-        if fs::canonicalize(&listed).ok() != Some(root.join(".git")) {
-            return Some(None);
+        let dot_git = root.join(".git");
+        if !fs::symlink_metadata(&dot_git).ok()?.is_file()
+            || fs::canonicalize(&listed).ok() != Some(dot_git)
+        {
+            return None;
         }
     } else if bare_repository(&config)? {
         // Git lists a bare repository without a branch.
@@ -10956,6 +10959,15 @@ mod tests {
         assert_eq!(worktree_branch(&linked), listed(&linked));
         assert_eq!(worktree_branch(&linked), None);
         fs::write(&backlink, original).unwrap();
+        assert_eq!(worktree_branch(&linked).as_deref(), Some("feature/x"));
+
+        // A worktree whose `.git` file is reached through a link.
+        let moved_link = fixture.root.join("linked-dot-git");
+        fs::rename(linked.join(".git"), &moved_link).unwrap();
+        std::os::unix::fs::symlink(&moved_link, linked.join(".git")).unwrap();
+        assert_eq!(worktree_branch(&linked), listed(&linked));
+        fs::remove_file(linked.join(".git")).unwrap();
+        fs::rename(&moved_link, linked.join(".git")).unwrap();
         assert_eq!(worktree_branch(&linked).as_deref(), Some("feature/x"));
 
         // A worktree moved by hand is not where Git lists it, so neither has
