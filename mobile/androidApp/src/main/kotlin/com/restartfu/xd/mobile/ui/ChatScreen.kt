@@ -366,6 +366,7 @@ internal fun ChatScreen(
         ),
     )
     LaunchedEffect(listState, model) {
+        var lastFollowed: Pair<FollowTarget?, Int?> = null to null
         // The newest row's drawn height too: a streaming reply is drawn at a
         // pace, so its last words can land after the text that woke this.
         snapshotFlow {
@@ -373,8 +374,15 @@ internal fun ChatScreen(
             val drawnHeight = listState.layoutInfo.visibleItemsInfo
                 .firstOrNull { it.index == target.lastIndex }?.size
             target to drawnHeight
-        }.collect { (target, _) ->
-            if (model.landed && target.count > 0 && following.value) {
+        }.collect { (target, drawnHeight) ->
+            // Only new output, or the newest row growing while in view, moves
+            // the list; the row leaving or entering the view is the reader's.
+            val grew = target == lastFollowed.first &&
+                drawnHeight != null &&
+                (lastFollowed.second ?: Int.MAX_VALUE) < drawnHeight
+            val changed = target != lastFollowed.first
+            lastFollowed = target to drawnHeight
+            if ((changed || grew) && model.landed && target.count > 0 && following.value) {
                 try {
                     listState.scrollToEnd(target.lastIndex, animated = true)
                 } catch (interrupted: CancellationException) {
