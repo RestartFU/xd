@@ -275,6 +275,17 @@ impl QuotaMeter {
 }
 
 impl Pass {
+    /// The chats working on one account now, each with the account and login
+    /// its turn runs as.
+    fn working_on(&self, provider: &str, account: &str) -> Vec<(String, String)> {
+        self.runtime
+            .working_accounts()
+            .into_iter()
+            .filter(|(_, p, tag)| p == provider && crate::accounts::tag_account(tag) == account)
+            .map(|(chat_id, _, tag)| (chat_id, tag))
+            .collect()
+    }
+
     /// One look at every account a chat with a quota works on. Returns how
     /// long until the next reading is due.
     fn run(&self, now: Instant) -> Duration {
@@ -394,11 +405,7 @@ impl Pass {
                 // With nothing at work here any more, what the account uses
                 // until the next reading is nobody's here: the next turn reads
                 // afresh rather than from before the gap.
-                let idle = !self
-                    .runtime
-                    .working_accounts()
-                    .iter()
-                    .any(|(_, p, a)| *p == provider && *a == account);
+                let idle = self.working_on(&provider, &account).is_empty();
                 if let Ok(mut ledger) = self.ledger.lock()
                     && let Some(entry) = ledger.accounts.get_mut(&key)
                 {
@@ -411,20 +418,14 @@ impl Pass {
                 continue;
             };
             // Who works on the account now, after the reading.
-            let working_now = self
-                .runtime
-                .working_accounts()
-                .into_iter()
-                .filter(|(_, p, tag)| {
-                    *p == provider && crate::accounts::tag_account(tag) == account
-                })
-                .collect::<Vec<_>>();
+            let working_now = self.working_on(&provider, &account);
             // A turn known to run as another login than the one read, such as
             // after the user's own CLI signed in to someone else, is not
             // measured by this reading, nor is anyone beside it.
-            if working_now.iter().any(|(_, _, tag)| {
-                !tag.ends_with("#?") && !crate::accounts::same_login(tag, &login)
-            }) {
+            if working_now
+                .iter()
+                .any(|(_, tag)| !tag.ends_with("#?") && !crate::accounts::same_login(tag, &login))
+            {
                 if let Ok(mut ledger) = self.ledger.lock()
                     && let Some(entry) = ledger.accounts.get_mut(&key)
                 {
@@ -434,7 +435,7 @@ impl Pass {
             }
             let here_now = working_now
                 .into_iter()
-                .map(|(chat_id, _, _)| chat_id)
+                .map(|(chat_id, _)| chat_id)
                 .collect::<Vec<_>>();
             let (shares, since_ms) = match self.ledger.lock() {
                 Ok(mut ledger) => ledger.record(
