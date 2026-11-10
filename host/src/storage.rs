@@ -8852,9 +8852,15 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
         None => return Some(None),
     };
     let common = common_directory(&git_dir);
+    // Git refuses a repository someone else owns unless told it is safe,
+    // which only Git's own config reading can tell.
+    if !owned_by_this_user(&[root, &root.join(".git"), &git_dir]) {
+        return None;
+    }
     let config = fs::read_to_string(common.join("config")).unwrap_or_default();
-    // Included files can set anything, so only Git can say.
-    if config_includes(&config) {
+    // Included files can set anything, and Git rejects config it cannot
+    // parse, so only plain config is read here.
+    if !plain_config(&config) {
         return None;
     }
     if git_dir.join("commondir").is_file() {
@@ -8983,15 +8989,51 @@ fn is_git_directory(directory: &Path) -> bool {
         && common.join("refs").is_dir()
 }
 
-/// Whether a Git config file includes others (`include` or `includeIf`).
-fn config_includes(config: &str) -> bool {
-    config.lines().any(|line| {
-        line.trim_start().strip_prefix('[').is_some_and(|header| {
-            header
-                .trim_start()
-                .to_ascii_lowercase()
-                .starts_with("include")
-        })
+/// Whether the current user, other than root, owns every one of `paths`, as
+/// Git requires of a repository it has not been told is safe.
+fn owned_by_this_user(paths: &[&Path]) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let user = unsafe { libc::geteuid() };
+    user != 0
+        && paths
+            .iter()
+            .all(|path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.uid() == user))
+}
+
+/// Whether a Git config file is plain: section headers and `key = value`
+/// lines, with no includes, quoting or continued lines. Anything else is left
+/// to Git, which may read it differently or reject it.
+fn plain_config(config: &str) -> bool {
+    config.lines().all(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(['#', ';']) {
+            return true;
+        }
+        let setting = match line.strip_prefix('[') {
+            Some(header) => {
+                let Some((name, rest)) = header.split_once(']') else {
+                    return false;
+                };
+                if name
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("include")
+                {
+                    return false;
+                }
+                rest.trim()
+            }
+            None => line,
+        };
+        let key = setting.split('=').next().unwrap_or_default().trim();
+        setting.is_empty()
+            || (!setting.contains(['"', '\\'])
+                && key.starts_with(|first: char| first.is_ascii_alphabetic())
+                && key
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-'))
     })
 }
 
@@ -10533,6 +10575,14 @@ mod tests {
                     workdir.display()
                 );
             }
+            // The layouts xd makes are read without starting Git.
+            if expected.is_some() {
+                assert!(
+                    head_branch(&fs::canonicalize(&workdir).unwrap()).is_some(),
+                    "{} was left to Git",
+                    workdir.display()
+                );
+            }
         }
 
         // An empty `.git` directory is no repository, so Git looks above it.
@@ -10639,6 +10689,16 @@ mod tests {
         );
         assert_eq!(listed(&separate), None);
         assert_eq!(worktree_branch(&separate).as_deref(), Some("main"));
+
+        // Config Git cannot parse makes Git refuse the repository.
+        let garbled = fixture.root.join("garbled");
+        fs::create_dir_all(&garbled).unwrap();
+        git(&garbled, &["init", "-q", "-b", "main"]);
+        let mut config = fs::read_to_string(garbled.join(".git/config")).unwrap();
+        config.push_str("this is not config\n");
+        fs::write(garbled.join(".git/config"), config).unwrap();
+        assert_eq!(listed(&garbled), None);
+        assert_eq!(worktree_branch(&garbled), None);
 
         // A bare setting spelled as Git also reads it.
         let numbered = fixture.root.join("numbered");
