@@ -51,6 +51,9 @@ const NEW_WINDOW_MS: i64 = 15 * 60 * 1000;
 pub(crate) struct Reading {
     pub(crate) percent: f64,
     pub(crate) resets_at_ms: Option<i64>,
+    /// Which limit it is: `session` (5-hour) or `weekly`. Readings of
+    /// different limits measure nothing against each other.
+    pub(crate) kind: &'static str,
 }
 
 /// The limit quotas count against: the 5-hour one, or the weekly one when an
@@ -61,13 +64,14 @@ pub(crate) fn quota_window(windows: &[Headroom]) -> Option<Reading> {
             .iter()
             .find(|window| window.kind == kind && !window.label.contains('·'))
     };
-    pick("session")
-        .or_else(|| pick("weekly"))
-        .filter(|window| window.used_percent.is_finite())
-        .map(|window| Reading {
-            percent: window.used_percent,
-            resets_at_ms: window.resets_at_ms,
-        })
+    let (kind, window) = pick("session")
+        .map(|window| ("session", window))
+        .or_else(|| pick("weekly").map(|window| ("weekly", window)))?;
+    window.used_percent.is_finite().then_some(Reading {
+        percent: window.used_percent,
+        resets_at_ms: window.resets_at_ms,
+        kind,
+    })
 }
 
 #[derive(Debug, Default)]
@@ -201,7 +205,7 @@ impl Ledger {
         sharers.extend(working.iter().cloned());
         let rise = entry
             .baseline(login)
-            .filter(|_| !entry.restarted_after_idle)
+            .filter(|last| last.kind == reading.kind && !entry.restarted_after_idle)
             .map_or(0.0, |last| rise(last, reading));
         entry.restarted_after_idle = false;
         // The next interval starts here; work going on now means no gap yet.
@@ -582,6 +586,7 @@ mod tests {
         Reading {
             percent,
             resets_at_ms: Some(resets_at_ms),
+            kind: "session",
         }
     }
 
@@ -739,6 +744,25 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_of_another_limit_starts_afresh() {
+        let mut ledger = Ledger::default();
+        let now = Instant::now();
+        let a = chats(&["a"]);
+        record_in(&mut ledger, "codex", "default", reading(10.0, 5), &a, now);
+        let weekly = Reading {
+            kind: "weekly",
+            ..reading(80.0, 5 + 7 * 24 * 60 * 60 * 1000)
+        };
+        assert!(record_in(&mut ledger, "codex", "default", weekly, &a, now).is_empty());
+        let later = Reading {
+            percent: 81.0,
+            ..weekly
+        };
+        let shares = record_in(&mut ledger, "codex", "default", later, &a, now);
+        assert_eq!(shares, vec![("a".to_owned(), 1.0)]);
+    }
+
+    #[test]
     fn a_fall_within_one_window_is_no_rise() {
         let mut ledger = Ledger::default();
         let now = Instant::now();
@@ -825,7 +849,13 @@ mod tests {
             window("weekly", "Weekly · Fable", 80.0),
             window("weekly", "Weekly", 40.0),
         ];
-        assert_eq!(quota_window(&weekly), Some(reading(40.0, 7)));
+        assert_eq!(
+            quota_window(&weekly),
+            Some(Reading {
+                kind: "weekly",
+                ..reading(40.0, 7)
+            })
+        );
         assert_eq!(quota_window(&[window("monthly", "Monthly", 1.0)]), None);
     }
 
