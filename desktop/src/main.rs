@@ -6503,15 +6503,20 @@ impl XdDesktop {
             self.model.apply_event(name, &body);
             let chat_id = chat_id.map(str::to_owned);
             // A turn its quota stopped is no finished turn: say why it ended.
-            let ending = if body.get("quota_reached").and_then(Value::as_bool) == Some(true) {
-                if let Some(chat_id) = &chat_id {
-                    self.quota_stops_announced.insert(chat_id.clone());
-                }
-                QUOTA_STOP_ENDING
-            } else {
-                "finished"
-            };
-            self.notify_chat_ended(chat_id, &title, ending, cx);
+            let quota_stop = body.get("quota_reached").and_then(Value::as_bool) == Some(true);
+            // A stop the tree already announced is not announced again.
+            let fresh = !quota_stop
+                || chat_id
+                    .as_ref()
+                    .is_none_or(|chat_id| self.quota_stops_announced.insert(chat_id.clone()));
+            if fresh {
+                let ending = if quota_stop {
+                    QUOTA_STOP_ENDING
+                } else {
+                    "finished"
+                };
+                self.notify_chat_ended(chat_id, &title, ending, cx);
+            }
             self.request_tree();
         }
         match name {

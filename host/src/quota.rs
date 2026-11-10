@@ -39,6 +39,10 @@ const MIN_READ_GAP: Duration = Duration::ZERO;
 const FAILED_READ_GAP: Duration = READ_INTERVAL;
 #[cfg(test)]
 const FAILED_READ_GAP: Duration = Duration::from_millis(10);
+/// A pause between one turn ending and the next starting that counts as the
+/// account going idle. A queued message starts the instant the turn before
+/// it ends, and that handover is still work.
+const IDLE_GAP: Duration = Duration::from_secs(10);
 /// A limit whose reset moved later by more than this has started a new window.
 const NEW_WINDOW_MS: i64 = 15 * 60 * 1000;
 
@@ -73,10 +77,11 @@ struct AccountLedger {
     read_at: Option<Instant>,
     /// The chats running a turn here, by their starts and ends.
     running: HashSet<String>,
-    /// Since `last`, every turn here ended at some point, and then one began
-    /// again. What the account used in that gap cannot be told apart from
-    /// the work around it, so the interval is counted for nobody.
-    went_idle: bool,
+    /// When every turn here last ended, while none has begun since.
+    idle_since: Option<Instant>,
+    /// Since `last`, every turn here ended and one began again more than
+    /// [`IDLE_GAP`] later. What the account used in that gap cannot be told
+    /// apart from the work around it, so the interval is counted for nobody.
     restarted_after_idle: bool,
     /// When a reading was last begun, and whether it failed.
     tried_at: Option<Instant>,
@@ -121,6 +126,17 @@ impl Ledger {
 
     /// A chat started or ended a turn on the account.
     pub(crate) fn turn(&mut self, provider: &str, account: &str, chat_id: &str, started: bool) {
+        self.turn_at(provider, account, chat_id, started, Instant::now());
+    }
+
+    fn turn_at(
+        &mut self,
+        provider: &str,
+        account: &str,
+        chat_id: &str,
+        started: bool,
+        now: Instant,
+    ) {
         self.note(provider, account, chat_id);
         let Some(entry) = self
             .accounts
@@ -130,13 +146,17 @@ impl Ledger {
         };
         if started {
             entry.running.insert(chat_id.to_owned());
-            if entry.went_idle {
+            if entry
+                .idle_since
+                .take()
+                .is_some_and(|since| now.saturating_duration_since(since) >= IDLE_GAP)
+            {
                 entry.restarted_after_idle = true;
             }
         } else {
             entry.running.remove(chat_id);
             if entry.running.is_empty() {
-                entry.went_idle = true;
+                entry.idle_since = Some(now);
             }
         }
     }
@@ -167,7 +187,6 @@ impl Ledger {
             .baseline(login)
             .filter(|_| !entry.restarted_after_idle)
             .map_or(0.0, |last| rise(last, reading));
-        entry.went_idle = false;
         entry.restarted_after_idle = false;
         let since_ms = std::mem::replace(&mut entry.asked_ms, asked_ms);
         entry.last = Some(reading);
@@ -678,12 +697,23 @@ mod tests {
         let mut ledger = Ledger::default();
         let now = Instant::now();
         let a = chats(&["a"]);
-        ledger.turn("claude", "default", "a", true);
+        ledger.turn_at("claude", "default", "a", true, now);
         record_in(&mut ledger, "claude", "default", reading(10.0, 1), &a, now);
-        // A turn that ends and another that starts before the next reading:
-        // the rise between them holds idle time nobody can be charged with.
-        ledger.turn("claude", "default", "a", false);
-        ledger.turn("claude", "default", "a", true);
+        // A queued message starting as the turn before it ends is still work.
+        ledger.turn_at("claude", "default", "a", false, now);
+        ledger.turn_at(
+            "claude",
+            "default",
+            "a",
+            true,
+            now + Duration::from_millis(5),
+        );
+        let shares = record_in(&mut ledger, "claude", "default", reading(12.0, 1), &a, now);
+        assert_eq!(shares, vec![("a".to_owned(), 2.0)]);
+        // A turn that ends and another that starts a while later, before the
+        // next reading: the rise holds idle time nobody can be charged with.
+        ledger.turn_at("claude", "default", "a", false, now);
+        ledger.turn_at("claude", "default", "a", true, now + IDLE_GAP);
         assert!(record_in(&mut ledger, "claude", "default", reading(20.0, 1), &a, now).is_empty());
         // Work that never stopped is counted again from there.
         let shares = record_in(&mut ledger, "claude", "default", reading(22.0, 1), &a, now);
