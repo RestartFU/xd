@@ -8841,6 +8841,12 @@ fn normalize_existing_path(path: &Path) -> String {
 /// transcript requests waited behind it. So the plain layouts xd makes, a
 /// checkout or a linked worktree, are read from their HEAD file; anything
 /// else is still left to Git, once per repository within `listed`.
+///
+/// For any repository Git works in, the answer is the one Git lists. Where
+/// the user's own Git settings make Git refuse a repository that is itself
+/// sound, for example a conditional include of a broken file, this may still
+/// show its branch: every Git command xd runs there fails with that error
+/// anyway, and telling would take running Git, which this exists to avoid.
 fn worktree_branch(workdir: &Path, listed: &mut ListedWorktrees) -> Option<String> {
     // Git looks for the repository from the physical directory, as here.
     let workdir = fs::canonicalize(workdir).ok()?;
