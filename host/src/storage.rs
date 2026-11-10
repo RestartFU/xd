@@ -8887,12 +8887,11 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
         // real refs elsewhere.
         Some("refs/heads/.invalid") => None,
         Some(reference) => {
-            let Some(branch) = reference
-                .strip_prefix("refs/heads/")
-                .filter(|branch| !branch.is_empty())
-            else {
-                return Some(None);
-            };
+            let branch = reference.strip_prefix("refs/heads/")?;
+            // Only a name Git surely accepts; Git judges the rest.
+            if !plain_branch_name(branch) {
+                return None;
+            }
             // A branch that is itself a symbolic ref names another, which
             // Git follows; a packed ref never is one.
             let loose = common.join("refs/heads").join(branch);
@@ -8901,10 +8900,29 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
                 || fs::read(&loose).is_ok_and(|reference| reference.starts_with(b"ref:"));
             (!symbolic).then(|| Some(branch.to_owned()))
         }
-        None => (matches!(head.len(), 40 | 64)
-            && head.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        // A SHA-1 object id, in a repository that names no other format.
+        None => (head.len() == 40
+            && head.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && !config.to_ascii_lowercase().contains("objectformat"))
         .then(|| Some("Detached HEAD".into())),
     }
+}
+
+/// Whether `name` is a branch name of the kind Git always accepts: ASCII
+/// letters, digits and `-_./`, in `/`-separated parts that neither start
+/// with `.` or `-` nor end with `.` or `.lock`.
+fn plain_branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('/').all(|part| {
+            !part.is_empty()
+                && !part.starts_with(['.', '-'])
+                && !part.ends_with('.')
+                && !part.ends_with(".lock")
+                && !part.contains("..")
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
 }
 
 /// The worktree root and Git directory for the physical directory `workdir`:
@@ -10596,7 +10614,9 @@ mod tests {
         assert_eq!(listed(&included), None);
         assert_eq!(worktree_branch(&included), None);
 
-        // A separate Git directory whose name ends in a space.
+        // A separate Git directory whose name ends in a space. Git lists this
+        // checkout at its Git directory rather than where it is, so the list
+        // has no branch for it; its HEAD says what `git status` does.
         let separate = fixture.root.join("separate");
         let spaced = fixture.root.join("admin ");
         fs::create_dir_all(&separate).unwrap();
@@ -10611,8 +10631,22 @@ mod tests {
                 spaced.to_str().unwrap(),
             ],
         );
-        assert_eq!(listed(&separate).as_deref(), Some("main"));
+        assert_eq!(listed(&separate), None);
         assert_eq!(worktree_branch(&separate).as_deref(), Some("main"));
+
+        // HEAD naming what Git would not take as a branch or commit.
+        let odd = fixture.root.join("odd");
+        fs::create_dir_all(&odd).unwrap();
+        git(&odd, &["init", "-q", "-b", "main"]);
+        for head in [
+            "ref: refs/heads/bad name\n".to_owned(),
+            "ref: refs/heads/a..b\n".to_owned(),
+            format!("{}\n", "a".repeat(64)),
+        ] {
+            fs::write(odd.join(".git/HEAD"), &head).unwrap();
+            assert_eq!(worktree_branch(&odd), listed(&odd), "{head}");
+        }
+        fs::write(odd.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
 
         // A branch that is itself a symbolic ref names the one Git lists.
         git(
