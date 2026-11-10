@@ -76,6 +76,12 @@ for line in sys.stdin:
     elif method == 'model/list':
         time.sleep(0.3)
         print(json.dumps({'id':2,'result':{'data':[{'model':'cli-default','isDefault':True,'defaultReasoningEffort':'low'},{'model':'gpt-5.5','defaultReasoningEffort':'medium'}]}}), flush=True)
+    elif method == 'account/rateLimits/read':
+        # Each reading finds five more points of the 5-hour limit used.
+        counter = pathlib.Path(__file__).with_suffix('.usage')
+        used = int(counter.read_text()) + 5 if counter.exists() else 10
+        counter.write_text(str(used))
+        print(json.dumps({'id':frame['id'],'result':{'rateLimits':{'primary':{'usedPercent':used,'windowDurationMins':300,'resetsAt':4102444800}}}}), flush=True)
     elif method == 'account/read': print(json.dumps({'id':frame['id'],'result':{'account':{'email':'fixture@example.com','planType':'pro'}}}), flush=True)
     elif method in ('thread/start','thread/resume'): print(json.dumps({'id':2,'result':{'thread':{'id':'thread-test'}}}), flush=True)
     elif method == 'turn/start':
@@ -640,6 +646,96 @@ fn pausing_all_holds_working_chats_until_they_resume() {
         assert_eq!(user_messages(&mut client, &after), 1);
         assert!(paused_in_tree(&mut client).is_empty());
     }
+}
+
+#[test]
+fn a_chat_stops_at_its_quota_until_the_user_gives_it_a_new_one() {
+    let daemon = Daemon::start_with_discovery(true);
+    let mut client = daemon.client();
+    let folder = client.call(json!({"op":"new-folder", "name":"Project"}));
+    assert_eq!(folder["ok"], true, "{folder}");
+    let chat = client.call(json!({"op":"new-chat", "folder":folder["id"], "backend":"codex"}));
+    assert_eq!(chat["ok"], true, "{chat}");
+    let chat = chat["id"].as_str().unwrap().to_owned();
+    let readings = || {
+        fs::read_to_string(daemon.root.join("codex.usage"))
+            .ok()
+            .and_then(|used| used.trim().parse::<i64>().ok())
+    };
+    assert_eq!(client.call(json!({"op":"tree"}))["chat_quotas"], true);
+    assert_eq!(
+        client.call(json!({"op":"chat-quota-settings"}))["percent"],
+        Value::Null
+    );
+    let reply = client.call(json!({"op":"set-chat-quota-settings", "percent":3}));
+    assert_eq!(reply["percent"], 3, "{reply}");
+    let quota = client.call(json!({"op":"chat", "chat":chat}))["quota"].clone();
+    assert_eq!(quota, json!({"percent":3, "used":0.0, "own":false}));
+
+    // The first turn reads where the limit stands; the next one finds five
+    // more points used, more than the chat's quota, and stops the chat.
+    let reply = client.call(json!({"op":"send", "chat":chat, "text":"hello"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while readings().is_none() {
+        assert!(Instant::now() < deadline, "the limit was never read");
+        thread::sleep(Duration::from_millis(20));
+    }
+    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["working"] == false
+    });
+    let reply = client.call(json!({"op":"send", "chat":chat, "text":"hello"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let stopped = loop {
+        let reply = client.call(json!({"op":"chat", "chat":chat}));
+        if reply["quota_reached"] == true {
+            break reply;
+        }
+        assert!(Instant::now() < deadline, "the chat never stopped: {reply}");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(stopped["quota"]["percent"], 3, "{stopped}");
+    assert!(
+        stopped["quota"]["used"].as_f64().unwrap() >= 3.0,
+        "{stopped}"
+    );
+    let tree = client.call(json!({"op":"tree"}));
+    let listed = tree["chats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listed| listed["id"] == chat.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(listed["quota_reached"], true, "{listed}");
+    assert!(listed.get("paused").is_none(), "{listed}");
+
+    // It waits: what the user sends is queued, and neither resuming nor
+    // `resume-all` takes it up.
+    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["working"] == false
+    });
+    let reply = client.call(json!({"op":"send", "chat":chat, "text":"later"}));
+    assert_eq!(reply["queued"], true, "{reply}");
+    let refused = client.call(json!({"op":"resume-turn", "chat":chat}));
+    assert_eq!(refused["ok"], false, "{refused}");
+    let reply = client.call(json!({"op":"resume-all"}));
+    assert_eq!(reply["resumed"], json!([]), "{reply}");
+    assert_eq!(
+        client.call(json!({"op":"chat", "chat":chat}))["queue"],
+        json!(["later"])
+    );
+
+    // A new quota of its own lets it go on, and the queue runs.
+    let reply = client.call(json!({"op":"set-chat-quota", "chat":chat, "percent":50}));
+    assert_eq!(reply["resumed"], true, "{reply}");
+    let chat_state = client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["working"] == false && reply["queue"] == json!([])
+    });
+    assert!(chat_state.get("quota_reached").is_none(), "{chat_state}");
+    assert_eq!(chat_state["quota"]["percent"], 50, "{chat_state}");
+    assert_eq!(chat_state["quota"]["own"], true, "{chat_state}");
 }
 
 #[test]

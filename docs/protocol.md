@@ -794,6 +794,60 @@ because it has moved on or is still stopping, just loses its mark and runs its
 queue. Sending a message, resuming, or steering in one paused chat picks up only
 that chat. Both operations publish `changed` for each chat they touch and `tree`.
 
+### Chat quotas
+
+```json
+{"op":"chat-quota-settings"}
+{"ok":true,"percent":null}
+{"op":"set-chat-quota-settings","percent":10}
+{"op":"set-chat-quota","chat":"chat-1","percent":20}
+{"ok":true,"resumed":true}
+```
+
+A host that can limit chats to a share of their account's usage adds a
+top-level `"chat_quotas":true` to `tree`. A quota is a percentage of the usage
+limit the chat's account works under: its 5-hour limit, or its weekly limit when
+it has no 5-hour one. A chat that has used its quota stops, and the host asks
+the user before it goes on.
+
+`percent`, a whole number from 1 to 100, is the host's default quota for every
+chat. It is `null`, and no chat is limited, until a client chooses one.
+`set-chat-quota-settings` takes `percent`, a number or `null`, replies like
+`chat-quota-settings`, broadcasts `chat-quota-settings`, and applies at once. A request without `percent` changes
+nothing.
+
+`set-chat-quota` gives one chat its own quota: `percent` from 1 to 100, or
+`null` for no limit at all. With `inherit:true` instead of `percent`, the chat
+follows the host's default again. Each of these starts the chat's count again
+from zero. When the chat had stopped at its quota, it then goes on: the turn the
+quota cut short continues as [`resume-turn`](#resume-turn) would, and then its
+queue runs. `resumed` says whether it went on. The request publishes `changed`
+for the chat and `tree`.
+
+The `chat` reply has `quota:{percent, used, own}` while a quota applies to the
+chat. `percent` is the quota, `used` is how much of the limit the chat has used
+since its count began, in the same percentage points, and `own` is true when
+the chat has its own quota rather than the host's default. A chat that stopped
+at its quota has `quota_reached:true`, in both `tree` and `chat`, until the user
+gives it a new quota; the member is absent otherwise.
+
+The host measures a chat's use by reading its account's limits about once a
+minute while the chat works on it, and when a turn ends. A rise in the limit is
+shared evenly among the chats that worked on the account since the last
+reading, including chats without a quota, so the figure is an estimate. An
+account whose limits cannot be read, such as one signed in with an API key,
+uses nothing against a quota.
+
+Once `used` reaches `percent`, the host stops the chat as
+[`pause-all`](#pause-all-and-resume-all) would: its turn ends and is
+`resumable`, its agent's background work stops, and anything sent to it waits
+in its queue. It is not `paused`. `resume-turn`, `steer-queue`, and
+`resume-all` leave it alone; the host never continues it by itself. A chat that
+reaches its quota as a turn ends is marked the same way, with nothing to resume.
+Clients show the chat's quota in place of its resume button and offer to
+continue with a new one, prefilled with a larger quota than the last, or
+without a limit.
+
 ### `respond`
 
 ```json
@@ -1235,6 +1289,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `tree` | — | Workspace tree changed; refetch `tree`. |
 | `auto-settle-settings` | `after_days`, `on_merge`, `keep_pull_requests` | The host's automatic settling rules changed. |
 | `auto-delete-settings` | `after_days` | The host's automatic deletion rule changed. |
+| `chat-quota-settings` | `percent` | The host's default chat quota changed. |
 | `changed` | `chat` | Stored chat state changed; refetch when idle. |
 | `worktrees-changed` | — | A Git worktree changed; refetch chat state and worktree lists. |
 | `shortcuts-changed` | optional `folder` | Global or workspace prompt shortcuts changed; refetch chat state. |

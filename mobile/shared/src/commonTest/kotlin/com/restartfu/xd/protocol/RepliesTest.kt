@@ -228,6 +228,38 @@ class RepliesTest {
     }
 
     @Test
+    fun chatQuotaMembersAreAbsentOnOlderHosts() {
+        val older = WireJson.parseToJsonElement(
+            """{"ok":true,"folders":[],"chats":[{"id":"one","folder":"p","title":"One","backend":"codex","working":false}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertFalse(older.chatQuotas)
+        assertFalse(older.chats.single().quotaReached)
+        val newer = WireJson.parseToJsonElement(
+            """{"ok":true,"chat_quotas":true,"folders":[],"chats":[{"id":"one","folder":"p","title":"One","backend":"codex","working":false,"quota_reached":true}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertTrue(newer.chatQuotas)
+        assertTrue(newer.chats.single().quotaReached)
+
+        val chat = """{"ok":true,"title":"T","backend":"codex","plan":false,"working":false,"new_worktree":false,"has_messages":true"""
+        val plain = WireJson.parseToJsonElement("$chat}").jsonObject.decodeReply<ChatReply>()
+        assertNull(com.restartfu.xd.model.ChatQuota.parse(plain.quota))
+        assertFalse(plain.quotaReached)
+        val stopped = WireJson.parseToJsonElement(
+            """$chat,"resumable":true,"quota_reached":true,"quota":{"percent":10,"used":10.4,"own":false}}""",
+        ).jsonObject.decodeReply<ChatReply>()
+        assertTrue(stopped.quotaReached)
+        assertEquals(com.restartfu.xd.model.ChatQuota(10, 10.4, own = false), com.restartfu.xd.model.ChatQuota.parse(stopped.quota))
+        // A quota this client does not understand leaves the chat readable.
+        val odd = WireJson.parseToJsonElement("""$chat,"quota":"ten"}""").jsonObject.decodeReply<ChatReply>()
+        assertNull(com.restartfu.xd.model.ChatQuota.parse(odd.quota))
+        val nullQuota = WireJson.parseToJsonElement("""$chat,"quota":null}""").jsonObject.decodeReply<ChatReply>()
+        assertNull(com.restartfu.xd.model.ChatQuota.parse(nullQuota.quota))
+
+        assertEquals(true, WireJson.parseToJsonElement("""{"ok":true,"resumed":true}""").jsonObject.decodeReply<SetChatQuotaReply>().resumed)
+        assertEquals(false, WireJson.parseToJsonElement("""{"ok":true}""").jsonObject.decodeReply<SetChatQuotaReply>().resumed)
+    }
+
+    @Test
     fun autoSettleSettingsReadAnOffInactivityRuleAsNull() {
         val off = WireJson.parseToJsonElement(
             """{"ok":true,"after_days":null,"on_merge":true,"keep_pull_requests":false}""",

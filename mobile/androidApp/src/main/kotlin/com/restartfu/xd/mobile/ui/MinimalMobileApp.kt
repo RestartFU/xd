@@ -2421,6 +2421,7 @@ private fun MinimalSettingsDialog(
                 }
                 ChatTitleSettings(model)
                 if (tree.settlement) AutoSettleSettings(model)
+                if (tree.chatQuotas) ChatQuotaSection(model)
                 SettingAction(
                     title = "Assistant accounts",
                     detail = "Manage sign-in and the installed assistant CLIs.",

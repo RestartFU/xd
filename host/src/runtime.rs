@@ -80,6 +80,9 @@ struct RuntimeInner {
     /// Told when a turn ends for good: not stopped, and not going on under
     /// another account.
     on_turn_settled: Mutex<Option<TurnSettledHandler>>,
+    /// Told whenever a turn starts or ends, with the chat, assistant, and
+    /// account; see [`crate::quota`].
+    on_activity: Mutex<Option<ActivityHandler>>,
     /// Chats whose move to another account was already explained to the user.
     explained_switches: Mutex<HashSet<String>>,
     /// False while sessions from before accounts were kept are being filed as
@@ -98,6 +101,10 @@ pub(crate) type AccountSwitchHandler = Box<dyn Fn(String, i64) + Send + Sync>;
 /// Hears that a chat's turn ended for good, and how. Called with the chat's
 /// succession held, so it must only hand the news on, never wait.
 pub(crate) type TurnSettledHandler = Box<dyn Fn(SettledTurn) + Send + Sync>;
+
+/// Hears that a chat's turn started or ended, with its assistant and account.
+/// Called with the chat's succession held, so it must only note it, never wait.
+pub(crate) type ActivityHandler = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 /// A turn that ended for good: neither stopped nor going on elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -492,6 +499,9 @@ struct ActiveProcess {
     started: Instant,
     label: String,
     progress: Arc<TurnProgress>,
+    /// The assistant and account the turn runs on.
+    provider: String,
+    account: String,
 }
 
 /// What a turn has published so far, readable from outside the turn thread.
@@ -566,6 +576,7 @@ impl TurnRuntime {
                 auth,
                 on_account_switch: Mutex::new(None),
                 on_turn_settled: Mutex::new(None),
+                on_activity: Mutex::new(None),
                 explained_switches: Mutex::new(HashSet::new()),
                 account_gate: std::sync::RwLock::new(()),
                 filing: Arc::new((Mutex::new(true), std::sync::Condvar::new())),
@@ -642,6 +653,66 @@ impl TurnRuntime {
         if let Ok(mut current) = self.inner.on_account_switch.lock() {
             *current = Some(handler);
         }
+    }
+
+    pub(crate) fn set_activity_handler(&self, handler: ActivityHandler) {
+        if let Ok(mut current) = self.inner.on_activity.lock() {
+            *current = Some(handler);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_activity_for_test(&self, chat_id: &str, provider: &str, account: &str) {
+        self.note_activity(chat_id, provider, account);
+    }
+
+    fn note_activity(&self, chat_id: &str, provider: &str, account: &str) {
+        if let Ok(handler) = self.inner.on_activity.lock()
+            && let Some(handler) = handler.as_ref()
+        {
+            handler(chat_id, provider, crate::accounts::tag_account(account));
+        }
+    }
+
+    /// Every chat whose agent is at work now, with the assistant and account
+    /// it works on: running a turn, or running background agents or shells
+    /// between turns.
+    pub(crate) fn working_accounts(&self) -> Vec<(String, String, String)> {
+        let mut working = self
+            .inner
+            .active
+            .lock()
+            .map(|active| {
+                active
+                    .iter()
+                    .map(|(chat_id, process)| {
+                        (
+                            chat_id.clone(),
+                            process.provider.clone(),
+                            process.account.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Ok(sessions) = self.inner.sessions.lock() {
+            for (chat_id, session) in sessions.iter() {
+                if working.iter().any(|(working, _, _)| working == chat_id) {
+                    continue;
+                }
+                let Ok(router) = session.router.lock() else {
+                    continue;
+                };
+                if !router.tasks.is_empty() {
+                    working.push((
+                        chat_id.clone(),
+                        router.backend.clone(),
+                        crate::accounts::tag_account(&session.account).to_owned(),
+                    ));
+                }
+            }
+        }
+        working
     }
 
     pub(crate) fn set_turn_settled_handler(&self, handler: TurnSettledHandler) {
@@ -1532,9 +1603,12 @@ impl TurnRuntime {
                     started: Instant::now(),
                     label: turn.label.clone(),
                     progress: progress.clone(),
+                    provider: turn.backend.clone(),
+                    account: crate::accounts::tag_account(&turn.account).to_owned(),
                 },
             );
         }
+        self.note_activity(&turn.chat_id, &turn.backend, &turn.account);
         let chat_id = turn.chat_id.clone();
         let label = turn.label.clone();
         let backend = turn.backend.clone();
@@ -2874,6 +2948,7 @@ impl TurnRuntime {
         {
             active.remove(&turn.chat_id);
         }
+        self.note_activity(&turn.chat_id, &turn.backend, &turn.account);
         if let Ok(mut interactions) = self.inner.interactions.lock() {
             let pending = interactions.entry(turn.chat_id.clone()).or_default();
             pending.requests.clear();
@@ -3639,6 +3714,8 @@ mod tests {
                 started: Instant::now(),
                 label: "test".to_owned(),
                 progress: Arc::new(TurnProgress::default()),
+                provider: "claude".to_owned(),
+                account: crate::accounts::DEFAULT_ACCOUNT.to_owned(),
             },
         );
 

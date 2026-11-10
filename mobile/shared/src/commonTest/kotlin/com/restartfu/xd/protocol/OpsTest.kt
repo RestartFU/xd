@@ -188,6 +188,33 @@ class OpsTest {
     }
 
     @Test
+    fun chatQuotasSendAPercentageNoLimitOrTheDefault() {
+        assertEquals("chat-quota-settings", Ops.chatQuotaSettings()["op"]!!.jsonPrimitive.content)
+        val on = Ops.setChatQuotaSettings(10)
+        assertEquals("set-chat-quota-settings", on["op"]!!.jsonPrimitive.content)
+        assertEquals(10, on["percent"]!!.jsonPrimitive.int)
+        val off = Ops.setChatQuotaSettings(null)
+        assertTrue(off["percent"] is JsonNull)
+
+        val own = Ops.setChatQuota("c", Ops.ChatQuotaChoice.Percent(20))
+        assertEquals("set-chat-quota", own["op"]!!.jsonPrimitive.content)
+        assertEquals("c", own["chat"]!!.jsonPrimitive.content)
+        assertEquals(20, own["percent"]!!.jsonPrimitive.int)
+        assertFalse("inherit" in own)
+        val unlimited = Ops.setChatQuota("c", Ops.ChatQuotaChoice.Unlimited)
+        assertTrue("percent" in unlimited)
+        assertTrue(unlimited["percent"] is JsonNull)
+        val inherit = Ops.setChatQuota("c", Ops.ChatQuotaChoice.Inherit)
+        assertEquals(true, inherit["inherit"]!!.jsonPrimitive.boolean)
+        assertFalse("percent" in inherit)
+
+        assertFailsWith<IllegalArgumentException> { Ops.setChatQuotaSettings(0) }
+        assertFailsWith<IllegalArgumentException> { Ops.setChatQuotaSettings(101) }
+        assertFailsWith<IllegalArgumentException> { Ops.setChatQuota("c", Ops.ChatQuotaChoice.Percent(0)) }
+        assertFailsWith<IllegalArgumentException> { Ops.setChatQuota(" ", Ops.ChatQuotaChoice.Unlimited) }
+    }
+
+    @Test
     fun reorderQueueCarriesBothTextsForTheHostToCheck() {
         val request = Ops.reorderQueue("c", source = 2, sourceText = "third", anchor = 0, anchorText = "first", after = false)
         assertEquals("reorder-queue", request["op"]!!.jsonPrimitive.content)

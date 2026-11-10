@@ -157,6 +157,7 @@ internal class TreeStore(
                         pauseAll = reply.pauseAll,
                         pauseFolders = reply.pauseFolders,
                         linkedPullRequests = reply.linkedPullRequests,
+                        chatQuotas = reply.chatQuotas,
                         chats = reply.chats.map {
                             ChatSummary(
                                 id = it.id,
@@ -197,6 +198,7 @@ internal class TreeStore(
                                 },
                                 parentId = it.parent,
                                 questionWaiting = it.questionWaiting,
+                                quotaReached = it.quotaReached,
                             )
                         },
                     )

@@ -19,6 +19,7 @@ import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.net.Link
 import com.restartfu.xd.protocol.ChatTitleSettingsReply
+import com.restartfu.xd.model.ChatQuotaSettings
 import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.Limits
@@ -155,6 +156,13 @@ class MainViewModel @JvmOverloads constructor(
     val autoSettleWriteError: StateFlow<String?> = client.autoSettleWriteError
     val autoSettleStale: StateFlow<Boolean> = client.autoSettleStale
 
+    /** The host's default chat quota; the client keeps it current and clears it on forgetting. */
+    val chatQuota: StateFlow<ChatQuotaSettings?> = client.chatQuotaSettings
+    private val _chatQuotaError = MutableStateFlow<String?>(null)
+    /** Why the newest chat quota request failed; cleared by the next one that lands. */
+    val chatQuotaError: StateFlow<String?> = _chatQuotaError.asStateFlow()
+    private var chatQuotaRequests = 0L
+
     private val _accountsError = MutableStateFlow<String?>(null)
     val accountsError: StateFlow<String?> = _accountsError.asStateFlow()
     val agentAuth = client.agentAuth
@@ -236,6 +244,8 @@ class MainViewModel @JvmOverloads constructor(
                 catalogReads++
                 chatTitleRequests++
                 chatTitlesWanted = false
+                _chatQuotaError.value = null
+                chatQuotaRequests++
             }
         }
     }
@@ -447,6 +457,30 @@ class MainViewModel @JvmOverloads constructor(
     /** Null goes back to the host's built-in choice, which follows its default as that changes. */
     fun setChatTitleModel(backend: String, model: String?) =
         chatTitleRequest("Could not change the naming model", write = true) { client.setChatTitleModel(backend, model) }
+
+    fun loadChatQuota() = chatQuotaRequest("Could not read the chat quota") { client.loadChatQuotaSettings() }
+
+    /** Sets the host's default chat quota; null limits no chat. */
+    fun setChatQuota(percent: Int?) =
+        chatQuotaRequest("Could not change the chat quota") { client.setChatQuotaSettings(percent) }
+
+    /** The value arrives through [chatQuota]; only the newest request's failure is shown. */
+    private fun chatQuotaRequest(failure: String, request: suspend () -> Unit) {
+        val serial = ++chatQuotaRequests
+        val generation = client.sessionGeneration.value
+        viewModelScope.launch {
+            try {
+                request()
+                if (serial == chatQuotaRequests && generation == client.sessionGeneration.value) _chatQuotaError.value = null
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (serial == chatQuotaRequests && generation == client.sessionGeneration.value) {
+                    _chatQuotaError.value = error.message ?: failure
+                }
+            }
+        }
+    }
 
     init {
         viewModelScope.launch {
@@ -1553,8 +1587,38 @@ class ChatViewModel(
 
     /** Continues a turn that was stopped, cut off, or ended by a usage limit. */
     fun resumeTurn() {
-        if (!state.value.resumable || state.value.working) return
+        // One stopped at its quota goes on only with a new quota.
+        if (!state.value.resumable || state.value.working || state.value.quotaReached) return
         launchGuarded(_sending) { session.resumeTurn() }
+    }
+
+    private val _quotaBusy = MutableStateFlow(false)
+    /** A new quota is on its way, so the quota card waits. */
+    val quotaBusy: StateFlow<Boolean> = _quotaBusy.asStateFlow()
+    private val _quotaError = MutableStateFlow<String?>(null)
+    val quotaError: StateFlow<String?> = _quotaError.asStateFlow()
+
+    /**
+     * Continues a chat that stopped at its quota, with a new quota of
+     * [percent], or without a limit when null. The card stays busy until the
+     * chat reloads without its quota mark, so it is not sent twice.
+     */
+    fun continueWithQuota(percent: Int?) {
+        if (_quotaBusy.value) return
+        _quotaBusy.value = true
+        _quotaError.value = null
+        viewModelScope.launch {
+            try {
+                session.setQuota(percent?.let(Ops.ChatQuotaChoice::Percent) ?: Ops.ChatQuotaChoice.Unlimited)
+                withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) { state.first { !it.quotaReached } }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _quotaError.value = error.message ?: "Could not continue the chat"
+            } finally {
+                _quotaBusy.value = false
+            }
+        }
     }
 
     fun dropQueued(index: Int, text: String, opened: OpenedQueue) {
