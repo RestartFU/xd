@@ -77,6 +77,9 @@ struct RuntimeInner {
     auth: AuthManager,
     /// Continues a chat after its account ran out and another took over.
     on_account_switch: Mutex<Option<AccountSwitchHandler>>,
+    /// Told when a turn ends for good: not stopped, and not going on under
+    /// another account.
+    on_turn_settled: Mutex<Option<TurnSettledHandler>>,
     /// Chats whose move to another account was already explained to the user.
     explained_switches: Mutex<HashSet<String>>,
     /// False while sessions from before accounts were kept are being filed as
@@ -91,6 +94,27 @@ struct RuntimeInner {
 /// Continues a chat on another account. Takes the chat and its newest user
 /// message, which must still be its newest for the continuation to go ahead.
 pub(crate) type AccountSwitchHandler = Box<dyn Fn(String, i64) + Send + Sync>;
+
+/// Hears that a chat's turn ended for good, and how. Called with the chat's
+/// succession held, so it must only hand the news on, never wait.
+pub(crate) type TurnSettledHandler = Box<dyn Fn(SettledTurn) + Send + Sync>;
+
+/// A turn that ended for good: neither stopped nor going on elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SettledTurn {
+    pub(crate) chat_id: String,
+    /// Everything the agent said in the turn, its final answer last.
+    pub(crate) reply: String,
+    /// What it failed with, when it failed.
+    pub(crate) error: Option<String>,
+    /// It ended on a question for whoever reads it.
+    pub(crate) waiting: bool,
+    /// It was stopped rather than finished, so there is no answer to pass on.
+    pub(crate) stopped: bool,
+    /// Whoever asked for the turn already knows how it went, so only the
+    /// agent's card needs to change.
+    pub(crate) quiet: bool,
+}
 
 /// Marks a `tool` row that says a chat moved to another account. A client that
 /// does not know it shows the sentence after it as a small tool row.
@@ -541,6 +565,7 @@ impl TurnRuntime {
                 records: Mutex::new(HashMap::new()),
                 auth,
                 on_account_switch: Mutex::new(None),
+                on_turn_settled: Mutex::new(None),
                 explained_switches: Mutex::new(HashSet::new()),
                 account_gate: std::sync::RwLock::new(()),
                 filing: Arc::new((Mutex::new(true), std::sync::Condvar::new())),
@@ -615,6 +640,12 @@ impl TurnRuntime {
 
     pub(crate) fn set_account_switch_handler(&self, handler: AccountSwitchHandler) {
         if let Ok(mut current) = self.inner.on_account_switch.lock() {
+            *current = Some(handler);
+        }
+    }
+
+    pub(crate) fn set_turn_settled_handler(&self, handler: TurnSettledHandler) {
+        if let Ok(mut current) = self.inner.on_turn_settled.lock() {
             *current = Some(handler);
         }
     }
@@ -1374,7 +1405,13 @@ impl TurnRuntime {
         }
         let link_tool = crate::agent_tools::offered(&turn.backend);
         if link_tool {
-            let hint = crate::agent_tools::HINT;
+            // An agent another agent started cannot start its own.
+            let started_by_agent = self
+                .inner
+                .store
+                .chat_parent(&turn.chat_id)
+                .is_ok_and(|parent| parent.is_some());
+            let hint = crate::agent_tools::hint(started_by_agent);
             turn.system_prompt = Some(match turn.system_prompt.take() {
                 Some(prompt) if !prompt.is_empty() => format!("{prompt}\n\n{hint}"),
                 _ => hint.to_owned(),
@@ -2282,7 +2319,19 @@ impl TurnRuntime {
             Err(error) => {
                 let succession = self.succession(&turn.chat_id);
                 let _succession = succession.lock().unwrap_or_else(|error| error.into_inner());
-                self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
+                let settled = SettledTurn {
+                    chat_id: turn.chat_id.clone(),
+                    reply: String::new(),
+                    error: Some(error.clone()),
+                    waiting: false,
+                    stopped: false,
+                    quiet: false,
+                };
+                let next = self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
+                self.settled(settled);
+                if let Some(next) = next {
+                    self.settled(next);
+                }
                 return;
             }
         };
@@ -2857,7 +2906,17 @@ impl TurnRuntime {
         // A chat that goes on elsewhere was not stopped, so the limit is no
         // error to show: the notice of the move says what happened.
         let error = error.filter(|_| !matches!(limited, Some((AfterLimit::Switches(_), _))));
-        self.finish(
+        // How this turn ended, kept for whoever hears of it: by the time they
+        // read the chat, its next turn may already have begun.
+        let settled = SettledTurn {
+            chat_id: chat_id.clone(),
+            reply: assistant_text.trim().to_owned(),
+            error: error.clone().filter(|_| !success),
+            waiting: asked.is_some(),
+            stopped: false,
+            quiet: false,
+        };
+        let next_failed = self.finish(
             turn,
             turn_id,
             progress.sequence(),
@@ -2868,6 +2927,21 @@ impl TurnRuntime {
             asked,
             context_usage,
         );
+        // Told while the chat's succession is still held: the next turn, which
+        // `finish` may have started, cannot end and be told of first.
+        let moves_on = matches!(limited, Some((AfterLimit::Switches(_), _)));
+        // A turn going on under another account ends later, and is told of
+        // then. A stopped one has nothing to report, but has ended.
+        if !moves_on {
+            self.settled(SettledTurn {
+                stopped: was_cancelled,
+                quiet: was_cancelled,
+                ..settled
+            });
+        }
+        if let Some(next_failed) = next_failed {
+            self.settled(next_failed);
+        }
         drop(succession);
         if let Some((outcome, message)) = limited {
             self.continue_after_limit(&chat_id, outcome, message);
@@ -2937,7 +3011,7 @@ impl TurnRuntime {
         silent: bool,
         asked: Option<Ask>,
         context_usage: Option<(u64, u64)>,
-    ) {
+    ) -> Option<SettledTurn> {
         if let Some((used, window)) = context_usage {
             let _ = self.inner.store.set_context_usage(
                 &turn.chat_id,
@@ -2955,7 +3029,7 @@ impl TurnRuntime {
             silent,
         );
         let Ok(finish) = finish else {
-            return;
+            return None;
         };
         let mut event = json!({
             "event": "turn-finished",
@@ -2988,6 +3062,42 @@ impl TurnRuntime {
             self.inner
                 .events
                 .publish(json!({"event": "changed", "chat": next.chat_id}));
+            // The queued message was taken and will not run: that ends it too.
+            return Some(SettledTurn {
+                chat_id: next.chat_id,
+                reply: String::new(),
+                error: Some(error),
+                waiting: false,
+                stopped: false,
+                quiet: false,
+            });
+        }
+        None
+    }
+
+    /// Tells whoever listens that a turn a message asked for could not start.
+    pub(crate) fn report_start_failure(&self, chat_id: &str, error: &str, quiet: bool) {
+        // Told in the order turns ended, like a turn that ran: a turn still
+        // ending, which no longer marks the chat busy, is told of first.
+        let succession = self.succession(chat_id);
+        let _succession = succession.lock().unwrap_or_else(|error| error.into_inner());
+        self.settled(SettledTurn {
+            chat_id: chat_id.to_owned(),
+            reply: String::new(),
+            error: Some(error.to_owned()),
+            waiting: false,
+            stopped: false,
+            quiet,
+        });
+    }
+
+    /// Tells whoever listens that a turn ended for good. A turn that ran is
+    /// told of with the chat's succession held, so in the order turns ended.
+    fn settled(&self, settled: SettledTurn) {
+        if let Ok(handler) = self.inner.on_turn_settled.lock()
+            && let Some(handler) = handler.as_ref()
+        {
+            handler(settled);
         }
     }
 
@@ -3710,6 +3820,47 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         }
         panic!("timed out waiting for {what}");
+    }
+
+    #[test]
+    fn a_failed_start_is_told_of_after_the_turn_still_ending() {
+        let root =
+            std::env::temp_dir().join(format!("xd-start-failure-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let runtime = Arc::new(TurnRuntime::new(
+            store,
+            Arc::new(EventBus::default()),
+            Arc::new(SecretsStore::new(None)),
+        ));
+        let (told, heard) = std::sync::mpsc::channel();
+        let told = Mutex::new(told);
+        runtime.set_turn_settled_handler(Box::new(move |settled| {
+            let _ = told.lock().unwrap().send(settled.error.is_some());
+        }));
+        // A turn ending holds the chat's succession until it has been told of.
+        let succession = runtime.succession("chat");
+        let ending = succession.lock().unwrap();
+        let reporter = {
+            let runtime = runtime.clone();
+            thread::spawn(move || runtime.report_start_failure("chat", "no account", false))
+        };
+        assert!(heard.recv_timeout(Duration::from_millis(200)).is_err());
+        runtime.settled(SettledTurn {
+            chat_id: "chat".into(),
+            reply: "Done.".into(),
+            error: None,
+            waiting: false,
+            stopped: false,
+            quiet: false,
+        });
+        drop(ending);
+        reporter.join().unwrap();
+        assert!(!heard.recv().unwrap());
+        assert!(heard.recv().unwrap());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn contents(store: &StateStore, chat: &str) -> Vec<(String, String)> {

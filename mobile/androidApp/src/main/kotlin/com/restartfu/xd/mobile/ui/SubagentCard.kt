@@ -315,7 +315,7 @@ internal fun StepLine(tool: String, text: String) {
 }
 
 /** The first line of some Markdown as plain text: no markers, emphasis, or code ticks. */
-private fun firstLine(text: String): String = text.lineSequence()
+internal fun firstLine(text: String): String = text.lineSequence()
     .map { it.trim().trimStart('#', '-', '*', '>', ' ') }
     .firstOrNull { it.isNotEmpty() && !it.startsWith("```") }
     .orEmpty()

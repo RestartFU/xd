@@ -87,6 +87,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
@@ -131,6 +133,7 @@ import com.restartfu.xd.model.activeSessions
 import com.restartfu.xd.model.settledSessions
 import com.restartfu.xd.model.PauseAllAction
 import com.restartfu.xd.model.pauseActionFor
+import com.restartfu.xd.model.waitingOnUser
 import com.restartfu.xd.protocol.Ops
 import androidx.compose.material3.RadioButton
 import com.restartfu.xd.protocol.BranchSourceReply
@@ -196,6 +199,7 @@ internal fun MinimalMobileApp(
     settings: MobileSettings,
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
+    val waitingChats by model.client.waitingChats.collectAsStateWithLifecycle()
     val created by model.createdDirectSession.collectAsStateWithLifecycle()
     val operationError by model.error.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -387,6 +391,18 @@ internal fun MinimalMobileApp(
                                         renameSession = { sessionActions.rename(activeSession) },
                                     ),
                                     linkedPullRequests = activeChat.pullRequests.takeIf { tree.linkedPullRequests },
+                                    agentChats = tree.chats.filter { it.parentId == activeChat.id }
+                                        .map { it.waitingOnUser(it.id in waitingChats) }
+                                        .associateBy { it.id },
+                                    startedBy = activeChat.parentId?.let { parent -> tree.chats.firstOrNull { it.id == parent } },
+                                    openChat = { id ->
+                                        tree.chats.firstOrNull { it.id == id }?.let { chat ->
+                                            activeSessionId = chat.sessionId
+                                            chatSelections = chatSelections + (chat.sessionId to chat.id)
+                                            hiddenChatIds = hiddenChatIds - chat.id
+                                            mobileDestination = MobileDestination.SESSIONS
+                                        }
+                                    },
                                 )
                             }
                         } else {
@@ -1588,6 +1604,9 @@ private fun ProjectMenu(
 }
 
 /** Indent per folder level on the Projects page, in dp. */
+/** How far a session another session's agent started sits in from that one. */
+private const val SESSION_NEST_INDENT = 12
+
 private const val FOLDER_INDENT = 16
 
 /** Told when New folder is offered by a host that would make a project instead. */
@@ -1999,6 +2018,23 @@ private fun SessionRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = 18.dp)
+            .then(
+                // Started by the agent of a session above: indented under it,
+                // along a guide line for each level, as on the desktop.
+                (0 until session.depth).fold<Int, Modifier>(Modifier) { modifier, _ ->
+                    modifier
+                        .padding(start = SESSION_NEST_INDENT.dp)
+                        .drawBehind {
+                            drawLine(
+                                signals.rule,
+                                Offset(0f, 0f),
+                                Offset(0f, size.height),
+                                strokeWidth = 1.dp.toPx(),
+                            )
+                        }
+                        .padding(start = 4.dp)
+                },
+            )
             .heightIn(min = 64.dp)
             .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)

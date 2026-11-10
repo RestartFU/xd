@@ -23,6 +23,7 @@ mod auth;
 mod background_process;
 mod background_tasks;
 mod chat_title;
+mod child_agents;
 mod cli_updates;
 mod cli_versions;
 mod codex_app;
@@ -64,7 +65,7 @@ mod user_environment;
 mod workflow;
 mod worktree_name;
 
-pub use agent_tools::{answer_mcp, offer_link_tool};
+pub use agent_tools::{AGENT_TOOL_TIMEOUT_SECONDS, answer_mcp, offer_link_tool};
 use auth::AuthManager;
 use chat_title::ChatTitleService;
 use cli_updates::CliUpdates;
@@ -358,6 +359,10 @@ impl Engine {
             Some("git-pr-create") => self.git_create_pull_request(&request),
             Some("link-pull-requests") => self.link_pull_requests(&request),
             Some("unlink-pull-request") => self.unlink_pull_request(&request),
+            Some("start-agent") => self.start_agent(&request),
+            Some("list-agents") => self.list_agents(&request),
+            Some("message-agent") => self.message_agent(&request),
+            Some("stop-agent") => self.stop_agent(&request),
             Some("git-draft") => self
                 .git_drafts
                 .start(&request)
@@ -1391,10 +1396,16 @@ impl Engine {
         if let Err(error) = self.terminal_owner(chat_id) {
             return error_reply(error);
         }
+        // A worker's card leaves its parent with it; the parent reloads.
+        let parent = store.chat_parent(chat_id).ok().flatten();
         match store.delete_chat(request) {
             Ok(reply) => {
                 if let Some(runtime) = &self.runtime {
                     runtime.discard_chat(chat_id);
+                }
+                if let Some((parent, _)) = parent {
+                    self.events
+                        .publish(json!({"event": "changed", "chat": parent}));
                 }
                 if reply["session_deleted"] == true
                     && let Some(session) = reply["session"].as_str()
@@ -1405,6 +1416,31 @@ impl Engine {
                 reply
             }
             Err(error) => error_reply(error),
+        }
+    }
+
+    /// The chats outside `chats` that started any of them, whose transcripts
+    /// lose those workers' cards when they are deleted.
+    fn worker_parents(&self, chats: &[String]) -> Vec<String> {
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        let mut parents = chats
+            .iter()
+            .filter_map(|chat| store.chat_parent(chat).ok().flatten())
+            .map(|(parent, _)| parent)
+            .filter(|parent| !chats.contains(parent))
+            .collect::<Vec<_>>();
+        parents.sort();
+        parents.dedup();
+        parents
+    }
+
+    /// Tells clients the transcripts of `parents` changed.
+    fn reload_parents(&self, parents: Vec<String>) {
+        for parent in parents {
+            self.events
+                .publish(json!({"event": "changed", "chat": parent}));
         }
     }
 
@@ -1428,6 +1464,7 @@ impl Engine {
         if let Err(error) = self.terminal_owner(session) {
             return error_reply(error);
         }
+        let parents = self.worker_parents(&chats);
         match store.delete_session(request) {
             Ok(reply) => {
                 for chat in chats {
@@ -1437,6 +1474,7 @@ impl Engine {
                 }
                 self.terminals.kill_chat(&format!("session:{session}"));
                 self.events.publish(json!({"event": "tree"}));
+                self.reload_parents(parents);
                 reply
             }
             Err(error) => error_reply(error),
@@ -1786,6 +1824,10 @@ impl Engine {
                 continue;
             }
             let still_idle = || !self.terminals.closed_since(&owners, idle_since);
+            let parents = store
+                .session_chats(&candidate.session)
+                .map(|chats| self.worker_parents(&chats))
+                .unwrap_or_default();
             match store.finish_auto_delete(&candidate, &settings, plan, &still_idle) {
                 Ok(deletion::AutoDeletion::Deleted {
                     chats,
@@ -1795,6 +1837,7 @@ impl Engine {
                     for chat in &chats {
                         runtime.discard_chat(chat);
                     }
+                    self.reload_parents(parents);
                     for reason in left {
                         eprintln!(
                             "xd: deleted idle session {} but kept its worktree: {reason}",
@@ -2060,6 +2103,11 @@ impl Engine {
                 Err(error) => {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
                     self.keep_paused_after_failed_start(chat_id, was_paused);
+                    // An agent's card says so either way; the chat that
+                    // started it is told too, unless it sent the message
+                    // itself and has this answer already.
+                    let quiet = request.get("from_parent").and_then(Value::as_bool) == Some(true);
+                    runtime.report_start_failure(chat_id, &error, quiet);
                     error_reply(error)
                 }
             },
@@ -3546,6 +3594,166 @@ mod tests {
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["_xd_request"], 7);
         assert!(reply["error"].as_str().unwrap().contains("terminal-open"));
+    }
+
+    /// An agent started through start_agent runs as a chat nested under the
+    /// chat that started it, and its finished turn comes back to that chat.
+    #[cfg(unix)]
+    #[test]
+    fn a_started_agent_runs_as_a_child_chat_and_reports_back() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("xd-child-agent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = root.join("claude");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+case "$*" in *--strict-mcp-config*) exit 0;; esac
+while read message; do
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}'
+echo '{"type":"result","terminal_reason":"completed","result":"Done."}'
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+        let (engine, parent) = steer_engine(&root);
+        let engine = Arc::new(engine);
+        engine.start_reporting_agents();
+        let store = engine.store.as_ref().unwrap();
+        let wait_for = |what: &str, ready: &dyn Fn() -> bool| {
+            for _ in 0..400 {
+                if ready() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            panic!("timed out waiting for {what}");
+        };
+
+        let started = engine.dispatch(json!({"op": "start-agent", "chat": parent,
+            "prompt": "Fix the tests", "title": "Tests", "workspace": "this_worktree"}));
+        assert_eq!(started["ok"], true, "{started}");
+        assert_eq!(started["backend"], "claude");
+        let child = started["agent"].as_str().unwrap().to_owned();
+        let tree = engine.dispatch(json!({"op": "tree"}));
+        let listed = tree["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chat| chat["id"] == child)
+            .unwrap();
+        assert_eq!(listed["parent"], parent);
+        assert_eq!(listed["title"], "Tests");
+        assert_eq!(tree["child_chats"], true);
+
+        let parent_reply = |text: &str| {
+            store.messages(&json!({"chat": parent})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row["content"]
+                        .as_str()
+                        .is_some_and(|row| row.starts_with(text))
+                })
+        };
+        wait_for("the report to reach the parent", &|| {
+            parent_reply(&format!(
+                "[xd] Agent \"Tests\" ({child}) is done with its turn."
+            ))
+        });
+        wait_for("the parent to answer it", &|| {
+            parent_reply("Done.") && store.chat(&parent).unwrap()["working"] == false
+        });
+        // One card stands for the worker in the parent, rewritten as it goes.
+        let cards = store.messages(&json!({"chat": parent})).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["content"].as_str())
+            .filter(|text| text.starts_with("subagent_run\n"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        let card: Value = serde_json::from_str(&cards[0]["subagent_run\n".len()..]).unwrap();
+        assert_eq!(card["chat"], child);
+        assert_eq!(card["key"], format!("chat:{child}"));
+        assert_eq!(card["status"], "completed");
+        assert_eq!(card["summary"], "Done.");
+        assert_eq!(card["prompt"], "Fix the tests");
+        let agents = engine.dispatch(json!({"op": "list-agents", "chat": parent}));
+        assert_eq!(agents["agents"][0]["id"], child, "{agents}");
+        assert_eq!(agents["agents"][0]["status"], "finished");
+        assert_eq!(agents["agents"][0]["reply"], "Done.");
+
+        let nested = engine.dispatch(json!({"op": "start-agent", "chat": child, "prompt": "More"}));
+        assert_eq!(nested["ok"], false);
+        let stranger = engine
+            .dispatch(json!({"op": "message-agent", "chat": child, "agent": parent, "text": "Hi"}));
+        assert_eq!(stranger["ok"], false);
+        let stopped = engine.dispatch(json!({"op": "stop-agent", "chat": parent, "agent": child}));
+        assert_eq!(stopped, json!({"ok": true, "was_working": false}));
+
+        // A message the user sends the worker that cannot start a turn is
+        // reported too; the parent's own message_agent just gets the error.
+        engine.runtime.as_ref().unwrap().discard_chat(&child);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CLAUDE_EXECUTABLE", root.join("missing")) };
+        let failed = engine.dispatch(json!({"op": "send", "chat": child, "text": "Again"}));
+        assert_eq!(failed["ok"], false, "{failed}");
+        wait_for("the failure to reach the parent", &|| {
+            parent_reply(&format!(
+                "[xd] Agent \"Tests\" ({child}) is stopped with an error."
+            ))
+        });
+        let refused = engine.dispatch(
+            json!({"op": "message-agent", "chat": parent, "agent": child, "text": "Again"}),
+        );
+        assert_eq!(refused["ok"], false, "{refused}");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let reports = store.messages(&json!({"chat": parent})).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("is stopped with an error"))
+            })
+            .count();
+        assert_eq!(reports, 1);
+        let cards = |store: &StateStore| {
+            store.messages(&json!({"chat": parent})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|row| row["content"].as_str()?.strip_prefix("subagent_run\n"))
+                .map(|text| serde_json::from_str::<Value>(text).unwrap())
+                .collect::<Vec<_>>()
+        };
+        // The card says the latest attempt failed, though the parent's own
+        // message_agent was told directly and got no report.
+        let card = cards(store);
+        assert_eq!(card.len(), 1);
+        assert_eq!(card[0]["status"], "failed");
+        // A worker that cannot start at all leaves no card behind.
+        let failed_start = engine.dispatch(json!({"op": "start-agent", "chat": parent,
+            "prompt": "More", "workspace": "this_worktree"}));
+        assert_eq!(failed_start["ok"], false, "{failed_start}");
+        assert_eq!(cards(store).len(), 1);
+
+        for chat in [&parent, &child] {
+            engine.runtime.as_ref().unwrap().discard_chat(chat);
+        }
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn steer_engine(root: &std::path::Path) -> (Engine, String) {

@@ -26,6 +26,10 @@ public data class ChatSummary(
     val paused: Boolean = false,
     /** The pull requests linked to it, oldest first; see [TreeSnapshot.linkedPullRequests]. */
     val pullRequests: List<LinkedPullRequest> = emptyList(),
+    /** The chat whose agent started this one through xd's start_agent tool. */
+    val parentId: String? = null,
+    /** Its last reply ends on a question for whoever reads it. */
+    val questionWaiting: Boolean = false,
 ) {
     /**
      * How many background tasks the chat is waiting on: none while a turn
@@ -79,6 +83,8 @@ public data class WorkspaceSession(
     val terminalChatId: String = "session:$id",
     val settledAt: Long? = null,
     val autoSettleDisabled: Boolean = false,
+    /** The session whose agent started this one; its row nests under that one's. */
+    val parentId: String? = null,
 )
 
 public data class TreeSnapshot(
