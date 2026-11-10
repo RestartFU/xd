@@ -802,11 +802,11 @@ impl StateStore {
             )
             .ok();
             if !session_titles.contains_key(&chat.8) {
-                let session_title: String = database.query_row(
-                    "SELECT COALESCE(title, 'New Session') FROM workspace_sessions WHERE id = ?",
-                    [&chat.8],
-                    |row| row.get(0),
-                )?;
+                let session_title: String = database
+                    .prepare_cached(
+                        "SELECT COALESCE(title, 'New Session') FROM workspace_sessions WHERE id = ?",
+                    )?
+                    .query_row([&chat.8], |row| row.get(0))?;
                 session_titles.insert(chat.8.clone(), session_title);
             }
             visible_chats.push((chat, workdir));
@@ -839,6 +839,7 @@ impl StateStore {
         let mut listed_worktrees = ListedWorktrees::new(git_settings_readable());
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
+        let mut session_index = HashMap::<String, usize>::new();
         for (
             (
                 id,
@@ -898,7 +899,10 @@ impl StateStore {
             if auto_settle_disabled {
                 chat["auto_settle_disabled"] = json!(true);
             }
-            if let Some(group) = sessions.iter_mut().find(|group| group["id"] == session) {
+            if let Some(group) = session_index
+                .get(&session)
+                .and_then(|&index| sessions.get_mut(index))
+            {
                 group["chats"]
                     .as_array_mut()
                     .expect("session members")
@@ -927,6 +931,7 @@ impl StateStore {
                 if let Some(parent_session) = parent_session {
                     group["parent"] = Value::String(parent_session);
                 }
+                session_index.insert(session.clone(), sessions.len());
                 sessions.push(group);
             }
             chats.push(chat);
@@ -3746,7 +3751,7 @@ impl StateStore {
         let chat_id = required_string(request, "chat", "diff-read needs a chat and read type.")?;
         let kind = required_string(request, "read", "diff-read needs a chat and read type.")?;
         let workdir = {
-            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            let database = self.reader()?;
             resolve_chat_workdir(&database, &self.workspace_root, chat_id)?
         };
         let workdir = Path::new(&workdir);
@@ -3838,7 +3843,7 @@ impl StateStore {
 
     pub(crate) fn git_action_state(&self, chat_id: &str) -> Result<Value, StorageError> {
         let workdir = {
-            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            let database = self.reader()?;
             resolve_chat_workdir(&database, &self.workspace_root, chat_id)?
         };
         Ok(repository_action_state(Path::new(&workdir)))
@@ -4382,7 +4387,7 @@ impl StateStore {
     fn chat_repository(&self, request: &Value, message: &str) -> Result<PathBuf, StorageError> {
         let chat_id = required_string(request, "chat", message)?;
         let workdir = {
-            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            let database = self.reader()?;
             resolve_chat_workdir(&database, &self.workspace_root, chat_id)?
         };
         git_repository_root(&workdir)
@@ -5494,7 +5499,7 @@ impl StateStore {
     /// Sessions in this workspace that match `filter`, a condition on the
     /// session `s`, with nothing running, paused, or queued in any member chat.
     fn quiet_sessions(&self, filter: &str) -> Result<Vec<SettlementCandidate>, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let root = self.workspace_root.to_string_lossy();
         let mut statement = database.prepare(&format!(
             "SELECT s.id, s.created_at, c.id, c.folder_id, c.workdir, c.original_workdir, \
@@ -7128,11 +7133,13 @@ const SETTLEABLE_SESSION: &str = "s.settled_override IS NULL AND s.auto_settle_d
 const DELETABLE_SESSION: &str =
     "COALESCE(s.settled_override, '') != 'active' AND s.auto_settle_disabled_at IS NULL";
 /// Whether any chat in session `?1` has done anything since the sweep looked:
-/// `?2` is the user's latest message or start it saw, `?3` the newest activity.
+/// `?2` is the user's latest message or start it saw, `?3` the newest activity,
+/// which it read from each chat's newest message as this does.
 const SESSION_CHANGED_SINCE: &str = "EXISTS (SELECT 1 FROM chats c WHERE c.workspace_session_id = ?1 AND ( \
        c.host_working != 0 OR c.paused != 0 OR COALESCE(c.queued, '') NOT IN ('', '[]') \
        OR c.last_user_message_at / 1000000 > ?2 OR c.created_at > ?2 \
-       OR EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.created_at > ?3)))";
+       OR COALESCE((SELECT m.created_at FROM messages m WHERE m.chat_id = c.id \
+         ORDER BY m.id DESC LIMIT 1), 0) > ?3))";
 
 struct SettlementRow {
     session: String,
