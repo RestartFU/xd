@@ -275,6 +275,7 @@ internal fun MinimalMobileApp(
     }
     val addChat: (MinimalSession) -> Unit = { session ->
         if (session.terminalChatId.startsWith("session:")) {
+            model.stopOpeningStartingSessions()
             createChatIn = session
         } else {
             scope.launch { snackbar.showSnackbar("Update the connected host to add chats inside a session.") }
@@ -637,7 +638,10 @@ private fun MinimalProjectsHome(
     var pickingProject by rememberSaveable { mutableStateOf(false) }
     // Opened on the list, so Back from the form returns to it.
     var startedFromList by rememberSaveable { mutableStateOf(false) }
+    // Opening another form moves on from a session still starting: it is not
+    // opened when made.
     val newSession = {
+        model.stopOpeningStartingSessions()
         val only = projects.singleOrNull()
         if (only != null) {
             createSessionIn = only.id
@@ -648,6 +652,7 @@ private fun MinimalProjectsHome(
         }
     }
     val newSessionIn = { projectId: String ->
+        model.stopOpeningStartingSessions()
         createSessionIn = projectId
         pickingProject = false
         startedFromList = false

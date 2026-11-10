@@ -268,6 +268,23 @@ class ProjectsScreenshotTest {
         check(model.error.value?.contains("Fix the footer (refused)") == true) { "error is ${model.error.value}" }
     }
 
+    @Test fun openingAnotherFormKeepsAStartingSessionFromOpening() = shoot("starting-form-dark", MinimalThemePreset.DARK) {
+        holdNewChats = true
+        val sentBefore = sent("new-chat")
+        model.createDirectSession("xd", "Fix the footer", DirectAgent.CLAUDE)
+        awaitSent("new-chat", sentBefore + 1)
+        // Its form never lets Compose go idle, so nothing waits on the screen after this.
+        click("New session in web")
+        releaseNewChats()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (model.startingSessions.value.isNotEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+        check(model.startingSessions.value.isEmpty()) { "still starting: ${model.startingSessions.value}" }
+        check(model.createdDirectSession.value == null) { "opened ${model.createdDirectSession.value}" }
+    }
+
     /** Waits until the app has sent [count] [op] requests. */
     private fun Screen.awaitSent(op: String, count: Int) {
         val deadline = System.currentTimeMillis() + 10_000
