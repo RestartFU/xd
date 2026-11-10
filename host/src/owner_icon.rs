@@ -4,7 +4,8 @@
 //!
 //! Resolution is two cached steps: the remote URL of a directory, which is a
 //! local `git` call, and the avatar for an owner, which is a network fetch and
-//! therefore never made on the request path. A client asking for an uncached
+//! therefore never made on the request path. A remote already read is
+//! re-read off the request path too, since every tree read asks for it. A client asking for an uncached
 //! avatar is told the answer is pending and receives an `owner-icon` event
 //! when the fetch lands.
 
@@ -42,6 +43,14 @@ pub(crate) struct Icon {
 
 type Fetcher = dyn Fn(&str) -> Result<Option<Icon>, String> + Send + Sync;
 
+/// The owner a directory's remote named when it was last read.
+struct RemoteEntry {
+    owner: Option<String>,
+    read_at: Instant,
+    /// A re-read is under way, so a stale entry starts only one.
+    refreshing: bool,
+}
+
 struct IconEntry {
     icon: Option<Icon>,
     fetched_at: Instant,
@@ -52,7 +61,7 @@ struct IconEntry {
 }
 
 pub(crate) struct OwnerIcons {
-    remotes: Mutex<HashMap<PathBuf, (Option<String>, Instant)>>,
+    remotes: Arc<Mutex<HashMap<PathBuf, RemoteEntry>>>,
     icons: Arc<Mutex<HashMap<String, IconEntry>>>,
     /// Owners being fetched, with the connections waiting on each of them.
     inflight: Arc<Mutex<HashMap<String, HashSet<u64>>>>,
@@ -75,7 +84,7 @@ impl OwnerIcons {
         events: Arc<EventBus>,
     ) -> Self {
         Self {
-            remotes: Mutex::new(HashMap::new()),
+            remotes: Arc::new(Mutex::new(HashMap::new())),
             icons: Arc::new(Mutex::new(HashMap::new())),
             inflight: Arc::new(Mutex::new(HashMap::new())),
             fetcher: Arc::new(fetcher),
@@ -85,19 +94,87 @@ impl OwnerIcons {
 
     /// The GitHub account that owns the repository checked out in `directory`,
     /// absent when it has no GitHub `origin` remote.
+    ///
+    /// Only a directory never read before waits for Git. Once the answer is
+    /// older than [`REMOTE_TTL`] it is still returned, and read again in the
+    /// background; a changed owner then publishes a `tree` event.
     pub(crate) fn owner(&self, directory: &Path) -> Option<String> {
         let now = Instant::now();
-        if let Ok(remotes) = self.remotes.lock()
-            && let Some((owner, read_at)) = remotes.get(directory)
-            && now.saturating_duration_since(*read_at) < REMOTE_TTL
-        {
-            return owner.clone();
+        let stale = match self.remotes.lock() {
+            Ok(mut remotes) => match remotes.get_mut(directory) {
+                Some(entry) => {
+                    let stale = (!entry.refreshing
+                        && now.saturating_duration_since(entry.read_at) >= REMOTE_TTL)
+                        .then_some(entry.read_at);
+                    if stale.is_some() {
+                        entry.refreshing = true;
+                    }
+                    Some((entry.owner.clone(), stale))
+                }
+                None => None,
+            },
+            Err(_) => None,
+        };
+        if let Some((owner, stale)) = stale {
+            if let Some(read_at) = stale {
+                self.refresh_remote(directory.to_owned(), read_at);
+            }
+            return owner;
         }
         let owner = origin_url(directory).as_deref().and_then(github_owner);
         if let Ok(mut remotes) = self.remotes.lock() {
-            remotes.insert(directory.to_owned(), (owner.clone(), now));
+            remotes.insert(
+                directory.to_owned(),
+                RemoteEntry {
+                    owner: owner.clone(),
+                    read_at: now,
+                    refreshing: false,
+                },
+            );
         }
         owner
+    }
+
+    /// Reads `directory`'s remote again on a thread of its own. The answer
+    /// replaces the entry read at `read_at` only; one forgotten or replaced
+    /// meanwhile is newer than this read.
+    fn refresh_remote(&self, directory: PathBuf, read_at: Instant) {
+        let remotes = self.remotes.clone();
+        let events = self.events.clone();
+        let worker_directory = directory.clone();
+        let spawned = thread::Builder::new()
+            .name("xd-owner-remote".into())
+            .spawn(move || {
+                let started = Instant::now();
+                let owner = origin_url(&worker_directory)
+                    .as_deref()
+                    .and_then(github_owner);
+                let changed = match remotes.lock() {
+                    Ok(mut remotes) => match remotes.get_mut(&worker_directory) {
+                        Some(entry) if entry.read_at == read_at => {
+                            let changed = entry.owner != owner;
+                            *entry = RemoteEntry {
+                                owner,
+                                read_at: started,
+                                refreshing: false,
+                            };
+                            changed
+                        }
+                        _ => false,
+                    },
+                    Err(_) => false,
+                };
+                if changed {
+                    events.publish(json!({"event": "tree"}));
+                }
+            });
+        if spawned.is_err()
+            && let Ok(mut remotes) = self.remotes.lock()
+            && let Some(entry) = remotes.get_mut(&directory)
+            && entry.read_at == read_at
+        {
+            entry.refreshing = false;
+        }
     }
 
     /// Answers an `owner-icon` request for `subscriber`, starting a fetch when

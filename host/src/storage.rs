@@ -916,7 +916,8 @@ impl StateStore {
         }
         drop(database);
 
-        let mut branches = HashMap::<String, Option<String>>::new();
+        // What Git listed this read, shared by the chats left to it.
+        let mut listed_worktrees = ListedWorktrees::new(git_settings_readable());
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
         for (
@@ -937,28 +938,8 @@ impl StateStore {
             workdir,
         ) in visible_chats
         {
-            let branch = workdir.and_then(|workdir| {
-                let normalized = normalize_existing_path(Path::new(&workdir));
-                let cached = cached_worktree_branch(&branches, &normalized);
-                if cached.is_none() {
-                    match list_git_worktrees(Path::new(&workdir)) {
-                        Ok(worktrees) => {
-                            for worktree in worktrees {
-                                branches.insert(
-                                    normalize_existing_path(&worktree.path),
-                                    worktree.branch.or_else(|| {
-                                        worktree.detached.then(|| "Detached HEAD".into())
-                                    }),
-                                );
-                            }
-                        }
-                        Err(_) => {
-                            branches.insert(normalized.clone(), None);
-                        }
-                    }
-                }
-                cached_worktree_branch(&branches, &normalized).flatten()
-            });
+            let branch = workdir
+                .and_then(|workdir| worktree_branch(Path::new(&workdir), &mut listed_worktrees));
             let mut chat = json!({
                 "id": id,
                 "folder": folder,
@@ -9218,17 +9199,450 @@ fn normalize_existing_path(path: &Path) -> String {
         .into_owned()
 }
 
-fn cached_worktree_branch(
-    branches: &HashMap<String, Option<String>>,
-    workdir: &str,
-) -> Option<Option<String>> {
-    branches
-        .iter()
-        .filter(|(root, _)| {
-            workdir == root.as_str() || Path::new(workdir).starts_with(Path::new(root.as_str()))
+/// The branch checked out in the worktree holding `workdir`, as `git worktree
+/// list` names it: the branch, "Detached HEAD", or nothing.
+///
+/// Every tree read asks this for every chat. One `git worktree list` per
+/// repository took seconds on a busy host, and a connection's chat and
+/// transcript requests waited behind it. So the plain layouts xd makes, a
+/// checkout or a linked worktree, are read from their HEAD file; anything
+/// else is still left to Git, once per repository within `listed`.
+///
+/// For any repository Git works in, the answer is the one Git lists. Where
+/// the user's own Git settings make Git refuse a repository that is itself
+/// sound, for example a conditional include of a broken file, this may still
+/// show its branch: every Git command xd runs there fails with that error
+/// anyway, and telling would take running Git, which this exists to avoid.
+fn worktree_branch(workdir: &Path, listed: &mut ListedWorktrees) -> Option<String> {
+    // Git looks for the repository from the physical directory, as here.
+    let workdir = fs::canonicalize(workdir).ok()?;
+    listed
+        .read_heads
+        .then(|| head_branch(&workdir))
+        .flatten()
+        .unwrap_or_else(|| listed.branch(&workdir))
+}
+
+/// Whether Git can read the settings outside any repository, its system and
+/// global config. Git refuses to run at all when it cannot, and then every
+/// branch is left to it. Checked at most every few seconds.
+fn git_settings_readable() -> bool {
+    const FRESH: Duration = Duration::from_secs(10);
+    static CHECKED: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    let mut checked = CHECKED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((at, readable)) = *checked
+        && at.elapsed() < FRESH
+    {
+        return readable;
+    }
+    let readable =
+        run_git(Path::new("/"), &["config", "--list"]).is_ok_and(|(status, _, _)| status.success());
+    *checked = Some((Instant::now(), readable));
+    readable
+}
+
+/// The branch HEAD names for the plain layouts, or `None` to ask Git.
+fn head_branch(workdir: &Path) -> Option<Option<String>> {
+    let (root, git_dir) = match git_directory(workdir)? {
+        Some(found) => found,
+        // Git finds no repository there either.
+        None => return Some(None),
+    };
+    let common = common_directory(&git_dir);
+    // Git refuses a repository someone else owns unless told it is safe,
+    // which only Git's own config reading can tell.
+    if !owned_by_this_user(&[root, &root.join(".git"), &git_dir]) {
+        return None;
+    }
+    // A config Git cannot read makes it refuse the repository; none at all
+    // is fine.
+    let config = match fs::read_to_string(common.join("config")) {
+        Ok(config) => config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return None,
+    };
+    // Included files can set anything, and Git rejects config it cannot
+    // parse, so only plain config is read here.
+    if !plain_config(&config) {
+        return None;
+    }
+    let linked = git_dir.join("commondir").is_file();
+    // Of the layouts a `.git` file makes, only a linked worktree is read
+    // here; a submodule or a separate Git directory is listed by Git in its
+    // own way.
+    // A `.git` that is a symbolic link to another checkout's is listed by
+    // Git at that checkout.
+    if !linked && !fs::symlink_metadata(root.join(".git")).ok()?.is_dir() {
+        return None;
+    }
+    if linked {
+        // A linked worktree's directory in the repository names the worktree
+        // it belongs to, which Git checks. Only an entry naming exactly this
+        // worktree's own `.git` file is read here; one moved by hand, made
+        // prunable or reached through links is left to Git.
+        let backlink = fs::read_to_string(git_dir.join("gitdir")).ok()?;
+        let listed = git_dir.join(backlink.trim_end_matches(['\n', '\r']));
+        let dot_git = root.join(".git");
+        // Git lists the worktrees it finds in the repository's `worktrees`.
+        let registered = fs::canonicalize(&git_dir)
+            .ok()
+            .and_then(|git_dir| git_dir.parent().map(Path::to_path_buf))
+            == fs::canonicalize(common.join("worktrees")).ok();
+        if !registered
+            || !fs::symlink_metadata(&dot_git).ok()?.is_file()
+            || fs::canonicalize(&listed).ok() != Some(dot_git)
+        {
+            return None;
+        }
+    } else if bare_repository(&config)? {
+        // Git lists a bare repository without a branch.
+        return Some(None);
+    }
+    let head_path = git_dir.join("HEAD");
+    // Git may keep HEAD as a symbolic link to the branch, which reading the
+    // file would follow to its commit.
+    if fs::symlink_metadata(&head_path)
+        .ok()?
+        .file_type()
+        .is_symlink()
+    {
+        return None;
+    }
+    let head = fs::read_to_string(&head_path).ok()?;
+    let head = head.trim_end();
+    match head.strip_prefix("ref:").map(str::trim) {
+        // A repository with reftable keeps this placeholder in HEAD and its
+        // real refs elsewhere.
+        Some("refs/heads/.invalid") => None,
+        Some(reference) => {
+            let branch = reference.strip_prefix("refs/heads/")?;
+            // Only a name Git surely accepts; Git judges the rest.
+            if !plain_branch_name(branch) {
+                return None;
+            }
+            // The branch's own ref, when it is a loose file, must name a
+            // commit as Git writes one; a symbolic ref names another branch,
+            // which Git follows. A branch with no loose ref is packed, or has
+            // no commit yet, and Git lists it either way.
+            let loose = common.join("refs/heads").join(branch);
+            let plain = match fs::symlink_metadata(&loose) {
+                // Git then reads the packed refs, and refuses them if they
+                // are malformed.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    plain_packed_refs(&common)
+                }
+                Err(_) => false,
+                Ok(metadata) if metadata.is_file() => {
+                    fs::read(&loose).is_ok_and(|reference| sha1_line(&reference))
+                }
+                Ok(_) => false,
+            };
+            plain.then(|| Some(branch.to_owned()))
+        }
+        // A SHA-1 object id, in a repository that names no other format.
+        None => (sha1_line(head.as_bytes())
+            && !config.to_ascii_lowercase().contains("objectformat"))
+        .then(|| Some("Detached HEAD".into())),
+    }
+}
+
+/// Whether the repository's packed refs, if any, are as Git writes them:
+/// an optional header, then SHA-1 ids each followed by a ref name or peeled
+/// on a line of their own. Very large files are left to Git.
+fn plain_packed_refs(common: &Path) -> bool {
+    const LIMIT: u64 = 4 * 1024 * 1024;
+    let path = common.join("packed-refs");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
+    };
+    if !metadata.is_file() || metadata.len() > LIMIT {
+        return false;
+    }
+    let Ok(contents) = fs::read(&path) else {
+        return false;
+    };
+    contents
+        .split(|byte| *byte == b'\n')
+        .enumerate()
+        .all(|(index, line)| {
+            if line.is_empty() {
+                return true;
+            }
+            if index == 0 && line.starts_with(b"# pack-refs with:") {
+                return true;
+            }
+            if let Some(peeled) = line.strip_prefix(b"^") {
+                return sha1_line(peeled);
+            }
+            match line.iter().position(|byte| *byte == b' ') {
+                Some(space) => {
+                    sha1_line(&line[..space])
+                        && line[space + 1..].starts_with(b"refs/")
+                        && line[space + 1..].iter().all(|byte| byte.is_ascii_graphic())
+                }
+                None => false,
+            }
         })
-        .max_by_key(|(root, _)| root.len())
-        .map(|(_, branch)| branch.clone())
+}
+
+/// Whether `contents` is a SHA-1 object id, as Git writes a ref.
+fn sha1_line(contents: &[u8]) -> bool {
+    let id = contents.strip_suffix(b"\n").unwrap_or(contents);
+    id.len() == 40 && id.iter().all(u8::is_ascii_hexdigit)
+}
+
+/// Whether `name` is a branch name of the kind Git always accepts: ASCII
+/// letters, digits and `-_./`, in `/`-separated parts that neither start
+/// with `.` or `-` nor end with `.` or `.lock`.
+fn plain_branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('/').all(|part| {
+            !part.is_empty()
+                && !part.starts_with(['.', '-'])
+                && !part.ends_with('.')
+                && !part.ends_with(".lock")
+                && !part.contains("..")
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+}
+
+/// The worktree root and Git directory for the physical directory `workdir`:
+/// the nearest `.git` above it, as Git finds it. `Some(None)` when there is
+/// none or it names no repository, and `None` where only Git can say: a
+/// directory that is a repository itself (bare, or inside `.git`), or a
+/// search that crosses into another file system, where Git stops.
+fn git_directory(workdir: &Path) -> Option<Option<(&Path, PathBuf)>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let device = fs::metadata(workdir).ok()?.dev();
+    for directory in workdir.ancestors() {
+        if fs::metadata(directory).ok()?.dev() != device || is_git_directory(directory) {
+            return None;
+        }
+        let dot_git = directory.join(".git");
+        if fs::symlink_metadata(&dot_git).is_err() {
+            continue;
+        }
+        if fs::metadata(&dot_git).ok()?.is_dir() {
+            // Git passes over a `.git` directory that is no repository.
+            if is_git_directory(&dot_git) {
+                return Some(Some((directory, dot_git)));
+            }
+            continue;
+        }
+        // A linked worktree's `.git` file names its own directory in the
+        // repository, relative to the worktree when it is not absolute. Git
+        // stops at one that names no repository.
+        let link = fs::read_to_string(&dot_git).ok()?;
+        let Some(target) = link
+            .trim_end_matches(['\n', '\r'])
+            .strip_prefix("gitdir: ")
+            .filter(|target| !target.is_empty())
+        else {
+            return Some(None);
+        };
+        let target = directory.join(target);
+        return Some(is_git_directory(&target).then_some((directory, target)));
+    }
+    Some(None)
+}
+
+/// The directory a Git directory shares its objects, refs and config with.
+fn common_directory(git_dir: &Path) -> PathBuf {
+    match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(common) => git_dir.join(common.trim_end_matches(['\n', '\r'])),
+        Err(_) => git_dir.to_owned(),
+    }
+}
+
+/// Whether `directory` is a Git directory by Git's own test: a HEAD, and the
+/// objects and refs of the repository it shares them with.
+fn is_git_directory(directory: &Path) -> bool {
+    let common = common_directory(directory);
+    fs::symlink_metadata(directory.join("HEAD")).is_ok()
+        && common.join("objects").is_dir()
+        && common.join("refs").is_dir()
+}
+
+/// Whether the current user, other than root, owns every one of `paths`, as
+/// Git requires of a repository it has not been told is safe.
+fn owned_by_this_user(paths: &[&Path]) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let user = unsafe { libc::geteuid() };
+    user != 0
+        && paths
+            .iter()
+            .all(|path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.uid() == user))
+}
+
+/// Whether a Git config file is plain: well-formed section headers and
+/// `key = value` lines, with no includes, extensions, quoted or continued
+/// values, and only the core settings Git writes into a new repository. Anything else is left to
+/// Git, which may read it differently or refuse the repository.
+fn plain_config(config: &str) -> bool {
+    let mut section = String::new();
+    config.lines().all(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(['#', ';']) {
+            return true;
+        }
+        let setting = match line.strip_prefix('[') {
+            Some(header) => {
+                let Some((inner, rest)) = header.split_once(']') else {
+                    return false;
+                };
+                let (name, subsection) = inner.split_once(' ').unwrap_or((inner, ""));
+                let subsection_plain = subsection.is_empty()
+                    || (subsection.len() >= 2
+                        && subsection.starts_with('"')
+                        && subsection.ends_with('"')
+                        && !subsection[1..subsection.len() - 1].contains(['"', '\\']));
+                let name_plain = !name.is_empty()
+                    && name.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || "-.".contains(character)
+                    });
+                section = name.to_ascii_lowercase();
+                if !name_plain
+                    || !subsection_plain
+                    || section.starts_with("include")
+                    || section == "extensions"
+                {
+                    return false;
+                }
+                rest.trim()
+            }
+            None => line,
+        };
+        if setting.is_empty() {
+            return true;
+        }
+        // A setting before any section is left to Git to judge.
+        if section.is_empty() {
+            return false;
+        }
+        let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
+        let key = key.trim();
+        if setting.contains(['"', '\\'])
+            || !key.starts_with(|first: char| first.is_ascii_alphabetic())
+            || !key
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            return false;
+        }
+        if section != "core" {
+            return true;
+        }
+        // Git reads its core settings as it opens the repository and refuses
+        // values it cannot parse, so only those Git itself writes into a new
+        // repository are read here, with the values it writes.
+        let value = value.trim().to_ascii_lowercase();
+        match key.to_ascii_lowercase().as_str() {
+            "repositoryformatversion" => matches!(value.as_str(), "0" | "1"),
+            "bare" | "filemode" | "logallrefupdates" | "ignorecase" | "precomposeunicode"
+            | "symlinks" => matches!(value.as_str(), "true" | "false"),
+            _ => false,
+        }
+    })
+}
+
+/// Whether a repository's config says it is bare (`core.bare`), or `None`
+/// when it does not say plainly.
+fn bare_repository(config: &str) -> Option<bool> {
+    let mut core = false;
+    // Git writes `bare` into every repository it makes. Without it, settings
+    // from outside the repository decide, which only Git can read.
+    let mut bare = None;
+    for line in config.lines() {
+        let line = line.trim();
+        let setting = if let Some(header) = line.strip_prefix('[') {
+            let (name, rest) = header.split_once(']').unwrap_or((header, ""));
+            core = name.trim().eq_ignore_ascii_case("core");
+            // A key may follow the header on the same line.
+            rest.trim()
+        } else {
+            line
+        };
+        if core && !setting.is_empty() {
+            match config_bool(setting, "bare") {
+                Some(Some(value)) => bare = Some(value),
+                Some(None) => return None,
+                None => {}
+            }
+        }
+    }
+    bare
+}
+
+/// The boolean `line` sets `key` to: `None` when it sets another key, and
+/// `Some(None)` for a value other than Git's usual spellings. A key alone is
+/// true.
+fn config_bool(line: &str, key: &str) -> Option<Option<bool>> {
+    let line = line.split(['#', ';']).next().unwrap_or_default().trim();
+    let (name, value) = line.split_once('=').unwrap_or((line, "true"));
+    if !name.trim().eq_ignore_ascii_case(key) {
+        return None;
+    }
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" | "" => Some(false),
+        _ => None,
+    })
+}
+
+/// The worktrees `git worktree list` named, by physical root, with what each
+/// has checked out. One listing answers every directory in its repository.
+struct ListedWorktrees {
+    listed: Vec<(PathBuf, Option<String>)>,
+    /// Whether plain layouts may be read from their HEAD file.
+    read_heads: bool,
+}
+
+impl ListedWorktrees {
+    fn new(read_heads: bool) -> Self {
+        Self {
+            listed: Vec::new(),
+            read_heads,
+        }
+    }
+
+    /// What Git says is checked out in the worktree holding the physical
+    /// directory `workdir`, asking Git only when no listing covers it yet.
+    fn branch(&mut self, workdir: &Path) -> Option<String> {
+        if let Some(branch) = self.covering(workdir) {
+            return branch;
+        }
+        match list_git_worktrees(workdir) {
+            Ok(worktrees) => self
+                .listed
+                .extend(worktrees.into_iter().filter_map(|worktree| {
+                    let path = fs::canonicalize(&worktree.path).ok()?;
+                    let branch = worktree
+                        .branch
+                        .or_else(|| worktree.detached.then(|| "Detached HEAD".into()));
+                    Some((path, branch))
+                })),
+            // Asking again in this read would fail the same way.
+            Err(_) => self.listed.push((workdir.to_owned(), None)),
+        }
+        self.covering(workdir).flatten()
+    }
+
+    /// The listed worktree that most closely holds `workdir`.
+    fn covering(&self, workdir: &Path) -> Option<Option<String>> {
+        self.listed
+            .iter()
+            .filter(|(root, _)| workdir.starts_with(root))
+            .max_by_key(|(root, _)| root.as_os_str().len())
+            .map(|(_, branch)| branch.clone())
+    }
 }
 
 struct BrowsableEntry {
@@ -10639,6 +11053,456 @@ mod tests {
                 "history"
             );
         }
+    }
+
+    #[test]
+    fn worktree_branches_are_read_from_head_as_git_lists_them() {
+        let fixture = Fixture::new();
+        let repository = fixture.root.join("repository");
+        fs::create_dir_all(repository.join("nested/deeper")).unwrap();
+        let git = |directory: &Path, args: &[&str]| {
+            let (status, _, error) = run_git(directory, args).unwrap();
+            assert!(status.success(), "{}", String::from_utf8_lossy(&error));
+        };
+        git(&repository, &["init", "-b", "main"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=xd test",
+                "-c",
+                "user.email=xd@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        let linked = fixture.root.join("linked");
+        let detached = fixture.root.join("detached");
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/x",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git(
+            &repository,
+            &["worktree", "add", "--detach", detached.to_str().unwrap()],
+        );
+        // Reached through a symlink, as Git also resolves it.
+        let alias = fixture.root.join("alias");
+        std::os::unix::fs::symlink(&linked, &alias).unwrap();
+        let outside = fixture.root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        // What Git lists for the worktree holding a directory.
+        let listed =
+            |workdir: &Path| ListedWorktrees::new(true).branch(&fs::canonicalize(workdir).unwrap());
+        let worktree_branch =
+            |workdir: &Path| super::worktree_branch(workdir, &mut ListedWorktrees::new(true));
+        for (workdir, expected) in [
+            (repository.clone(), Some("main")),
+            (repository.join("nested/deeper"), Some("main")),
+            (linked.clone(), Some("feature/x")),
+            (alias.clone(), Some("feature/x")),
+            (detached.clone(), Some("Detached HEAD")),
+            (outside.clone(), None),
+            (fixture.root.join("missing"), None),
+        ] {
+            assert_eq!(
+                worktree_branch(&workdir).as_deref(),
+                expected,
+                "{}",
+                workdir.display()
+            );
+            if workdir.exists() {
+                assert_eq!(
+                    worktree_branch(&workdir),
+                    listed(&workdir),
+                    "{}",
+                    workdir.display()
+                );
+            }
+            // The layouts xd makes are read without starting Git, except by
+            // root, which Git's ownership rules are left to.
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            if expected.is_some() && unsafe { libc::geteuid() } != 0 {
+                assert!(
+                    head_branch(&fs::canonicalize(&workdir).unwrap()).is_some(),
+                    "{} was left to Git",
+                    workdir.display()
+                );
+            }
+        }
+
+        // An empty `.git` directory is no repository, so Git looks above it.
+        let hollow = repository.join("nested/hollow");
+        fs::create_dir_all(hollow.join(".git")).unwrap();
+        assert_eq!(listed(&hollow).as_deref(), Some("main"));
+        assert_eq!(worktree_branch(&hollow).as_deref(), Some("main"));
+
+        // A config Git cannot read.
+        let unreadable = fixture.root.join("unreadable");
+        fs::create_dir_all(&unreadable).unwrap();
+        git(&unreadable, &["init", "-q", "-b", "main"]);
+        fs::write(unreadable.join(".git/config"), [0xff, 0xfe, b'\n']).unwrap();
+        assert_eq!(head_branch(&fs::canonicalize(&unreadable).unwrap()), None);
+
+        // A `.git` file that names no repository stops the search there.
+        let broken = repository.join("nested/broken");
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join(".git"), "not a gitfile\n").unwrap();
+        assert_eq!(listed(&broken), None);
+        assert_eq!(worktree_branch(&broken), None);
+
+        // So does one that names a directory that is no repository.
+        let stray = repository.join("nested/stray");
+        let admin = fixture.root.join("broken-admin");
+        fs::create_dir_all(&stray).unwrap();
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(stray.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        assert_eq!(listed(&stray), None);
+        assert_eq!(worktree_branch(&stray), None);
+
+        // A bare repository kept as `.git` has no branch in Git's list.
+        let bare = fixture.root.join("bare-project");
+        fs::create_dir_all(&bare).unwrap();
+        git(
+            &bare,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                bare.join(".git").to_str().unwrap(),
+            ],
+        );
+        assert_eq!(listed(&bare), None);
+        assert_eq!(worktree_branch(&bare), None);
+        let bare_linked = fixture.root.join("bare-linked");
+        git(
+            &bare,
+            &[
+                "--git-dir",
+                bare.join(".git").to_str().unwrap(),
+                "worktree",
+                "add",
+                "--orphan",
+                "-b",
+                "orphan",
+                bare_linked.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(listed(&bare_linked).as_deref(), Some("orphan"));
+        assert_eq!(worktree_branch(&bare_linked).as_deref(), Some("orphan"));
+
+        // A bare repository inside a checkout is a repository of its own.
+        let nested_bare = repository.join("nested/bare.git");
+        git(
+            &repository,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "dev",
+                nested_bare.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(listed(&nested_bare), None);
+        assert_eq!(worktree_branch(&nested_bare), None);
+
+        // Config included from elsewhere is read as Git reads it.
+        let included = fixture.root.join("included");
+        let settings = fixture.root.join("bare.cfg");
+        fs::create_dir_all(&included).unwrap();
+        fs::write(&settings, "[core]\n\tbare = true\n").unwrap();
+        git(&included, &["init", "-q", "-b", "main"]);
+        git(
+            &included,
+            &["config", "include.path", settings.to_str().unwrap()],
+        );
+        assert_eq!(listed(&included), None);
+        assert_eq!(worktree_branch(&included), None);
+
+        // A separate Git directory, whose name ends in a space, is left to
+        // Git, which lists the checkout at its Git directory.
+        let separate = fixture.root.join("separate");
+        let spaced = fixture.root.join("admin ");
+        fs::create_dir_all(&separate).unwrap();
+        git(
+            &separate,
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                spaced.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(worktree_branch(&separate), listed(&separate));
+        assert_eq!(head_branch(&fs::canonicalize(&separate).unwrap()), None);
+
+        // Config Git cannot parse makes Git refuse the repository.
+        let garbled = fixture.root.join("garbled");
+        fs::create_dir_all(&garbled).unwrap();
+        git(&garbled, &["init", "-q", "-b", "main"]);
+        let mut config = fs::read_to_string(garbled.join(".git/config")).unwrap();
+        config.push_str("this is not config\n");
+        fs::write(garbled.join(".git/config"), config).unwrap();
+        assert_eq!(listed(&garbled), None);
+        assert_eq!(worktree_branch(&garbled), None);
+
+        // So do a repository format Git does not know and a malformed
+        // section header.
+        for (garbage, name) in [
+            ("[core]\n\trepositoryformatversion = 999\n", "format"),
+            ("[core invalid]\n", "header"),
+        ] {
+            let refused = fixture.root.join(name);
+            fs::create_dir_all(&refused).unwrap();
+            git(&refused, &["init", "-q", "-b", "main"]);
+            let mut config = fs::read_to_string(refused.join(".git/config")).unwrap();
+            config.push_str(garbage);
+            fs::write(refused.join(".git/config"), config).unwrap();
+            assert_eq!(listed(&refused), None, "{name}");
+            assert_eq!(worktree_branch(&refused), None, "{name}");
+        }
+
+        // A setting before any section is left to Git.
+        let sectionless = fixture.root.join("sectionless");
+        fs::create_dir_all(&sectionless).unwrap();
+        git(&sectionless, &["init", "-q", "-b", "main"]);
+        let config = fs::read_to_string(sectionless.join(".git/config")).unwrap();
+        fs::write(
+            sectionless.join(".git/config"),
+            format!("foo = bar\n{config}"),
+        )
+        .unwrap();
+        assert_eq!(worktree_branch(&sectionless), listed(&sectionless));
+        assert_eq!(head_branch(&fs::canonicalize(&sectionless).unwrap()), None);
+
+        // A `.git` linked to another checkout's is listed at that checkout.
+        let borrowed = fixture.root.join("borrowed");
+        fs::create_dir_all(&borrowed).unwrap();
+        std::os::unix::fs::symlink(repository.join(".git"), borrowed.join(".git")).unwrap();
+        assert_eq!(worktree_branch(&borrowed), listed(&borrowed));
+        assert_eq!(head_branch(&fs::canonicalize(&borrowed).unwrap()), None);
+
+        // Worktrees left to Git share one listing of their repository.
+        let extended = fixture.root.join("extended");
+        let extended_linked = fixture.root.join("extended-linked");
+        fs::create_dir_all(&extended).unwrap();
+        git(&extended, &["init", "-q", "-b", "main"]);
+        git(
+            &extended,
+            &[
+                "-c",
+                "user.name=xd test",
+                "-c",
+                "user.email=xd@example.com",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "initial",
+            ],
+        );
+        git(&extended, &["config", "extensions.worktreeConfig", "true"]);
+        git(
+            &extended,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "side",
+                extended_linked.to_str().unwrap(),
+            ],
+        );
+        let mut shared = ListedWorktrees::new(true);
+        assert_eq!(
+            super::worktree_branch(&extended, &mut shared).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            shared.covering(&fs::canonicalize(&extended_linked).unwrap()),
+            Some(Some("side".into())),
+            "one listing answers the other worktree"
+        );
+
+        // A core setting Git cannot parse.
+        let unparsed = fixture.root.join("unparsed");
+        fs::create_dir_all(&unparsed).unwrap();
+        git(&unparsed, &["init", "-q", "-b", "main"]);
+        git(&unparsed, &["config", "core.filemode", "garbage"]);
+        assert_eq!(worktree_branch(&unparsed), listed(&unparsed));
+        assert_eq!(head_branch(&fs::canonicalize(&unparsed).unwrap()), None);
+
+        // When Git cannot read its own settings, every branch is left to it.
+        let mut unreadable_settings = ListedWorktrees::new(false);
+        assert_eq!(
+            super::worktree_branch(&repository, &mut unreadable_settings),
+            listed(&repository)
+        );
+        assert!(!unreadable_settings.listed.is_empty(), "Git was asked");
+        assert!(git_settings_readable());
+
+        // A bare setting spelled as Git also reads it.
+        let numbered = fixture.root.join("numbered");
+        fs::create_dir_all(&numbered).unwrap();
+        git(&numbered, &["init", "-q", "-b", "main"]);
+        git(&numbered, &["config", "core.bare", "2"]);
+        assert_eq!(listed(&numbered), None);
+        assert_eq!(worktree_branch(&numbered), None);
+
+        // A branch whose loose ref names no commit.
+        let corrupt = fixture.root.join("corrupt");
+        fs::create_dir_all(&corrupt).unwrap();
+        git(&corrupt, &["init", "-q", "-b", "main"]);
+        git(
+            &corrupt,
+            &[
+                "-c",
+                "user.name=xd test",
+                "-c",
+                "user.email=xd@example.com",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "initial",
+            ],
+        );
+        let main_ref = fs::read(corrupt.join(".git/refs/heads/main")).unwrap();
+        fs::write(corrupt.join(".git/refs/heads/main"), "garbage\n").unwrap();
+        assert_eq!(worktree_branch(&corrupt), listed(&corrupt));
+        assert_eq!(head_branch(&fs::canonicalize(&corrupt).unwrap()), None);
+
+        // A packed branch is read from the packed refs, unless Git would
+        // refuse them.
+        fs::write(corrupt.join(".git/refs/heads/main"), main_ref).unwrap();
+        git(&corrupt, &["pack-refs", "--all"]);
+        assert!(!corrupt.join(".git/refs/heads/main").exists());
+        assert_eq!(worktree_branch(&corrupt).as_deref(), Some("main"));
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(head_branch(&fs::canonicalize(&corrupt).unwrap()).is_some());
+        }
+        // Git reads past a blank line in them.
+        let packed = corrupt.join(".git/packed-refs");
+        let refs = fs::read_to_string(&packed).unwrap();
+        let (header, rest) = refs.split_once('\n').unwrap();
+        fs::write(&packed, format!("{header}\n\n{rest}")).unwrap();
+        assert_eq!(worktree_branch(&corrupt), listed(&corrupt));
+        fs::write(&packed, refs).unwrap();
+        let packed = corrupt.join(".git/packed-refs");
+        let mut refs = fs::read_to_string(&packed).unwrap();
+        refs.push_str("not a packed ref\n");
+        fs::write(&packed, refs).unwrap();
+        assert_eq!(worktree_branch(&corrupt), listed(&corrupt));
+        assert_eq!(head_branch(&fs::canonicalize(&corrupt).unwrap()), None);
+
+        // HEAD naming what Git would not take as a branch or commit.
+        let odd = fixture.root.join("odd");
+        fs::create_dir_all(&odd).unwrap();
+        git(&odd, &["init", "-q", "-b", "main"]);
+        for head in [
+            "ref: refs/heads/bad name\n".to_owned(),
+            "ref: refs/heads/a..b\n".to_owned(),
+            format!("{}\n", "a".repeat(64)),
+        ] {
+            fs::write(odd.join(".git/HEAD"), &head).unwrap();
+            assert_eq!(worktree_branch(&odd), listed(&odd), "{head}");
+        }
+        fs::write(odd.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        // A branch that is itself a symbolic ref names the one Git lists.
+        git(
+            &repository,
+            &["symbolic-ref", "refs/heads/alias", "refs/heads/main"],
+        );
+        git(&repository, &["symbolic-ref", "HEAD", "refs/heads/alias"]);
+        assert_eq!(listed(&repository).as_deref(), Some("main"));
+        assert_eq!(worktree_branch(&repository).as_deref(), Some("main"));
+        git(&repository, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+        // HEAD kept as a symbolic link to the branch, which Git still reads.
+        let head = repository.join(".git/HEAD");
+        fs::remove_file(&head).unwrap();
+        std::os::unix::fs::symlink("refs/heads/main", &head).unwrap();
+        assert_eq!(listed(&repository).as_deref(), Some("main"));
+        assert_eq!(worktree_branch(&repository).as_deref(), Some("main"));
+
+        // An entry naming a file the worktree does not have makes Git list it
+        // as prunable.
+        let backlink = repository.join(".git/worktrees/linked/gitdir");
+        let original = fs::read_to_string(&backlink).unwrap();
+        fs::write(
+            &backlink,
+            format!("{}\n", linked.join("missing.git").display()),
+        )
+        .unwrap();
+        assert_eq!(worktree_branch(&linked), listed(&linked));
+        assert_eq!(worktree_branch(&linked), None);
+        fs::write(&backlink, original).unwrap();
+        assert_eq!(worktree_branch(&linked).as_deref(), Some("feature/x"));
+
+        // A worktree whose `.git` file is reached through a link.
+        let moved_link = fixture.root.join("linked-dot-git");
+        fs::rename(linked.join(".git"), &moved_link).unwrap();
+        std::os::unix::fs::symlink(&moved_link, linked.join(".git")).unwrap();
+        assert_eq!(worktree_branch(&linked), listed(&linked));
+        fs::remove_file(linked.join(".git")).unwrap();
+        fs::rename(&moved_link, linked.join(".git")).unwrap();
+        assert_eq!(worktree_branch(&linked).as_deref(), Some("feature/x"));
+
+        // A worktree whose entry was moved out of the repository's
+        // `worktrees`, where Git does not look for it.
+        let entry = repository.join(".git/worktrees/linked");
+        let outside_entry = fixture.root.join("linked-entry");
+        fs::rename(&entry, &outside_entry).unwrap();
+        fs::write(
+            outside_entry.join("commondir"),
+            format!("{}\n", repository.join(".git").display()),
+        )
+        .unwrap();
+        fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", outside_entry.display()),
+        )
+        .unwrap();
+        assert_eq!(worktree_branch(&linked), listed(&linked));
+        fs::rename(&outside_entry, &entry).unwrap();
+        fs::write(entry.join("commondir"), "../..\n").unwrap();
+        fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", entry.display()),
+        )
+        .unwrap();
+        assert_eq!(worktree_branch(&linked).as_deref(), Some("feature/x"));
+
+        // A worktree moved by hand is not where Git lists it, so neither has
+        // a branch for it.
+        let moved = fixture.root.join("moved");
+        fs::rename(&linked, &moved).unwrap();
+        assert_eq!(listed(&moved), None);
+        assert_eq!(worktree_branch(&moved), None);
+        fs::rename(&moved, &linked).unwrap();
+        assert_eq!(worktree_branch(&linked).as_deref(), Some("feature/x"));
+
+        // A worktree whose entry in the repository is gone has no branch,
+        // as Git then reports none.
+        fs::remove_dir_all(repository.join(".git/worktrees/linked")).unwrap();
+        assert_eq!(worktree_branch(&linked), None);
     }
 
     #[test]
