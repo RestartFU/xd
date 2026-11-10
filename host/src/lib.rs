@@ -1370,6 +1370,31 @@ impl Engine {
         }
     }
 
+    /// The chats outside `chats` that started any of them, whose transcripts
+    /// lose those workers' cards when they are deleted.
+    fn worker_parents(&self, chats: &[String]) -> Vec<String> {
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        let mut parents = chats
+            .iter()
+            .filter_map(|chat| store.chat_parent(chat).ok().flatten())
+            .map(|(parent, _)| parent)
+            .filter(|parent| !chats.contains(parent))
+            .collect::<Vec<_>>();
+        parents.sort();
+        parents.dedup();
+        parents
+    }
+
+    /// Tells clients the transcripts of `parents` changed.
+    fn reload_parents(&self, parents: Vec<String>) {
+        for parent in parents {
+            self.events
+                .publish(json!({"event": "changed", "chat": parent}));
+        }
+    }
+
     fn delete_session(&self, request: &Value) -> Value {
         let session =
             match required_string(request, "session", "delete-session needs a session id.") {
@@ -1390,6 +1415,7 @@ impl Engine {
         if let Err(error) = self.terminal_owner(session) {
             return error_reply(error);
         }
+        let parents = self.worker_parents(&chats);
         match store.delete_session(request) {
             Ok(reply) => {
                 for chat in chats {
@@ -1399,6 +1425,7 @@ impl Engine {
                 }
                 self.terminals.kill_chat(&format!("session:{session}"));
                 self.events.publish(json!({"event": "tree"}));
+                self.reload_parents(parents);
                 reply
             }
             Err(error) => error_reply(error),
@@ -1748,6 +1775,10 @@ impl Engine {
                 continue;
             }
             let still_idle = || !self.terminals.closed_since(&owners, idle_since);
+            let parents = store
+                .session_chats(&candidate.session)
+                .map(|chats| self.worker_parents(&chats))
+                .unwrap_or_default();
             match store.finish_auto_delete(&candidate, &settings, plan, &still_idle) {
                 Ok(deletion::AutoDeletion::Deleted {
                     chats,
@@ -1757,6 +1788,7 @@ impl Engine {
                     for chat in &chats {
                         runtime.discard_chat(chat);
                     }
+                    self.reload_parents(parents);
                     for reason in left {
                         eprintln!(
                             "xd: deleted idle session {} but kept its worktree: {reason}",
