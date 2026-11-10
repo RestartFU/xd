@@ -113,6 +113,8 @@ data class CreatedDirectSession(
     val agent: DirectAgent,
     val title: String,
     val sessionId: String? = null,
+    /** Where the app was when it was asked for: it opens only if still there. */
+    val place: Any? = null,
 )
 
 data class PendingHostKeyConfirmation(
@@ -138,6 +140,12 @@ class MainViewModel @JvmOverloads constructor(
     private var startingIds = 0L
     /** Starting sessions to open once made: leaving for another place forgets them. */
     private val openWhenMade = mutableSetOf<Long>()
+
+    /**
+     * Where the app is (its page, session and tabs), as the screen last drew
+     * it. A session made after the reader went elsewhere is not opened.
+     */
+    var place: Any? = null
     private val _creatingWorkspace = MutableStateFlow(false)
     private val _createdDirectSession = MutableStateFlow<CreatedDirectSession?>(null)
     private val _deletingChat = MutableStateFlow(false)
@@ -632,8 +640,13 @@ class MainViewModel @JvmOverloads constructor(
         openWhenMade += starting.id
         val drafts = getApplication<Application>().getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
         val draftKey = "$folderId/${sessionId ?: "new"}"
-        // The form as it was sent: a draft written since for the next one stays.
-        val sentDraft = drafts.getString(draftKey, null)
+        // The form as it was sent, marked as this attempt's, so an identical
+        // form sent again is not taken for it. A draft written since stays.
+        val sentDraft = drafts.getString(draftKey, null)?.let { saved ->
+            runCatching { org.json.JSONObject(saved).put("attempt", starting.id).toString() }.getOrNull()
+        }
+        if (sentDraft != null) drafts.edit().putString(draftKey, sentDraft).apply()
+        val place = place
         viewModelScope.launch {
             try {
                 val chatId = client.createChat(
@@ -647,7 +660,7 @@ class MainViewModel @JvmOverloads constructor(
                 )
                 if (drafts.getString(draftKey, null) == sentDraft) drafts.edit().remove(draftKey).apply()
                 if (openWhenMade.remove(starting.id)) {
-                    _createdDirectSession.value = CreatedDirectSession(folderId, chatId, agent, named, sessionId)
+                    _createdDirectSession.value = CreatedDirectSession(folderId, chatId, agent, named, sessionId, place)
                 }
             } catch (error: CancellationException) {
                 throw error

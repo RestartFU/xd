@@ -285,6 +285,32 @@ class ProjectsScreenshotTest {
         check(model.createdDirectSession.value == null) { "opened ${model.createdDirectSession.value}" }
     }
 
+    @Test fun anIdenticalFormSentAgainKeepsItsDraftWhenRefused() = shoot("starting-identical-dark", MinimalThemePreset.DARK) {
+        holdNewChats = true
+        val sentBefore = sent("new-chat")
+        val drafts = this@ProjectsScreenshotTest.compose.activity.getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
+        val form = "{\"title\":\"Fix the footer\"}"
+        drafts.edit().putString("xd/new", form).commit()
+        // The host refuses the second.
+        refuseNewChat = newChatsAsked.get() + 2
+        model.createDirectSession("xd", "Fix the footer", DirectAgent.CLAUDE)
+        awaitSent("new-chat", sentBefore + 1)
+        // The same form again.
+        drafts.edit().putString("xd/new", form).commit()
+        model.createDirectSession("xd", "Fix the footer", DirectAgent.CLAUDE)
+        awaitSent("new-chat", sentBefore + 2)
+        // The second is refused first, then the first is made.
+        releaseNewChatsNewestFirst()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (model.startingSessions.value.isNotEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+        check(model.startingSessions.value.isEmpty()) { "still starting: ${model.startingSessions.value}" }
+        val draft = drafts.getString("xd/new", null)
+        check(draft?.contains("Fix the footer") == true) { "draft is $draft" }
+    }
+
     /** Waits until the app has sent [count] [op] requests. */
     private fun Screen.awaitSent(op: String, count: Int) {
         val deadline = System.currentTimeMillis() + 10_000
@@ -421,6 +447,7 @@ class ProjectsScreenshotTest {
         canPauseAll = pauseAll
         holdNewChats = false
         HELD.clear()
+        refuseNewChat = 0
         val activity = compose.activity
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         model = MainViewModel(activity.application, XdClient({ ScriptedSocket() }, NoCredentials, scope))
@@ -627,7 +654,7 @@ class ProjectsScreenshotTest {
             "pause-all" -> { pausedFolders = pausedFolders + folder.orEmpty(); """{"ok":true,"paused":[]}""" }
             "resume-all" -> { pausedFolders = pausedFolders - folder.orEmpty(); """{"ok":true,"resumed":[]}""" }
             "owner-icon" -> """{"ok":true,"owner":"$owner","mime":"image/png","data":"${avatar(owner.orEmpty())}"}"""
-            "new-chat" -> if (title?.contains("(refused)") == true) """{"ok":false,"error":"No such branch."}"""
+            "new-chat" -> if (title?.contains("(refused)") == true || newChatsAsked.incrementAndGet() == refuseNewChat) """{"ok":false,"error":"No such branch."}"""
                 else """{"ok":true,"id":"made-${madeChats.incrementAndGet()}"}"""
             else -> """{"ok":true}"""
         }
@@ -651,6 +678,10 @@ class ProjectsScreenshotTest {
         val HELD = mutableListOf<() -> Unit>()
 
         val madeChats = java.util.concurrent.atomic.AtomicInteger()
+
+        /** New chats asked for so far, and which of them (counting from 1) to refuse. */
+        val newChatsAsked = java.util.concurrent.atomic.AtomicInteger()
+        @Volatile var refuseNewChat = 0
 
         fun releaseNewChats() {
             holdNewChats = false

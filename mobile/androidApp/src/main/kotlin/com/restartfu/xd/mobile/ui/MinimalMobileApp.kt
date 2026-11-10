@@ -75,6 +75,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -246,8 +247,15 @@ internal fun MinimalMobileApp(
             stores.retain(tree.chats.map { it.id }.toSet(), sessions.map { it.id }.toSet())
         }
     }
+    val place = listOf(mobileDestination, activeSessionId, chatSelections, hiddenChatIds)
+    SideEffect { model.place = place }
     LaunchedEffect(created, tree.chats) {
         created?.let { result ->
+            // Gone somewhere else since it was asked for: it stays in its project.
+            if (result.place != null && result.place != place) {
+                model.consumeCreatedDirectSession(result)
+                return@let
+            }
             val chat = tree.chats.firstOrNull { it.id == result.chatId } ?: return@let
             activeSessionId = chat.sessionId
             chatSelections = chatSelections + (chat.sessionId to chat.id)
