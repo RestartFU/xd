@@ -36,6 +36,11 @@ public data class ChatSummaryReply(
     /** Linked pull requests, oldest first, on hosts with `linked_pull_requests`. */
     @SerialName("pull_requests")
     val pullRequests: List<LinkedPullRequestReply> = emptyList(),
+    /** The chat whose agent started this one through xd's start_agent tool. */
+    val parent: String? = null,
+    /** Its last reply ends on a question for whoever reads it. */
+    @SerialName("question_waiting")
+    val questionWaiting: Boolean = false,
 )
 
 /** One pull request linked to a chat; [state] is absent until the host has asked GitHub. */

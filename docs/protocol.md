@@ -1184,6 +1184,21 @@ parent gets it in its queue without resuming. Statuses in `list-agents` are
 `working`, `paused`, `waiting for an answer`, `stopped with an error`,
 `finished` and `idle`.
 
+The parent's transcript also gets one card per agent: a `tool` row holding a
+`subagent_run` record (see the subagent records above) with `key` set to
+`chat:<agent chat id>` and `chat` set to that id. The host writes it when the
+agent starts and rewrites it in place, with a `record` event, after each turn
+that ends for good: `status` is `completed` or `failed` and `summary` the start
+of the reply or the error. The card says only how the last turn went; clients
+show what the tree says of the chat now (`working`, `paused`,
+`question_waiting`) over it, and open the chat when the card is clicked. Older
+clients show it as an ordinary agent card. The report message itself starts
+`[xd] Agent "<title>" (<chat id>) is <ending>.`, or `[xd] An agent (<chat id>)
+is <ending>.` before the agent has a title, where `<ending>` is `done with its
+turn`, `stopped with an error` or `waiting for an answer`; clients show such a
+user row as one line naming the agent rather than the whole message. A chat
+whose tree entry has `parent` shows a link back to that chat.
+
 Starting an agent creates its chat and starts its first turn before answering,
 so the server waits up to 300 seconds for the daemon, and Codex is started with
 `mcp_servers.xd.tool_timeout_sec=300` so it waits as long for the tool.

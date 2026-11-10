@@ -389,6 +389,16 @@ internal fun MinimalMobileApp(
                                         renameSession = { sessionActions.rename(activeSession) },
                                     ),
                                     linkedPullRequests = activeChat.pullRequests.takeIf { tree.linkedPullRequests },
+                                    agentChats = tree.chats.filter { it.parentId == activeChat.id }.associateBy { it.id },
+                                    startedBy = activeChat.parentId?.let { parent -> tree.chats.firstOrNull { it.id == parent } },
+                                    openChat = { id ->
+                                        tree.chats.firstOrNull { it.id == id }?.let { chat ->
+                                            activeSessionId = chat.sessionId
+                                            chatSelections = chatSelections + (chat.sessionId to chat.id)
+                                            hiddenChatIds = hiddenChatIds - chat.id
+                                            mobileDestination = MobileDestination.SESSIONS
+                                        }
+                                    },
                                 )
                             }
                         } else {

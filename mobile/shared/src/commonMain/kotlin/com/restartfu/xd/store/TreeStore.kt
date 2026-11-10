@@ -195,6 +195,8 @@ internal class TreeStore(
                                 pullRequests = it.pullRequests.map { pull ->
                                     LinkedPullRequest(pull.url, pull.state?.takeIf(String::isNotBlank))
                                 },
+                                parentId = it.parent,
+                                questionWaiting = it.questionWaiting,
                             )
                         },
                     )

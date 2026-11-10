@@ -99,6 +99,7 @@ impl Engine {
         }
         self.events
             .publish(json!({"event": "changed", "chat": child}));
+        self.write_agent_record(&child, "running", None);
         let started = store.agent_origin(&child).ok();
         json!({
             "ok": true,
@@ -265,9 +266,23 @@ impl Engine {
             return;
         };
         let child = settled.chat_id.as_str();
-        let Ok(Some((parent, true))) = store.chat_parent(child) else {
+        let Ok(Some((parent, reports))) = store.chat_parent(child) else {
             return;
         };
+        // The card follows every turn; the message only when it was asked for.
+        let summary = match &settled.error {
+            Some(error) => clip(error, SUMMARY_CHARS),
+            None => clip_start(&settled.reply, SUMMARY_CHARS),
+        };
+        let status = if settled.error.is_some() {
+            "failed"
+        } else {
+            "completed"
+        };
+        self.write_agent_record(child, status, Some(&summary));
+        if !reports {
+            return;
+        }
         let title = store
             .child_agents(&parent)
             .ok()
@@ -285,6 +300,31 @@ impl Engine {
                 .publish(json!({"event": "changed", "chat": parent}));
         } else {
             eprintln!("xd-host: cannot report agent {child} to chat {parent}: {reply}");
+        }
+    }
+}
+
+impl Engine {
+    /// Writes the card standing for agent chat `child` in its parent's
+    /// transcript, and tells clients: a new card reloads the chat, a changed
+    /// one is rewritten in place like any other agent card.
+    fn write_agent_record(&self, child: &str, status: &str, summary: Option<&str>) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        match store.write_agent_record(child, status, summary) {
+            Ok(Some(record)) if record.created => self
+                .events
+                .publish(json!({"event": "changed", "chat": record.parent})),
+            Ok(Some(record)) => self.events.publish(json!({
+                "event": "record",
+                "chat": record.parent,
+                "record": record.key,
+                "message_id": record.message_id,
+                "text": record.text,
+            })),
+            Ok(None) => {}
+            Err(error) => eprintln!("xd-host: cannot write the card for agent {child}: {error}"),
         }
     }
 }
@@ -312,6 +352,8 @@ fn new_chat_request(origin: &AgentOrigin, request: &Value, prompt: &str) -> Resu
     });
     if let Some(title) = text("title")? {
         new_chat["title"] = json!(title.chars().take(120).collect::<String>());
+        // Its worktree and branch are named for what the user sees it as.
+        new_chat["prompt"] = new_chat["title"].clone();
     }
     // On the same assistant, it starts on the parent's model and effort unless
     // told otherwise; on the other, on what that assistant last used.
@@ -462,7 +504,7 @@ mod tests {
         let request = new_chat_request(&origin(), &json!({"title": "  Fix  "}), "Fix it").unwrap();
         assert_eq!(
             request,
-            json!({"op": "new-chat", "folder": "project", "backend": "claude", "prompt": "Fix it",
+            json!({"op": "new-chat", "folder": "project", "backend": "claude", "prompt": "Fix",
                 "title": "Fix", "model": "opus", "effort": "high", "access": "full",
                 "worktree": {"kind": "new"}})
         );

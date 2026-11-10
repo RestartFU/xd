@@ -166,6 +166,12 @@ internal fun ChatScreen(
      * them; null on an older one, which shows the branch's pull request alone.
      */
     linkedPullRequests: List<LinkedPullRequest>? = null,
+    /** Chats this chat's agent started, as the tree has them now, by id. */
+    agentChats: Map<String, com.restartfu.xd.model.ChatSummary> = emptyMap(),
+    /** The chat whose agent started this one, if one did. */
+    startedBy: com.restartfu.xd.model.ChatSummary? = null,
+    /** Opens another of this host's chats by id. */
+    openChat: (String) -> Unit = {},
 ) {
     val state by model.state.collectAsStateWithLifecycle()
     val sending by model.sending.collectAsStateWithLifecycle()
@@ -261,7 +267,8 @@ internal fun ChatScreen(
     val runningAgents = remember(rows) {
         rows.filterIsInstance<TranscriptRow.Subagent>()
             .map { it.run }
-            .filter { it.state == SubagentState.RUNNING }
+            // An agent chat opens as a chat of its own, not a tab here.
+            .filter { it.state == SubagentState.RUNNING && it.chat == null }
     }
     val agents = AgentTabs(
         tabs = agentTabKeys.map { key ->
@@ -597,6 +604,9 @@ internal fun ChatScreen(
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (startedBy != null) {
+                item(key = "started-by") { StartedByPill(startedBy) { openChat(startedBy.id) } }
+            }
             if (state.hasOlderMessages) {
                 item(key = "load-older") {
                     Box(
@@ -620,11 +630,24 @@ internal fun ChatScreen(
             }
             items(rows, key = ::rowKey) { row ->
                 when (row) {
-                    is TranscriptRow.Single -> TranscriptRow(row.item, model, answered[row.item.id])
+                    is TranscriptRow.Single -> {
+                        // xd's word that one of this chat's agents ended a turn.
+                        val report = row.item.takeIf { it.kind == com.restartfu.xd.model.TranscriptKind.USER }
+                            ?.let { com.restartfu.xd.model.AgentReport.parse(it.text) }
+                        if (report != null) {
+                            AgentReportLine(report, agentChats[report.chatId]) { openChat(report.chatId) }
+                        } else {
+                            TranscriptRow(row.item, model, answered[row.item.id])
+                        }
+                    }
                     is TranscriptRow.Tools -> ToolGroupRow(row)
                     is TranscriptRow.AccountSwitch -> AccountSwitchNotice(row.sentence)
                     is TranscriptRow.Pipeline -> PipelineCard(row.run, model.client)
-                    is TranscriptRow.Subagent -> {
+                    is TranscriptRow.Subagent -> if (row.run.chat != null) {
+                        // An agent started with start_agent is a chat of its own.
+                        val chat = row.run.chat.orEmpty()
+                        AgentChatRow(row.run, agentChats[chat]) { openChat(chat) }
+                    } else {
                         val key = row.run.key
                         val pending = key?.let { subagentActions[it] }
                         SettleSubagentAction(row.run, pending, model)

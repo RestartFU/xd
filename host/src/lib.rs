@@ -3571,6 +3571,22 @@ done
         wait_for("the parent to answer it", &|| {
             parent_reply("Done.") && store.chat(&parent).unwrap()["working"] == false
         });
+        // One card stands for the worker in the parent, rewritten as it goes.
+        let cards = store.messages(&json!({"chat": parent})).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["content"].as_str())
+            .filter(|text| text.starts_with("subagent_run\n"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        let card: Value = serde_json::from_str(&cards[0]["subagent_run\n".len()..]).unwrap();
+        assert_eq!(card["chat"], child);
+        assert_eq!(card["key"], format!("chat:{child}"));
+        assert_eq!(card["status"], "completed");
+        assert_eq!(card["summary"], "Done.");
+        assert_eq!(card["prompt"], "Fix the tests");
         let agents = engine.dispatch(json!({"op": "list-agents", "chat": parent}));
         assert_eq!(agents["agents"][0]["id"], child, "{agents}");
         assert_eq!(agents["agents"][0]["status"], "finished");

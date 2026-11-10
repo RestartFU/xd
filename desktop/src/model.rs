@@ -712,6 +712,8 @@ pub struct AppModel {
     pub waiting_chats: HashMap<String, HashSet<String>>,
     /// Completed replies containing an unanswered <ask> block.
     pub question_chats: HashSet<String>,
+    /// The chat whose agent started each chat with xd's start_agent tool.
+    pub chat_parents: HashMap<String, String>,
     pub messages: Vec<Message>,
     pub queue: Vec<String>,
     /// The chat's last turn was cut short and can be continued.
@@ -1030,6 +1032,17 @@ impl AppModel {
         normalize_sessions(&mut snapshot, body);
         // New hosts persist final-reply questions in the tree, including chats
         // whose transcript has never been opened on this desktop.
+        self.chat_parents = body["chats"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|chat| {
+                Some((
+                    chat["id"].as_str()?.to_owned(),
+                    chat["parent"].as_str()?.to_owned(),
+                ))
+            })
+            .collect();
         for chat in body["chats"].as_array().into_iter().flatten() {
             if let (Some(id), Some(waiting)) =
                 (chat["id"].as_str(), chat["question_waiting"].as_bool())
@@ -2035,6 +2048,7 @@ impl AppModel {
             unread_chats: HashSet::new(),
             waiting_chats: HashMap::new(),
             question_chats: HashSet::new(),
+            chat_parents: HashMap::new(),
             messages: vec![
                 Message::new(
                     Some(1),

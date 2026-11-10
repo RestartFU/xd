@@ -353,6 +353,17 @@ pub struct AgentOrigin {
     pub parent: Option<String>,
 }
 
+/// The card [`StateStore::write_agent_record`] wrote, for telling clients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRecord {
+    pub parent: String,
+    pub key: String,
+    pub message_id: i64,
+    pub text: String,
+    /// It is new, rather than rewritten in place.
+    pub created: bool,
+}
+
 /// A chat another chat's agent started, as [`StateStore::child_agents`] reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildAgent {
@@ -3055,6 +3066,97 @@ impl StateStore {
             )
             .optional()?
             .and_then(|(parent, reports)| Some((parent?, reports))))
+    }
+
+    /// Writes the card in its parent's transcript that stands for the agent
+    /// chat `child`: a `subagent_run` record naming the chat, made the first
+    /// time and rewritten in place after. `status` and `summary` say how its
+    /// latest turn went. `None` for a chat no agent started.
+    pub fn write_agent_record(
+        &self,
+        child: &str,
+        status: &str,
+        summary: Option<&str>,
+    ) -> Result<Option<AgentRecord>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let Some((parent, record, title, backend, model, created_at, prompt)) = transaction
+            .query_row(
+                "SELECT parent_chat_id, agent_record_id, COALESCE(title, ''), backend, model, \
+                 created_at, (SELECT content FROM messages WHERE chat_id = chats.id \
+                 AND role = 'user' ORDER BY id LIMIT 1) FROM chats WHERE id = ?",
+                [child],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+        let key = format!("chat:{child}");
+        let mut card = json!({
+            "key": key,
+            "chat": child,
+            "provider": if backend == "codex" { "Codex" } else { "Claude" },
+            "agent": title,
+            "description": title,
+            "status": status,
+            "background": true,
+            "steps": [],
+            "tool_uses": 0,
+            "started_at": created_at * 1000,
+        });
+        if let Some(model) = model.filter(|model| !model.is_empty()) {
+            card["model"] = json!(model);
+        }
+        if let Some(prompt) = prompt {
+            card["prompt"] = json!(prompt);
+        }
+        if let Some(summary) = summary.filter(|summary| !summary.trim().is_empty()) {
+            card["summary"] = json!(summary);
+        }
+        let text = format!("{}{card}", crate::subagent::PREFIX);
+        let updated = match record {
+            Some(id) => transaction.execute(
+                "UPDATE messages SET content = ? WHERE id = ? AND chat_id = ? AND role = 'tool'",
+                params![text, id, parent],
+            )? == 1,
+            None => false,
+        };
+        let message_id = if updated {
+            record.unwrap_or_default()
+        } else {
+            transaction.execute(
+                "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'tool', ?, ?)",
+                params![parent, text, now_seconds()],
+            )?;
+            let id = transaction.last_insert_rowid();
+            transaction.execute(
+                "UPDATE chats SET agent_record_id = ? WHERE id = ?",
+                params![id, child],
+            )?;
+            id
+        };
+        transaction.commit()?;
+        Ok(Some(AgentRecord {
+            parent,
+            key,
+            message_id,
+            text,
+            created: !updated,
+        }))
     }
 
     /// The chats `parent`'s agent started, oldest first.
@@ -6600,6 +6702,10 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
     if !columns.contains("parent_chat_id") {
         database.execute("ALTER TABLE chats ADD COLUMN parent_chat_id TEXT", [])?;
     }
+    // The card in the parent's transcript that stands for this chat.
+    if !columns.contains("agent_record_id") {
+        database.execute("ALTER TABLE chats ADD COLUMN agent_record_id INTEGER", [])?;
+    }
     if !columns.contains("report_to_parent") {
         database.execute(
             "ALTER TABLE chats ADD COLUMN report_to_parent INTEGER NOT NULL DEFAULT 0",
@@ -9461,7 +9567,9 @@ fn stop_orphaned_agents(transaction: &rusqlite::Transaction<'_>) -> Result<(), r
         let Some(mut record) = content
             .strip_prefix(crate::subagent::PREFIX)
             .and_then(|record| serde_json::from_str::<Value>(record).ok())
-            .filter(|record| record["status"] == "running")
+            // A card for an agent chat follows the chat, which a restart
+            // resumes rather than ends.
+            .filter(|record| record["status"] == "running" && record.get("chat").is_none())
         else {
             continue;
         };

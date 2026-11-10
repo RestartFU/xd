@@ -40,6 +40,11 @@ public data class SubagentRun(
     val latest: String = "",
     /** Its final report. */
     val summary: String = "",
+    /**
+     * The xd chat this agent is, for one an agent started with xd's
+     * start_agent tool; null for an agent inside its lead's own process.
+     */
+    val chat: String? = null,
 ) {
     /** "2 tools · 13.9k tokens · 2.9s", whatever of it is known. */
     val stats: String
@@ -152,6 +157,7 @@ public data class SubagentRun(
                 startedAtMillis = (record["started_at"] as? JsonPrimitive)?.longOrNull,
                 latest = field("latest"),
                 summary = field("summary"),
+                chat = field("chat").ifBlank { null },
             )
         }
 

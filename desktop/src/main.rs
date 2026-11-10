@@ -847,6 +847,61 @@ struct ToggleActivity {
 #[action(namespace = xd, no_json)]
 struct ToggleAgentsTray;
 
+/// Opens the chat of an agent started with xd's start_agent tool, or the
+/// chat that started this one.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = xd, no_json)]
+struct OpenAgentChat {
+    chat: String,
+}
+
+/// An agent chat as the tree has it now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentChatLive {
+    title: String,
+    working: bool,
+    paused: bool,
+    waiting: bool,
+}
+
+/// How an agent chat stands, in the words its row uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentChatStatus {
+    Running,
+    Paused,
+    NeedsYou,
+    Done,
+    Failed,
+    Stopped,
+}
+
+impl AgentChatStatus {
+    fn label(self, colors: ThemeColors) -> (&'static str, u32) {
+        match self {
+            Self::Running => ("Running", colors.working),
+            Self::Paused => ("Paused", colors.muted),
+            Self::NeedsYou => ("Needs you", colors.waiting),
+            Self::Done => ("Done", colors.done),
+            Self::Failed => ("Failed", colors.danger),
+            Self::Stopped => ("Stopped", colors.faint),
+        }
+    }
+}
+
+/// What the tree says of the chat now wins over the card's last turn: a card
+/// that says it runs while its chat does not was stopped, or cut short.
+fn agent_chat_status(card: SubagentState, live: Option<&AgentChatLive>) -> AgentChatStatus {
+    match (card, live) {
+        (_, Some(live)) if live.working => AgentChatStatus::Running,
+        (_, Some(live)) if live.paused => AgentChatStatus::Paused,
+        (_, Some(live)) if live.waiting => AgentChatStatus::NeedsYou,
+        (SubagentState::Failed, _) => AgentChatStatus::Failed,
+        (SubagentState::Completed, _) => AgentChatStatus::Done,
+        (SubagentState::Running, None) => AgentChatStatus::Running,
+        _ => AgentChatStatus::Stopped,
+    }
+}
+
 /// Opens a delegated agent in a tab of its own, by its record key.
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = xd, no_json)]
@@ -1781,7 +1836,10 @@ impl TranscriptSnapshot {
         self.running_agents = Arc::new(
             rows.filter(|message| message.role == "tool")
                 .filter_map(|message| match message.tool_view() {
-                    Some(ToolView::Subagent(view)) if view.status == SubagentState::Running => {
+                    // An agent chat has its own chat to open, not a tab here.
+                    Some(ToolView::Subagent(view))
+                        if view.status == SubagentState::Running && view.chat.is_empty() =>
+                    {
                         Some(RunningAgent { view: view.clone() })
                     }
                     _ => None,
@@ -11775,6 +11833,20 @@ impl XdDesktop {
     /// Takes the user to the window and, if it is still there, the chat that a
     /// clicked notification was about.
     #[cfg(target_os = "linux")]
+    /// Opens one of this host's chats by id, as the sidebar would.
+    fn open_agent_chat(&mut self, chat_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((project_id, agent)) = self
+            .model
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| Some((chat.folder.clone(), AgentCli::from_backend(&chat.backend)?)))
+        else {
+            return;
+        };
+        self.open_minimal_session(project_id, chat_id.to_owned(), agent, window, cx);
+    }
+
     fn open_clicked_notification(
         &mut self,
         activation: notifications::Activation<TurnNotificationTarget>,
@@ -13586,7 +13658,11 @@ impl XdDesktop {
                     .when(emphasized, |title| title.font_weight(FontWeight::MEDIUM)),
             )
             .when(
-                signal == SessionSignal::Idle && session.branch != "Project directory",
+                // A session an agent started sits under the one that started
+                // it; its generated branch would only crowd its title.
+                signal == SessionSignal::Idle
+                    && session.branch != "Project directory"
+                    && session.depth == 0,
                 |row| {
                     row.child(
                         truncating_label(session.branch)
@@ -15799,6 +15875,231 @@ impl XdDesktop {
 
     /// One delegated agent: who it is, what it is doing right now, and, once
     /// opened, its task, every step it took, and its report.
+    /// One agent an agent started with xd's start_agent tool: its assistant
+    /// with a status dot, its name and latest word on one line each, and how it
+    /// stands. The row is its chat's way in, so a click opens that chat.
+    fn render_agent_chat_row(
+        colors: ThemeColors,
+        view: &SubagentView,
+        live: Option<&AgentChatLive>,
+        index: usize,
+    ) -> gpui::AnyElement {
+        let status = agent_chat_status(view.status, live);
+        let (label, tone) = status.label(colors);
+        let title = live
+            .map(|live| live.title.clone())
+            .filter(|title| !title.trim().is_empty() && title != "New Chat")
+            .or_else(|| (!view.agent.trim().is_empty()).then(|| view.agent.clone()))
+            .unwrap_or_else(|| first_line(&view.prompt));
+        let detail = match status {
+            AgentChatStatus::Running | AgentChatStatus::Paused => first_line(&view.prompt),
+            _ if !view.summary.is_empty() => first_line(&view.summary),
+            _ => first_line(&view.prompt),
+        };
+        let icon = match view.provider.to_ascii_lowercase().as_str() {
+            "codex" => CODEX_ICON,
+            _ => CLAUDE_ICON,
+        };
+        let chat = view.chat.clone();
+        div()
+            .id(("agent-chat-row", index))
+            .group("agent-chat-row")
+            .w_full()
+            .my(px(2.0))
+            .px(px(8.0))
+            .py(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(colors.surface_high)))
+            .on_click(move |_, window, cx| {
+                window.dispatch_action(Box::new(OpenAgentChat { chat: chat.clone() }), cx);
+            })
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .size(px(24.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.surface_high))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(assistant_icon(icon, 13.0, colors.muted, colors))
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(-2.0))
+                            .bottom(px(-2.0))
+                            .size(px(9.0))
+                            .rounded_full()
+                            .border_2()
+                            .border_color(rgb(colors.background))
+                            .bg(rgb(tone))
+                            .when(status == AgentChatStatus::Running, |dot| {
+                                dot.opacity(pulse_opacity())
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(colors.text))
+                            .child(title),
+                    )
+                    .when(!detail.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(rgb(if status == AgentChatStatus::Failed {
+                                    colors.danger
+                                } else {
+                                    colors.faint
+                                }))
+                                .child(detail),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(rgb(tone))
+                    .child(label),
+            )
+            .child(
+                svg()
+                    .path(CHEVRON_RIGHT_ICON)
+                    .flex_none()
+                    .size(px(13.0))
+                    .text_color(rgb(colors.faint))
+                    .group_hover("agent-chat-row", |style| style.text_color(rgb(colors.text))),
+            )
+            .into_any_element()
+    }
+
+    /// The message xd sent this chat when one of its agents ended a turn,
+    /// as one quiet line that opens that agent's chat. The agent's reply is
+    /// on its row above and in its chat.
+    fn render_agent_report(
+        colors: ThemeColors,
+        report: activity::AgentReport,
+        live: Option<&AgentChatLive>,
+        index: usize,
+    ) -> gpui::AnyElement {
+        let title = live
+            .map(|live| live.title.clone())
+            .filter(|title| !title.trim().is_empty())
+            .or_else(|| (!report.title.is_empty()).then(|| report.title.clone()))
+            .unwrap_or_else(|| "An agent".into());
+        let (verb, tone) = match report.outcome {
+            activity::AgentOutcome::Done => ("finished", colors.done),
+            activity::AgentOutcome::Failed => ("stopped with an error", colors.danger),
+            activity::AgentOutcome::Waiting => ("is asking a question", colors.waiting),
+        };
+        let chat = report.chat.clone();
+        div()
+            .id(("agent-report", index))
+            .w_full()
+            .my(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .child(div().h(px(1.0)).flex_1().bg(rgb(colors.border)))
+            .child(
+                div()
+                    .id(("agent-report-link", index))
+                    .flex_none()
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(11.5))
+                    .text_color(rgb(colors.faint))
+                    .cursor_pointer()
+                    .hover(|style| {
+                        style
+                            .bg(rgb(colors.surface_high))
+                            .text_color(rgb(colors.text))
+                    })
+                    .on_click(move |_, window, cx| {
+                        window.dispatch_action(Box::new(OpenAgentChat { chat: chat.clone() }), cx);
+                    })
+                    .child(div().size(px(6.0)).rounded_full().bg(rgb(tone)))
+                    .child(
+                        div()
+                            .max_w(px(320.0))
+                            .truncate()
+                            .child(format!("{title} {verb}")),
+                    ),
+            )
+            .child(div().h(px(1.0)).flex_1().bg(rgb(colors.border)))
+            .into_any_element()
+    }
+
+    /// The one way back from an agent's chat to the chat that started it.
+    fn render_started_by(colors: ThemeColors, parent: String, title: String) -> gpui::AnyElement {
+        div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .justify_center()
+            .pb(px(10.0))
+            .child(
+                div()
+                    .id("agent-started-by")
+                    .px(px(10.0))
+                    .py(px(3.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(11.5))
+                    .text_color(rgb(colors.faint))
+                    .cursor_pointer()
+                    .hover(|style| {
+                        style
+                            .bg(rgb(colors.surface_high))
+                            .text_color(rgb(colors.text))
+                    })
+                    .on_click(move |_, window, cx| {
+                        window.dispatch_action(
+                            Box::new(OpenAgentChat {
+                                chat: parent.clone(),
+                            }),
+                            cx,
+                        );
+                    })
+                    .child("Started by")
+                    .child(
+                        div()
+                            .max_w(px(360.0))
+                            .truncate()
+                            .text_color(rgb(colors.muted))
+                            .child(title),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_native_subagent(
         colors: ThemeColors,
         view: SubagentView,
@@ -17469,6 +17770,39 @@ impl XdDesktop {
         let expanded_activities = self.expanded_activities.clone();
         let expanded_work_logs = self.expanded_work_logs.clone();
         let subagent_actions = self.subagent_actions.clone();
+        // Agent chats as the tree has them now, which their cards and
+        // reports follow: a card's own status is only its last turn's.
+        let agent_chats = Arc::new(
+            self.model
+                .chat_parents
+                .keys()
+                .filter_map(|id| {
+                    let chat = self.model.chats.iter().find(|chat| &chat.id == id)?;
+                    Some((
+                        id.clone(),
+                        AgentChatLive {
+                            title: chat.title.clone().unwrap_or_default(),
+                            working: chat.working,
+                            paused: chat.paused,
+                            waiting: self.model.question_chats.contains(id),
+                        },
+                    ))
+                })
+                .collect::<HashMap<_, _>>(),
+        );
+        let started_by = self
+            .model
+            .selected_chat
+            .as_ref()
+            .and_then(|chat| self.model.chat_parents.get(chat))
+            .and_then(|parent| self.model.chats.iter().find(|chat| &chat.id == parent))
+            .map(|parent| {
+                Self::render_started_by(
+                    colors,
+                    parent.id.clone(),
+                    parent.title.clone().unwrap_or_else(|| "New Chat".into()),
+                )
+            });
         let messages = self.transcript_snapshot.clone();
         let transcript_empty = messages.get(0).is_none();
         let transcript_loading = self.transcript_loading;
@@ -17528,6 +17862,33 @@ impl XdDesktop {
                                 .w(px(column))
                                 .child(accounts_view::render_switch_notice(sentence, colors)),
                         )
+                        .into_any_element();
+                }
+                // An agent started with start_agent is a chat of its own: one
+                // row that opens it, and a slim line for each of its reports.
+                let agent_row = match message.tool_view() {
+                    Some(ToolView::Subagent(view)) if !view.chat.is_empty() => {
+                        Some(Self::render_agent_chat_row(
+                            colors,
+                            view,
+                            agent_chats.get(&view.chat),
+                            index,
+                        ))
+                    }
+                    _ if message.role == "user" => {
+                        activity::agent_report(&message.content).map(|report| {
+                            let live = agent_chats.get(&report.chat);
+                            Self::render_agent_report(colors, report, live, index)
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(row) = agent_row {
+                    return div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(div().w(px(column)).child(row))
                         .into_any_element();
                 }
                 let (subagent, activity) = match message.tool_view() {
@@ -17985,6 +18346,7 @@ impl XdDesktop {
                     .min_h_0()
                     .w_full()
                     .pt_4()
+                    .children(started_by)
                     .child(transcript)
                     .when(
                         !self.transcript_pinned() && !transcript_empty && !transcript_loading,
@@ -20514,6 +20876,9 @@ impl XdDesktop {
             }))
             .on_action(cx.listener(|this, action: &OpenAgentTab, window, cx| {
                 this.open_agent_tab(action.key.clone(), window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &OpenAgentChat, window, cx| {
+                this.open_agent_chat(&action.chat, window, cx);
             }))
             .on_action(cx.listener(|this, action: &ControlSubagent, _, cx| {
                 this.control_subagent(action.key.clone(), &action.action, cx);
