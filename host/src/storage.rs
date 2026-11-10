@@ -8887,7 +8887,8 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
         // nothing is, so one moved by hand has no branch, as before.
         let backlink = fs::read_to_string(git_dir.join("gitdir")).ok()?;
         let listed = git_dir.join(backlink.trim_end_matches(['\n', '\r']));
-        if fs::canonicalize(listed.parent()?).ok() != Some(root.to_owned()) {
+        // Git checks the file the entry names, not just its directory.
+        if fs::canonicalize(&listed).ok() != Some(root.join(".git")) {
             return Some(None);
         }
     } else if bare_repository(&config)? {
@@ -9033,7 +9034,7 @@ fn owned_by_this_user(paths: &[&Path]) -> bool {
 
 /// Whether a Git config file is plain: well-formed section headers and
 /// `key = value` lines, with no includes, extensions, quoted or continued
-/// values, and a repository format Git always reads. Anything else is left to
+/// values, and only the core settings Git writes into a new repository. Anything else is left to
 /// Git, which may read it differently or refuse the repository.
 fn plain_config(config: &str) -> bool {
     let mut section = String::new();
@@ -9086,9 +9087,19 @@ fn plain_config(config: &str) -> bool {
         {
             return false;
         }
-        section != "core"
-            || !key.eq_ignore_ascii_case("repositoryformatversion")
-            || matches!(value.trim(), "0" | "1")
+        if section != "core" {
+            return true;
+        }
+        // Git reads its core settings as it opens the repository and refuses
+        // values it cannot parse, so only those Git itself writes into a new
+        // repository are read here, with the values it writes.
+        let value = value.trim().to_ascii_lowercase();
+        match key.to_ascii_lowercase().as_str() {
+            "repositoryformatversion" => matches!(value.as_str(), "0" | "1"),
+            "bare" | "filemode" | "logallrefupdates" | "ignorecase" | "precomposeunicode"
+            | "symlinks" => matches!(value.as_str(), "true" | "false"),
+            _ => false,
+        }
     })
 }
 
@@ -10864,6 +10875,14 @@ mod tests {
             "one listing answers the other worktree"
         );
 
+        // A core setting Git cannot parse.
+        let unparsed = fixture.root.join("unparsed");
+        fs::create_dir_all(&unparsed).unwrap();
+        git(&unparsed, &["init", "-q", "-b", "main"]);
+        git(&unparsed, &["config", "core.filemode", "garbage"]);
+        assert_eq!(worktree_branch(&unparsed), listed(&unparsed));
+        assert_eq!(head_branch(&fs::canonicalize(&unparsed).unwrap()), None);
+
         // A bare setting spelled as Git also reads it.
         let numbered = fixture.root.join("numbered");
         fs::create_dir_all(&numbered).unwrap();
@@ -10924,6 +10943,20 @@ mod tests {
         std::os::unix::fs::symlink("refs/heads/main", &head).unwrap();
         assert_eq!(listed(&repository).as_deref(), Some("main"));
         assert_eq!(worktree_branch(&repository).as_deref(), Some("main"));
+
+        // An entry naming a file the worktree does not have makes Git list it
+        // as prunable.
+        let backlink = repository.join(".git/worktrees/linked/gitdir");
+        let original = fs::read_to_string(&backlink).unwrap();
+        fs::write(
+            &backlink,
+            format!("{}\n", linked.join("missing.git").display()),
+        )
+        .unwrap();
+        assert_eq!(worktree_branch(&linked), listed(&linked));
+        assert_eq!(worktree_branch(&linked), None);
+        fs::write(&backlink, original).unwrap();
+        assert_eq!(worktree_branch(&linked).as_deref(), Some("feature/x"));
 
         // A worktree moved by hand is not where Git lists it, so neither has
         // a branch for it.
