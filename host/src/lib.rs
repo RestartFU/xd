@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{SyncSender, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle},
@@ -92,6 +92,10 @@ use workflow::WorkflowStatuses;
 // for the reader's extra byte; allocation capacity is the platform limit.
 pub const FRAME_LIMIT: usize = isize::MAX as usize - 1;
 pub const AUTH_FRAME_LIMIT: usize = 64 * 1024;
+/// New chats one connection may be setting up beside its other requests.
+/// Making a worktree can take a while, and the client should not have to
+/// wait for it to open another chat. Past this many they wait in line.
+const NEW_CHATS_ASIDE: usize = 4;
 const REQUEST_ID: &str = "_xd_request";
 
 pub struct Engine {
@@ -2752,6 +2756,7 @@ pub fn serve_daemon_connection(
             }
         }
     });
+    let new_chats_aside = Arc::new(AtomicUsize::new(0));
     let result = (|| -> std::io::Result<()> {
         loop {
             let authenticated = engine.pairing.authenticated(subscriber);
@@ -2814,6 +2819,33 @@ pub fn serve_daemon_connection(
                 if authenticated {
                     events_ready.store(true, Ordering::Release);
                 }
+            } else if authenticated
+                && request["op"] == "new-chat"
+                // Without an id to match it by, a reply must come in order.
+                && request.get(REQUEST_ID).is_some()
+                && new_chats_aside
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |running| {
+                        (running < NEW_CHATS_ASIDE).then_some(running + 1)
+                    })
+                    .is_ok()
+            {
+                // Off the request worker: creating a worktree can take a
+                // while, and the client's other requests need not wait for
+                // it. Replies carry their request id, so their order does
+                // not matter.
+                let engine = engine.clone();
+                let outbound = outbound.clone();
+                let running = new_chats_aside.clone();
+                let stream = stream.try_clone()?;
+                thread::spawn(move || {
+                    if engine.events.subscribed(subscriber) {
+                        let reply = engine.dispatch_for(subscriber, request);
+                        if outbound.try_send(reply).is_err() {
+                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                        }
+                    }
+                    running.fetch_sub(1, Ordering::AcqRel);
+                });
             } else {
                 commands
                     .try_send(request)

@@ -1536,3 +1536,79 @@ fn shell_panes_are_shared_and_outlive_their_client() {
     let reused = second.call(json!({"op":"terminal-open","chat":"global:daemon-test","columns":80,"rows":24,"reuse":true}));
     assert_eq!(reused["id"], id);
 }
+
+#[test]
+fn a_new_worktree_being_made_does_not_hold_up_the_clients_other_requests() {
+    let daemon = Daemon::start();
+    let repo = daemon.root.join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(["-c", "user.name=xd", "-c", "user.email=xd@example.com"])
+            .args(args)
+            .current_dir(&repo)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(repo.join("README.md"), "hello\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-q", "-m", "first"]);
+    // Checking out the new worktree waits until the test lets it go.
+    let release = daemon.root.join("release-checkout");
+    let hook = repo.join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.05; done\n",
+            release.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut client = daemon.client();
+    let folder = client.call(json!({"op":"new-folder", "name":"Repo", "repo":repo}));
+    assert_eq!(folder["ok"], true, "{folder}");
+    let creating = 9_000;
+    writeln!(
+        client.writer,
+        "{}",
+        json!({"op":"new-chat", "folder":folder["id"], "backend":"codex",
+            "worktree":{"kind":"new"}, "_xd_request":creating})
+    )
+    .unwrap();
+    client.writer.flush().unwrap();
+
+    // The tree comes back while the worktree is still being checked out,
+    // rather than this read timing out.
+    client
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let tree = client.call(json!({"op":"tree"}));
+    assert_eq!(tree["ok"], true, "{tree}");
+    assert!(!release.exists());
+
+    fs::write(&release, "").unwrap();
+    let created = loop {
+        let frame = client.frame();
+        if frame["_xd_request"] == creating {
+            break frame;
+        }
+    };
+    assert_eq!(created["ok"], true, "{created}");
+    let tree = client.call(json!({"op":"tree"}));
+    assert!(
+        tree["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|chat| chat["id"] == created["id"]),
+        "{tree}"
+    );
+}

@@ -17,20 +17,64 @@ enum Job {
         key: String,
         reply: mpsc::Sender<Result<Value, String>>,
     },
+    List {
+        reply: mpsc::Sender<Vec<(String, Value)>>,
+    },
 }
 static ERROR: Mutex<Option<String>> = Mutex::new(None);
 
-fn directory(key: &str) -> PathBuf {
-    // Encode components rather than interpreting remote identifiers as paths.
-    let mut path = if cfg!(test) {
+fn root() -> PathBuf {
+    if cfg!(test) {
         std::env::temp_dir().join(format!("xd-new-chat-store-tests-{}", std::process::id()))
     } else {
         crate::settings::settings_path().with_file_name("new-chat-drafts")
-    };
+    }
+}
+
+fn directory(key: &str) -> PathBuf {
+    // Encode components rather than interpreting remote identifiers as paths.
+    let mut path = root();
     for chunk in key.as_bytes().chunks(60) {
         path.push(chunk.iter().map(|b| format!("{b:02x}")).collect::<String>());
     }
     path
+}
+
+/// The drafts under `dir` holding something to send, without their files.
+/// `prefix` is the key so far, decoded from the directories above.
+fn list_keys(dir: &std::path::Path, prefix: &[u8], keys: &mut Vec<(String, Value)>) {
+    if let Ok(bytes) = fs::read(dir.join("draft.json"))
+        && let Ok(draft) = serde_json::from_slice::<Value>(&bytes)
+        && (draft["text"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty())
+            || draft["has_attachments"] == true)
+        && let Ok(key) = String::from_utf8(prefix.to_vec())
+    {
+        keys.push((key, draft));
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.len() % 2 != 0 || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Some(chunk) = (0..name.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&name[at..at + 2], 16).ok())
+            .collect::<Option<Vec<u8>>>()
+        else {
+            continue;
+        };
+        let mut key = prefix.to_vec();
+        key.extend(chunk);
+        list_keys(&entry.path(), &key, keys);
+    }
 }
 
 fn attachment_path(dir: &std::path::Path, metadata: &Value) -> PathBuf {
@@ -144,6 +188,11 @@ fn worker() -> &'static mpsc::Sender<Job> {
                         })();
                         let _ = reply.send(result);
                     }
+                    Job::List { reply } => {
+                        let mut keys = Vec::new();
+                        list_keys(&root(), &[], &mut keys);
+                        let _ = reply.send(keys);
+                    }
                 }
             }
         });
@@ -174,10 +223,53 @@ pub(super) fn read(key: String) -> Result<Value, String> {
     result
 }
 
+/// The saved drafts that hold something to send, by key, without their
+/// files. Waits for the writes asked for before it.
+pub(super) fn list() -> Vec<(String, Value)> {
+    let (reply, receive) = mpsc::channel();
+    if worker().send(Job::List { reply }).is_err() {
+        return Vec::new();
+    }
+    receive.recv().unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn new_chat_store_lists_the_drafts_holding_something() {
+        let long = format!("local/project/{}/new", "p".repeat(90));
+        save(
+            long.clone(),
+            json!({"text":"Fix the footer"}),
+            Some(json!([])),
+        )
+        .unwrap();
+        let files = "local/project/files/new".to_owned();
+        save(
+            files.clone(),
+            json!({"text":" ","has_attachments":true}),
+            Some(json!([{"name":"notes.txt","mime":"text/plain","data":"bm90ZXM="}])),
+        )
+        .unwrap();
+        let emptied = "local/project/emptied/new".to_owned();
+        save(emptied.clone(), json!({"text":"gone"}), Some(json!([]))).unwrap();
+        save(emptied.clone(), json!({}), Some(json!([]))).unwrap();
+        let listed = list();
+        assert_eq!(
+            listed.iter().find(|(key, _)| *key == long).unwrap().1["text"],
+            "Fix the footer"
+        );
+        let keys = listed.into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+        assert!(keys.contains(&long), "{keys:?}");
+        assert!(keys.contains(&files), "{keys:?}");
+        assert!(!keys.contains(&emptied), "{keys:?}");
+        for key in [long, files, emptied] {
+            let _ = fs::remove_dir_all(directory(&key));
+        }
+    }
 
     #[test]
     fn new_chat_store_keeps_payloads_when_only_text_changes() {

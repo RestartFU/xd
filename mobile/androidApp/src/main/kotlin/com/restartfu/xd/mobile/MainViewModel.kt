@@ -94,6 +94,19 @@ data class OpenedMessage(
     val draft: String = text,
 )
 
+/**
+ * A session or chat sent to the host and not made yet. It shows under its
+ * project meanwhile, and others can start beside it.
+ */
+data class StartingSession(
+    val id: Long,
+    val projectId: String,
+    /** The session a chat joins, or null for a new session. */
+    val sessionId: String?,
+    val title: String,
+    val agent: DirectAgent,
+)
+
 data class CreatedDirectSession(
     val projectId: String,
     val chatId: String,
@@ -121,7 +134,10 @@ class MainViewModel @JvmOverloads constructor(
     private var shortcutOpenings = 0L
     private var privateKeyBytes: ByteArray? = null
     private val _forgetting = MutableStateFlow(false)
-    private val _creatingChat = MutableStateFlow(false)
+    private val _startingSessions = MutableStateFlow<List<StartingSession>>(emptyList())
+    private var startingIds = 0L
+    /** Starting sessions to open once made: leaving for another place forgets them. */
+    private val openWhenMade = mutableSetOf<Long>()
     private val _creatingWorkspace = MutableStateFlow(false)
     private val _createdDirectSession = MutableStateFlow<CreatedDirectSession?>(null)
     private val _deletingChat = MutableStateFlow(false)
@@ -135,6 +151,7 @@ class MainViewModel @JvmOverloads constructor(
     val privateKeyName: StateFlow<String?> = _privateKeyName.asStateFlow()
     val createdDirectSession: StateFlow<CreatedDirectSession?> =
         _createdDirectSession.asStateFlow()
+    val startingSessions: StateFlow<List<StartingSession>> = _startingSessions.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val creatingWorkspace: StateFlow<Boolean> = _creatingWorkspace.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
@@ -604,9 +621,15 @@ class MainViewModel @JvmOverloads constructor(
         access: String? = null,
         plan: Boolean? = null,
     ) {
-        if (_creatingChat.value) return
-        _creatingChat.value = true
         _error.value = null
+        val named = title.takeIf(String::isNotBlank) ?: if (sessionId == null) "New Session" else "New chat"
+        val starting = StartingSession(++startingIds, folderId, sessionId, named, agent)
+        _startingSessions.update { it + starting }
+        openWhenMade += starting.id
+        val drafts = getApplication<Application>().getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
+        val draftKey = "$folderId/${sessionId ?: "new"}"
+        // The form as it was sent: a draft written since for the next one stays.
+        val sentDraft = drafts.getString(draftKey, null)
         viewModelScope.launch {
             try {
                 val chatId = client.createChat(
@@ -618,23 +641,27 @@ class MainViewModel @JvmOverloads constructor(
                     effort = effort, access = access, plan = plan,
                     startFromRemote = startFromRemote,
                 )
-                getApplication<Application>().getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
-                    .edit().remove("$folderId/${sessionId ?: "new"}").apply()
-                _createdDirectSession.value = CreatedDirectSession(
-                    folderId,
-                    chatId,
-                    agent,
-                    title.takeIf(String::isNotBlank) ?: if (sessionId == null) "New Session" else "New chat",
-                    sessionId,
-                )
+                if (drafts.getString(draftKey, null) == sentDraft) drafts.edit().remove(draftKey).apply()
+                if (openWhenMade.remove(starting.id)) {
+                    _createdDirectSession.value = CreatedDirectSession(folderId, chatId, agent, named, sessionId)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 _error.value = error.message ?: "Could not create a session"
             } finally {
-                _creatingChat.value = false
+                openWhenMade -= starting.id
+                _startingSessions.update { it - starting }
             }
         }
+    }
+
+    /**
+     * The reader went somewhere else: sessions still starting are not opened
+     * when made, and show up in their projects instead.
+     */
+    fun stopOpeningStartingSessions() {
+        openWhenMade.clear()
     }
 
     fun consumeCreatedDirectSession(session: CreatedDirectSession) {

@@ -102,6 +102,7 @@ import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
+import com.restartfu.xd.mobile.StartingSession
 import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.mobile.UsageViewModel
 import com.restartfu.xd.model.DirectAgent
@@ -261,8 +262,14 @@ internal fun MinimalMobileApp(
         onDispose { model.client.setVisibleChat(null) }
     }
     val showProjects = { mobileDestination = MobileDestination.PROJECTS }
-    val showTerminal = { mobileDestination = MobileDestination.TERMINAL }
-    val showUsage = { mobileDestination = MobileDestination.USAGE }
+    val showTerminal = {
+        model.stopOpeningStartingSessions()
+        mobileDestination = MobileDestination.TERMINAL
+    }
+    val showUsage = {
+        model.stopOpeningStartingSessions()
+        mobileDestination = MobileDestination.USAGE
+    }
     val addChat: (MinimalSession) -> Unit = { session ->
         if (session.terminalChatId.startsWith("session:")) {
             createChatIn = session
@@ -410,6 +417,7 @@ internal fun MinimalMobileApp(
                         onRenameProject = { renamingProjectId = it.id },
                         onDeleteProject = { deletingProject = it },
                         open = { _, session ->
+                            model.stopOpeningStartingSessions()
                             activeSessionId = session.id
                             // Opening a session always reveals at least its most recent chat.
                             if (session.chatIds.all { it in hiddenChatIds }) {
@@ -587,6 +595,7 @@ private fun MinimalProjectsHome(
     open: (MinimalProject, MinimalSession) -> Unit,
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
+    val starting by model.startingSessions.collectAsStateWithLifecycle()
     var shelfOpen by rememberSaveable { mutableStateOf(false) }
     // Saved by project id, so an open editor survives recreating the activity.
     var contextForId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -756,6 +765,7 @@ private fun MinimalProjectsHome(
                                         project = project,
                                         icon = ownerIcons[project.owner],
                                         sessions = tree.activeSessions(project.id),
+                                        starting = starting.filter { it.projectId == project.id && it.sessionId == null },
                                         signalOf = signalOf,
                                         open = { session -> open(project, session) },
                                         actions = actions,
@@ -1939,6 +1949,8 @@ private fun OpenDrawer(
     project: MinimalProject,
     icon: ByteArray?,
     sessions: List<MinimalSession>,
+    /** New sessions sent to the host and not made yet. */
+    starting: List<StartingSession>,
     signalOf: (MinimalSession) -> SessionSignal,
     open: (MinimalSession) -> Unit,
     actions: SessionActions,
@@ -1964,8 +1976,11 @@ private fun OpenDrawer(
             pause = pause,
             menu = menu,
         )
+        starting.forEach { session ->
+            key("starting-${session.id}") { StartingRow(session) }
+        }
         // Kept to one quiet line: several empty projects can be open at once.
-        if (sessions.isEmpty()) {
+        if (sessions.isEmpty() && starting.isEmpty()) {
             Text(
                 "No sessions yet",
                 modifier = Modifier.padding(start = 30.dp, end = 10.dp, bottom = 6.dp),
@@ -1978,6 +1993,38 @@ private fun OpenDrawer(
             key(session.id) {
                 SessionRow(session = session, signal = signalOf(session), onClick = { open(session) }, actions = actions)
             }
+        }
+    }
+}
+
+/** A new session the host is still setting up, laid out as its row will be. */
+@Composable
+private fun StartingRow(session: StartingSession) {
+    val signals = LocalXdSignals.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 18.dp)
+            .heightIn(min = 64.dp)
+            .padding(start = 12.dp, end = 16.dp)
+            .semantics(mergeDescendants = true) {},
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        BackendIcon(session.agent.wire, size = 15.dp)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                session.title,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "Starting…",
+                style = MaterialTheme.typography.labelMedium,
+                color = signals.working,
+                maxLines = 1,
+            )
         }
     }
 }
