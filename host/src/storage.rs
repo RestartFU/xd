@@ -3860,19 +3860,7 @@ impl StateStore {
             Some(workdir) => workdir,
             None => return String::new(),
         };
-        if let Some(signature) = head_file_signature(Path::new(&workdir)) {
-            return signature;
-        }
-        let Ok((status, stdout, _)) = run_git(
-            Path::new(&workdir),
-            &["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"],
-        ) else {
-            return String::new();
-        };
-        if !status.success() {
-            return String::new();
-        }
-        String::from_utf8_lossy(&stdout).into_owned()
+        repository_head_signature_at(Path::new(&workdir))
     }
 
     pub(crate) fn perform_git_action(&self, request: &Value) -> Result<Value, StorageError> {
@@ -8682,6 +8670,23 @@ fn git_dir(workdir: &Path) -> Option<PathBuf> {
 /// the branch's loose ref, or packed refs when there is none. Changes when the
 /// checkout commits, switches branch, or detaches. None when the repository
 /// keeps its refs some other way.
+/// The head signature of one checkout: from Git's files, or from git itself
+/// when they cannot say.
+fn repository_head_signature_at(workdir: &Path) -> String {
+    if let Some(signature) = head_file_signature(workdir) {
+        return signature;
+    }
+    let Ok((status, stdout, _)) =
+        run_git(workdir, &["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"])
+    else {
+        return String::new();
+    };
+    if !status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&stdout).into_owned()
+}
+
 fn head_file_signature(workdir: &Path) -> Option<String> {
     let git_dir = git_dir(workdir)?;
     let common = match fs::read_to_string(git_dir.join("commondir")) {
@@ -8710,6 +8715,11 @@ fn head_file_signature(workdir: &Path) -> Option<String> {
         }
         Err(_) => return None,
     };
+    // A branch that names another ref moves when that one does, which this
+    // file does not show: git resolves the chain.
+    if target.trim_start().starts_with("ref:") {
+        return None;
+    }
     Some(format!("{head}{target}"))
 }
 
@@ -17041,6 +17051,15 @@ mod tests {
                 .unwrap()
                 .contains("refs/heads/other")
         );
+        // A branch that is itself a symbolic ref is left to git, since a
+        // commit moves the ref it names rather than either file read here.
+        git(&["checkout", "-q", "feature"]);
+        git(&["symbolic-ref", "refs/heads/alias", "refs/heads/feature"]);
+        git(&["symbolic-ref", "HEAD", "refs/heads/alias"]);
+        assert_eq!(head_file_signature(&repository.join("src")), None);
+        let through_git = repository_head_signature_at(&repository);
+        git(&["commit", "-q", "--allow-empty", "-m", "through the alias"]);
+        assert_ne!(repository_head_signature_at(&repository), through_git);
     }
 
     #[test]
