@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, Read, Write},
     net::{Shutdown, TcpListener, UdpSocket},
     os::{
         fd::AsRawFd,
@@ -31,6 +31,14 @@ use xd_transport::rustls::{
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(15);
+/// The daemon flag for a daemon the xd app started, which stops when it closes.
+pub(super) const STOP_WITH_APP: &str = "--stop-with-app";
+/// Set by the xd app on the bridge it runs, so the bridge tells the daemon
+/// which connection is the app's and starts it with `--stop-with-app`.
+const APP_BRIDGE: &str = "XD_APP_BRIDGE";
+/// How long a daemon the app started waits for the app to come back once its
+/// last connection closed. It covers a reconnect and an app restart.
+const APP_CLOSE_GRACE: Duration = Duration::from_secs(10);
 const MAX_CLIENTS: usize = 64;
 /// A child forked just before its daemon died keeps the lock and the listening
 /// socket until its `exec` closes them, so a busy lock can outlive the daemon.
@@ -167,10 +175,17 @@ fn ask_for_an_answer(socket: &Path) -> bool {
         && stream.read(&mut answer).is_ok_and(|read| read > 0)
 }
 
-pub(super) fn run(options: HostOptions) -> Result<(), String> {
-    run_inner(options).map_err(|e| e.to_string())
+pub(super) fn run(options: HostOptions, stop_with_app: bool) -> Result<(), String> {
+    run_inner(options, stop_with_app).map_err(|e| e.to_string())
 }
-fn run_inner(options: HostOptions) -> io::Result<()> {
+fn app_close_grace() -> Duration {
+    // Tests shorten it.
+    std::env::var("XD_APP_CLOSE_GRACE_MS")
+        .ok()
+        .and_then(|millis| millis.parse().ok())
+        .map_or(APP_CLOSE_GRACE, Duration::from_millis)
+}
+fn run_inner(options: HostOptions, stop_with_app: bool) -> io::Result<()> {
     let paths = paths(&options)?;
     let Some(_singleton) = singleton(&paths, LOCK_WAIT)? else {
         return Ok(());
@@ -195,6 +210,9 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
     engine.start_reporting_agents();
     #[cfg(target_os = "linux")]
     engine.start_memory_guard();
+    if stop_with_app {
+        engine.stop_with_app();
+    }
     let listener = UnixListener::bind(&paths.socket)?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
@@ -218,8 +236,26 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
         libc::signal(libc::SIGINT, stop_signal as *const () as libc::sighandler_t);
     }
     let mut clients = Vec::<thread::JoinHandle<()>>::new();
+    let app_grace = app_close_grace();
+    let mut installed_at = None::<Instant>;
     while !STOP.load(Ordering::Acquire) && !engine.shutdown_requested() {
         clients.retain(|client| !client.is_finished());
+        if stop_with_app {
+            // An update the app asked for finishes before the host stops.
+            if engine.installing_update() {
+                installed_at = Some(Instant::now());
+            }
+            // The bridge that started this daemon connects right after it
+            // listens, and the engine counts from its start until then.
+            if engine
+                .app_absent_for()
+                .is_some_and(|absent| absent >= app_grace)
+                && installed_at.is_none_or(|at| at.elapsed() >= app_grace)
+            {
+                eprintln!("xd-host: stopping, because the xd app that started it closed");
+                break;
+            }
+        }
         match listener.accept() {
             Ok((stream, _)) if clients.len() < MAX_CLIENTS => {
                 // Accepted sockets inherit nonblocking mode on macOS.
@@ -256,7 +292,9 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn connect(options: &HostOptions, start: bool) -> io::Result<UnixStream> {
+/// Connects to the daemon, starting it when `start` is set. `app` starts it so
+/// that it stops when the xd app closes.
+pub(super) fn connect(options: &HostOptions, start: bool, app: bool) -> io::Result<UnixStream> {
     let paths = paths(options)?;
     if let Ok(stream) = UnixStream::connect(&paths.socket) {
         return Ok(stream);
@@ -276,6 +314,9 @@ pub(super) fn connect(options: &HostOptions, start: bool) -> io::Result<UnixStre
         .arg(&options.database)
         .arg("--workspaces")
         .arg(&options.workspaces)
+        .args(app.then_some(STOP_WITH_APP))
+        // Agents and shells the daemon starts are not the app.
+        .env_remove(APP_BRIDGE)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log))
@@ -318,13 +359,24 @@ pub(super) fn connect(options: &HostOptions, start: bool) -> io::Result<UnixStre
 }
 
 pub(super) fn bridge(options: HostOptions) -> Result<(), String> {
-    let mut stream = connect(&options, true).map_err(|e| e.to_string())?;
+    let app = std::env::var_os(APP_BRIDGE).is_some_and(|value| value == "1");
+    let mut stream = connect(&options, true, app).map_err(|e| e.to_string())?;
     let mut info = rpc(&mut stream, "daemon-info").map_err(|e| e.to_string())?;
     // A restart keeps the daemon's arguments, so it cannot fix this mismatch.
     check_workspaces(&options, &info)?;
+    // Only a daemon the app started stops when it closes. One started any
+    // other way keeps running, and an older one refuses this. It is sent
+    // before any replacement: a busy daemon refuses to restart, and the app's
+    // retries must keep it running until it can.
+    if app {
+        let _ = rpc(&mut stream, "app-client");
+    }
     if !matches_this_build(&info) {
         (stream, info) = replace_stale_daemon(&options, stream, &info)?;
         check_workspaces(&options, &info)?;
+        if app {
+            let _ = rpc(&mut stream, "app-client");
+        }
     }
     let mut reader = stream.try_clone().map_err(|e| e.to_string())?;
     let close = stream.try_clone().map_err(|e| e.to_string())?;
@@ -361,6 +413,9 @@ fn replace_stale_daemon(
     mut stale: UnixStream,
     info: &Value,
 ) -> Result<(UnixStream, Value), String> {
+    // A daemon this has to start while the old one re-executes takes the old
+    // one's place, so it keeps its lifetime rather than this bridge's.
+    let stops_with_app = info["stops_with_app"] == true;
     let stop = stop_command(options);
     let status = request(&mut stale, json!({"op": "host-update"})).unwrap_or_default();
     if !restarts_into_this_host(info, &status) {
@@ -385,7 +440,7 @@ fn replace_stale_daemon(
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
         // The old process answers until it re-executes, then refuses briefly.
-        if let Ok(mut stream) = connect(options, true)
+        if let Ok(mut stream) = connect(options, true, stops_with_app)
             && let Ok(info) = rpc(&mut stream, "daemon-info")
             && matches_this_build(&info)
         {
@@ -466,13 +521,18 @@ pub(super) fn request_within(
     body["_xd_request"] = json!(0);
     stream.set_read_timeout(Some(timeout))?;
     writeln!(stream, "{body}")?;
-    let mut reader = BufReader::new(stream.try_clone()?);
     loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Err(io::Error::other("Daemon disconnected."));
+        // One byte at a time: the bridge passes on what follows the reply, so
+        // nothing past its line may be read here.
+        let mut line = Vec::new();
+        let mut byte = [0];
+        while byte[0] != b'\n' {
+            if stream.read(&mut byte)? == 0 {
+                return Err(io::Error::other("Daemon disconnected."));
+            }
+            line.push(byte[0]);
         }
-        let frame: Value = serde_json::from_str(&line)?;
+        let frame: Value = serde_json::from_slice(&line)?;
         if frame["_xd_request"] == 0 {
             // A restarting daemon can close right after replying, and macOS then
             // rejects socket options with EINVAL. The reply is already in hand.
@@ -482,7 +542,7 @@ pub(super) fn request_within(
     }
 }
 pub(super) fn control(options: HostOptions, operation: &str) -> Result<(), String> {
-    let mut stream = connect(&options, false).map_err(|e| e.to_string())?;
+    let mut stream = connect(&options, false, false).map_err(|e| e.to_string())?;
     let reply = rpc(&mut stream, operation).map_err(|e| e.to_string())?;
     println!("{reply}");
     Ok(())
@@ -644,6 +704,7 @@ impl PeerServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
 
     fn lock_fixture() -> (PathBuf, Paths, File) {
         // Not the temporary directory: on macOS its path is too long for a socket.

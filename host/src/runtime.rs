@@ -1059,7 +1059,16 @@ impl TurnRuntime {
             }
         }
         if let Ok(mut sessions) = self.inner.sessions.lock() {
-            for session in sessions.values_mut() {
+            for (chat_id, session) in sessions.iter_mut() {
+                // Its turn ended, but the agent waits on background agents or
+                // commands that stop with it.
+                let waiting = session
+                    .router
+                    .lock()
+                    .is_ok_and(|router| !router.tasks.is_empty());
+                if waiting {
+                    let _ = self.inner.store.mark_waiting_resume_after_restart(chat_id);
+                }
                 if let Ok(mut child) = session.child.lock() {
                     let _ = terminate_agent(&mut child);
                 }
@@ -5372,6 +5381,35 @@ read next"#,
         wait_for("the task to finish", || {
             !agent.runtime.has_background_tasks()
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shutdown_marks_a_chat_waiting_on_background_work_to_resume() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Watch CI","task_type":"local_bash","is_backgrounded":true}}'
+{}
+read poke"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("watch CI");
+        assert!(agent.runtime.has_background_tasks());
+        assert!(agent.store.take_chats_to_resume().unwrap().is_empty());
+
+        agent.runtime.shutdown();
+        let chats = agent.store.take_chats_to_resume().unwrap();
+        assert_eq!(chats.len(), 1, "{chats:?}");
+        assert_eq!(chats[0].chat_id, agent.chat);
+        assert!(chats[0].waiting);
+        assert_eq!(chats[0].prompt(), crate::storage::WAITING_RESUME_PROMPT);
+        assert_eq!(
+            chats[0].last_message,
+            agent.store.latest_user_message(&agent.chat).unwrap()
+        );
+        assert_eq!(agent.store.chat(&agent.chat).unwrap()["resumable"], true);
     }
 
     #[cfg(unix)]

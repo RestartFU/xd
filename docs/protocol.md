@@ -111,14 +111,17 @@ accepts at most ten guesses.
 The client verifies the pairing code's SHA-256 leaf-certificate fingerprint before
 sending either secret. Authentication replies precede event fan-out. Tokens are
 stored hashed on the host. `devices`, `rename-device`, `revoke-device`,
-`peer-pairing`, and `daemon-stop` are local-only. Revocation disconnects every
+`peer-pairing`, `daemon-stop`, and `app-client` are local-only. Revocation disconnects every
 session for that device immediately. A revoked token or changed certificate
 requires explicit re-pairing.
 
 `daemon-info` returns protocol/build identity, PID, and the installed host binary
 that an update restart re-executes (`executable`, null outside an installed
-bundle). `daemon-stop` acknowledges
-before shutting down the shared runtime. Remote listeners persist across daemon
+bundle), and whether it stops once the xd app that started it closes
+(`stops_with_app`). `daemon-stop` acknowledges
+before shutting down the shared runtime. `app-client` marks the connection as the
+xd app's; a daemon started with `--stop-with-app` stops once no such connection has
+been open for ten seconds. The local bridge sends it when `XD_APP_BRIDGE=1`. Remote listeners persist across daemon
 restarts, but unused codes and pending backend requests do not.
 
 ## State reads
@@ -398,7 +401,7 @@ boundary, not an event cursor.
 | `agent-auth` | none | `providers:[…]` as in [Assistant accounts](#assistant-accounts), and `multiple_accounts: boolean`, false on a host that keeps only the user's own sign-in; checks every account again |
 | `host-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-cli-updates` | optional `action` of `status`, `check`, `install`; `install` requires `provider` | `providers:[{provider,display_name,state,available,updatable, optional version, latest, detail}]`; `state` is `idle`, `updating`, `updated`, or `failed`; each change is also sent as an `agent-cli-update` event holding one provider |
-| `resume-interrupted` | `resume: boolean` | `resumed: string[]`. Answers for every chat cut off since the last answer, which wait in storage until then. Local and authenticated remote clients may answer, and the first answer settles them: `true` sends a visible continuation message to each, unless the chat has moved on, and `false` discards them |
+| `resume-interrupted` | `resume: boolean` | `resumed: string[]`. Answers for every chat cut off since the last answer, or left waiting on background agents or commands that a restart stopped, which wait in storage until then. Local and authenticated remote clients may answer, and the first answer settles them: `true` sends a visible continuation message to each (one that says the background work stopped, for a waiting chat), unless the chat has moved on, and `false` discards them |
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
 | `owner-icon` | `owner: string` GitHub login from a folder's `owner` | `owner`, and either `mime` of `image/png` or `image/jpeg` with base64 `data`, `pending: true` while the host fetches, `retry: true` when the last fetch failed, or none of these when the account has no avatar; an uncached avatar is answered as pending and sent to the asking connection as an `owner-icon` event |
 | `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the host |
@@ -662,14 +665,20 @@ stays, such as a file another device added meanwhile, or the files an image-only
 client never saw. A message sent apart from the draft, such as a shortcut,
 leaves the draft's attachments alone.
 
-Desktop clients may provide `worktree_name`, `worktree_backend`, and
-`worktree_model` when the chat is configured to create a new worktree. The
-name is used directly as the hint when supplied; otherwise the host asks a
-low-cost model to choose a short worktree name before the first turn: the
-`worktree_model` when given, or else the assistant's naming model from
-`chat-title-settings` (whether or not titles are enabled), once its CLI reports
-offering it. Without either, or for older or other clients that omit them, the
-host falls back to a prompt slug.
+When a chat's first message creates its worktree, the worktree's branch is
+named from the message's first line, so the send never waits on a model. Then,
+in the background, a low-cost model chooses a short name and the host renames
+the branch to `xd/<name>-<chat suffix>`. It does this only while the branch is
+still the one xd made. The model is `worktree_model` with `worktree_backend`
+when a client gives them and the CLI still offers that model. Otherwise it is
+the assistant's naming model from `chat-title-settings`, whether or not titles
+are enabled. An assistant that offers none of those keeps the name from the
+message. A client may give `worktree_name` to use that name instead, or
+`generate_worktree_name: false` to keep the name from the message. `new-chat`
+takes the same fields, with the first message in `prompt`, for a worktree it
+creates. A worktree that `new-chat` creates without `prompt` is named for the
+chat's placeholder title, and the chat's first message renames it in the same
+way.
 
 ### `set-draft`
 

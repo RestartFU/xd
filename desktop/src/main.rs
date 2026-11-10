@@ -81,6 +81,7 @@ mod selection;
 mod settings;
 mod source_build;
 mod terminal;
+mod undo;
 mod update_popup;
 mod usage_view;
 #[cfg(any(target_os = "windows", test))]
@@ -92,11 +93,12 @@ use editor::{
     Backspace as EditorBackspace, Copy as EditorCopy, Cut as EditorCut, Delete as EditorDelete,
     DeleteWord as EditorDeleteWord, DeleteWordForward as EditorDeleteWordForward,
     Down as EditorDown, EditorEvent, End as EditorEnd, FileEditor, Home as EditorHome,
-    Left as EditorLeft, Newline as EditorNewline, Paste as EditorPaste, Right as EditorRight,
-    Save as EditorSave, SelectAll as EditorSelectAll, SelectLeft as EditorSelectLeft,
-    SelectRight as EditorSelectRight, SelectWordLeft as EditorSelectWordLeft,
-    SelectWordRight as EditorSelectWordRight, Submit as EditorSubmit, SubmitNow as EditorSubmitNow,
-    Tab as EditorTab, Up as EditorUp, WordLeft as EditorWordLeft, WordRight as EditorWordRight,
+    Left as EditorLeft, Newline as EditorNewline, Paste as EditorPaste, Redo as EditorRedo,
+    Right as EditorRight, Save as EditorSave, SelectAll as EditorSelectAll,
+    SelectLeft as EditorSelectLeft, SelectRight as EditorSelectRight,
+    SelectWordLeft as EditorSelectWordLeft, SelectWordRight as EditorSelectWordRight,
+    Submit as EditorSubmit, SubmitNow as EditorSubmitNow, Tab as EditorTab, Undo as EditorUndo,
+    Up as EditorUp, WordLeft as EditorWordLeft, WordRight as EditorWordRight,
 };
 use input::{
     Backspace, ClearScreen as TerminalClearScreen, ComposerEvent, ComposerInput,
@@ -108,10 +110,10 @@ use input::{
     ControlT as TerminalControlT, ControlU as TerminalControlU, ControlW as TerminalControlW,
     ControlX as TerminalControlX, ControlY as TerminalControlY, Copy, Cut, Delete, DeleteWord,
     DeleteWordForward, Down, End, EndOfFile as TerminalEndOfFile, Escape, Home, Interrupt, Left,
-    PageDown as TerminalPageDown, PageUp as TerminalPageUp, Paste,
+    PageDown as TerminalPageDown, PageUp as TerminalPageUp, Paste, Redo,
     ReverseSearch as TerminalReverseSearch, Right, SelectAll, SelectLeft, SelectRight,
     SelectWordLeft, SelectWordRight, ShiftTab as TerminalShiftTab, ShowCharacterPalette, Submit,
-    Suspend as TerminalSuspend, Tab, Up, WordLeft, WordRight, terminal_paste_bytes,
+    Suspend as TerminalSuspend, Tab, Undo, Up, WordLeft, WordRight, terminal_paste_bytes,
 };
 use minimal::{
     AgentCli, MinimalRoute, ProjectCard, SessionCard, SettledCard, age_label, folder_tree,
@@ -5732,7 +5734,7 @@ impl XdDesktop {
                 }
                 if !self.draft_dirty {
                     let draft = self.model.draft.clone();
-                    self.set_composer_text(draft, cx);
+                    self.sync_composer_draft(draft, cx);
                 }
                 if self
                     .first_chat_prompts
@@ -6487,7 +6489,7 @@ impl XdDesktop {
                 }
                 if !self.draft_dirty {
                     let draft = self.model.draft.clone();
-                    self.set_composer_text(draft, cx);
+                    self.sync_composer_draft(draft, cx);
                 }
             }
             "commands" if self.event_is_active(&body) => {
@@ -11178,6 +11180,15 @@ impl XdDesktop {
             .collect();
         if let Some(panel) = &mut self.shortcut_panel {
             panel.rows = rows;
+        }
+    }
+
+    /// Shows the host's copy of the draft. The host echoes back each draft
+    /// this box saves, and loading that over itself would lose the caret and
+    /// what Ctrl+Z can undo.
+    fn sync_composer_draft(&mut self, draft: String, cx: &mut Context<Self>) {
+        if draft != self.composer {
+            self.set_composer_text(draft, cx);
         }
     }
 
@@ -29343,6 +29354,23 @@ Binary files /dev/null and b/image.png differ\n";
     }
 }
 
+/// Undo and redo in every text box the desktop draws itself. A message box
+/// has its own key context, so it needs the file editor's bindings again.
+fn undo_key_bindings() -> Vec<KeyBinding> {
+    let mut bindings = Vec::new();
+    for undo in ["ctrl-z", "cmd-z"] {
+        bindings.push(KeyBinding::new(undo, Undo, Some("ComposerInput")));
+        bindings.push(KeyBinding::new(undo, EditorUndo, Some("FileEditor")));
+        bindings.push(KeyBinding::new(undo, EditorUndo, Some("MessageEditor")));
+    }
+    for redo in ["ctrl-shift-z", "cmd-shift-z", "ctrl-y"] {
+        bindings.push(KeyBinding::new(redo, Redo, Some("ComposerInput")));
+        bindings.push(KeyBinding::new(redo, EditorRedo, Some("FileEditor")));
+        bindings.push(KeyBinding::new(redo, EditorRedo, Some("MessageEditor")));
+    }
+    bindings
+}
+
 fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> {
     text_system
         .add_fonts(EMBEDDED_UI_FONTS.into_iter().map(Cow::Borrowed).collect())
@@ -29556,6 +29584,7 @@ fn main() {
                 KeyBinding::new("ctrl-shift-v", Paste, Some("TerminalInput")),
                 KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
             ]);
+            cx.bind_keys(undo_key_bindings());
             let settings = AppSettings::load();
             let bounds = Bounds::centered(
                 None,

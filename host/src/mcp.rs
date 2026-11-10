@@ -55,6 +55,6 @@ pub(super) fn serve(options: HostOptions, chat: &str) -> Result<(), String> {
 /// choose: every request is about the chat the server was started for.
 fn ask(options: &HostOptions, chat: &str, mut request: Value) -> Result<Value, String> {
     request["chat"] = json!(chat);
-    let mut stream = daemon::connect(options, false).map_err(|error| error.to_string())?;
+    let mut stream = daemon::connect(options, false, false).map_err(|error| error.to_string())?;
     daemon::request_within(&mut stream, request, CALL_TIMEOUT).map_err(|error| error.to_string())
 }

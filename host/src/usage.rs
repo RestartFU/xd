@@ -2051,6 +2051,32 @@ fn codex_reset_credits(summary: &Value) -> Option<Value> {
     }))
 }
 
+/// The plan as Codex's own status line names it. Codex reports billing ids,
+/// and several are sold under another name: `pro` is "Pro 200" beside
+/// `prolite` ("Pro 100"), and `team` is "Business". Ids Codex adds later
+/// fall back to their own words.
+fn codex_plan(plan_type: &str) -> String {
+    match plan_type.to_ascii_lowercase().as_str() {
+        "free" => "Free",
+        "go" => "Go",
+        "plus" => "Plus",
+        "pro" => "Pro 200",
+        "prolite" => "Pro 100",
+        "promax" => "Pro 500",
+        "team" | "self_serve_business_usage_based" => "Business",
+        "self_serve_business_prolite" => "Business Premium",
+        "business" | "ent26" | "enterprise" | "hc" | "enterprise_cbp_usage_based" => "Enterprise",
+        "enterprise_cbp_automation" => "Enterprise (Automation)",
+        "edu" | "education" => "Edu",
+        "edu_plus" => "Edu Plus",
+        "edu_pro" => "Edu Pro",
+        "sci" => "Academic Researchers",
+        "sci_plus" => "Academic Researchers Plus",
+        _ => return title_case(plan_type),
+    }
+    .to_owned()
+}
+
 fn title_case(value: &str) -> String {
     value
         .split(['_', '-', ' '])
@@ -2184,6 +2210,7 @@ fn claude_limits(mut command: std::process::Command, now: i64, zone: Tz) -> Opti
         return Some(failed());
     }
     let mut identity = None;
+    let mut plan_name = None;
     loop {
         let Some(value) = session.next() else {
             return Some(failed());
@@ -2193,9 +2220,9 @@ fn claude_limits(mut command: std::process::Command, now: i64, zone: Tz) -> Opti
         }
         let response = &value["response"];
         if response["request_id"] == "xd-usage-init" {
-            identity = response["response"]["account"]["email"]
-                .as_str()
-                .map(str::to_owned);
+            let signed_in = &response["response"]["account"];
+            identity = signed_in["email"].as_str().map(str::to_owned);
+            plan_name = signed_in["subscriptionType"].as_str().map(str::to_owned);
             if session.send(&control("xd-usage", "get_usage")).is_none() {
                 return Some(failed());
             }
@@ -2203,7 +2230,13 @@ fn claude_limits(mut command: std::process::Command, now: i64, zone: Tz) -> Opti
             if response["subtype"] == "error" {
                 return Some(failed());
             }
-            let mut account = claude_account(&response["response"], identity.as_deref(), now, zone);
+            let mut account = claude_account(
+                &response["response"],
+                identity.as_deref(),
+                plan_name.as_deref(),
+                now,
+                zone,
+            );
             account["checked_at_ms"] = json!(now_ms());
             // Read by the host's account list and removed before it is sent.
             account["email"] = json!(identity);
@@ -2212,7 +2245,25 @@ fn claude_limits(mut command: std::process::Command, now: i64, zone: Tz) -> Opti
     }
 }
 
-fn claude_account(response: &Value, identity: Option<&str>, now: i64, zone: Tz) -> Value {
+/// The plan as Claude Code names it. Its sign-in reports the account's own
+/// plan name, such as "Claude Ultra", which can be a tier the usage reply only
+/// calls `max`. The usage reply's tier is used when the sign-in names none.
+fn claude_plan(plan_name: Option<&str>, tier: Option<&str>) -> Option<String> {
+    plan_name
+        .map(str::trim)
+        .map(|name| name.strip_prefix("Claude ").unwrap_or(name).trim())
+        .filter(|name| !name.is_empty() && *name != "API")
+        .map(str::to_owned)
+        .or_else(|| tier.map(title_case))
+}
+
+fn claude_account(
+    response: &Value,
+    identity: Option<&str>,
+    plan_name: Option<&str>,
+    now: i64,
+    zone: Tz,
+) -> Value {
     if response["rate_limits_available"] != true || !response["rate_limits"].is_object() {
         let reason = if response["rate_limits_available"] == true {
             "probeFailed"
@@ -2225,7 +2276,7 @@ fn claude_account(response: &Value, identity: Option<&str>, now: i64, zone: Tz) 
     json!({
         "provider": "claude",
         "account_key": account_key("claude", identity),
-        "plan": response["subscription_type"].as_str().map(title_case),
+        "plan": claude_plan(plan_name, response["subscription_type"].as_str()),
         "checked_at_ms": now,
         "windows": windows_json(&windows, now, zone),
     })
@@ -2338,7 +2389,7 @@ fn codex_account(limits: &Value, profile: &Value, now: i64, zone: Tz) -> Value {
     json!({
         "provider": "codex",
         "account_key": account_key("codex", codex_identity(limits, profile).as_deref()),
-        "plan": plan.map(title_case),
+        "plan": plan.map(codex_plan),
         "checked_at_ms": now,
         "windows": windows_json(&windows, now, zone),
         "reset_credits": codex_reset_credits(&limits["rateLimitResetCredits"]),
@@ -2493,7 +2544,7 @@ pub(crate) fn read_codex_login(environment: &[(String, String)]) -> Option<Ident
         let email = account["email"].as_str()?;
         return Some(Identity {
             email: Some(email.to_owned()),
-            plan: account["planType"].as_str().map(title_case),
+            plan: account["planType"].as_str().map(codex_plan),
             account_key: account_key("codex", codex_login(account).as_deref()),
         });
     }
@@ -3352,8 +3403,48 @@ mod tests {
             "is_enabled": true, "used_credits": 1, "monthly_limit": 4,
         }}));
         assert_eq!(extra, Some(25.0));
-        let account = claude_account(&json!({"rate_limits_available": false}), None, 0, Tz::UTC);
+        let account = claude_account(
+            &json!({"rate_limits_available": false}),
+            None,
+            None,
+            0,
+            Tz::UTC,
+        );
         assert_eq!(account["unavailable"]["reason"], "unsupported");
+    }
+
+    #[test]
+    fn plans_use_the_names_each_cli_shows() {
+        assert_eq!(
+            claude_plan(Some("Claude Ultra"), Some("max")).as_deref(),
+            Some("Ultra")
+        );
+        assert_eq!(
+            claude_plan(Some("Claude Max"), Some("max")).as_deref(),
+            Some("Max")
+        );
+        assert_eq!(claude_plan(None, Some("max")).as_deref(), Some("Max"));
+        assert_eq!(
+            claude_plan(Some("Claude API"), Some("pro")).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(claude_plan(Some(" "), None), None);
+        for (id, name) in [
+            ("plus", "Plus"),
+            ("pro", "Pro 200"),
+            ("prolite", "Pro 100"),
+            ("promax", "Pro 500"),
+            ("team", "Business"),
+            ("business", "Enterprise"),
+            ("self_serve_business_prolite", "Business Premium"),
+            ("enterprise_cbp_automation", "Enterprise (Automation)"),
+            ("hc", "Enterprise"),
+            ("education", "Edu"),
+            ("sci_plus", "Academic Researchers Plus"),
+            ("future_tier", "Future Tier"),
+        ] {
+            assert_eq!(codex_plan(id), name, "{id}");
+        }
     }
 
     #[test]
@@ -3372,7 +3463,7 @@ mod tests {
             ]},
         });
         let account = codex_account(&limits, &json!({"account":{"email":"a@b.c"}}), 0, Tz::UTC);
-        assert_eq!(account["plan"], "Pro");
+        assert_eq!(account["plan"], "Pro 200");
         assert_eq!(account["windows"][0]["kind"], "weekly");
         assert_eq!(account["windows"][0]["label"], "Weekly");
         assert_eq!(account["reset_credits"]["available_count"], 2);
@@ -3443,12 +3534,12 @@ echo '{"id":2,"error":{"code":-32600,"message":"nope"}}'; sleep 30"#,
         let claude = script(
             &directory,
             "claude",
-            r#"read a; echo '{"type":"control_response","response":{"request_id":"xd-usage-init","subtype":"success","response":{"account":{"email":"a@b.c"}}}}'
+            r#"read a; echo '{"type":"control_response","response":{"request_id":"xd-usage-init","subtype":"success","response":{"account":{"email":"a@b.c","subscriptionType":"Claude Ultra"}}}}'
 read b; echo '{"type":"control_response","response":{"request_id":"xd-usage","subtype":"success","response":{"subscription_type":"max","rate_limits_available":true,"rate_limits":{"seven_day":{"utilization":50,"resets_at":null}}}}}'
 sleep 30"#,
         );
         let account = claude_limits(claude, 0, Tz::UTC).unwrap();
-        assert_eq!(account["plan"], "Max");
+        assert_eq!(account["plan"], "Ultra", "the sign-in's plan name wins");
         assert_eq!(account["windows"][0]["id"], "seven_day");
         assert_eq!(
             account["account_key"],

@@ -43,14 +43,17 @@ Remote desktop / Android ── pinned TLS + device token ┘
 ```
 
 Clients share the same chats, drafts, queues, pending approvals, and running
-turns. Disconnecting or closing a client leaves the daemon running. Reconnecting
+turns. Disconnecting a client leaves the daemon running, but closing the desktop
+app stops the local daemon it started (see [the host](host.md#when-the-host-stops)). Reconnecting
 takes fresh snapshots and reconciles live output using turn watermarks. A daemon
-restart interrupts active turns, preserves recorded history and backend thread
-IDs, and reports interrupted work. It continues that work only if the first desktop to
+restart interrupts active turns and the background agents and commands chats
+wait on, preserves recorded history and backend thread IDs, and reports
+interrupted work. It continues that work only if the first desktop to
 connect afterward has **Resume chats after a restart** on.
 
 The host must have xd and the assistant CLIs installed. Starting the desktop
-starts its daemon automatically. For a headless host, run:
+starts its daemon automatically, and closing it stops that daemon. For a
+headless host, or to keep work running while the app is closed, run:
 
 ```sh
 xd-host daemon --data "$HOME/.local/share/xd"
