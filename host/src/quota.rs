@@ -388,7 +388,8 @@ impl Pass {
     /// baseline nothing to measure against; a failed one keeps it while the
     /// account works.
     fn unreadable(&self, key: &(String, String), seen: &[String], other_login: bool) {
-        let idle = self.working_on(&key.0, &key.1).is_empty();
+        let working = self.working_on(&key.0, &key.1);
+        let idle = working.is_empty();
         let Ok(mut ledger) = self.ledger.lock() else {
             return;
         };
@@ -396,14 +397,23 @@ impl Pass {
             return;
         };
         entry.failed = true;
-        if idle || other_login {
-            entry.last = None;
+        if !idle && !other_login {
+            return;
         }
-        if idle {
-            entry.sharers.retain(|chat_id| !seen.contains(chat_id));
-            if entry.sharers.is_empty() {
-                ledger.accounts.remove(key);
-            }
+        // The interval is dropped, and the chats seen before the reading that
+        // no longer work leave with it, their logins too, so one that ran as
+        // an old login cannot keep every later reading from counting.
+        entry.last = None;
+        entry.sharers.retain(|chat_id| {
+            !seen.contains(chat_id) || working.iter().any(|(id, _)| id == chat_id)
+        });
+        let kept = &entry.sharers;
+        entry.logins.retain(|chat_id, _| kept.contains(chat_id));
+        for (chat_id, tag) in &working {
+            entry.logins.insert(chat_id.clone(), tag.clone());
+        }
+        if idle && entry.sharers.is_empty() {
+            ledger.accounts.remove(key);
         }
     }
 
