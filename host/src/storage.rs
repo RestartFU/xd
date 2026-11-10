@@ -8797,6 +8797,10 @@ fn worktree_signature(common: &Path) -> Option<String> {
                         .is_ok_and(|target| target.trim_start().starts_with("ref:"))
             })
     };
+    // Refs kept in a reftable are not files this could check.
+    if common.join("reftable").exists() {
+        return None;
+    }
     let mut signature = fs::read_to_string(common.join("HEAD")).ok()?;
     if names_a_symbolic_branch(&signature) {
         return None;
@@ -16975,6 +16979,47 @@ mod tests {
             )
             .unwrap();
         repository
+    }
+
+    #[test]
+    fn reftable_repositories_are_listed_by_git() {
+        let fixture = Fixture::new();
+        let repository = fixture.root.join("reftable");
+        let git = |arguments: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(["-c", "user.name=xd", "-c", "user.email=xd@example.com"])
+                    .args(arguments)
+                    .current_dir(&fixture.root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&[
+            "init",
+            "-q",
+            "--ref-format=reftable",
+            "-b",
+            "main",
+            "reftable",
+        ]);
+        git(&[
+            "-C",
+            "reftable",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "first",
+        ]);
+        assert!(repository.join(".git/reftable").exists());
+        for _ in 0..2 {
+            let before = GIT_WORKTREE_LISTS.get();
+            let worktrees = cached_git_worktrees(&repository).unwrap();
+            assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+            assert_eq!(GIT_WORKTREE_LISTS.get() - before, 1, "never cached");
+        }
     }
 
     #[test]
