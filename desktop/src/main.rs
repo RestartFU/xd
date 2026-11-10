@@ -827,6 +827,28 @@ struct OpenBrowserUrl {
     window: gpui::AnyWindowHandle,
 }
 
+/// Whether a link click asked for the computer's own web browser rather than
+/// the chat's browser pane: Ctrl+click, or Cmd+click on macOS.
+fn opens_in_system_browser(modifiers: gpui::Modifiers) -> bool {
+    modifiers.secondary()
+}
+
+/// Opens a clicked link in the chat's browser pane, or in the computer's
+/// default web browser when the click held Ctrl (Cmd on macOS).
+fn open_clicked_link(url: &str, window: &mut Window, cx: &mut App) {
+    if opens_in_system_browser(window.modifiers()) {
+        cx.open_url(url);
+        return;
+    }
+    window.dispatch_action(
+        Box::new(OpenBrowserUrl {
+            url: url.to_owned(),
+            window: window.window_handle(),
+        }),
+        cx,
+    );
+}
+
 /// A transcript image was clicked. Routed by window, like a link click, for the
 /// same reason: it can arrive with nothing focused.
 #[derive(Clone, PartialEq, gpui::Action)]
@@ -8340,6 +8362,22 @@ impl XdDesktop {
         }
     }
 
+    /// Opens a clicked link in the chat's browser pane, or in the computer's
+    /// default web browser when the click held Ctrl (Cmd on macOS).
+    fn open_link(
+        &mut self,
+        url: &str,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if opens_in_system_browser(event.modifiers()) {
+            cx.open_url(url);
+        } else {
+            self.open_browser_url(url, window, cx);
+        }
+    }
+
     fn open_browser_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.native_pane = NativePane::Chat;
         self.set_browser_open(true);
@@ -12201,13 +12239,7 @@ impl XdDesktop {
                     ranges,
                     move |index, window, cx| {
                         if let Some(url) = urls.get(index) {
-                            window.dispatch_action(
-                                Box::new(OpenBrowserUrl {
-                                    url: url.clone(),
-                                    window: window.window_handle(),
-                                }),
-                                cx,
-                            );
+                            open_clicked_link(url, window, cx);
                         }
                     },
                 )
@@ -12792,8 +12824,8 @@ impl XdDesktop {
                             })
                             .into()
                         })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_browser_url(&url, window, cx);
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            this.open_link(&url, event, window, cx);
                         }))
                         .child(
                             svg()
@@ -12916,8 +12948,8 @@ impl XdDesktop {
                         })
                         .into()
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_browser_url(&url, window, cx);
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.open_link(&url, event, window, cx);
                     }))
                     .child(icon(
                         GIT_PULL_REQUEST_ICON,
@@ -13034,9 +13066,9 @@ impl XdDesktop {
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(colors.surface_high)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.close_pull_request_panel(window, cx);
-                        this.open_browser_url(&open_url, window, cx);
+                        this.open_link(&open_url, event, window, cx);
                     }))
                     .child(icon(
                         GIT_PULL_REQUEST_ICON,
@@ -15020,13 +15052,7 @@ impl XdDesktop {
             ranges,
             move |link, window, cx| {
                 if let Some(url) = urls.get(link) {
-                    window.dispatch_action(
-                        Box::new(OpenBrowserUrl {
-                            url: url.clone(),
-                            window: window.window_handle(),
-                        }),
-                        cx,
-                    );
+                    open_clicked_link(url, window, cx);
                 }
             },
         )
@@ -23701,7 +23727,7 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[gpui::test]
-    fn clicking_a_native_markdown_link_dispatches_the_integrated_browser_action(
+    fn clicking_a_native_markdown_link_opens_the_browser_pane_or_with_ctrl_the_system_browser(
         cx: &mut gpui::TestAppContext,
     ) {
         struct MarkdownLink {
@@ -23753,6 +23779,15 @@ Binary files /dev/null and b/image.png differ\n";
         let opened_url = cx.update(|_, cx| view.read(cx).opened_url.clone());
         assert_eq!(opened_url.as_deref(), Some("http://localhost:3000"));
         assert!(cx.opened_url().is_none());
+
+        // Ctrl+click (Cmd+click on macOS) hands the link to the computer's own
+        // browser and leaves the browser pane alone.
+        cx.update(|_, cx| view.update(cx, |view, _| view.opened_url = None));
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::secondary_key());
+
+        let opened_url = cx.update(|_, cx| view.read(cx).opened_url.clone());
+        assert!(opened_url.is_none());
+        assert_eq!(cx.opened_url().as_deref(), Some("http://localhost:3000"));
     }
 
     #[test]
@@ -24589,6 +24624,26 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(pane.read(cx).current_url().as_deref(), Some(url));
         });
         assert!(cx.opened_url().is_none(), "it stays inside the app");
+
+        // Ctrl+click (Cmd+click on macOS) opens it in the computer's browser.
+        cx.update(|_, cx| desktop.read(cx).browser_panes["local/chat/pr-chat"].clone())
+            .update(cx, |pane, cx| {
+                pane.navigate("http://localhost:3000/elsewhere", cx)
+            });
+        let chip = cx
+            .debug_bounds("minimal-session-pull-request")
+            .expect("the chip stays in the header");
+        cx.simulate_click(chip.center(), gpui::Modifiers::secondary_key());
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url().as_deref(), Some(url));
+        desktop.update(cx, |desktop, cx| {
+            let pane = desktop.browser_panes["local/chat/pr-chat"].clone();
+            assert_eq!(
+                pane.read(cx).current_url().as_deref(),
+                Some("http://localhost:3000/elsewhere"),
+                "the browser pane keeps its page"
+            );
+        });
     }
 
     fn show_linked_pull_requests(
@@ -24693,6 +24748,28 @@ Binary files /dev/null and b/image.png differ\n";
                 Some("http://localhost:3000/o/r/pull/2")
             );
             assert!(desktop.pull_request_panel.is_none());
+        });
+        assert!(
+            cx.opened_url().is_none(),
+            "a plain click stays inside the app"
+        );
+
+        let chip = cx
+            .debug_bounds("minimal-session-pull-request-0")
+            .expect("the first chip");
+        cx.simulate_click(chip.center(), gpui::Modifiers::secondary_key());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("http://localhost:3000/o/r/pull/1"),
+            "Ctrl+click opens the computer's browser"
+        );
+        desktop.update(cx, |desktop, cx| {
+            let pane = desktop.browser_panes["local/chat/pr-chat"].clone();
+            assert_eq!(
+                pane.read(cx).current_url().as_deref(),
+                Some("http://localhost:3000/o/r/pull/2")
+            );
         });
 
         let more = cx
@@ -28117,7 +28194,7 @@ Binary files /dev/null and b/image.png differ\n";
 
         assert!(terminal.contains("markdown::web_links("));
         assert!(terminal.contains("selectable_links_in_document("));
-        assert!(terminal.contains("Box::new(OpenBrowserUrl"));
+        assert!(terminal.contains("open_clicked_link(url, window, cx)"));
     }
 
     #[test]
