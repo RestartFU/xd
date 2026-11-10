@@ -29,9 +29,11 @@ import com.restartfu.xd.syntax.Syntax
 import com.restartfu.xd.syntax.SyntaxLanguage
 import com.restartfu.xd.syntax.SyntaxState
 
-/** The desktop's token colours, parsed once. */
+/** The desktop's token colours, each parsed once. Highlighting runs on several threads. */
+private val tokenColours = java.util.concurrent.ConcurrentHashMap<String, Color>()
+
 private fun tokenColour(hex: String?): Color? =
-    hex?.let { Color(it.removePrefix("#").toLong(16) or 0xFF000000L) }
+    hex?.let { tokenColours.getOrPut(it) { Color(it.removePrefix("#").toLong(16) or 0xFF000000L) } }
 
 /**
  * Syntax-coloured source, one scanner state threaded down the whole block so
@@ -77,7 +79,7 @@ internal class SyntaxVisualTransformation(
 internal fun DiffText(
     patch: String,
     modifier: Modifier = Modifier,
-) = DiffText(CodeBlocks.diffLines(patch), modifier)
+) = DiffText(remember(patch) { CodeBlocks.diffLines(patch) }, modifier)
 
 @Composable
 internal fun DiffText(
@@ -85,46 +87,66 @@ internal fun DiffText(
     modifier: Modifier = Modifier,
 ) {
     val fallback = LocalContentColor.current
-    // One state per file: a hunk is not contiguous source, so carrying lexer
-    // state across a hunk boundary would colour the rest of the file wrong.
-    val rendered = remember(lines, fallback) {
-        val state = SyntaxState()
-        lines.map { line ->
-            if (line.kind == DiffKind.META || line.kind == DiffKind.HUNK) state.reset()
-            line to when (line.kind) {
-                DiffKind.META, DiffKind.HUNK -> AnnotatedString(line.code)
-                else -> buildAnnotatedString {
-                    append(line.marker)
-                    appendHighlighted(line.code, line.language, state, fallback)
-                }
-            }
-        }
-    }
-
-    val signals = LocalXdSignals.current
+    val rendered = remember(lines, fallback) { highlightDiff(lines, fallback) }
     Column(modifier.horizontalScroll(rememberScrollState())) {
-        rendered.forEach { (line, annotated) ->
-            val background = when (line.kind) {
-                DiffKind.ADDED -> signals.diffAdded
-                DiffKind.REMOVED -> signals.diffRemoved
-                else -> Color.Transparent
-            }
-            Text(
-                annotated,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(background)
-                    .padding(horizontal = 4.dp),
-                color = when (line.kind) {
-                    DiffKind.META, DiffKind.HUNK -> MaterialTheme.colorScheme.outline
-                    else -> Color.Unspecified
-                },
-                fontFamily = XdMonoFamily,
-                style = MaterialTheme.typography.bodySmall,
-                softWrap = false,
-            )
+        lines.forEachIndexed { index, line ->
+            DiffLineText(line.kind, rendered[index], Modifier.fillMaxWidth())
         }
     }
+}
+
+/**
+ * Each line of a patch, coloured for its file's language.
+ *
+ * One state per file: a hunk is not contiguous source, so carrying lexer
+ * state across a hunk boundary would colour the rest of the file wrong.
+ */
+internal fun highlightDiff(lines: List<DiffLine>, fallback: Color): List<AnnotatedString> {
+    val state = SyntaxState()
+    return lines.map { line ->
+        if (line.kind == DiffKind.META || line.kind == DiffKind.HUNK) state.reset()
+        when (line.kind) {
+            DiffKind.META, DiffKind.HUNK -> AnnotatedString(line.code)
+            else -> buildAnnotatedString {
+                append(line.marker)
+                appendHighlighted(line.code, line.language, state, fallback)
+            }
+        }
+    }
+}
+
+/** A diff line before it is coloured: the same characters, uncoloured. */
+internal fun plainDiffLine(line: DiffLine): AnnotatedString = when (line.kind) {
+    DiffKind.META, DiffKind.HUNK -> AnnotatedString(line.code)
+    else -> AnnotatedString(line.marker + line.code)
+}
+
+/** One line of a patch, on the desktop's tint for an added or removed line. */
+@Composable
+internal fun DiffLineText(
+    kind: DiffKind,
+    text: AnnotatedString,
+    modifier: Modifier = Modifier,
+) {
+    val signals = LocalXdSignals.current
+    val background = when (kind) {
+        DiffKind.ADDED -> signals.diffAdded
+        DiffKind.REMOVED -> signals.diffRemoved
+        else -> Color.Transparent
+    }
+    Text(
+        text,
+        modifier = modifier
+            .background(background)
+            .padding(horizontal = 4.dp),
+        color = when (kind) {
+            DiffKind.META, DiffKind.HUNK -> MaterialTheme.colorScheme.outline
+            else -> Color.Unspecified
+        },
+        fontFamily = XdMonoFamily,
+        style = MaterialTheme.typography.bodySmall,
+        softWrap = false,
+    )
 }
 
 private fun highlight(

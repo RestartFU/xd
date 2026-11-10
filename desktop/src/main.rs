@@ -123,7 +123,7 @@ use minimal::{
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
-use terminal::TerminalScreen;
+use terminal::{TerminalScreen, TerminalText};
 use usage_view::{
     ALERT_ICON, INFO_ICON, PLUS_ICON, REFRESH_ICON, ROTATE_CCW_ICON, SLIDERS_ICON, TICKET_ICON,
     USAGE_ICON, UsagePage,
@@ -220,7 +220,20 @@ const PULSE_INTERVAL: Duration = Duration::from_millis(400);
 /// Steps of the shared pulse, advanced only while something is working.
 static PULSE_FRAME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+thread_local! {
+    /// Whether the last frame drew anything that moves with the pulse: a
+    /// working dot, or a running timer. When nothing did, the pulse has no
+    /// reason to redraw the window.
+    static ANIMATION_DRAWN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Notes that this frame draws something the pulse moves.
+fn mark_animated() {
+    ANIMATION_DRAWN.with(|drawn| drawn.set(true));
+}
+
 fn pulse_frame() -> usize {
+    mark_animated();
     PULSE_FRAME.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -1325,6 +1338,59 @@ fn terminal_runtime_event(event: SessionEvent) -> (ChatEndpoint, &'static str, V
     (endpoint, name, body)
 }
 
+/// The shown terminal's text, colours and links, kept until its screen
+/// changes. Rebuilding them walks the whole scrollback, so a redraw for
+/// anything else (a blink, a token in the chat) reuses them instead.
+struct TerminalRenderCache {
+    revision: u64,
+    text: SharedString,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    cursor: Option<Range<usize>>,
+    links: Vec<(Range<usize>, String)>,
+}
+
+impl TerminalRenderCache {
+    fn new(revision: u64, rendered: TerminalText) -> Self {
+        let mut links = rendered
+            .links
+            .into_iter()
+            .map(|link| (link.range, link.url))
+            .collect::<Vec<_>>();
+        let detected = markdown::web_links(&rendered.text)
+            .into_iter()
+            .filter(|(range, _)| {
+                !links
+                    .iter()
+                    .any(|(native, _)| native.start < range.end && range.start < native.end)
+            })
+            .collect::<Vec<_>>();
+        links.extend(detected);
+        links.sort_by_key(|(range, _)| range.start);
+        let highlights = rendered
+            .spans
+            .into_iter()
+            .map(|span| {
+                (
+                    span.range,
+                    HighlightStyle {
+                        color: span.style.foreground.map(|color| rgb(color).into()),
+                        background_color: span.style.background.map(|color| rgb(color).into()),
+                        font_weight: span.style.bold.then_some(FontWeight::BOLD),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        Self {
+            revision,
+            text: rendered.text.into(),
+            highlights,
+            cursor: rendered.cursor,
+            links,
+        }
+    }
+}
+
 fn insert_terminal_cursor_highlight(
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     cursor: Option<(Range<usize>, HighlightStyle)>,
@@ -1901,7 +1967,19 @@ impl TranscriptSnapshot {
     }
 
     fn sync_live_items(&mut self, model: &AppModel) {
-        self.live_items = Arc::new(model.live_items.clone());
+        // Each tool event adds a row at the end of a turn that can already
+        // hold hundreds: copy only the rows that changed.
+        let kept = self
+            .live_items
+            .iter()
+            .zip(&model.live_items)
+            .take_while(|(shown, current)| shown.same_row(current))
+            .count();
+        if kept != self.live_items.len() || kept != model.live_items.len() {
+            let items = Arc::make_mut(&mut self.live_items);
+            items.truncate(kept);
+            items.extend(model.live_items[kept..].iter().cloned());
+        }
         self.sync_derived_rows();
     }
 
@@ -2497,6 +2575,12 @@ struct XdDesktop {
     terminal_activity_by_tab: HashMap<(ChatEndpoint, String, String), bool>,
     terminal_cache_refresh: HashSet<ChatEndpoint>,
     terminal_cursor_visible: bool,
+    /// Whether the last frame drew the terminal cursor, so its blink has
+    /// something to redraw.
+    terminal_cursor_drawn: bool,
+    /// Whether the last frame drew the terminal panel at all.
+    terminal_drawn: bool,
+    terminal_render_cache: Option<Rc<TerminalRenderCache>>,
     diff_generation: u64,
     /// The working directory as a folding tree, in the sidebar.
     file_tree: files::FileTree,
@@ -2605,6 +2689,7 @@ impl XdDesktop {
                 desktop.flush_new_chat_draft();
                 desktop.shutdown_browsers(cx);
             });
+            settings::flush_saves();
             true
         });
         let new_chat_search = cx.new(|cx| ComposerInput::new(cx, "Search…"));
@@ -2631,7 +2716,7 @@ impl XdDesktop {
         .detach();
         let composer_input = cx.new(FileEditor::composer);
         cx.subscribe(&composer_input, |this, _, event, cx| match event {
-            EditorEvent::Changed(text) => this.composer_changed(text.clone(), cx),
+            EditorEvent::Changed(text) => this.composer_changed(text, cx),
             EditorEvent::PasteImage { format, bytes } => {
                 this.attach_clipboard_image(*format, bytes.clone(), cx)
             }
@@ -3188,6 +3273,9 @@ impl XdDesktop {
             terminal_activity_by_tab: HashMap::new(),
             terminal_cache_refresh: HashSet::new(),
             terminal_cursor_visible: true,
+            terminal_cursor_drawn: false,
+            terminal_drawn: false,
+            terminal_render_cache: None,
             diff_generation: 0,
             file_tree: files::FileTree::default(),
             open_files: files::OpenFiles::default(),
@@ -3275,7 +3363,11 @@ impl XdDesktop {
                     .update(cx, |this, cx| {
                         if this.anything_working() {
                             PULSE_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            cx.notify();
+                            // Work that nothing on screen shows, such as a chat
+                            // in a collapsed folder, does not redraw the window.
+                            if ANIMATION_DRAWN.with(Cell::get) {
+                                cx.notify();
+                            }
                         }
                         true
                     })
@@ -3296,8 +3388,15 @@ impl XdDesktop {
                                 Some(format!("Could not save the new-chat draft: {error}"));
                             cx.notify();
                         }
+                        if let Some(error) = settings::take_save_error() {
+                            this.model.connection_error =
+                                Some(format!("Could not save app settings: {error}"));
+                            cx.notify();
+                        }
                         this.terminal_cursor_visible = !this.terminal_cursor_visible;
-                        if this.terminal_panel.is_some() {
+                        // Only a terminal that is drawn and focused shows its
+                        // cursor; any other blink would redraw for nothing.
+                        if this.terminal_cursor_drawn {
                             cx.notify();
                         }
                         true
@@ -3864,6 +3963,11 @@ impl XdDesktop {
         if self.usage_host_update(ChatEndpoint::Remote, &update, cx) {
             return;
         }
+        let quiet = matches!(
+            &update,
+            HostUpdate::Event { name, body, .. }
+                if self.host_event_is_quiet(ChatEndpoint::Remote, name, body.get("chat").and_then(Value::as_str))
+        );
         match update {
             HostUpdate::Connected { .. } => {}
             HostUpdate::Disconnected { message } => {
@@ -3996,7 +4100,9 @@ impl XdDesktop {
                 }
             }
         }
-        cx.notify();
+        if !quiet {
+            cx.notify();
+        }
     }
 
     fn remote_connection_failed(&mut self, error: RemoteError, cx: &mut Context<Self>) {
@@ -4121,6 +4227,11 @@ impl XdDesktop {
         if self.usage_host_update(ChatEndpoint::Local, &update, cx) {
             return;
         }
+        let quiet = matches!(
+            &update,
+            HostUpdate::Event { name, body, .. }
+                if self.host_event_is_quiet(ChatEndpoint::Local, name, body.get("chat").and_then(Value::as_str))
+        );
         if self.active_endpoint == ChatEndpoint::Remote {
             match update {
                 HostUpdate::Connected { .. } => {
@@ -4221,7 +4332,9 @@ impl XdDesktop {
                     }
                 }
             }
-            cx.notify();
+            if !quiet {
+                cx.notify();
+            }
             return;
         }
         match update {
@@ -4330,7 +4443,9 @@ impl XdDesktop {
                 attachments,
             } => self.handle_event(&name, Value::Object(body), attachments, cx),
         }
-        cx.notify();
+        if !quiet {
+            cx.notify();
+        }
     }
 
     fn handle_reply(
@@ -5094,6 +5209,7 @@ impl XdDesktop {
                         match command.spawn() {
                             Ok(_) => {
                                 self.shutdown_browsers(cx);
+                                settings::flush_saves();
                                 cx.quit();
                             }
                             Err(error) => {
@@ -6386,6 +6502,44 @@ impl XdDesktop {
         }
     }
 
+    /// Whether a terminal event is for the panel the last frame drew. Output
+    /// for any other terminal changes nothing on screen until it is shown,
+    /// and showing it redraws anyway.
+    fn terminal_event_is_shown(&self, endpoint: ChatEndpoint, chat: Option<&str>) -> bool {
+        if endpoint != self.active_endpoint || !self.terminal_drawn {
+            return false;
+        }
+        let Some(chat) = chat else {
+            return false;
+        };
+        let chat = self.endpoint_model(endpoint).canonical_terminal_key(chat);
+        self.terminal_panel
+            .as_ref()
+            .is_some_and(|panel| panel.chat_id == chat)
+    }
+
+    /// Whether a host event leaves everything on screen as it was, so it
+    /// needs no redraw. Agents stream a token or a terminal chunk at a time,
+    /// and redrawing the whole window for each one, for chats nobody is
+    /// looking at, kept the window busy. Anything not known to be quiet
+    /// redraws.
+    fn host_event_is_quiet(&self, endpoint: ChatEndpoint, name: &str, chat: Option<&str>) -> bool {
+        if endpoint != self.active_endpoint {
+            // The other endpoint's chats only show in the sidebar, which a
+            // streamed token or terminal chunk does not change.
+            return matches!(name, "text" | "tool" | "terminal-output");
+        }
+        match name {
+            // The shown chat's text redraws through its live-text throttle;
+            // another chat's text changes nothing.
+            "text" => true,
+            "tool" | "record" | "commands" | "queued" | "draft" | "changed"
+            | "repository-changed" => chat != self.model.selected_chat.as_deref(),
+            "terminal-output" => !self.terminal_event_is_shown(endpoint, chat),
+            _ => false,
+        }
+    }
+
     fn handle_event(
         &mut self,
         name: &str,
@@ -6393,6 +6547,11 @@ impl XdDesktop {
         attachments: Option<Vec<Attachment>>,
         cx: &mut Context<Self>,
     ) {
+        let quiet = self.host_event_is_quiet(
+            self.active_endpoint,
+            name,
+            body.get("chat").and_then(Value::as_str),
+        );
         if self.event_is_active(&body)
             && matches!(name, "interaction-resolved" | "interactions-cleared")
         {
@@ -6675,7 +6834,9 @@ impl XdDesktop {
             "agent-cli-update" => self.apply_cli_update(&body),
             _ => {}
         }
-        cx.notify();
+        if !quiet {
+            cx.notify();
+        }
     }
 
     fn request_tree(&mut self) {
@@ -7282,11 +7443,19 @@ impl XdDesktop {
 
     fn catalog_session_chats(&self) -> Vec<xd_desktop::model::ChatSummary> {
         let mut seen = HashSet::new();
+        // The sidebar asks this on every frame, for every chat: a lookup per
+        // chat through every session added up with many chats.
+        let mut session_of = HashMap::new();
+        for session in &self.model.sessions {
+            for chat in &session.chats {
+                session_of.entry(chat.as_str()).or_insert(session);
+            }
+        }
         self.model
             .chats
             .iter()
             .filter_map(|chat| {
-                let Some(session) = self.model.session_for_chat(&chat.id) else {
+                let Some(session) = session_of.get(chat.id.as_str()).copied() else {
                     return Some(chat.clone());
                 };
                 if !seen.insert(session.id.clone()) {
@@ -8776,6 +8945,14 @@ impl XdDesktop {
                             cx.notify();
                         } else {
                             this.handle_terminal_screen_event(endpoint, name, &body, cx);
+                            if name != "terminal-output"
+                                || this.terminal_event_is_shown(
+                                    endpoint,
+                                    body.get("chat").and_then(Value::as_str),
+                                )
+                            {
+                                cx.notify();
+                            }
                         }
                     })
                     .is_err()
@@ -10655,9 +10832,10 @@ impl XdDesktop {
             .messages
             .iter()
             .chain(self.model.live_items.iter())
-            .filter(|message| message.role == "tool")
+            .filter(|message| {
+                message.role == "tool" && message.content.starts_with("workflow_run\n")
+            })
             .map(|message| message.content.clone())
-            .filter(|content| content.starts_with("workflow_run\n"))
             .collect::<HashSet<_>>();
         Arc::make_mut(&mut self.workflow_statuses).retain(|marker, _| markers.contains(marker));
         Arc::make_mut(&mut self.workflow_pending).retain(|marker| markers.contains(marker));
@@ -11454,8 +11632,10 @@ impl XdDesktop {
         .detach();
     }
 
-    fn composer_changed(&mut self, text: String, cx: &mut Context<Self>) {
-        self.composer = text;
+    fn composer_changed(&mut self, text: &str, cx: &mut Context<Self>) {
+        // Reuses the buffer: this runs on every keystroke.
+        self.composer.clear();
+        self.composer.push_str(text);
         self.draft_dirty = true;
         self.schedule_draft_sync(cx);
         cx.notify();
@@ -11617,6 +11797,9 @@ impl XdDesktop {
                 } else {
                     "No background tasks running."
                 });
+            }
+            if !self.background_output.is_empty() {
+                mark_animated();
             }
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -12314,6 +12497,24 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// The selected terminal's rendering, rebuilt only once its screen has
+    /// changed since the last frame.
+    fn selected_terminal_render(&mut self) -> Option<Rc<TerminalRenderCache>> {
+        let session = self.terminal_panel.as_ref()?.selected()?;
+        let revision = session.screen.revision();
+        if let Some(cached) = &self.terminal_render_cache
+            && cached.revision == revision
+        {
+            return Some(cached.clone());
+        }
+        let cached = Rc::new(TerminalRenderCache::new(
+            revision,
+            session.screen.rendered_with_cursor(),
+        ));
+        self.terminal_render_cache = Some(cached.clone());
+        Some(cached)
+    }
+
     fn render_minimal_terminal(
         &mut self,
         colors: ThemeColors,
@@ -12323,6 +12524,8 @@ impl XdDesktop {
         let terminal_input = self.terminal_input.clone();
         let terminal_focus = self.terminal_input.read(cx).focus_handle(cx);
         let desktop = cx.entity();
+        self.terminal_drawn |= self.terminal_panel.is_some();
+        let rendered = self.selected_terminal_render();
         let Some(panel) = self.terminal_panel.as_ref() else {
             return div()
                 .size_full()
@@ -12353,42 +12556,19 @@ impl XdDesktop {
         let panel_loading = panel.loading;
         let panel_is_empty = panel.sessions.is_empty();
         let panel_error = panel.error.clone();
-        let output = panel
-            .selected()
-            .map(|session| session.screen.rendered_with_cursor());
-        let (output_text, output_spans, output_cursor, output_links) = output
-            .map(|output| (output.text, output.spans, output.cursor, output.links))
-            .unwrap_or_else(|| (String::new(), Vec::new(), None, Vec::new()));
-        let mut terminal_links = output_links
-            .into_iter()
-            .map(|link| (link.range, link.url))
-            .collect::<Vec<_>>();
-        let detected_links = markdown::web_links(&output_text)
-            .into_iter()
-            .filter(|(range, _)| {
-                !terminal_links
-                    .iter()
-                    .any(|(native, _)| native.start < range.end && range.start < native.end)
-            })
-            .collect::<Vec<_>>();
-        terminal_links.extend(detected_links);
-        terminal_links.sort_by_key(|(range, _)| range.start);
-        let highlights = output_spans
-            .into_iter()
-            .map(|span| {
+        let (output_text, highlights, output_cursor, terminal_links) = rendered
+            .map(|rendered| {
                 (
-                    span.range,
-                    HighlightStyle {
-                        color: span.style.foreground.map(|color| rgb(color).into()),
-                        background_color: span.style.background.map(|color| rgb(color).into()),
-                        font_weight: span.style.bold.then_some(FontWeight::BOLD),
-                        ..Default::default()
-                    },
+                    rendered.text.clone(),
+                    rendered.highlights.clone(),
+                    rendered.cursor.clone(),
+                    rendered.links.clone(),
                 )
             })
-            .collect::<Vec<_>>();
-        let cursor_highlight = if self.terminal_cursor_visible && terminal_focus.is_focused(window)
-        {
+            .unwrap_or_default();
+        let cursor_shown = output_cursor.is_some() && terminal_focus.is_focused(window);
+        self.terminal_cursor_drawn |= cursor_shown;
+        let cursor_highlight = if self.terminal_cursor_visible && cursor_shown {
             output_cursor.map(|cursor| {
                 (
                     cursor,
@@ -12403,7 +12583,6 @@ impl XdDesktop {
             None
         };
         let highlights = insert_terminal_cursor_highlight(highlights, cursor_highlight);
-        let output_text: SharedString = output_text.into();
         let output_range = 0..output_text.len();
         let output = StyledText::new(output_text.clone()).with_highlights(highlights);
         let output_layout = output.layout().clone();
@@ -15256,7 +15435,7 @@ impl XdDesktop {
         let value: SharedString = content.text.clone().into();
         let text = StyledText::new(value.clone()).with_highlights(highlights);
         let layout = text.layout().clone();
-        let document = scoped_element_id(&format!("native-inline:{}", content.text), index);
+        let document = text_element_id("native-inline", &content.text, index);
         let (ranges, urls) = content
             .spans
             .iter()
@@ -15289,7 +15468,7 @@ impl XdDesktop {
         let value: SharedString = text.to_owned().into();
         let styled = StyledText::new(value.clone());
         let layout = styled.layout().clone();
-        let document = scoped_element_id(&format!("native-code:{text}"), index);
+        let document = text_element_id("native-code", text, index);
         selectable_in_document(document, document, value, 0..text.len(), layout, styled)
             .into_any_element()
     }
@@ -15728,7 +15907,9 @@ impl XdDesktop {
         text.strip_prefix("Running ").unwrap_or(text).to_owned()
     }
 
+    /// The time for a running agent's timer, which the pulse keeps moving.
     fn now_millis() -> u64 {
+        mark_animated();
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as u64)
@@ -16415,12 +16596,7 @@ impl XdDesktop {
                 _ => None,
             }
         };
-        let stats = view.stats_at(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_millis() as u64)
-                .unwrap_or(0),
-        );
+        let stats = view.stats_at(Self::now_millis());
         let preview = if running {
             view.activity.clone()
         } else {
@@ -18194,31 +18370,38 @@ impl XdDesktop {
                     ),
                     None => (None, None),
                 };
-                if let (Some(run), Some(card)) = (messages.work_run(index), activity.clone()) {
-                    let log_key = messages.row_key(run.start);
-                    let log_expanded = expanded_work_logs.contains(&log_key);
-                    if run.hides(log_expanded) {
-                        return div().w_full().into_any_element();
+                let activity = match (messages.work_run(index), activity) {
+                    (Some(run), Some(card)) => Err((run, card)),
+                    (_, activity) => Ok(activity),
+                };
+                let activity = match activity {
+                    Ok(activity) => activity,
+                    Err((run, card)) => {
+                        let log_key = messages.row_key(run.start);
+                        let log_expanded = expanded_work_logs.contains(&log_key);
+                        if run.hides(log_expanded) {
+                            return div().w_full().into_any_element();
+                        }
+                        // Keyed by its oldest row, an entry stays open as repeats
+                        // of it arrive.
+                        let entry_key = messages.row_key(run.repeat_start);
+                        return div()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .child(div().w(px(column)).child(Self::render_work_log_row(
+                                colors,
+                                card,
+                                run,
+                                index,
+                                entry_key,
+                                log_key,
+                                log_expanded,
+                                expanded_activities.contains(&entry_key),
+                            )))
+                            .into_any_element();
                     }
-                    // Keyed by its oldest row, an entry stays open as repeats
-                    // of it arrive.
-                    let entry_key = messages.row_key(run.repeat_start);
-                    return div()
-                        .w_full()
-                        .flex()
-                        .justify_center()
-                        .child(div().w(px(column)).child(Self::render_work_log_row(
-                            colors,
-                            card,
-                            run,
-                            index,
-                            entry_key,
-                            log_key,
-                            log_expanded,
-                            expanded_activities.contains(&entry_key),
-                        )))
-                        .into_any_element();
-                }
+                };
                 // Images load as their rows come into view, so a long chat
                 // does not hold every image it ever showed.
                 let mut unknown_images = Vec::new();
@@ -21441,6 +21624,9 @@ impl XdDesktop {
 impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.background_visible = false;
+        ANIMATION_DRAWN.with(|drawn| drawn.set(false));
+        self.terminal_cursor_drawn = false;
+        self.terminal_drawn = false;
         self.expire_action_error(cx);
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let custom_titlebar = client_decorations || cfg!(target_os = "macos");
@@ -22138,6 +22324,16 @@ fn pairing_details(value: &Value) -> Result<(u16, String), String> {
         .filter(|code| !code.is_empty())
         .ok_or_else(|| "The host returned an invalid pairing code.".to_owned())?;
     Ok((port, code.to_owned()))
+}
+
+/// An id for a block of text, from the text itself, without copying it into
+/// a scope string first: a long reply draws many such blocks every frame.
+fn text_element_id(kind: &str, text: &str, index: usize) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    kind.hash(&mut hasher);
+    text.hash(&mut hasher);
+    index.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn scoped_element_id(scope: &str, index: usize) -> u64 {
@@ -25772,6 +25968,144 @@ Binary files /dev/null and b/image.png differ\n";
         assert!(cx.opened_url().is_none());
     }
 
+    /// Counts the times the desktop asks to be redrawn.
+    fn count_redraws(
+        desktop: &Entity<XdDesktop>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Rc<Cell<usize>> {
+        let redraws = Rc::new(Cell::new(0));
+        let counter = redraws.clone();
+        cx.update(|_, cx| {
+            cx.observe(desktop, move |_, _| counter.set(counter.get() + 1))
+                .detach();
+        });
+        redraws
+    }
+
+    #[gpui::test]
+    fn streamed_output_for_chats_off_screen_does_not_redraw(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+        });
+        cx.run_until_parked();
+        let redraws = count_redraws(&desktop, cx);
+        desktop.update(cx, |desktop, cx| {
+            let generation = desktop.connection_generation;
+            for (name, body) in [
+                (
+                    "text",
+                    serde_json::json!({"chat": "review", "text": "token"}),
+                ),
+                (
+                    "tool",
+                    serde_json::json!({"chat": "review", "text": "Ran ls"}),
+                ),
+                (
+                    "record",
+                    serde_json::json!({"chat": "review", "message_id": 4, "text": "x"}),
+                ),
+                (
+                    "terminal-output",
+                    serde_json::json!({"chat": "review", "terminal": "shell", "data": "aGk="}),
+                ),
+            ] {
+                desktop.handle_host_update(
+                    HostUpdate::Event {
+                        name: name.into(),
+                        body: body.as_object().unwrap().clone(),
+                        attachments: None,
+                    },
+                    generation,
+                    cx,
+                );
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(redraws.get(), 0, "nothing on screen changed");
+
+        // The shown chat's text waits for its live-text frame.
+        desktop.update(cx, |desktop, cx| {
+            desktop.handle_event(
+                "text",
+                serde_json::json!({"chat": "implementation", "text": "hello"}),
+                None,
+                cx,
+            );
+            desktop.handle_event(
+                "text",
+                serde_json::json!({"chat": "implementation", "text": " there"}),
+                None,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(redraws.get(), 0);
+        assert!(
+            desktop.read_with(cx, |desktop, _| desktop.live_render_scheduled.is_some()),
+            "its own frame redraws it"
+        );
+
+        // A change the sidebar shows still redraws.
+        desktop.update(cx, |desktop, cx| {
+            desktop.handle_event(
+                "turn-started",
+                serde_json::json!({"chat": "review"}),
+                None,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(redraws.get() > 0);
+    }
+
+    #[gpui::test]
+    fn the_terminal_keeps_its_rendering_until_its_screen_changes(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("dock-chat".into());
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            let mut shell =
+                XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({"id": "shell"})).unwrap();
+            shell.screen.feed(b"first line https://example.com");
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            panel.loading = false;
+            panel.sessions.push(shell);
+            panel.selected = Some("shell".into());
+        });
+        cx.run_until_parked();
+        let first = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
+        assert!(first.text.contains("first line"));
+        assert_eq!(first.links.len(), 1, "found the link once");
+        let again = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
+        assert!(
+            Rc::ptr_eq(&first, &again),
+            "an unchanged screen is not rebuilt"
+        );
+
+        // Output for a terminal no frame drew changes nothing on screen.
+        let redraws = count_redraws(&desktop, cx);
+        let output = |text: &str| serde_json::json!({"chat": "dock-chat", "terminal": "shell", "data": STANDARD.encode(text)});
+        desktop.update(cx, |desktop, cx| {
+            desktop.terminal_drawn = false;
+            desktop.handle_event("terminal-output", output("\nsecond"), None, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(redraws.get(), 0);
+
+        // Output for the drawn terminal redraws, with the new text.
+        desktop.update(cx, |desktop, cx| {
+            desktop.terminal_drawn = true;
+            desktop.handle_event("terminal-output", output("\nthird"), None, cx);
+        });
+        cx.run_until_parked();
+        assert!(redraws.get() > 0);
+        let changed = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
+        assert!(!Rc::ptr_eq(&first, &changed));
+        assert!(changed.text.contains("second") && changed.text.contains("third"));
+    }
+
     #[gpui::test]
     fn bottom_terminal_and_side_tools_keep_independent_state(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
@@ -28901,7 +29235,16 @@ Binary files /dev/null and b/image.png differ\n";
             .expect("end of minimal terminal renderer")
             .0;
 
-        assert!(terminal.contains("markdown::web_links("));
+        let cache = source
+            .split_once("impl TerminalRenderCache {")
+            .expect("terminal rendering cache")
+            .1
+            .split_once("fn insert_terminal_cursor_highlight(")
+            .expect("end of terminal rendering cache")
+            .0;
+
+        assert!(cache.contains("markdown::web_links("));
+        assert!(terminal.contains("self.selected_terminal_render()"));
         assert!(terminal.contains("selectable_links_in_document("));
         assert!(terminal.contains("open_clicked_link(url, window, cx)"));
     }
@@ -28917,9 +29260,18 @@ Binary files /dev/null and b/image.png differ\n";
             .expect("end of minimal terminal renderer")
             .0;
 
-        assert!(terminal.contains("output.links"));
-        assert!(terminal.contains("let detected_links = markdown::web_links("));
-        assert!(terminal.contains("terminal_links.extend(detected_links)"));
+        let cache = source
+            .split_once("impl TerminalRenderCache {")
+            .expect("terminal rendering cache")
+            .1
+            .split_once("fn insert_terminal_cursor_highlight(")
+            .expect("end of terminal rendering cache")
+            .0;
+
+        assert!(terminal.contains("self.selected_terminal_render()"));
+        assert!(cache.contains(".links"));
+        assert!(cache.contains("let detected = markdown::web_links("));
+        assert!(cache.contains("links.extend(detected)"));
     }
 
     #[test]

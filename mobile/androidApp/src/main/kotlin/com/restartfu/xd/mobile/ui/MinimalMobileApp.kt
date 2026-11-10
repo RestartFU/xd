@@ -236,11 +236,15 @@ internal fun MinimalMobileApp(
         rename = { renamingSessionId = it.id },
         delete = { deletingSession = it },
     )
-    val projects = tree.minimalProjects()
-    val sessions = projects.flatMap { project -> tree.minimalSessions(project.id) }
+    // Worked out once per tree, not on every recomposition of the app.
+    val projects = remember(tree) { tree.minimalProjects() }
+    val sessionsByProject = remember(tree, projects) {
+        projects.associate { project -> project.id to tree.minimalSessions(project.id) }
+    }
+    val sessions = remember(sessionsByProject) { sessionsByProject.values.flatten() }
     val activeSession = sessions.firstOrNull { it.id == activeSessionId }
     val activeProject = projects.firstOrNull { project ->
-        tree.minimalSessions(project.id).any { it.id == activeSessionId }
+        sessionsByProject[project.id].orEmpty().any { it.id == activeSessionId }
     }
     val sessionChats = activeSession?.chatIds.orEmpty().mapNotNull { id -> tree.chats.firstOrNull { it.id == id } }
     val openChats = sessionChats.filterNot { it.id in hiddenChatIds }

@@ -516,6 +516,138 @@ class TranscriptMachineTest {
         assertTrue(result.effects.isEmpty())
     }
 
+    @Test
+    fun storedRowsKeepTheirIdsAsRowsAreAddedAndOlderOnesLoad() {
+        val first = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat(),
+                messagesWithTotal(
+                    4,
+                    MessageReply("user", "hi", 1, id = 3),
+                    MessageReply("assistant", "hello", 2, id = 4),
+                ),
+                nowMillis = 0,
+            ),
+        ).state
+        val grown = reduce(
+            first,
+            TranscriptInput.MessagesLoaded(
+                messagesWithTotal(
+                    5,
+                    MessageReply("user", "hi", 1, id = 3),
+                    MessageReply("assistant", "hello", 2, id = 4),
+                    MessageReply("user", "more", 3, id = 5),
+                ),
+            ),
+        ).state
+        assertEquals(first.messages.map { it.id }, grown.messages.take(2).map { it.id })
+
+        val older = reduce(
+            grown,
+            TranscriptInput.OlderLoaded(
+                MessagesReply(
+                    ok = true,
+                    totalMessages = 5,
+                    lastMessageId = 5,
+                    messages = listOf(
+                        MessageReply("user", "start", 0, id = 1),
+                        MessageReply("duration", "3", 0, id = 2),
+                        // Already shown: a page boundary that moved is not drawn twice.
+                        MessageReply("user", "hi", 1, id = 3),
+                    ),
+                    hasOlder = false,
+                ),
+            ),
+        ).state
+        assertEquals(listOf("start", "hi", "hello", "more"), older.messages.map { it.text })
+        assertEquals(grown.messages.map { it.id }, older.messages.drop(1).map { it.id })
+        assertFalse(older.hasOlderMessages)
+        assertFalse(older.loadingOlder)
+    }
+
+    @Test
+    fun anOlderPageOfHiddenRowsStillMovesTheCursorAndKeepsAClearedTodoList() {
+        val oldList = "todo_list\n" +
+            "[{\"id\":\"1\",\"text\":\"Old step\",\"status\":\"pending\"}]"
+        val loaded = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat(),
+                messagesWithTotal(
+                    6,
+                    MessageReply("user", "hi", 1, id = 5),
+                    // The newest snapshot cleared the list.
+                    MessageReply("tool", "todo_list\n[]", 2, id = 6),
+                ),
+                nowMillis = 0,
+            ),
+        ).state
+        assertTrue(loaded.todos.isEmpty())
+        assertEquals(5L, loaded.oldestFetchedMessageId)
+
+        val older = reduce(
+            loaded,
+            TranscriptInput.OlderLoaded(
+                MessagesReply(
+                    ok = true,
+                    totalMessages = 6,
+                    lastMessageId = 6,
+                    // Nothing on this page is drawn.
+                    messages = listOf(
+                        MessageReply("tool", oldList, 0, id = 3),
+                        MessageReply("duration", "3", 0, id = 4),
+                    ),
+                    hasOlder = true,
+                ),
+            ),
+        ).state
+        assertEquals(listOf("hi"), older.messages.map { it.text })
+        // The next page is asked for from before the hidden rows, not again from "hi".
+        assertEquals(3L, older.oldestFetchedMessageId)
+        assertTrue(older.hasOlderMessages)
+        // The cleared list stays cleared rather than coming back from further back.
+        assertTrue(older.todos.isEmpty())
+    }
+
+    @Test
+    fun aStoredLiveRowKeepsItsIdWhenTheTurnEnds() {
+        var state = reduce(ChatState("chat"), TranscriptInput.TurnStarted("Working", 0, turnId = 1, turnSequence = 0)).state
+        state = reduce(state, TranscriptInput.Text("Looking", turnId = 1, turnSequence = 1)).state
+        state = reduce(state, TranscriptInput.Tool("Read", turnId = 1, turnSequence = 2, messageId = 9)).state
+        val liveId = state.liveItems.last().id
+
+        val reloaded = reduce(
+            state,
+            TranscriptInput.Loaded(
+                chat(
+                    working = true,
+                    items = listOf(
+                        LiveItemReply(tool = false, text = "Looking"),
+                        LiveItemReply(tool = true, text = "Read", messageId = 9),
+                    ),
+                    turnId = 1,
+                    turnSequence = 2,
+                ),
+                messages(),
+                nowMillis = 0,
+            ),
+        ).state
+        // A reload in the middle of a turn names its rows as streaming did.
+        assertEquals(state.liveItems.map { it.id }, reloaded.liveItems.map { it.id })
+
+        val finished = reduce(
+            reduce(state, TranscriptInput.TurnFinished(turnId = 1, turnSequence = 3)).state,
+            TranscriptInput.MessagesLoaded(
+                messages(
+                    MessageReply("assistant", "Looking", 1, id = 8),
+                    MessageReply("tool", "Read", 1, id = 9),
+                ),
+            ),
+        ).state
+        assertEquals(liveId, finished.messages.last().id)
+    }
+
     private fun reduce(
         state: ChatState,
         input: TranscriptInput,

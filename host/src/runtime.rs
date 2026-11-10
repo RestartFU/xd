@@ -1684,8 +1684,11 @@ impl TurnRuntime {
         let _ = thread::Builder::new().name(format!("xd-agent-processes-{chat_id}"))
             .spawn(move || {
                 let mut tracker = crate::process_delegation::Tracker::default();
+                // Quick while a turn runs or a wrapped assistant is followed,
+                // slower while the process waits for its next message.
+                let mut busy = true;
                 loop {
-                    thread::sleep(Duration::from_millis(500));
+                    thread::sleep(Duration::from_millis(if busy { 500 } else { 2_000 }));
                     let snapshot = tracker.poll(pid);
                     let Some(inner) = inner.upgrade() else { return; };
                     let runtime = TurnRuntime { inner };
@@ -1707,6 +1710,7 @@ impl TurnRuntime {
                         { continue; }
                         runtime.idle_subagent(&chat_id, &router.template.workdir, patch);
                     }
+                    busy = router.sink.is_some() || tracker.tracking();
                 }
             });
     }

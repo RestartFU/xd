@@ -52,6 +52,14 @@ private fun decodeBounded(bytes: ByteArray): Bitmap? {
     return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 }
 
+/**
+ * Images already decoded, so one scrolled back into view is not fetched and
+ * decoded again. Bounded by the bitmaps' size, not their number.
+ */
+private val decodedImages = object : android.util.LruCache<String, ImageBitmap>(24 * 1024 * 1024) {
+    override fun sizeOf(key: String, value: ImageBitmap): Int = value.width * value.height * 4
+}
+
 private sealed interface Loaded {
     data object Loading : Loaded
     data class Ready(val bitmap: ImageBitmap) : Loaded
@@ -71,17 +79,23 @@ internal fun MessageImage(
     path: String,
     modifier: Modifier = Modifier,
 ) {
-    var state: Loaded by remember(path) { mutableStateOf(Loaded.Loading) }
+    // Paths are the host's, and chats are the host's too, so the chat tells hosts apart.
+    val cacheKey = "${model.state.value.chatId}\u0000$path"
+    var state: Loaded by remember(cacheKey) {
+        mutableStateOf(decodedImages.get(cacheKey)?.let(Loaded::Ready) ?: Loaded.Loading)
+    }
     var zoomed by remember(path) { mutableStateOf(false) }
 
-    LaunchedEffect(path) {
+    LaunchedEffect(cacheKey) {
+        if (state is Loaded.Ready) return@LaunchedEffect
         state = try {
             val bytes = model.session.readImage(path)
-            val bitmap = withContext(Dispatchers.Default) { decodeBounded(bytes) }
+            val bitmap = withContext(Dispatchers.Default) { decodeBounded(bytes)?.asImageBitmap() }
             if (bitmap == null) {
                 Loaded.Failed("That image could not be decoded")
             } else {
-                Loaded.Ready(bitmap.asImageBitmap())
+                decodedImages.put(cacheKey, bitmap)
+                Loaded.Ready(bitmap)
             }
         } catch (error: CancellationException) {
             throw error

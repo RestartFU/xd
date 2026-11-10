@@ -18,10 +18,14 @@ public object ToolText {
 
     /** The unified patch when this row is an inline diff, else null. */
     public fun patch(text: String): String? {
-        if (!text.startsWith(FILE_CHANGE_PREFIX)) return null
-        val patch = text.substring(FILE_CHANGE_PREFIX.length)
-        return patch.takeIf { it.startsWith(PATCH_MARKER) }
+        if (!isPatch(text)) return null
+        return text.substring(FILE_CHANGE_PREFIX.length)
     }
+
+    /** Whether this row is an inline diff, without copying the patch out. */
+    public fun isPatch(text: String): Boolean =
+        text.startsWith(FILE_CHANGE_PREFIX) &&
+            text.startsWith(PATCH_MARKER, FILE_CHANGE_PREFIX.length)
 
     /**
      * The `b/` paths a patch touches, in order.

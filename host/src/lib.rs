@@ -207,7 +207,6 @@ pub struct Engine {
     self_update: SelfUpdate,
     pairing: PairingService,
     peer_listener: Mutex<Option<PeerListener>>,
-    _shared_event_monitor: Option<SharedEventMonitor>,
     auto_settler: Mutex<Option<AutoSettler>>,
 }
 
@@ -225,17 +224,6 @@ pub(crate) struct EventBus {
     next_event: AtomicU64,
     next_subscriber: AtomicU64,
     subscribers: Mutex<HashMap<u64, Subscriber>>,
-    shared: Option<SharedEventPublisher>,
-}
-
-struct SharedEventPublisher {
-    store: Arc<StateStore>,
-    source: String,
-}
-
-struct SharedEventMonitor {
-    stop: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
 }
 
 struct Subscriber {
@@ -278,7 +266,6 @@ impl Engine {
             self_update,
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
-            _shared_event_monitor: None,
             auto_settler: Mutex::new(None),
             events,
             runtime: None,
@@ -292,7 +279,7 @@ impl Engine {
 
     pub fn with_store_and_data(store: StateStore, data_directory: Option<PathBuf>) -> Self {
         let store = Arc::new(store);
-        let events = Arc::new(EventBus::with_store(store.clone()));
+        let events = Arc::new(EventBus::default());
         // Unit tests keep to the user's own sign-in; a stray data directory
         // must not give them accounts of their own.
         let accounts =
@@ -319,7 +306,6 @@ impl Engine {
         );
         let self_update = SelfUpdate::new(events.clone());
         let repository_monitor = RepositoryMonitor::new(store.clone(), events.clone());
-        let shared_event_monitor = Some(SharedEventMonitor::start(events.clone()));
         let engine = Self {
             shutdown: AtomicBool::new(false),
             app_clients: Mutex::default(),
@@ -345,7 +331,6 @@ impl Engine {
             self_update,
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
-            _shared_event_monitor: shared_event_monitor,
             auto_settler: Mutex::new(None),
             events,
         };
@@ -2583,16 +2568,6 @@ impl Engine {
 }
 
 impl EventBus {
-    fn with_store(store: Arc<StateStore>) -> Self {
-        Self {
-            shared: Some(SharedEventPublisher {
-                store,
-                source: uuid::Uuid::new_v4().to_string(),
-            }),
-            ..Self::default()
-        }
-    }
-
     #[cfg(test)]
     fn subscribe(&self, sender: SyncSender<Value>, connection: UnixStream) -> Result<u64, String> {
         self.subscribe_with_auth(sender, Some(connection), Arc::new(AtomicBool::new(true)))
@@ -2627,17 +2602,7 @@ impl EventBus {
         }
     }
 
-    fn publish(&self, event: Value) {
-        if shared_event(&event)
-            && let Some(shared) = &self.shared
-            && let Err(error) = shared.store.append_shared_event(&shared.source, &event)
-        {
-            eprintln!("xd-host: cannot relay chat event: {error}");
-        }
-        self.publish_local(event);
-    }
-
-    fn publish_local(&self, mut event: Value) {
+    fn publish(&self, mut event: Value) {
         let id = self.next_event.fetch_add(1, Ordering::Relaxed) + 1;
         if let Some(event) = event.as_object_mut() {
             event.insert("id".into(), id.into());
@@ -2707,74 +2672,6 @@ impl EventBus {
             .lock()
             .is_ok_and(|subscribers| subscribers.contains_key(&subscriber_id))
     }
-}
-
-impl SharedEventMonitor {
-    fn start(events: Arc<EventBus>) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = stop.clone();
-        let initial_cursor = events
-            .shared
-            .as_ref()
-            .and_then(|shared| shared.store.latest_shared_event_id().ok())
-            .unwrap_or(0);
-        let worker = thread::Builder::new()
-            .name("xd-shared-events".into())
-            .spawn(move || {
-                let Some(shared) = events.shared.as_ref() else {
-                    return;
-                };
-                let mut cursor = initial_cursor;
-                while !worker_stop.load(Ordering::Acquire) {
-                    thread::park_timeout(Duration::from_millis(50));
-                    if worker_stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let Ok(pending) = shared.store.shared_events_after(cursor) else {
-                        continue;
-                    };
-                    for (id, source, event) in pending {
-                        cursor = id;
-                        if source != shared.source {
-                            events.publish_local(event);
-                        }
-                    }
-                }
-            })
-            .ok();
-        Self { stop, worker }
-    }
-}
-
-impl Drop for SharedEventMonitor {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            worker.thread().unpark();
-            let _ = worker.join();
-        }
-    }
-}
-
-fn shared_event(event: &Value) -> bool {
-    matches!(
-        event.get("event").and_then(Value::as_str),
-        Some(
-            "tree"
-                | "changed"
-                | "repository-changed"
-                | "turn-started"
-                | "text"
-                | "tool"
-                | "turn-finished"
-                | "commands"
-                | "queued"
-                | "draft"
-                | "shortcuts-changed"
-                | "terminal-activity"
-                | "background-tasks"
-        )
-    )
 }
 
 #[cfg(test)]
@@ -2884,6 +2781,43 @@ fn refresh_pull_request_states(store: &StateStore, events: &EventBus, chat_id: &
     }
 }
 
+/// Answers one connection's requests from `queued` in the order they came.
+fn answer_in_order(
+    engine: Arc<Engine>,
+    subscriber: u64,
+    queued: std::sync::mpsc::Receiver<Value>,
+    replies: SyncSender<Value>,
+    stream: UnixStream,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while let Ok(request) = queued.recv() {
+            if !engine.events.subscribed(subscriber) {
+                break;
+            }
+            let reply = engine.dispatch_for(subscriber, request);
+            if replies.try_send(reply).is_err() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                break;
+            }
+        }
+    })
+}
+
+/// Git requests slow enough to hold up the reads queued behind them.
+fn answered_in_git_lane(request: &Value) -> bool {
+    matches!(
+        request["op"].as_str(),
+        Some(
+            "diff-read"
+                | "git-status"
+                | "git-pr-status"
+                | "git-pr-create"
+                | "git-commit"
+                | "git-push"
+        )
+    )
+}
+
 pub fn serve_daemon_connection(
     stream: UnixStream,
     engine: Arc<Engine>,
@@ -2911,21 +2845,18 @@ pub fn serve_daemon_connection(
     let writer_stream = stream.try_clone()?;
     let writer = thread::spawn(move || write_frames(writer_stream, frames));
     let (commands, queued) = sync_channel::<Value>(128);
-    let worker_engine = engine.clone();
-    let replies = outbound.clone();
-    let worker_stream = stream.try_clone()?;
-    let worker = thread::spawn(move || {
-        while let Ok(request) = queued.recv() {
-            if !worker_engine.events.subscribed(subscriber) {
-                break;
-            }
-            let reply = worker_engine.dispatch_for(subscriber, request);
-            if replies.try_send(reply).is_err() {
-                let _ = worker_stream.shutdown(std::net::Shutdown::Both);
-                break;
-            }
-        }
-    });
+    let worker = answer_in_order(
+        engine.clone(),
+        subscriber,
+        queued,
+        outbound.clone(),
+        stream.try_clone()?,
+    );
+    // Git requests that can take seconds (a push, a GitHub round trip) are
+    // answered in order on a lane of their own, so the chat and transcript
+    // reads queued behind them are not held up. Only requests carrying a
+    // request id go there: their replies may then overtake one another.
+    let mut git_lane: Option<(SyncSender<Value>, JoinHandle<()>)> = None;
     let new_chats_aside = Arc::new(NewChatsAside::default());
     let result = (|| -> std::io::Result<()> {
         loop {
@@ -3036,6 +2967,27 @@ pub fn serve_daemon_connection(
                         return Err(error);
                     }
                 }
+            } else if authenticated
+                && request.get(REQUEST_ID).is_some()
+                && answered_in_git_lane(&request)
+            {
+                let lane = match &git_lane {
+                    Some((lane, _)) => lane.clone(),
+                    None => {
+                        let (lane, requests) = sync_channel::<Value>(128);
+                        let worker = answer_in_order(
+                            engine.clone(),
+                            subscriber,
+                            requests,
+                            outbound.clone(),
+                            stream.try_clone()?,
+                        );
+                        git_lane = Some((lane.clone(), worker));
+                        lane
+                    }
+                };
+                lane.try_send(request)
+                    .map_err(|_| std::io::Error::other("Client command queue overflowed"))?;
             } else {
                 commands
                     .try_send(request)
@@ -3044,6 +2996,10 @@ pub fn serve_daemon_connection(
         }
     })();
     drop(commands);
+    let git_worker = git_lane.map(|(lane, worker)| {
+        drop(lane);
+        worker
+    });
     // The app has gone even while requests it sent are still being answered.
     engine.release_app_client(subscriber);
     if result.is_err() {
@@ -3052,6 +3008,9 @@ pub fn serve_daemon_connection(
     // A half-close requests a final drain; a disconnected client cannot block
     // this forever because daemon sockets have bounded write deadlines.
     let _ = worker.join();
+    if let Some(worker) = git_worker {
+        let _ = worker.join();
+    }
     new_chats_aside.wait_idle();
     engine.unsubscribe(subscriber);
     drop(outbound);
@@ -4447,6 +4406,68 @@ read next
     }
 
     #[test]
+    fn slow_git_requests_do_not_hold_up_reads_sent_after_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = test_directory();
+        let store = StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap();
+        let folder = store.new_folder(&json!({"name": "Repo"})).unwrap()["id"].clone();
+        let chat = store.new_chat(&json!({"folder": folder})).unwrap()["id"].clone();
+        let repository = root.join("Workspaces/Repo");
+        // git status asks this monitor first, which takes its time.
+        let monitor = root.join("slow-monitor.sh");
+        fs::write(&monitor, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+        fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+        for arguments in [
+            vec!["init", "-q"],
+            vec!["config", "core.fsmonitor", monitor.to_str().unwrap()],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let engine = Arc::new(Engine::with_store(store));
+        let (client, server) = UnixStream::pair().unwrap();
+        let serving = {
+            let engine = engine.clone();
+            thread::spawn(move || serve_daemon_connection(server, engine, false))
+        };
+        let mut writer = client.try_clone().unwrap();
+        writeln!(
+            writer,
+            "{}",
+            json!({"op": "git-status", "chat": chat, "_xd_request": 1})
+        )
+        .unwrap();
+        writeln!(writer, "{}", json!({"op": "tree", "_xd_request": 2})).unwrap();
+        let started = Instant::now();
+        let mut replies = BufReader::new(client.try_clone().unwrap()).lines();
+        let mut order = Vec::new();
+        let mut tree_after = None;
+        while order.len() < 2 {
+            let frame: Value = serde_json::from_str(&replies.next().unwrap().unwrap()).unwrap();
+            if let Some(id) = frame.get("_xd_request").and_then(Value::as_u64) {
+                if id == 2 {
+                    tree_after = Some(started.elapsed());
+                }
+                order.push(id);
+            }
+        }
+        assert_eq!(order, vec![2, 1], "the tree is answered first");
+        let tree_after = tree_after.unwrap();
+        assert!(
+            tree_after < Duration::from_millis(1500),
+            "the tree waited for git: {tree_after:?}"
+        );
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        serving.join().unwrap().ok();
+    }
+
+    #[test]
     fn event_bus_broadcasts_monotonic_events() {
         let bus = EventBus::default();
         let (sender, receiver) = sync_channel(2);
@@ -4458,131 +4479,6 @@ read next
         assert_eq!(receiver.recv().unwrap()["id"], 2);
         bus.unsubscribe(subscriber);
         drop(peer);
-    }
-
-    #[test]
-    fn chat_events_cross_host_process_boundaries() {
-        let root = test_directory();
-        let database = root.join("chats.db");
-        let workspaces = root.join("Workspaces");
-        let first =
-            Engine::with_store(StateStore::open(&database, &workspaces).expect("first host store"));
-        let second = Engine::with_store(
-            StateStore::open(&database, &workspaces).expect("second host store"),
-        );
-        let (sender, receiver) = sync_channel(8);
-        let (connection, peer) = UnixStream::pair().unwrap();
-        let subscriber = second.events.subscribe(sender, connection).unwrap();
-        while receiver.try_recv().is_ok() {}
-
-        first.events.publish(json!({
-            "event": "text",
-            "chat": "chat-1",
-            "text": "live from desktop",
-            "turn_id": 7,
-            "turn_sequence": 3,
-        }));
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let event = loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let event = receiver
-                .recv_timeout(remaining)
-                .expect("the other host process should relay the live chat event");
-            if event["event"] == "text" {
-                break event;
-            }
-        };
-        assert_eq!(event["event"], "text");
-        assert_eq!(event["chat"], "chat-1");
-        assert_eq!(event["text"], "live from desktop");
-
-        second.events.unsubscribe(subscriber);
-        drop(peer);
-    }
-
-    #[test]
-    fn shared_chat_events_do_not_echo_or_relay_terminal_output() {
-        let root = test_directory();
-        let database = root.join("chats.db");
-        let workspaces = root.join("Workspaces");
-        let first =
-            Engine::with_store(StateStore::open(&database, &workspaces).expect("first host store"));
-        let second = Engine::with_store(
-            StateStore::open(&database, &workspaces).expect("second host store"),
-        );
-        let (first_sender, first_receiver) = sync_channel(8);
-        let (first_connection, first_peer) = UnixStream::pair().unwrap();
-        let first_subscriber = first
-            .events
-            .subscribe(first_sender, first_connection)
-            .unwrap();
-        let (second_sender, second_receiver) = sync_channel(8);
-        let (second_connection, second_peer) = UnixStream::pair().unwrap();
-        let second_subscriber = second
-            .events
-            .subscribe(second_sender, second_connection)
-            .unwrap();
-
-        first
-            .events
-            .publish(json!({"event": "text", "chat": "chat-1", "text": "once"}));
-        assert_eq!(next_event(&first_receiver, "text")["text"], "once");
-        assert_eq!(next_event(&second_receiver, "text")["text"], "once");
-        first.events.publish(json!({
-            "event": "terminal-output",
-            "chat": "chat-1",
-            "terminal": "terminal-1",
-            "data": "not shared",
-        }));
-        assert_eq!(
-            next_event(&first_receiver, "terminal-output")["data"],
-            "not shared"
-        );
-        assert!(!receives_event(
-            &second_receiver,
-            "terminal-output",
-            std::time::Duration::from_millis(150),
-        ));
-        assert!(!receives_event(
-            &first_receiver,
-            "text",
-            std::time::Duration::from_millis(150),
-        ));
-
-        first.events.unsubscribe(first_subscriber);
-        second.events.unsubscribe(second_subscriber);
-        drop(first_peer);
-        drop(second_peer);
-    }
-
-    fn next_event(receiver: &std::sync::mpsc::Receiver<Value>, name: &str) -> Value {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let event = receiver
-                .recv_timeout(remaining)
-                .expect("expected host event");
-            if event["event"] == name {
-                return event;
-            }
-        }
-    }
-
-    fn receives_event(
-        receiver: &std::sync::mpsc::Receiver<Value>,
-        name: &str,
-        timeout: std::time::Duration,
-    ) -> bool {
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            match receiver.recv_timeout(remaining) {
-                Ok(event) if event["event"] == name => return true,
-                Ok(_) => {}
-                Err(_) => return false,
-            }
-        }
     }
 
     #[test]

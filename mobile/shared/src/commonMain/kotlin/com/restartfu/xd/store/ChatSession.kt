@@ -32,6 +32,7 @@ import com.restartfu.xd.protocol.TerminalOpenReply
 import com.restartfu.xd.protocol.TerminalReply
 import com.restartfu.xd.protocol.decodeReply
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -205,10 +206,11 @@ public class ChatSession internal constructor(
 
     /** The bytes of a stored image, already decoded from the wire. */
     @OptIn(ExperimentalEncodingApi::class)
-    public suspend fun readImage(path: String): ByteArray =
-        core.read(Ops.imageRead(path)) {
-            Base64.Default.decode(it.decodeReply<ImageReply>().data)
-        }
+    public suspend fun readImage(path: String): ByteArray {
+        val data = core.read(Ops.imageRead(path)) { it.decodeReply<ImageReply>().data }
+        // Callers are usually on the main thread, and an image is megabytes of text.
+        return withContext(Dispatchers.Default) { Base64.Default.decode(data) }
+    }
 
     /** The assistants and models this host can run. */
     public suspend fun catalog(): List<BackendReply> =
@@ -245,6 +247,9 @@ internal class ChatSessionCore(
     private var invalidated = false
     private val inputsDuringReload = mutableListOf<BufferedInput>()
     private val reloadRequests = Channel<Unit>(Channel.CONFLATED)
+
+    /** Set while the transcript may be out of date and nobody has looked since. */
+    private val stale = MutableStateFlow(false)
     private val reloadWorker = scope.launch {
         for (ignored in reloadRequests) reload()
     }
@@ -300,6 +305,8 @@ internal class ChatSessionCore(
                 clearReloadAfterCancellation()
                 throw error
             } catch (error: Throwable) {
+                // Still out of date: the next visit reads it again.
+                stale.value = true
                 stateMutex.withLock {
                     if (invalidated) return@withLock
                     reloadInProgress = false
@@ -336,16 +343,34 @@ internal class ChatSessionCore(
                 messageLimit.toLong() + MESSAGE_PAGE_SIZE,
                 Int.MAX_VALUE.toLong(),
             ).toInt()
+            val oldest = stateMutex.withLock { _state.value.oldestStoredId() }
             try {
-                val messagesValue = actor.call(Ops.messages(chatId, nextLimit))
-                val messages = actor.decodeReply(messagesValue) {
+                // One page from before the oldest message shown, rather than
+                // every page shown again with one more in front.
+                val page = oldest?.let {
+                    val value = actor.call(Ops.messages(chatId, MESSAGE_PAGE_SIZE, before = it))
+                    actor.decodeReply(value) { reply -> reply.decodeReply<MessagesReply>() }
+                }?.takeIf { it.hasOlder != null }
+                // A host without cursors answers with the newest page instead.
+                val messages = page ?: actor.decodeReply(actor.call(Ops.messages(chatId, nextLimit))) {
                     it.decodeReply<MessagesReply>()
                 }
                 stateMutex.withLock {
                     if (invalidated) return@withLock
+                    val stillOldest = _state.value.oldestStoredId() == oldest
+                    if (page != null && !stillOldest) {
+                        // A reload replaced the list meanwhile; this page may
+                        // not join onto it, and the next tap asks again.
+                        _state.value = _state.value.copy(loadingOlder = false)
+                        return@withLock
+                    }
                     _state.value = TranscriptMachine.reduce(
                         _state.value,
-                        TranscriptInput.MessagesLoaded(messages),
+                        if (page != null) {
+                            TranscriptInput.OlderLoaded(page)
+                        } else {
+                            TranscriptInput.MessagesLoaded(messages)
+                        },
                     ).state
                     messageLimit = nextLimit
                 }
@@ -608,7 +633,19 @@ internal class ChatSessionCore(
     fun requestReload() {
         // Terminal scopes share transport but have no conversation snapshot.
         if (chatId.startsWith("global:") || chatId.startsWith("session:")) return
+        stale.value = false
         reloadRequests.trySend(Unit)
+    }
+
+
+    /** Marks the transcript out of date, to be read again by [reloadIfStale]. */
+    fun markStale() {
+        stale.value = true
+    }
+
+    /** Reads the transcript again if it was marked out of date. */
+    fun reloadIfStale() {
+        if (stale.compareAndSet(expect = true, update = false)) requestReload()
     }
 
     private suspend fun apply(
@@ -723,3 +760,7 @@ internal class ChatSessionCore(
 
 /** GitHub can be slow; past this the header and Changes just keep what they showed. */
 private const val GIT_STATE_TIMEOUT_MILLIS = 60_000L
+
+/** The cursor for the page before what is loaded; hidden rows count, so a page of them still moves it. */
+private fun ChatState.oldestStoredId(): Long? =
+    oldestFetchedMessageId ?: messages.firstOrNull()?.messageId

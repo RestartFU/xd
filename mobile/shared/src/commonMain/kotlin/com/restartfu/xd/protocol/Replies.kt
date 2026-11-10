@@ -600,6 +600,9 @@ public data class MessagesReply(
     @SerialName("last_message_id")
     val lastMessageId: Long,
     val messages: List<MessageReply>,
+    /** Whether rows older than this page exist; only cursor-aware hosts say. */
+    @SerialName("has_older")
+    val hasOlder: Boolean? = null,
 )
 
 @Serializable

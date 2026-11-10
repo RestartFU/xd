@@ -96,6 +96,42 @@ fn wrapped(process: &Process, root: u32, processes: &HashMap<u32, Process>) -> b
     interpreter && !explicit_shell
 }
 
+/// `root` and its descendants, read from each thread's `children` file.
+/// None when the kernel does not provide those files, or `root` is gone.
+fn descendants(root: u32) -> Option<HashSet<u32>> {
+    let mut found = HashSet::from([root]);
+    let mut pending = vec![root];
+    let mut first = true;
+    while let Some(pid) = pending.pop() {
+        let threads = match std::fs::read_dir(format!("/proc/{pid}/task")) {
+            Ok(threads) => threads,
+            Err(_) if first => return None,
+            // It exited while being walked; its children were reparented.
+            Err(_) => continue,
+        };
+        let mut readable = false;
+        for thread in threads.flatten() {
+            let Ok(children) = std::fs::read_to_string(thread.path().join("children")) else {
+                continue;
+            };
+            readable = true;
+            for child in children
+                .split_ascii_whitespace()
+                .filter_map(|child| child.parse::<u32>().ok())
+            {
+                if found.insert(child) {
+                    pending.push(child);
+                }
+            }
+        }
+        if first && !readable {
+            return None;
+        }
+        first = false;
+    }
+    Some(found)
+}
+
 type Changes = (Vec<(String, Delegation)>, Vec<String>);
 
 #[derive(Default)]
@@ -104,8 +140,48 @@ pub(crate) struct Tracker {
 }
 
 impl Tracker {
+    /// Whether any wrapped assistant is being followed.
+    pub(crate) fn tracking(&self) -> bool {
+        !self.active.is_empty()
+    }
+
     /// None means the snapshot failed; do not end cards on a transient error.
     pub(crate) fn poll(&mut self, root: u32) -> Option<Changes> {
+        // Only the assistant's own process tree matters. Walking it through
+        // each process's children reads a handful of files, where scanning
+        // every process on the machine read thousands, twice a second for
+        // each assistant. The scan stays for kernels without that file.
+        let mut relevant = match descendants(root) {
+            Some(tree) => tree,
+            None => self.scan_descendants(root)?,
+        };
+        relevant.extend(self.active.values().map(|p| p.pid));
+        let mut processes = HashMap::new();
+        for pid in relevant {
+            if let Some(process) = read_process(pid) {
+                processes.insert(pid, process);
+                continue;
+            }
+            let Some(old) = self.active.values().find(|p| p.pid == pid) else {
+                continue;
+            };
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                // Do not interpret a transient argv read error as completion.
+                Ok(stat) if identity(&stat).is_some_and(|(_, start)| start == old.start) => {
+                    processes.insert(pid, old.clone());
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                // Other users may hide their process metadata. An unreadable
+                // process we track makes this snapshot inconclusive.
+                Err(_) => return None,
+            }
+        }
+        Some(self.update(root, &processes))
+    }
+
+    /// `root` and its descendants, from every process's parent.
+    fn scan_descendants(&self, root: u32) -> Option<HashSet<u32>> {
         let mut identities = HashMap::new();
         for entry in std::fs::read_dir("/proc").ok()? {
             let entry = entry.ok()?;
@@ -141,21 +217,7 @@ impl Tracker {
                 break;
             }
         }
-        relevant.extend(self.active.values().map(|p| p.pid));
-        let mut processes = HashMap::new();
-        for pid in relevant {
-            if let Some(process) = read_process(pid) {
-                processes.insert(pid, process);
-            } else if let Some(old) = self.active.values().find(|p| p.pid == pid)
-                && identities
-                    .get(&pid)
-                    .is_some_and(|(_, start)| *start == old.start)
-            {
-                // Do not interpret a transient argv read error as completion.
-                processes.insert(pid, old.clone());
-            }
-        }
-        Some(self.update(root, &processes))
+        Some(relevant)
     }
 
     fn update(&mut self, root: u32, processes: &HashMap<u32, Process>) -> Changes {
@@ -232,6 +294,36 @@ p.communicate(b'done\n')
             .find(|(key, _)| key.starts_with(&format!("process:{pid}:")));
         assert!(key.is_some(), "actual child not found: {started:?}");
         assert!(ended.contains(&key.unwrap().0));
+    }
+
+    #[test]
+    fn walks_only_the_process_tree_and_agrees_with_a_full_scan() {
+        use std::process::{Command, Stdio};
+        // A grandchild under a shell, so the walk has to go two levels down.
+        let mut shell = Command::new("sh")
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(shell.stdout.take().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        let grandchild: u32 = line.trim().parse().unwrap();
+        let root = std::process::id();
+        let walked = descendants(root).expect("this kernel lists each thread's children");
+        let scanned = Tracker::default().scan_descendants(root).unwrap();
+        assert!(walked.contains(&shell.id()));
+        assert!(walked.contains(&grandchild));
+        assert!(!walked.contains(&1), "nothing outside the tree");
+        for pid in [root, shell.id(), grandchild] {
+            assert!(scanned.contains(&pid));
+        }
+        let _ = shell.kill();
+        let _ = shell.wait();
+        let _ = Command::new("kill").arg(grandchild.to_string()).status();
     }
 
     #[test]

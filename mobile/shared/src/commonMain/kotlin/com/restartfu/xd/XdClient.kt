@@ -252,7 +252,31 @@ public class XdClient(
     /** The displayed transcript; cached background tabs can still become unread. */
     public fun setVisibleChat(chatId: String?) {
         visibleChat.value = chatId
-        if (chatId != null) markSeen(chatId)
+        if (chatId != null) {
+            markSeen(chatId)
+            sessions.value[chatId]?.core?.reloadIfStale()
+        }
+    }
+
+    /**
+     * Brings open chats up to date after something they cannot follow from
+     * their own events: a new connection, or a change to the tree. Only the
+     * chat on screen, and any chat not read yet, is read again now; the rest
+     * are marked, and read again when next shown. Every chat a phone has
+     * visited stays open, so reading them all each time it comes back to the
+     * foreground grew with every chat opened.
+     */
+    private fun reloadSessions() {
+        sessions.value.forEach { (chatId, entry) ->
+            val core = entry.core
+            if (chatId == visibleChat.value || !core.state.value.transcriptLoaded) {
+                core.requestReload()
+            } else {
+                core.markStale()
+                // Shown in the meantime, after the check above.
+                if (chatId == visibleChat.value) core.reloadIfStale()
+            }
+        }
     }
 
     public fun markSeen(chatId: String) {
@@ -329,9 +353,7 @@ public class XdClient(
                         scope.launch { runCatching { agentCliUpdates("status") } }
                     }
                     requestTreeRefresh()
-                    sessions.value.values.forEach { entry ->
-                        entry.core.requestReload()
-                    }
+                    reloadSessions()
                 }
             }
         }
@@ -358,9 +380,7 @@ public class XdClient(
                 }
                 if (eventName == "tree") {
                     requestTreeRefresh()
-                    sessions.value.values.forEach { entry ->
-                        entry.core.requestReload()
-                    }
+                    reloadSessions()
                 }
                 val chatId = (event.value["chat"] as? JsonPrimitive)?.contentOrNull
                 if (chatId != null) trackSignals(eventName, chatId, event.value)

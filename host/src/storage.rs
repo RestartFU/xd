@@ -183,6 +183,7 @@ struct MaterializedMessage {
     keep: bool,
 }
 
+#[derive(Clone)]
 struct GitWorktree {
     path: PathBuf,
     head: Option<String>,
@@ -190,6 +191,7 @@ struct GitWorktree {
     detached: bool,
 }
 
+#[derive(Clone, Copy)]
 enum RequestedNewChatWorktree<'a> {
     Default,
     Existing(&'a str),
@@ -446,101 +448,6 @@ impl StateStore {
         )
     }
 
-    pub(crate) fn append_shared_event(
-        &self,
-        source: &str,
-        event: &Value,
-    ) -> Result<(), StorageError> {
-        let encoded = serde_json::to_string(event)
-            .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
-        let write = |database: &Connection| -> Result<(), StorageError> {
-            let transaction = database.unchecked_transaction()?;
-            let chunked = encoded.len() > DRAFT_CHUNK_BYTES;
-            transaction.execute(
-                "INSERT INTO shared_events (source, payload) VALUES (?, ?)",
-                (source, if chunked { CHUNKED_DRAFT } else { &encoded }),
-            )?;
-            let id = transaction.last_insert_rowid();
-            if chunked {
-                let mut insert = transaction.prepare(
-                    "INSERT INTO shared_event_chunks (event_id, ordinal, data) VALUES (?, ?, ?)",
-                )?;
-                for (ordinal, chunk) in encoded.as_bytes().chunks(DRAFT_CHUNK_BYTES).enumerate() {
-                    insert.execute(params![id, ordinal as i64, chunk])?;
-                }
-            }
-            if id % 256 == 0 {
-                transaction.execute(
-                    "DELETE FROM shared_events WHERE id <= ?",
-                    [id.saturating_sub(16_384)],
-                )?;
-            }
-            transaction.commit()?;
-            Ok(())
-        };
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        // These rows only relay live updates to other host processes; they are
-        // pruned soon after and nothing reads them back after a restart. A
-        // reply streams one per token, so syncing each to disk queued every
-        // chat behind a busy disk. Write-ahead logging keeps them in order
-        // without a sync, and the next real commit makes them durable anyway.
-        if self.readers.is_some() {
-            database::without_sync(&database, write)
-        } else {
-            write(&database)
-        }
-    }
-
-    pub(crate) fn latest_shared_event_id(&self) -> Result<i64, StorageError> {
-        let database = self.reader()?;
-        database
-            .query_row(
-                "SELECT COALESCE(MAX(id), 0) FROM shared_events",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(StorageError::from)
-    }
-
-    pub(crate) fn shared_events_after(
-        &self,
-        after: i64,
-    ) -> Result<Vec<(i64, String, Value)>, StorageError> {
-        let database = self.reader()?;
-        let mut statement = database.prepare(
-            "SELECT id, source, payload FROM shared_events WHERE id > ? ORDER BY id LIMIT 512",
-        )?;
-        let rows = statement.query_map([after], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut events = Vec::new();
-        for row in rows {
-            let (id, source, payload) = row?;
-            let payload = if payload == CHUNKED_DRAFT {
-                let mut chunks = database.prepare(
-                    "SELECT data FROM shared_event_chunks WHERE event_id = ? ORDER BY ordinal",
-                )?;
-                let mut bytes = Vec::new();
-                for chunk in chunks.query_map([id], |row| row.get::<_, Vec<u8>>(0))? {
-                    bytes.extend_from_slice(&chunk?);
-                }
-                String::from_utf8(bytes)
-                    .map_err(|error| StorageError::InvalidRequest(error.to_string()))?
-            } else {
-                payload
-            };
-            let event = serde_json::from_str(&payload).map_err(|error| {
-                StorageError::InvalidRequest(format!("Saved host event is invalid: {error}"))
-            })?;
-            events.push((id, source, event));
-        }
-        Ok(events)
-    }
-
     pub fn remote_listener(&self) -> Result<Option<(String, u16)>, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let encoded = database
@@ -609,6 +516,18 @@ impl StateStore {
         if writable {
             initialize_schema(&database)?;
             initialize_generated_worktrees(&database)?;
+        }
+        // Before the checkpointer and readers open the file, which VACUUM
+        // needs to itself. A failure only leaves the file as large as it was.
+        if write_ahead_log {
+            match database::compact_if_bloated(&database) {
+                Ok(true) => eprintln!("xd-host: compacted {}", database_path.display()),
+                Ok(false) => {}
+                Err(error) => eprintln!(
+                    "xd-host: cannot compact {}: {error}",
+                    database_path.display()
+                ),
+            }
         }
         let database = Arc::new(Mutex::new(database));
         let checkpointer = write_ahead_log
@@ -883,11 +802,11 @@ impl StateStore {
             )
             .ok();
             if !session_titles.contains_key(&chat.8) {
-                let session_title: String = database.query_row(
-                    "SELECT COALESCE(title, 'New Session') FROM workspace_sessions WHERE id = ?",
-                    [&chat.8],
-                    |row| row.get(0),
-                )?;
+                let session_title: String = database
+                    .prepare_cached(
+                        "SELECT COALESCE(title, 'New Session') FROM workspace_sessions WHERE id = ?",
+                    )?
+                    .query_row([&chat.8], |row| row.get(0))?;
                 session_titles.insert(chat.8.clone(), session_title);
             }
             visible_chats.push((chat, workdir));
@@ -920,6 +839,7 @@ impl StateStore {
         let mut listed_worktrees = ListedWorktrees::new(git_settings_readable());
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
+        let mut session_index = HashMap::<String, usize>::new();
         for (
             (
                 id,
@@ -979,7 +899,10 @@ impl StateStore {
             if auto_settle_disabled {
                 chat["auto_settle_disabled"] = json!(true);
             }
-            if let Some(group) = sessions.iter_mut().find(|group| group["id"] == session) {
+            if let Some(group) = session_index
+                .get(&session)
+                .and_then(|&index| sessions.get_mut(index))
+            {
                 group["chats"]
                     .as_array_mut()
                     .expect("session members")
@@ -1008,6 +931,7 @@ impl StateStore {
                 if let Some(parent_session) = parent_session {
                     group["parent"] = Value::String(parent_session);
                 }
+                session_index.insert(session.clone(), sessions.len());
                 sessions.push(group);
             }
             chats.push(chat);
@@ -1192,7 +1116,7 @@ impl StateStore {
         drop(database);
         if let Ok(workdir) = workdir {
             response["workdir"] = Value::String(workdir.clone());
-            if let Ok(worktrees) = list_git_worktrees(Path::new(&workdir)) {
+            if let Ok(worktrees) = cached_git_worktrees(Path::new(&workdir)) {
                 let current_path = normalize_existing_path(Path::new(&workdir));
                 let values = worktrees
                     .iter()
@@ -1908,6 +1832,63 @@ impl StateStore {
         )?)
     }
 
+    /// Checks out the worktree a chat's first message will run in, before
+    /// the send takes the database: `git worktree add` can take seconds, and
+    /// every other chat's writes would wait behind it. The send records it if
+    /// the chat still needs it then; otherwise it is removed again. Callers
+    /// hold the engine's session resources, so no other worktree change runs
+    /// meanwhile. Anything unexpected here leaves the work to the send.
+    fn premake_turn_worktree(
+        &self,
+        chat_id: &str,
+        name_hint: Option<&str>,
+        keep_paused: bool,
+    ) -> Result<Option<MadeWorktree>, StorageError> {
+        let source = {
+            let Ok(database) = self.reader() else {
+                return Ok(None);
+            };
+            let chat = database
+                .query_row(
+                    "SELECT folder_id, workdir, original_workdir, new_worktree, host_working, \
+                     paused FROM chats WHERE id = ?",
+                    [chat_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, bool>(3)?,
+                            row.get::<_, bool>(4)?,
+                            row.get::<_, bool>(5)?,
+                        ))
+                    },
+                )
+                .optional();
+            let Ok(Some((folder, workdir, original, new_worktree, working, paused))) = chat else {
+                return Ok(None);
+            };
+            if !new_worktree
+                || working
+                || (paused && keep_paused)
+                || !workspace_is_unused(&database, chat_id).unwrap_or(false)
+            {
+                return Ok(None);
+            }
+            match resolve_workdir(
+                &database,
+                &self.workspace_root,
+                &folder,
+                workdir.as_deref(),
+                original.as_deref(),
+            ) {
+                Ok(source) => source,
+                Err(_) => return Ok(None),
+            }
+        };
+        make_worktree(&source, chat_id, name_hint, None).map(Some)
+    }
+
     fn prepare_send_inner(
         &self,
         request: &Value,
@@ -1926,6 +1907,14 @@ impl StateStore {
             ));
         }
         let mut message = self.materialize_message(request, text)?;
+        let keep_paused = request.get("keep_paused").and_then(Value::as_bool) == Some(true);
+        // Declared before the database lock, so a worktree this send does not
+        // end up using is removed after the lock is released.
+        let mut premade = self.premake_turn_worktree(
+            chat_id,
+            turn_worktree_hint(&message.prompt, worktree_name),
+            keep_paused,
+        )?;
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let (working, backend, paused) = transaction
@@ -1987,8 +1976,7 @@ impl StateStore {
         }
         // The host's own messages, such as an agent's report to the chat
         // that started it, wait in a paused chat's queue instead of resuming it.
-        let keep_paused =
-            paused && request.get("keep_paused").and_then(Value::as_bool) == Some(true);
+        let keep_paused = paused && keep_paused;
         if working || keep_paused {
             let stored = transaction.query_row(
                 "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
@@ -2047,6 +2035,7 @@ impl StateStore {
             chat_id,
             &message.prompt,
             worktree_name,
+            premade.as_ref(),
         )?;
         if let Some(user_message_at) = user_message_at {
             transaction.execute(
@@ -2073,6 +2062,11 @@ impl StateStore {
         }
         transaction.commit()?;
         message.keep();
+        if let Some(made) = premade.as_mut()
+            && made.path == turn.workdir
+        {
+            made.keep();
+        }
         Ok(SendDisposition::Start {
             reply: json!({"ok": true, "queued": false}),
             turn,
@@ -2942,7 +2936,16 @@ impl StateStore {
         )?;
         let next = next_text
             .as_deref()
-            .map(|text| prepare_turn(&transaction, &self.workspace_root, chat_id, text, None))
+            .map(|text| {
+                prepare_turn(
+                    &transaction,
+                    &self.workspace_root,
+                    chat_id,
+                    text,
+                    None,
+                    None,
+                )
+            })
             .transpose()?;
         transaction.commit()?;
         Ok(TurnFinish {
@@ -2991,11 +2994,23 @@ impl StateStore {
         label: Option<&str>,
     ) -> Result<(), StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        database.execute(
-            "UPDATE chats SET partial_reply = ?, partial_reply_label = ? WHERE id = ?",
-            params![text, label, chat_id],
-        )?;
-        Ok(())
+        let write = |database: &Connection| -> Result<(), StorageError> {
+            database
+                .prepare_cached(
+                    "UPDATE chats SET partial_reply = ?, partial_reply_label = ? WHERE id = ?",
+                )?
+                .execute(params![text, label, chat_id])?;
+            Ok(())
+        };
+        // A streaming reply saves itself every half second only so that a
+        // crash of this process keeps what was said. Write-ahead logging
+        // survives that without a sync, and waiting on the disk for each copy
+        // held up every other chat's writes. Clearing it stays fully synced.
+        if self.readers.is_some() && !text.is_empty() {
+            database::without_sync(&database, write)
+        } else {
+            write(&database)
+        }
     }
 
     /// Explicitly repair every `host_working` row after an operator has proved
@@ -3736,7 +3751,7 @@ impl StateStore {
         let chat_id = required_string(request, "chat", "diff-read needs a chat and read type.")?;
         let kind = required_string(request, "read", "diff-read needs a chat and read type.")?;
         let workdir = {
-            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            let database = self.reader()?;
             resolve_chat_workdir(&database, &self.workspace_root, chat_id)?
         };
         let workdir = Path::new(&workdir);
@@ -3828,41 +3843,24 @@ impl StateStore {
 
     pub(crate) fn git_action_state(&self, chat_id: &str) -> Result<Value, StorageError> {
         let workdir = {
-            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            let database = self.reader()?;
             resolve_chat_workdir(&database, &self.workspace_root, chat_id)?
         };
         Ok(repository_action_state(Path::new(&workdir)))
     }
 
+    /// What changes when the chat's checkout commits or switches branch,
+    /// which the repository monitor compares every second. Read from Git's
+    /// files where it can, since `git status` refreshed the whole index each
+    /// time only to report the branch and commit.
     pub(crate) fn repository_head_signature(&self, chat_id: &str) -> String {
-        let workdir = match self.database.lock().ok().and_then(|database| {
+        let workdir = match self.reader().ok().and_then(|database| {
             resolve_chat_workdir(&database, &self.workspace_root, chat_id).ok()
         }) {
             Some(workdir) => workdir,
             None => return String::new(),
         };
-        let Ok((status, stdout, _)) = run_git(
-            Path::new(&workdir),
-            &[
-                "status",
-                "--porcelain=v2",
-                "--branch",
-                "--untracked-files=no",
-            ],
-        ) else {
-            return String::new();
-        };
-        if !status.success() {
-            return String::new();
-        }
-        String::from_utf8_lossy(&stdout)
-            .lines()
-            .filter(|line| line.starts_with("# branch.oid ") || line.starts_with("# branch.head "))
-            .fold(String::new(), |mut signature, line| {
-                signature.push_str(line);
-                signature.push('\n');
-                signature
-            })
+        repository_head_signature_at(Path::new(&workdir))
     }
 
     pub(crate) fn perform_git_action(&self, request: &Value) -> Result<Value, StorageError> {
@@ -4377,7 +4375,7 @@ impl StateStore {
     fn chat_repository(&self, request: &Value, message: &str) -> Result<PathBuf, StorageError> {
         let chat_id = required_string(request, "chat", message)?;
         let workdir = {
-            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            let database = self.reader()?;
             resolve_chat_workdir(&database, &self.workspace_root, chat_id)?
         };
         git_repository_root(&workdir)
@@ -4902,6 +4900,46 @@ impl StateStore {
         self.new_chat_under(request, Some((parent, reports)))
     }
 
+    /// The worktree a new chat asks for, chosen and checked out before the
+    /// chat takes the database, since git can take seconds (or fetch over the
+    /// network) and every other chat's writes would wait behind it. Callers
+    /// hold the engine's session resources. Anything unexpected here leaves
+    /// the work to the locked part, which reports it as before.
+    fn prechoose_new_chat_worktree(
+        &self,
+        folder: &str,
+        id: &str,
+        worktree_name: &str,
+        requested: RequestedNewChatWorktree<'_>,
+        start_from_remote: bool,
+    ) -> Result<Option<(String, ChosenWorktree)>, StorageError> {
+        let source = {
+            let Ok(database) = self.reader() else {
+                return Ok(None);
+            };
+            let project: Option<bool> = database
+                .query_row(
+                    "SELECT is_group FROM workspace_folders WHERE root_path = ? AND id = ?",
+                    params![self.workspace_root.to_string_lossy().as_ref(), folder],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .map(|group: bool| !group);
+            if project != Some(true) {
+                return Ok(None);
+            }
+            match resolve_workdir(&database, &self.workspace_root, folder, None, None) {
+                Ok(source) => source,
+                Err(_) => return Ok(None),
+            }
+        };
+        let chosen =
+            choose_new_chat_worktree(&source, id, worktree_name, requested, start_from_remote)?;
+        Ok(Some((source, chosen)))
+    }
+
     fn new_chat_under(
         &self,
         request: &Value,
@@ -4931,6 +4969,23 @@ impl StateStore {
         let worktree_name = optional_string(request, "prompt")?
             .and_then(|prompt| prompt.lines().find(|line| !line.trim().is_empty()))
             .unwrap_or(title);
+        let id = Uuid::new_v4().to_string();
+        let start_from_remote = request
+            .get("start_from_remote")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        // Declared before the database lock, so a worktree the chat does not
+        // end up using is removed after the lock is released.
+        let mut chosen = match (requested_session, requested_folder, requested_worktree) {
+            (_, _, RequestedNewChatWorktree::Default) | (Some(_), _, _) | (_, None, _) => None,
+            (None, Some(folder), requested) => self.prechoose_new_chat_worktree(
+                folder,
+                &id,
+                worktree_name,
+                requested,
+                start_from_remote,
+            )?,
+        };
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let shared = if let Some(session) = requested_session {
@@ -5072,101 +5127,34 @@ impl StateStore {
             .cloned()
             .unwrap_or(json!([]));
         validate_draft_attachments(&draft_attachments)?;
-        let id = Uuid::new_v4().to_string();
         let now = now_seconds();
         let (workdir, original_workdir) = if let Some(shared) = &shared {
             (shared.1.clone(), shared.2.clone())
         } else {
             match requested_worktree {
                 RequestedNewChatWorktree::Default => (legacy_workdir.map(str::to_owned), None),
-                RequestedNewChatWorktree::Existing(requested) => {
-                    if !Path::new(requested).is_absolute() {
-                        return Err(StorageError::InvalidRequest(
-                            "An existing worktree path is required.".into(),
+                requested => {
+                    let source =
+                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
+                    // Chosen before the lock unless the project's directory
+                    // moved meanwhile, which the git work here then redoes.
+                    if chosen.as_ref().is_none_or(|(before, _)| before != &source) {
+                        chosen = Some((
+                            source.clone(),
+                            choose_new_chat_worktree(
+                                &source,
+                                &id,
+                                worktree_name,
+                                requested,
+                                start_from_remote,
+                            )?,
                         ));
                     }
-                    let source =
-                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                    let requested = normalize_existing_path(Path::new(requested));
-                    let normalized_source = normalize_existing_path(Path::new(&source));
-                    let selected = match list_git_worktrees(Path::new(&source)) {
-                        Ok(worktrees) => worktrees
-                            .into_iter()
-                            .find(|worktree| normalize_existing_path(&worktree.path) == requested)
-                            .map(|worktree| normalize_existing_path(&worktree.path))
-                            .ok_or_else(|| {
-                                StorageError::InvalidRequest(
-                                    "That path is not a worktree of this repository.".into(),
-                                )
-                            })?,
-                        Err(_) if requested == normalized_source => normalized_source,
-                        Err(error) => return Err(error),
+                    let path = match chosen.as_ref() {
+                        Some((_, chosen)) => chosen.record(&transaction)?,
+                        None => unreachable!("a worktree was just chosen"),
                     };
-                    (Some(selected), Some(source))
-                }
-                RequestedNewChatWorktree::New => {
-                    let source =
-                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                    let created =
-                        create_worktree(&transaction, &source, &id, Some(worktree_name), None)?;
-                    (Some(created), Some(source))
-                }
-                RequestedNewChatWorktree::Branch { reference, oid } => {
-                    let source =
-                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                    let root = git_repository_root(&source)?;
-                    let resolved = git_resolve_commit(&root, reference)?;
-                    if resolved != oid {
-                        return Err(StorageError::InvalidRequest(
-                            "That branch changed after it was selected. Refresh and try again."
-                                .into(),
-                        ));
-                    }
-                    let base = if request
-                        .get("start_from_remote")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                    {
-                        fetch_worktree_base(&root, reference, oid)?
-                    } else {
-                        oid.to_owned()
-                    };
-                    let created = create_worktree(
-                        &transaction,
-                        &source,
-                        &id,
-                        Some(worktree_name),
-                        Some(&base),
-                    )?;
-                    (Some(created), Some(source))
-                }
-                RequestedNewChatWorktree::PullRequest { number, oid } => {
-                    let source =
-                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                    let root = git_repository_root(&source)?;
-                    let reference = format!("refs/pull/{number}/head");
-                    let fetched = run_git(&root, &["fetch", "origin", &reference])?;
-                    if !fetched.0.success() {
-                        return Err(StorageError::InvalidRequest(command_error(
-                            &fetched.2,
-                            "git could not fetch that pull request",
-                        )));
-                    }
-                    let resolved = git_resolve_commit(&root, "FETCH_HEAD")?;
-                    if resolved != oid {
-                        return Err(StorageError::InvalidRequest(
-                        "That pull request changed after it was selected. Refresh and try again."
-                            .into(),
-                    ));
-                    }
-                    let created = create_worktree(
-                        &transaction,
-                        &source,
-                        &id,
-                        Some(worktree_name),
-                        Some(oid),
-                    )?;
-                    (Some(created), Some(source))
+                    (Some(path), Some(source))
                 }
             }
         };
@@ -5213,6 +5201,9 @@ impl StateStore {
             params![draft, attachments, id],
         )?;
         transaction.commit()?;
+        if let Some((_, chosen)) = chosen.as_mut() {
+            chosen.keep();
+        }
         Ok(
             json!({"ok": true, "id": id, "backend": backend, "session": session,
             "terminal_chat": format!("session:{session}")}),
@@ -5496,7 +5487,7 @@ impl StateStore {
     /// Sessions in this workspace that match `filter`, a condition on the
     /// session `s`, with nothing running, paused, or queued in any member chat.
     fn quiet_sessions(&self, filter: &str) -> Result<Vec<SettlementCandidate>, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = self.reader()?;
         let root = self.workspace_root.to_string_lossy();
         let mut statement = database.prepare(&format!(
             "SELECT s.id, s.created_at, c.id, c.folder_id, c.workdir, c.original_workdir, \
@@ -5912,48 +5903,14 @@ impl StateStore {
             ));
         }
         let requested = normalize_existing_path(Path::new(requested));
-        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        let transaction = database.transaction()?;
-        let chat = transaction
-            .query_row(
-                "SELECT workdir, original_workdir, new_worktree FROM chats WHERE id = ?",
-                [chat_id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, bool>(2)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
-        let selected = chat
-            .0
-            .as_deref()
-            .map(|path| normalize_existing_path(Path::new(path)))
-            .filter(|path| path == &requested)
-            .ok_or_else(|| {
-                StorageError::InvalidRequest("That worktree is no longer selected.".into())
-            })?;
-        let original = chat.1.ok_or_else(|| {
-            StorageError::InvalidRequest("That chat is not using a removable worktree.".into())
-        })?;
-        if chat.2 {
-            return Err(StorageError::InvalidRequest(
-                "The chat has not selected an existing worktree.".into(),
-            ));
-        }
-        let has_messages: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
-            [chat_id],
-            |row| row.get(0),
-        )?;
-        if has_messages || !workspace_is_unused(&transaction, chat_id)? {
-            return Err(StorageError::InvalidRequest(
-                "A worktree cannot be removed after the session's first message.".into(),
-            ));
-        }
+        // Checked first under the lock, then git runs without it: removing a
+        // worktree can take a while, and every other chat's writes would wait.
+        // The engine's session resources keep other worktree changes and
+        // first messages out meanwhile, and the update below checks again.
+        let (selected, original) = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            worktree_to_give_back(&database, chat_id, &requested)?
+        };
         let worktrees = list_git_worktrees(Path::new(&original))?;
         let target_index = worktrees
             .iter()
@@ -5966,23 +5923,6 @@ impl StateStore {
         if target_index == 0 {
             return Err(StorageError::InvalidRequest(
                 "The main checkout cannot be removed.".into(),
-            ));
-        }
-        let references = {
-            let mut statement = transaction.prepare(
-                "SELECT workdir FROM chats WHERE workspace_session_id != \
-                    (SELECT workspace_session_id FROM chats WHERE id = ?) AND workdir IS NOT NULL",
-            )?;
-            statement
-                .query_map([chat_id], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        if references
-            .iter()
-            .any(|path| normalize_existing_path(Path::new(path)) == requested)
-        {
-            return Err(StorageError::InvalidRequest(
-                "Another chat is still using that worktree.".into(),
             ));
         }
         let status = run_git(
@@ -6002,6 +5942,16 @@ impl StateStore {
                 "The worktree must be clean before it is removed.".into(),
             ));
         }
+        {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            if worktree_to_give_back(&database, chat_id, &requested)?
+                != (selected.clone(), original.clone())
+            {
+                return Err(StorageError::InvalidRequest(
+                    "The workspace changed before the worktree was removed.".into(),
+                ));
+            }
+        }
         let removed = run_git(Path::new(&original), &["worktree", "remove", &selected])?;
         if !removed.0.success() {
             let message = String::from_utf8_lossy(&removed.2).trim().to_owned();
@@ -6011,6 +5961,8 @@ impl StateStore {
                 message
             }));
         }
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
         transaction.execute(
             "DELETE FROM generated_worktrees WHERE path = ?",
             [&selected],
@@ -6363,7 +6315,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_workspace_sort_order(database)?;
             ensure_workspace_group_columns(database)?;
             ensure_chat_sort_order(database)?;
-            ensure_shared_events_table(database)?;
+            retire_shared_events(database)?;
             disable_claude_mode(database)?;
             remove_terminal_chats(database)?;
             ensure_workspace_sessions(database)?;
@@ -6430,8 +6382,6 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); \
          CREATE TABLE IF NOT EXISTS devices (token_hash TEXT PRIMARY KEY, name TEXT NOT NULL, \
            created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL); \
-         CREATE TABLE IF NOT EXISTS shared_events (id INTEGER PRIMARY KEY AUTOINCREMENT, \
-           source TEXT NOT NULL, payload TEXT NOT NULL); \
          CREATE TRIGGER IF NOT EXISTS remember_agent_defaults \
            AFTER UPDATE OF backend, model, effort, access, plan, fast, claude_mode ON chats \
            WHEN OLD.backend IS NOT NEW.backend OR OLD.model IS NOT NEW.model \
@@ -6462,7 +6412,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_workspace_sort_order(database)?;
     ensure_workspace_group_columns(database)?;
     ensure_chat_sort_order(database)?;
-    ensure_shared_events_table(database)?;
+    retire_shared_events(database)?;
     disable_claude_mode(database)?;
     remove_terminal_chats(database)?;
     ensure_workspace_sessions(database)?;
@@ -6600,12 +6550,25 @@ fn ensure_session_mode(database: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn ensure_shared_events_table(database: &Connection) -> Result<(), StorageError> {
-    database.execute(
-        "CREATE TABLE IF NOT EXISTS shared_events (id INTEGER PRIMARY KEY AUTOINCREMENT, \
-         source TEXT NOT NULL, payload TEXT NOT NULL)",
-        [],
+/// Host processes once relayed live events to each other through these
+/// tables. Only the daemon opens the database now, so they only cost a write
+/// per streamed token. An older xd creates them again if it opens this file.
+fn retire_shared_events(database: &Connection) -> Result<(), StorageError> {
+    database.execute_batch(
+        "DROP TABLE IF EXISTS shared_event_chunks; \
+         DROP TABLE IF EXISTS shared_events;",
     )?;
+    let has_sequence: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_sequence {
+        database.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'shared_events'",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -7158,11 +7121,13 @@ const SETTLEABLE_SESSION: &str = "s.settled_override IS NULL AND s.auto_settle_d
 const DELETABLE_SESSION: &str =
     "COALESCE(s.settled_override, '') != 'active' AND s.auto_settle_disabled_at IS NULL";
 /// Whether any chat in session `?1` has done anything since the sweep looked:
-/// `?2` is the user's latest message or start it saw, `?3` the newest activity.
+/// `?2` is the user's latest message or start it saw, `?3` the newest activity,
+/// which it read from each chat's newest message as this does.
 const SESSION_CHANGED_SINCE: &str = "EXISTS (SELECT 1 FROM chats c WHERE c.workspace_session_id = ?1 AND ( \
        c.host_working != 0 OR c.paused != 0 OR COALESCE(c.queued, '') NOT IN ('', '[]') \
        OR c.last_user_message_at / 1000000 > ?2 OR c.created_at > ?2 \
-       OR EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.created_at > ?3)))";
+       OR COALESCE((SELECT m.created_at FROM messages m WHERE m.chat_id = c.id \
+         ORDER BY m.id DESC LIMIT 1), 0) > ?3))";
 
 struct SettlementRow {
     session: String,
@@ -8185,6 +8150,73 @@ fn workspace_session_chat(database: &Connection, session: &str) -> Result<String
         .ok_or_else(|| StorageError::InvalidRequest("No such session on the host.".into()))
 }
 
+/// The worktree `requested` a chat may give back before its first message,
+/// as its selected path and the checkout it came from.
+fn worktree_to_give_back(
+    database: &Connection,
+    chat_id: &str,
+    requested: &str,
+) -> Result<(String, String), StorageError> {
+    let chat = database
+        .query_row(
+            "SELECT workdir, original_workdir, new_worktree FROM chats WHERE id = ?",
+            [chat_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+    let selected = chat
+        .0
+        .as_deref()
+        .map(|path| normalize_existing_path(Path::new(path)))
+        .filter(|path| path == requested)
+        .ok_or_else(|| {
+            StorageError::InvalidRequest("That worktree is no longer selected.".into())
+        })?;
+    let original = chat.1.ok_or_else(|| {
+        StorageError::InvalidRequest("That chat is not using a removable worktree.".into())
+    })?;
+    if chat.2 {
+        return Err(StorageError::InvalidRequest(
+            "The chat has not selected an existing worktree.".into(),
+        ));
+    }
+    let has_messages: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
+        [chat_id],
+        |row| row.get(0),
+    )?;
+    if has_messages || !workspace_is_unused(database, chat_id)? {
+        return Err(StorageError::InvalidRequest(
+            "A worktree cannot be removed after the session's first message.".into(),
+        ));
+    }
+    let references = {
+        let mut statement = database.prepare(
+            "SELECT workdir FROM chats WHERE workspace_session_id != \
+                    (SELECT workspace_session_id FROM chats WHERE id = ?) AND workdir IS NOT NULL",
+        )?;
+        statement
+            .query_map([chat_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if references
+        .iter()
+        .any(|path| normalize_existing_path(Path::new(path)) == requested)
+    {
+        return Err(StorageError::InvalidRequest(
+            "Another chat is still using that worktree.".into(),
+        ));
+    }
+    Ok((selected, original))
+}
+
 fn workspace_is_unused(database: &Connection, chat: &str) -> Result<bool, StorageError> {
     Ok(database.query_row(
         "SELECT NOT EXISTS(SELECT 1 FROM chats c WHERE c.workspace_session_id = \
@@ -8230,6 +8262,176 @@ fn create_worktree(
     name_hint: Option<&str>,
     start: Option<&str>,
 ) -> Result<String, StorageError> {
+    let mut made = make_worktree(workdir, chat_id, name_hint, start)?;
+    record_worktree(transaction, &made)?;
+    made.keep();
+    Ok(made.path.clone())
+}
+
+/// A worktree checked out for a chat, before the database records it. Git
+/// does the slow part, so callers make it without holding the database and
+/// record it afterwards in a short transaction. Dropped without `keep`, it
+/// removes the checkout and branch it added, so a send or new chat that
+/// fails afterwards leaves nothing behind.
+pub(crate) struct MadeWorktree {
+    /// The working directory it was made from.
+    source: String,
+    path: String,
+    container: PathBuf,
+    /// Set when `git worktree add` made it here, rather than finding the
+    /// chat's branch already checked out.
+    added: Option<AddedWorktree>,
+}
+
+struct AddedWorktree {
+    root: PathBuf,
+    branch: String,
+    new_branch: bool,
+}
+
+impl MadeWorktree {
+    fn keep(&mut self) {
+        self.added = None;
+    }
+}
+
+impl Drop for MadeWorktree {
+    fn drop(&mut self) {
+        let Some(added) = self.added.take() else {
+            return;
+        };
+        let removed = run_git(&added.root, &["worktree", "remove", "--force", &self.path])
+            .is_ok_and(|result| result.0.success());
+        if removed && added.new_branch {
+            let _ = run_git(&added.root, &["branch", "-D", &added.branch]);
+        }
+        if let Some(parent) = Path::new(&self.path).parent() {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+}
+
+/// The worktree a new chat runs in: one that already exists, or one made for it.
+pub(crate) enum ChosenWorktree {
+    Existing(String),
+    Made(MadeWorktree),
+}
+
+impl ChosenWorktree {
+    /// Records it in the chat's transaction and returns its path.
+    fn record(&self, transaction: &rusqlite::Transaction<'_>) -> Result<String, StorageError> {
+        match self {
+            Self::Existing(path) => Ok(path.clone()),
+            Self::Made(made) => {
+                record_worktree(transaction, made)?;
+                Ok(made.path.clone())
+            }
+        }
+    }
+
+    fn keep(&mut self) {
+        if let Self::Made(made) = self {
+            made.keep();
+        }
+    }
+}
+
+/// Picks or checks out the worktree a new chat asked for, from the project's
+/// working directory `source`. Runs git only; the caller records the result.
+fn choose_new_chat_worktree(
+    source: &str,
+    id: &str,
+    worktree_name: &str,
+    requested: RequestedNewChatWorktree<'_>,
+    start_from_remote: bool,
+) -> Result<ChosenWorktree, StorageError> {
+    match requested {
+        RequestedNewChatWorktree::Default => Err(StorageError::InvalidRequest(
+            "A new chat without a worktree choice uses its project's checkout.".into(),
+        )),
+        RequestedNewChatWorktree::Existing(requested) => {
+            if !Path::new(requested).is_absolute() {
+                return Err(StorageError::InvalidRequest(
+                    "An existing worktree path is required.".into(),
+                ));
+            }
+            let requested = normalize_existing_path(Path::new(requested));
+            let normalized_source = normalize_existing_path(Path::new(source));
+            let selected = match list_git_worktrees(Path::new(source)) {
+                Ok(worktrees) => worktrees
+                    .into_iter()
+                    .find(|worktree| normalize_existing_path(&worktree.path) == requested)
+                    .map(|worktree| normalize_existing_path(&worktree.path))
+                    .ok_or_else(|| {
+                        StorageError::InvalidRequest(
+                            "That path is not a worktree of this repository.".into(),
+                        )
+                    })?,
+                Err(_) if requested == normalized_source => normalized_source,
+                Err(error) => return Err(error),
+            };
+            Ok(ChosenWorktree::Existing(selected))
+        }
+        RequestedNewChatWorktree::New => Ok(ChosenWorktree::Made(make_worktree(
+            source,
+            id,
+            Some(worktree_name),
+            None,
+        )?)),
+        RequestedNewChatWorktree::Branch { reference, oid } => {
+            let root = git_repository_root(source)?;
+            let resolved = git_resolve_commit(&root, reference)?;
+            if resolved != oid {
+                return Err(StorageError::InvalidRequest(
+                    "That branch changed after it was selected. Refresh and try again.".into(),
+                ));
+            }
+            let base = if start_from_remote {
+                fetch_worktree_base(&root, reference, oid)?
+            } else {
+                oid.to_owned()
+            };
+            Ok(ChosenWorktree::Made(make_worktree(
+                source,
+                id,
+                Some(worktree_name),
+                Some(&base),
+            )?))
+        }
+        RequestedNewChatWorktree::PullRequest { number, oid } => {
+            let root = git_repository_root(source)?;
+            let reference = format!("refs/pull/{number}/head");
+            let fetched = run_git(&root, &["fetch", "origin", &reference])?;
+            if !fetched.0.success() {
+                return Err(StorageError::InvalidRequest(command_error(
+                    &fetched.2,
+                    "git could not fetch that pull request",
+                )));
+            }
+            let resolved = git_resolve_commit(&root, "FETCH_HEAD")?;
+            if resolved != oid {
+                return Err(StorageError::InvalidRequest(
+                    "That pull request changed after it was selected. Refresh and try again."
+                        .into(),
+                ));
+            }
+            Ok(ChosenWorktree::Made(make_worktree(
+                source,
+                id,
+                Some(worktree_name),
+                Some(oid),
+            )?))
+        }
+    }
+}
+
+/// Checks out the chat's worktree without touching the database.
+fn make_worktree(
+    workdir: &str,
+    chat_id: &str,
+    name_hint: Option<&str>,
+    start: Option<&str>,
+) -> Result<MadeWorktree, StorageError> {
     let root = git_repository_root(workdir)?;
     let worktrees = list_git_worktrees(&root)?;
     let main = worktrees
@@ -8250,7 +8452,13 @@ fn create_worktree(
             StorageError::InvalidRequest("Worktree selection needs a Git working directory.".into())
         })?;
     let container = repository_parent.join("worktrees");
-    register_worktree_container(transaction, &container)?;
+    prepare_worktree_container(&container)?;
+    let made = |path: String, added: Option<AddedWorktree>| MadeWorktree {
+        source: workdir.to_owned(),
+        path,
+        container: container.clone(),
+        added,
+    };
 
     let slug = worktree_slug(name_hint);
     let branch = format!("xd/{slug}-{}", glib_hash(chat_id));
@@ -8263,7 +8471,7 @@ fn create_worktree(
                 .is_some_and(|candidate| candidate == branch || candidate == legacy_branch)
     }) {
         // Not recorded as generated: it may be a checkout the user made.
-        return Ok(normalize_existing_path(&existing.path));
+        return Ok(made(normalize_existing_path(&existing.path), None));
     }
 
     for suffix in 1..=10_000_u32 {
@@ -8302,8 +8510,14 @@ fn create_worktree(
                 }));
             }
             let path = normalize_existing_path(Path::new(target));
-            record_generated_worktree(transaction, &path, &branch)?;
-            return Ok(path);
+            return Ok(made(
+                path,
+                Some(AddedWorktree {
+                    root: root.clone(),
+                    branch: branch.clone(),
+                    new_branch: !branch_exists,
+                }),
+            ));
         }
     }
     Err(StorageError::InvalidRequest(
@@ -8311,10 +8525,20 @@ fn create_worktree(
     ))
 }
 
-fn register_worktree_container(
+/// Records a worktree `make_worktree` checked out: its container, and the
+/// worktree itself when this chat's request added it.
+fn record_worktree(
     transaction: &rusqlite::Transaction<'_>,
-    container: &Path,
+    made: &MadeWorktree,
 ) -> Result<(), StorageError> {
+    register_worktree_container(transaction, &made.container)?;
+    if let Some(added) = &made.added {
+        record_generated_worktree(transaction, &made.path, &added.branch)?;
+    }
+    Ok(())
+}
+
+fn prepare_worktree_container(container: &Path) -> Result<(), StorageError> {
     let existed = container.exists();
     fs::create_dir_all(container).map_err(|source| StorageError::Filesystem {
         context: "Cannot create the generated worktree container".into(),
@@ -8326,6 +8550,14 @@ fn register_worktree_container(
             source,
         })?;
     }
+    Ok(())
+}
+
+fn register_worktree_container(
+    transaction: &rusqlite::Transaction<'_>,
+    container: &Path,
+) -> Result<(), StorageError> {
+    prepare_worktree_container(container)?;
     let normalized = normalize_existing_path(container);
     transaction.execute(
         "INSERT INTO worktree_containers (path, created_at, updated_at) VALUES (?, ?, ?) \
@@ -8411,9 +8643,198 @@ thread_local! {
     /// what the read that asked for them still holds.
     static BEFORE_GIT_WORKTREES: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
+    /// How many times this thread has run `git worktree list`.
+    static GIT_WORKTREE_LISTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The Git directory of the checkout `workdir` is in: its own `.git`
+/// directory, or a linked worktree's directory inside the common one.
+fn git_dir(workdir: &Path) -> Option<PathBuf> {
+    let mut directory = Some(workdir);
+    while let Some(current) = directory {
+        let dot_git = current.join(".git");
+        let Ok(metadata) = fs::metadata(&dot_git) else {
+            directory = current.parent();
+            continue;
+        };
+        if metadata.is_dir() {
+            return Some(dot_git);
+        }
+        let link = fs::read_to_string(&dot_git).ok()?;
+        return Some(current.join(link.strip_prefix("gitdir:")?.trim()));
+    }
+    None
+}
+
+/// HEAD and the commit it points at, read from Git's files: HEAD itself, then
+/// the branch's loose ref, or packed refs when there is none. Changes when the
+/// checkout commits, switches branch, or detaches. None when the repository
+/// keeps its refs some other way.
+/// The head signature of one checkout: from Git's files, or from git itself
+/// when they cannot say.
+fn repository_head_signature_at(workdir: &Path) -> String {
+    if let Some(signature) = head_file_signature(workdir) {
+        return signature;
+    }
+    let Ok((status, stdout, _)) = run_git(
+        workdir,
+        &["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"],
+    ) else {
+        return String::new();
+    };
+    if !status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&stdout).into_owned()
+}
+
+fn head_file_signature(workdir: &Path) -> Option<String> {
+    let git_dir = git_dir(workdir)?;
+    let common = match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(relative) => git_dir.join(relative.trim()),
+        Err(_) => git_dir.clone(),
+    };
+    if common.join("reftable").exists() {
+        return None;
+    }
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let Some(reference) = head.strip_prefix("ref:").map(str::trim) else {
+        return Some(head);
+    };
+    // Only branches live in the common directory as plain files; worktree
+    // refs (`refs/worktree/`, `refs/bisect/` and the like) are per worktree,
+    // so git resolves anything else.
+    if !reference.starts_with("refs/heads/") || reference.contains("..") {
+        return None;
+    }
+    let target = match fs::read_to_string(common.join(reference)) {
+        Ok(oid) => oid,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::metadata(common.join("packed-refs")) {
+                Ok(packed) => format!("packed {} {:?}", packed.len(), packed.modified().ok()?),
+                // An unborn branch.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(_) => return None,
+            }
+        }
+        Err(_) => return None,
+    };
+    // A branch that names another ref moves when that one does, which this
+    // file does not show: git resolves the chain.
+    if target.trim_start().starts_with("ref:") {
+        return None;
+    }
+    Some(format!("{head}{target}"))
+}
+
+/// Repositories' worktree lists, by common Git directory, with the signature
+/// of the files they were read from.
+type WorktreeLists = HashMap<PathBuf, (String, Vec<GitWorktree>)>;
+static WORKTREE_LISTS: Mutex<Option<WorktreeLists>> = Mutex::new(None);
+
+/// `git worktree list` for the tree and chat reads, which every client
+/// repeats after most changes. What they show of each worktree, its path,
+/// branch and whether HEAD is detached, all comes from files in the common
+/// Git directory, so the list is listed again only when one of those files
+/// changes. Anything this cannot read runs git as before.
+fn cached_git_worktrees(workdir: &Path) -> Result<Vec<GitWorktree>, StorageError> {
+    let Some(common) = git_common_dir(workdir) else {
+        return list_git_worktrees(workdir);
+    };
+    let Some(signature) = worktree_signature(&common) else {
+        return list_git_worktrees(workdir);
+    };
+    if let Ok(lists) = WORKTREE_LISTS.lock()
+        && let Some((cached, worktrees)) = lists.as_ref().and_then(|lists| lists.get(&common))
+        && *cached == signature
+    {
+        #[cfg(test)]
+        BEFORE_GIT_WORKTREES.with_borrow_mut(|hook| {
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+        return Ok(worktrees.clone());
+    }
+    let worktrees = list_git_worktrees(workdir)?;
+    // Kept only when nothing changed while git listed them.
+    if worktree_signature(&common).as_ref() == Some(&signature)
+        && let Ok(mut lists) = WORKTREE_LISTS.lock()
+    {
+        let lists = lists.get_or_insert_with(HashMap::new);
+        if lists.len() >= 256 {
+            lists.clear();
+        }
+        lists.insert(common, (signature, worktrees.clone()));
+    }
+    Ok(worktrees)
+}
+
+/// The common Git directory of the repository `workdir` is in, found from
+/// its `.git` entry without running git.
+fn git_common_dir(workdir: &Path) -> Option<PathBuf> {
+    let git_dir = git_dir(workdir)?;
+    let common = match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(relative) => git_dir.join(relative.trim()),
+        Err(_) => git_dir,
+    };
+    fs::canonicalize(common).ok()
+}
+
+/// Everything `git worktree list` reports that the tree and chat show: each
+/// worktree's HEAD, where its checkout is, and whether that still exists.
+fn worktree_signature(common: &Path) -> Option<String> {
+    // The branch git reports follows a branch that names another ref, which
+    // the files read here would not show, and refs outside `refs/heads/` can
+    // live in a worktree's own directory, so such a checkout is listed by git.
+    let names_a_symbolic_branch = |head: &str| {
+        head.strip_prefix("ref:")
+            .map(str::trim)
+            .is_some_and(|reference| {
+                !reference.starts_with("refs/heads/")
+                    || reference.contains("..")
+                    || fs::read_to_string(common.join(reference))
+                        .is_ok_and(|target| target.trim_start().starts_with("ref:"))
+            })
+    };
+    // Refs kept in a reftable are not files this could check.
+    if common.join("reftable").exists() {
+        return None;
+    }
+    let mut signature = fs::read_to_string(common.join("HEAD")).ok()?;
+    if names_a_symbolic_branch(&signature) {
+        return None;
+    }
+    let mut names = match fs::read_dir(common.join("worktrees")) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return None,
+    };
+    names.sort();
+    for name in names {
+        let admin = common.join("worktrees").join(&name);
+        let checkout = fs::read_to_string(admin.join("gitdir")).unwrap_or_default();
+        let present = Path::new(checkout.trim()).exists();
+        let head = fs::read_to_string(admin.join("HEAD")).unwrap_or_default();
+        if names_a_symbolic_branch(&head) {
+            return None;
+        }
+        signature.push_str(&format!(
+            "\0{}\0{}\0{}\0{present}\0{}",
+            name.to_string_lossy(),
+            head,
+            checkout,
+            admin.join("locked").exists(),
+        ));
+    }
+    Some(signature)
 }
 
 fn list_git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, StorageError> {
+    #[cfg(test)]
+    GIT_WORKTREE_LISTS.set(GIT_WORKTREE_LISTS.get() + 1);
     #[cfg(test)]
     BEFORE_GIT_WORKTREES.with_borrow_mut(|hook| {
         if let Some(hook) = hook {
@@ -9912,12 +10333,18 @@ fn with_cut_off_note(
     ))
 }
 
+/// What a chat's first message names its worktree after.
+fn turn_worktree_hint<'a>(text: &'a str, worktree_name: Option<&'a str>) -> Option<&'a str> {
+    worktree_name.or_else(|| text.lines().find(|line| !line.trim().is_empty()))
+}
+
 fn prepare_turn(
     transaction: &rusqlite::Transaction<'_>,
     workspace_root: &Path,
     chat_id: &str,
     text: &str,
     worktree_name: Option<&str>,
+    premade: Option<&MadeWorktree>,
 ) -> Result<TurnSpec, StorageError> {
     // Any turn picks a paused chat back up.
     transaction.execute(
@@ -9962,13 +10389,19 @@ fn prepare_turn(
             ));
         }
         let source = workdir.clone();
-        workdir = create_worktree(
-            transaction,
-            &source,
-            chat_id,
-            worktree_name.or_else(|| text.lines().find(|line| !line.trim().is_empty())),
-            None,
-        )?;
+        workdir = match premade.filter(|made| made.source == source) {
+            Some(made) => {
+                record_worktree(transaction, made)?;
+                made.path.clone()
+            }
+            None => create_worktree(
+                transaction,
+                &source,
+                chat_id,
+                turn_worktree_hint(text, worktree_name),
+                None,
+            )?,
+        };
         let changed = transaction.execute(
             "UPDATE chats SET workdir = ?, original_workdir = COALESCE(original_workdir, ?), \
              new_worktree = 0, updated_at = ? WHERE id = ? AND new_worktree = 1 \
@@ -10669,10 +11102,6 @@ fn ensure_draft_chunks(database: &Connection) -> Result<(), StorageError> {
             chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
             ordinal INTEGER NOT NULL, data BLOB NOT NULL,
             PRIMARY KEY(chat_id, ordinal));
-         CREATE TABLE IF NOT EXISTS shared_event_chunks (
-            event_id INTEGER NOT NULL REFERENCES shared_events(id) ON DELETE CASCADE,
-            ordinal INTEGER NOT NULL, data BLOB NOT NULL,
-            PRIMARY KEY(event_id, ordinal));
          UPDATE meta SET value = '26' WHERE key = 'schema_version';",
     )?;
     Ok(())
@@ -11903,32 +12332,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shared_event_append_waits_for_transient_database_contention() {
-        let fixture = Fixture::new();
-        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        let database_path = fixture.database.clone();
-        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-        let lock = thread::spawn(move || {
-            let database = Connection::open(database_path).unwrap();
-            database.execute_batch("BEGIN IMMEDIATE").unwrap();
-            locked_tx.send(()).unwrap();
-            thread::sleep(Duration::from_millis(100));
-            database.execute_batch("COMMIT").unwrap();
-        });
-
-        locked_rx.recv().unwrap();
-        store
-            .append_shared_event("other-host", &json!({"event": "text", "text": "hello"}))
-            .unwrap();
-        lock.join().unwrap();
-
-        let events = store.shared_events_after(0).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].1, "other-host");
-        assert_eq!(events[0].2["text"], "hello");
-    }
-
     /// A store with one chat holding `messages` user messages.
     fn store_with_chat(fixture: &Fixture, messages: usize) -> (StateStore, String) {
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
@@ -12156,12 +12559,9 @@ mod tests {
     }
 
     #[test]
-    fn relayed_events_skip_the_sync_but_other_commits_stay_fully_synced() {
+    fn unsynced_writes_relax_only_their_own_commit() {
         let fixture = Fixture::new();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        store
-            .append_shared_event("this-host", &json!({"event": "text", "text": "token"}))
-            .unwrap();
         let database = store.database.lock().unwrap();
         let level = |database: &Connection| -> i64 {
             database
@@ -12170,10 +12570,7 @@ mod tests {
         };
         assert_eq!(level(&database), 2);
         let inside = database::without_sync(&database, |database| Ok(level(database))).unwrap();
-        assert_eq!(
-            inside, 1,
-            "relayed events commit without waiting for the disk"
-        );
+        assert_eq!(inside, 1, "the write commits without waiting for the disk");
         let failed = database::without_sync(&database, |_| -> Result<(), StorageError> {
             Err(StorageError::InvalidRequest("write failed".into()))
         });
@@ -12181,13 +12578,8 @@ mod tests {
         assert_eq!(
             level(&database),
             2,
-            "a failed relay must not relax later commits"
+            "a failed write must not relax later commits"
         );
-        drop(database);
-        let other = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        let events = other.shared_events_after(0).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].2["text"], "token");
     }
 
     #[test]
@@ -12368,9 +12760,6 @@ mod tests {
         {
             let (store, chat) = store_with_chat(&fixture, 2);
             store.messages(&json!({"chat": chat})).unwrap();
-            store
-                .append_shared_event("this-host", &json!({"event": "text", "text": "token"}))
-                .unwrap();
         }
         assert!(!fixture.root.join("chats.db-wal").exists());
         let backup = Connection::open_with_flags(
@@ -16546,6 +16935,324 @@ mod tests {
         );
     }
 
+    /// A one-commit repository whose checkouts take `delay`, through a
+    /// post-checkout hook, registered as project `repo` with chats on it.
+    fn slow_checkout_repository(fixture: &Fixture, delay: &str) -> PathBuf {
+        let repository = fixture.workspaces.join("Repo");
+        fs::create_dir_all(&repository).unwrap();
+        for arguments in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.name", "xd test"],
+            vec!["config", "user.email", "xd@example.test"],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let hook = repository.join(".git/hooks/post-checkout");
+        fs::write(&hook, format!("#!/bin/sh\nsleep {delay}\n")).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        database
+            .execute(
+                "INSERT INTO workspace_folders \
+                 (id, root_path, relative_path, repo, shortcuts) VALUES ('repo', ?, 'Repo', ?, '[]')",
+                params![
+                    fixture.workspaces.to_string_lossy(),
+                    repository.to_string_lossy()
+                ],
+            )
+            .unwrap();
+        database
+            .execute_batch(
+                "INSERT INTO chats (id, folder_id, title, backend, new_worktree) \
+                 VALUES ('chat-worktree', 'repo', 'Worktree', 'codex', 1); \
+                 INSERT INTO chats (id, folder_id, title, backend) \
+                 VALUES ('chat-other', 'repo', 'Other', 'codex');",
+            )
+            .unwrap();
+        repository
+    }
+
+    #[test]
+    fn reftable_repositories_are_listed_by_git() {
+        let fixture = Fixture::new();
+        let repository = fixture.root.join("reftable");
+        let git = |arguments: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(["-c", "user.name=xd", "-c", "user.email=xd@example.com"])
+                    .args(arguments)
+                    .current_dir(&fixture.root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&[
+            "init",
+            "-q",
+            "--ref-format=reftable",
+            "-b",
+            "main",
+            "reftable",
+        ]);
+        git(&[
+            "-C",
+            "reftable",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "first",
+        ]);
+        assert!(repository.join(".git/reftable").exists());
+        for _ in 0..2 {
+            let before = GIT_WORKTREE_LISTS.get();
+            let worktrees = cached_git_worktrees(&repository).unwrap();
+            assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+            assert_eq!(GIT_WORKTREE_LISTS.get() - before, 1, "never cached");
+        }
+    }
+
+    #[test]
+    fn cached_worktree_lists_follow_branches_and_worktrees() {
+        let fixture = Fixture::new();
+        let repository = slow_checkout_repository(&fixture, "0");
+        let git = |arguments: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        let listed = || {
+            let before = GIT_WORKTREE_LISTS.get();
+            let worktrees = cached_git_worktrees(&repository).unwrap();
+            let summary = worktrees
+                .iter()
+                .map(|worktree| {
+                    worktree
+                        .branch
+                        .clone()
+                        .unwrap_or_else(|| format!("detached:{}", worktree.detached))
+                })
+                .collect::<Vec<_>>();
+            (summary, GIT_WORKTREE_LISTS.get() - before)
+        };
+        assert_eq!(listed(), (vec!["main".to_owned()], 1));
+        assert_eq!(listed().1, 0, "unchanged, the list comes from the cache");
+        git(&["checkout", "-q", "-b", "feature"]);
+        assert_eq!(listed(), (vec!["feature".to_owned()], 1));
+        let linked = fixture.root.join("linked");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "other",
+            linked.to_str().unwrap(),
+        ]);
+        assert_eq!(listed().0, vec!["feature".to_owned(), "other".to_owned()]);
+        git(&["-C", linked.to_str().unwrap(), "checkout", "-q", "--detach"]);
+        assert_eq!(listed().0[1], "detached:true");
+        assert_eq!(listed().1, 0);
+        fs::remove_dir_all(&linked).unwrap();
+        assert_eq!(listed(), (vec!["feature".to_owned()], 1));
+        // A branch that names another ref can be pointed elsewhere without
+        // touching HEAD, so a checkout on one is always listed by git.
+        git(&["symbolic-ref", "refs/heads/alias", "refs/heads/feature"]);
+        git(&["symbolic-ref", "HEAD", "refs/heads/alias"]);
+        let fresh = || {
+            list_git_worktrees(&repository)
+                .unwrap()
+                .into_iter()
+                .map(|worktree| worktree.branch)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed().1, 1);
+        assert_eq!(
+            listed().1,
+            1,
+            "not cached while HEAD names a symbolic branch"
+        );
+        git(&["symbolic-ref", "refs/heads/alias", "refs/heads/other"]);
+        let (summary, lists) = listed();
+        assert_eq!(lists, 1);
+        assert_eq!(
+            summary,
+            fresh()
+                .into_iter()
+                .map(Option::unwrap_or_default)
+                .collect::<Vec<_>>()
+        );
+        // A worktree-local ref lives in that worktree's own directory, so a
+        // checkout on one is listed by git too.
+        git(&["checkout", "-q", "feature"]);
+        git(&["update-ref", "refs/worktree/local", "HEAD"]);
+        git(&["symbolic-ref", "HEAD", "refs/worktree/local"]);
+        assert_eq!(listed().1, 1);
+        assert_eq!(listed().1, 1, "not cached while HEAD names a worktree ref");
+    }
+
+    #[test]
+    fn head_signatures_change_with_commits_and_branches_only() {
+        let fixture = Fixture::new();
+        let repository = slow_checkout_repository(&fixture, "0");
+        let git = |arguments: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        let signature = || head_file_signature(&repository.join("src")).unwrap();
+        fs::create_dir_all(repository.join("src")).unwrap();
+        let first = signature();
+        fs::write(repository.join("src/edit.txt"), "not committed\n").unwrap();
+        assert_eq!(signature(), first, "a working tree edit is not a new head");
+        git(&["commit", "-q", "--allow-empty", "-m", "second"]);
+        let committed = signature();
+        assert_ne!(committed, first);
+        git(&["pack-refs", "--all"]);
+        let packed = signature();
+        git(&["commit", "-q", "--allow-empty", "-m", "third"]);
+        assert_ne!(
+            signature(),
+            packed,
+            "a commit after packing writes a loose ref"
+        );
+        git(&["checkout", "-q", "-b", "feature"]);
+        let branch = signature();
+        assert!(branch.contains("refs/heads/feature"));
+        git(&["checkout", "-q", "--detach"]);
+        assert_ne!(signature(), branch);
+        let linked = fixture.root.join("linked");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "other",
+            linked.to_str().unwrap(),
+        ]);
+        assert!(
+            head_file_signature(&linked)
+                .unwrap()
+                .contains("refs/heads/other")
+        );
+        // A branch that is itself a symbolic ref is left to git, since a
+        // commit moves the ref it names rather than either file read here.
+        git(&["checkout", "-q", "feature"]);
+        git(&["symbolic-ref", "refs/heads/alias", "refs/heads/feature"]);
+        git(&["symbolic-ref", "HEAD", "refs/heads/alias"]);
+        assert_eq!(head_file_signature(&repository.join("src")), None);
+        let through_git = repository_head_signature_at(&repository);
+        git(&["commit", "-q", "--allow-empty", "-m", "through the alias"]);
+        assert_ne!(repository_head_signature_at(&repository), through_git);
+        // A worktree-local ref lives in the worktree's own Git directory, not
+        // the common one, so it is left to git as well.
+        git(&["update-ref", "refs/worktree/local", "HEAD"]);
+        git(&["symbolic-ref", "HEAD", "refs/worktree/local"]);
+        assert_eq!(head_file_signature(&repository.join("src")), None);
+        let local = repository_head_signature_at(&repository);
+        git(&["commit", "-q", "--allow-empty", "-m", "on a worktree ref"]);
+        assert_ne!(repository_head_signature_at(&repository), local);
+    }
+
+    #[test]
+    fn a_first_send_makes_its_worktree_without_holding_up_other_chats() {
+        let fixture = Fixture::new();
+        slow_checkout_repository(&fixture, "2");
+        let store = Arc::new(StateStore::open(&fixture.database, &fixture.workspaces).unwrap());
+        let sending = {
+            let store = store.clone();
+            thread::spawn(move || {
+                store.prepare_send(&json!({"chat": "chat-worktree", "text": "review it"}))
+            })
+        };
+        thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        store
+            .set_partial_reply("chat-other", "still streaming", None)
+            .unwrap();
+        let waited = started.elapsed();
+        let Ok(SendDisposition::Start { turn, .. }) = sending.join().unwrap() else {
+            panic!("the first message should start a turn");
+        };
+        assert!(
+            waited < Duration::from_millis(1200),
+            "another chat's write waited on git: {waited:?}"
+        );
+        assert!(Path::new(&turn.workdir).is_dir());
+        let database = store.database.lock().unwrap();
+        let (workdir, recorded): (String, i64) = database
+            .query_row(
+                "SELECT workdir, (SELECT count(*) FROM generated_worktrees WHERE path = workdir) \
+                 FROM chats WHERE id = 'chat-worktree'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(workdir, turn.workdir);
+        assert_eq!(recorded, 1, "the worktree is recorded as generated");
+    }
+
+    #[test]
+    fn a_worktree_made_for_a_send_that_did_not_use_it_is_removed() {
+        let fixture = Fixture::new();
+        let repository = slow_checkout_repository(&fixture, "0");
+        let branches = || {
+            String::from_utf8(
+                Command::new("git")
+                    .args(["branch", "--list", "xd/*"])
+                    .current_dir(&repository)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+        };
+        let made = make_worktree(
+            &repository.to_string_lossy(),
+            "chat-worktree",
+            Some("review it"),
+            None,
+        )
+        .unwrap();
+        let path = made.path.clone();
+        assert!(Path::new(&path).is_dir());
+        assert!(!branches().is_empty());
+        drop(made);
+        assert!(!Path::new(&path).exists(), "the unused checkout is removed");
+        assert!(branches().is_empty(), "with the branch it added");
+
+        let mut kept = make_worktree(
+            &repository.to_string_lossy(),
+            "chat-worktree",
+            Some("review it"),
+            None,
+        )
+        .unwrap();
+        kept.keep();
+        let path = kept.path.clone();
+        drop(kept);
+        assert!(Path::new(&path).is_dir(), "a kept worktree stays");
+    }
+
     #[test]
     fn first_send_creates_and_persists_a_named_git_worktree() {
         let fixture = Fixture::new();
@@ -16977,40 +17684,95 @@ mod tests {
     }
 
     #[test]
-    fn chunked_shared_events_roundtrip_and_expire() {
+    fn a_mostly_empty_database_is_compacted_when_opened() {
         let fixture = Fixture::new();
-        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        let event =
-            json!({"event": "draft", "draft_files": [{"data": "a".repeat(DRAFT_CHUNK_BYTES + 1)}]});
-        store.append_shared_event("test", &event).unwrap();
-        assert_eq!(store.shared_events_after(0).unwrap()[0].2, event);
-        {
+        let chat = {
+            let (store, chat) = store_with_chat(&fixture, 2);
             let database = store.database.lock().unwrap();
-            assert!(
-                database
-                    .query_row("SELECT count(*) FROM shared_event_chunks", [], |row| row
-                        .get::<_, i64>(0))
-                    .unwrap()
-                    > 1
-            );
             database
-                .execute(
-                    "UPDATE sqlite_sequence SET seq = 16639 WHERE name = 'shared_events'",
-                    [],
+                .execute_batch(
+                    "CREATE TABLE filler (data BLOB); \
+                     WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1500) \
+                     INSERT INTO filler SELECT zeroblob(4000) FROM n; \
+                     DROP TABLE filler;",
+                )
+                .unwrap();
+            chat
+        };
+        let pragma = |store: &StateStore, name: &str| -> i64 {
+            store
+                .database
+                .lock()
+                .unwrap()
+                .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+                .unwrap()
+        };
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert!(
+            pragma(&store, "freelist_count") < 100,
+            "the free pages are gone"
+        );
+        assert_eq!(
+            pragma(&store, "auto_vacuum"),
+            2,
+            "and come back incrementally"
+        );
+        assert_eq!(
+            store.messages(&json!({"chat": chat})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "nothing stored is lost"
+        );
+
+        store
+            .database
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE filler (data BLOB); \
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300) \
+                 INSERT INTO filler SELECT zeroblob(4000) FROM n; \
+                 DROP TABLE filler;",
+            )
+            .unwrap();
+        let free = pragma(&store, "freelist_count");
+        assert!(free > 64);
+        database::release_free_pages(&store.database.lock().unwrap());
+        assert!(pragma(&store, "freelist_count") < free);
+    }
+
+    #[test]
+    fn opening_drops_the_retired_event_relay_tables() {
+        let fixture = Fixture::new();
+        drop(StateStore::open(&fixture.database, &fixture.workspaces).unwrap());
+        {
+            // As an older xd left them, with relayed rows still in place.
+            let database = Connection::open(&fixture.database).unwrap();
+            database
+                .execute_batch(
+                    "CREATE TABLE shared_events (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                       source TEXT NOT NULL, payload TEXT NOT NULL); \
+                     CREATE TABLE shared_event_chunks ( \
+                       event_id INTEGER NOT NULL REFERENCES shared_events(id) ON DELETE CASCADE, \
+                       ordinal INTEGER NOT NULL, data BLOB NOT NULL, \
+                       PRIMARY KEY(event_id, ordinal)); \
+                     INSERT INTO shared_events (source, payload) VALUES ('old', '{}'); \
+                     INSERT INTO shared_event_chunks VALUES (1, 0, x'00');",
                 )
                 .unwrap();
         }
-        store
-            .append_shared_event("test", &json!({"event": "draft"}))
-            .unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         let database = store.database.lock().unwrap();
-        assert_eq!(
-            database
-                .query_row("SELECT count(*) FROM shared_event_chunks", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
+        let tables: i64 = database
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE 'shared_event%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
     }
 
     #[test]
