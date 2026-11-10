@@ -79,9 +79,8 @@ internal fun WorkingRow(startedAtMillis: Long?) {
 }
 
 /**
- * The mark for work still running in the background, as on the desktop: a ring
- * in the working color that holds still, where a working dot is filled and
- * pulses.
+ * The mark for work still running in the background, as on the desktop: a gray
+ * ring that holds still, where a working dot is green, filled, and pulses.
  */
 @Composable
 internal fun BackgroundRing(color: Color, modifier: Modifier = Modifier, size: Dp = 8.dp) {
@@ -133,7 +132,7 @@ internal fun BackgroundTasksRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            BackgroundRing(LocalXdSignals.current.working, size = 7.dp)
+            BackgroundRing(MaterialTheme.colorScheme.onSurfaceVariant, size = 7.dp)
             Text(
                 backgroundTasksLabel(count),
                 modifier = Modifier.weight(1f),

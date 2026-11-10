@@ -385,8 +385,8 @@ impl SessionSignal {
     fn color(self, colors: ThemeColors) -> u32 {
         match self {
             Self::Idle => colors.faint,
-            Self::Paused => colors.muted,
-            Self::Working | Self::Background(_) => colors.working,
+            Self::Paused | Self::Background(_) => colors.muted,
+            Self::Working => colors.working,
             Self::Waiting => colors.waiting,
             Self::Done => colors.done,
         }
@@ -413,8 +413,8 @@ fn background_label(count: u32) -> String {
     )
 }
 
-/// The mark for work still running in the background: a ring in the working
-/// color that holds still, where a working dot is filled and pulses.
+/// The mark for work still running in the background: a gray ring that holds
+/// still, where a working dot is green, filled, and pulses.
 fn background_ring(size: f32, color: u32) -> gpui::Div {
     div()
         .size(px(size))
@@ -11529,7 +11529,7 @@ impl XdDesktop {
                     .cursor_pointer()
                     .hover(|row| row.text_color(rgb(colors.text)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_background_tasks(cx)))
-                    .child(background_ring(7.0, colors.working))
+                    .child(background_ring(7.0, colors.muted))
                     .child(background_label(count))
                     .child(icon(
                         if expanded {
@@ -25944,7 +25944,7 @@ Binary files /dev/null and b/image.png differ\n";
         assert!(signal_tab(SessionSignal::Idle, colors).is_none());
         assert!(signal_tab(SessionSignal::Background(1), colors).is_some());
         assert_eq!(SessionSignal::Waiting.color(colors), colors.waiting);
-        assert_eq!(SessionSignal::Background(1).color(colors), colors.working);
+        assert_eq!(SessionSignal::Background(1).color(colors), colors.muted);
     }
 
     #[test]
