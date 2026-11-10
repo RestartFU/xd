@@ -78,6 +78,56 @@ pub(crate) fn enable_write_ahead_log(
     Ok(true)
 }
 
+/// Free space at which opening the database compacts it: at least this much,
+/// and at least half the file.
+const COMPACT_FREE_BYTES: i64 = if cfg!(test) {
+    1024 * 1024
+} else {
+    64 * 1024 * 1024
+};
+/// Free pages past which the background connection hands some back to the
+/// file system, once the database reuses free pages incrementally.
+const INCREMENTAL_VACUUM_FREE_PAGES: i64 = if cfg!(test) { 64 } else { 4_096 };
+/// Pages each incremental vacuum frees, so one never holds writes for long.
+const INCREMENTAL_VACUUM_PAGES: i64 = 2_048;
+/// Checkpoint rounds between incremental vacuum checks.
+const INCREMENTAL_VACUUM_EVERY: u32 = 60;
+
+/// Compacts a database that is mostly free pages, and switches it to giving
+/// free pages back incrementally from then on. SQLite never shrinks a file
+/// on its own: deleted chats and messages left one user's database at
+/// 1.8 GB holding 51 MB of data. Run before any other connection opens it;
+/// `VACUUM` rewrites only the live data. Reports whether it compacted.
+pub(crate) fn compact_if_bloated(connection: &Connection) -> rusqlite::Result<bool> {
+    let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+    let free: i64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+    let page_size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    if free.saturating_mul(page_size) < COMPACT_FREE_BYTES || free.saturating_mul(2) < pages {
+        return Ok(false);
+    }
+    connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+    connection.execute_batch("VACUUM")?;
+    Ok(true)
+}
+
+/// Hands up to `INCREMENTAL_VACUUM_PAGES` free pages back to the file system
+/// when a database in incremental mode has piled up more than
+/// `INCREMENTAL_VACUUM_FREE_PAGES`. A busy database just waits for the next
+/// round.
+pub(crate) fn release_free_pages(connection: &Connection) {
+    let incremental = connection
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))
+        .is_ok_and(|mode| mode == 2);
+    let free = connection
+        .query_row("PRAGMA freelist_count", [], |row| row.get::<_, i64>(0))
+        .unwrap_or(0);
+    if incremental && free > INCREMENTAL_VACUUM_FREE_PAGES {
+        let _ = connection.execute_batch(&format!(
+            "PRAGMA incremental_vacuum({INCREMENTAL_VACUUM_PAGES})"
+        ));
+    }
+}
+
 /// Runs `write` with commits that do not wait for the disk, then restores
 /// full syncing. Only call it on a connection in write-ahead-log mode, which
 /// keeps commits in order: a machine crash can drop the newest relaxed
@@ -293,6 +343,7 @@ impl Checkpointer {
         let worker = thread::Builder::new()
             .name("xd-sqlite-checkpoint".into())
             .spawn(move || {
+                let mut rounds = 0_u32;
                 while !worker_stop.load(Ordering::Acquire) {
                     thread::park_timeout(CHECKPOINT_EVERY);
                     if worker_stop.load(Ordering::Acquire) {
@@ -301,6 +352,10 @@ impl Checkpointer {
                     checkpoint_round(&connection, &writer, PRESSURE_FRAMES, || {
                         !worker_stop.load(Ordering::Acquire)
                     });
+                    rounds = rounds.wrapping_add(1);
+                    if rounds.is_multiple_of(INCREMENTAL_VACUUM_EVERY) {
+                        release_free_pages(&connection);
+                    }
                 }
             })?;
         Ok(Self {

@@ -517,6 +517,18 @@ impl StateStore {
             initialize_schema(&database)?;
             initialize_generated_worktrees(&database)?;
         }
+        // Before the checkpointer and readers open the file, which VACUUM
+        // needs to itself. A failure only leaves the file as large as it was.
+        if write_ahead_log {
+            match database::compact_if_bloated(&database) {
+                Ok(true) => eprintln!("xd-host: compacted {}", database_path.display()),
+                Ok(false) => {}
+                Err(error) => eprintln!(
+                    "xd-host: cannot compact {}: {error}",
+                    database_path.display()
+                ),
+            }
+        }
         let database = Arc::new(Mutex::new(database));
         let checkpointer = write_ahead_log
             .then(|| Checkpointer::start(database_path, DATABASE_BUSY_TIMEOUT, database.clone()))
@@ -17532,6 +17544,66 @@ mod tests {
                 .image_read(&json!({"path": report.to_string_lossy()}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_mostly_empty_database_is_compacted_when_opened() {
+        let fixture = Fixture::new();
+        let chat = {
+            let (store, chat) = store_with_chat(&fixture, 2);
+            let database = store.database.lock().unwrap();
+            database
+                .execute_batch(
+                    "CREATE TABLE filler (data BLOB); \
+                     WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1500) \
+                     INSERT INTO filler SELECT zeroblob(4000) FROM n; \
+                     DROP TABLE filler;",
+                )
+                .unwrap();
+            chat
+        };
+        let pragma = |store: &StateStore, name: &str| -> i64 {
+            store
+                .database
+                .lock()
+                .unwrap()
+                .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+                .unwrap()
+        };
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert!(
+            pragma(&store, "freelist_count") < 100,
+            "the free pages are gone"
+        );
+        assert_eq!(
+            pragma(&store, "auto_vacuum"),
+            2,
+            "and come back incrementally"
+        );
+        assert_eq!(
+            store.messages(&json!({"chat": chat})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "nothing stored is lost"
+        );
+
+        store
+            .database
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE filler (data BLOB); \
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300) \
+                 INSERT INTO filler SELECT zeroblob(4000) FROM n; \
+                 DROP TABLE filler;",
+            )
+            .unwrap();
+        let free = pragma(&store, "freelist_count");
+        assert!(free > 64);
+        database::release_free_pages(&store.database.lock().unwrap());
+        assert!(pragma(&store, "freelist_count") < free);
     }
 
     #[test]
