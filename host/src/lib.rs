@@ -2894,23 +2894,38 @@ pub fn serve_daemon_connection(
                 // it. Replies carry their request id, so their order does
                 // not matter.
                 if let Some(request) = new_chats_aside.take_or_queue(request)? {
+                    // A slot taken is given back if its thread cannot start,
+                    // or closing the connection would wait for it forever.
+                    let stream = match stream.try_clone() {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            let _ = new_chats_aside.next(false);
+                            return Err(error);
+                        }
+                    };
                     let engine = engine.clone();
                     let outbound = outbound.clone();
                     let aside = new_chats_aside.clone();
-                    let stream = stream.try_clone()?;
-                    thread::spawn(move || {
-                        let mut request = Some(request);
-                        while let Some(next) = request {
-                            let answered = !engine.events.subscribed(subscriber) || {
-                                let reply = engine.dispatch_for(subscriber, next);
-                                outbound.try_send(reply).is_ok()
-                            };
-                            if !answered {
-                                let _ = stream.shutdown(std::net::Shutdown::Both);
-                            }
-                            request = aside.next(answered);
-                        }
-                    });
+                    let spawned =
+                        thread::Builder::new()
+                            .name("xd-new-chat".into())
+                            .spawn(move || {
+                                let mut request = Some(request);
+                                while let Some(next) = request {
+                                    let answered = !engine.events.subscribed(subscriber) || {
+                                        let reply = engine.dispatch_for(subscriber, next);
+                                        outbound.try_send(reply).is_ok()
+                                    };
+                                    if !answered {
+                                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                                    }
+                                    request = aside.next(answered);
+                                }
+                            });
+                    if let Err(error) = spawned {
+                        let _ = new_chats_aside.next(false);
+                        return Err(error);
+                    }
                 }
             } else {
                 commands
