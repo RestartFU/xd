@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.Dispatchers
 
 public data class TerminalPane(
     val id: String? = null,
@@ -55,7 +57,11 @@ class TerminalViewModel(
     init {
         client?.let { connected ->
             // Keep interpreting output while another chat or workspace pane is visible.
-            viewModelScope.launch { connected.terminalEvents.collect(::onEvent) }
+            // Every terminal's output reaches every pane, so reading the events
+            // and decoding their bytes is done away from the main thread.
+            viewModelScope.launch {
+                connected.terminalEvents.flowOn(Dispatchers.Default).collect(::onEvent)
+            }
             viewModelScope.launch {
                 var wasConnected = connected.link.value is Link.Up
                 connected.link.collect { link ->
