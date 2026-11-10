@@ -625,6 +625,10 @@ class MainViewModel @JvmOverloads constructor(
         val named = title.takeIf(String::isNotBlank) ?: if (sessionId == null) "New Session" else "New chat"
         val starting = StartingSession(++startingIds, folderId, sessionId, named, agent)
         _startingSessions.update { it + starting }
+        // Only the newest opens when made: one started earlier and made
+        // later must not take the reader from it.
+        openWhenMade.clear()
+        _createdDirectSession.value = null
         openWhenMade += starting.id
         val drafts = getApplication<Application>().getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
         val draftKey = "$folderId/${sessionId ?: "new"}"

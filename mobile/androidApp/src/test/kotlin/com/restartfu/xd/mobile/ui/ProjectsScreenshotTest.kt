@@ -196,10 +196,11 @@ class ProjectsScreenshotTest {
 
     @Test fun sessionsStartSideBySide() = shoot("starting-dark", MinimalThemePreset.DARK) {
         holdNewChats = true
+        val sentBefore = sent("new-chat")
         // A second session starts while the host still sets up the first.
         model.createDirectSession("xd", "Fix the footer", DirectAgent.CLAUDE)
         model.createDirectSession("xd", "Tidy the header", DirectAgent.CODEX)
-        awaitSent("new-chat", 2)
+        awaitSent("new-chat", sentBefore + 2)
         awaitShown("Tidy the header")
         check(shows("Fix the footer") && shows("Tidy the header"))
         val starting = this@ProjectsScreenshotTest.compose
@@ -223,6 +224,24 @@ class ProjectsScreenshotTest {
         check(shows("Terminal"))
         click("Projects")
         check(!shows("Starting…"))
+    }
+
+    @Test fun onlyTheNewestStartedSessionOpens() = shoot("starting-newest-dark", MinimalThemePreset.DARK) {
+        holdNewChats = true
+        val sentBefore = sent("new-chat")
+        model.createDirectSession("xd", "Fix the footer", DirectAgent.CLAUDE)
+        model.createDirectSession("xd", "Tidy the header", DirectAgent.CODEX)
+        awaitSent("new-chat", sentBefore + 2)
+        releaseNewChats()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (model.startingSessions.value.isNotEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+        // The scripted host makes them in either order; only the second may open.
+        check(model.createdDirectSession.value?.title in listOf(null, "Tidy the header")) {
+            "opened ${model.createdDirectSession.value}"
+        }
     }
 
     /** Waits until the app has sent [count] [op] requests. */
