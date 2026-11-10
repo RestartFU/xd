@@ -1937,7 +1937,9 @@ impl Engine {
             let asked = accounts::now_ms();
             usage::check_account(auth.accounts(), provider, account)?;
             // Another login's usage says nothing of these turns, such as after
-            // the user's own CLI signed in to someone else.
+            // the user's own CLI signed in to someone else. A turn whose login
+            // was not known yet is measured against the login read first; the
+            // meter starts afresh whenever the login it reads changes.
             let current = auth.accounts().session_tag(provider, account);
             if !tag.ends_with("#?") && !accounts::same_login(tag, &current) {
                 return None;
@@ -1947,7 +1949,7 @@ impl Engine {
             if checked_at < asked {
                 return None;
             }
-            quota::quota_window(&windows)
+            Some((quota::quota_window(&windows)?, current))
         });
         // Weak, since the engine owns the meter that holds this.
         let engine = Arc::downgrade(self);

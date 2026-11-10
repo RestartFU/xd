@@ -2180,11 +2180,11 @@ enum RemoteState {
     Offline,
 }
 
-/// Where clicking a "turn finished" notification should lead.
-#[cfg(target_os = "linux")]
 /// How a notification ends the chat's title when its quota stopped it.
 const QUOTA_STOP_ENDING: &str = "stopped at its quota";
 
+/// Where clicking a "turn finished" notification should lead.
+#[cfg(target_os = "linux")]
 struct TurnNotificationTarget {
     endpoint: ChatEndpoint,
     chat_id: Option<String>,

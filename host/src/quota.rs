@@ -78,6 +78,9 @@ struct AccountLedger {
     asked_ms: i64,
     /// Nothing worked on the account when `last` was read.
     idle: bool,
+    /// The login `last` read, as [`crate::accounts::Accounts::session_tag`]
+    /// gives it. A reading of another login measures nothing against it.
+    login: String,
     /// Every chat that worked on the account since `last`.
     sharers: BTreeSet<String>,
 }
@@ -93,8 +96,8 @@ impl AccountLedger {
     /// while nothing worked here. What the account used while idle, perhaps
     /// outside xd, is nobody's here, so the next turn reads afresh. A turn
     /// shorter than a reading takes is then counted short, never long.
-    fn baseline(&self) -> Option<Reading> {
-        self.last.filter(|_| !self.idle)
+    fn baseline(&self, login: &str) -> Option<Reading> {
+        self.last.filter(|_| !self.idle && self.login == login)
     }
 }
 
@@ -108,15 +111,18 @@ impl Ledger {
             .insert(chat_id.to_owned());
     }
 
-    /// Takes in a reading of the account's limit, asked for at `asked_ms`,
-    /// with the chats working on it now, and returns each chat's share of the
-    /// rise since the last one, and when that last one was asked for. Chats
-    /// without a quota take their share too; the caller drops theirs.
+    /// Takes in a reading of the account's limit as `login`, asked for at
+    /// `asked_ms`, with the chats working on it now, and returns each chat's
+    /// share of the rise since the last one, and when that last one was asked
+    /// for. Chats without a quota take their share too; the caller drops
+    /// theirs.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record(
         &mut self,
         provider: &str,
         account: &str,
         reading: Reading,
+        login: &str,
         working: &[String],
         now: Instant,
         asked_ms: i64,
@@ -127,12 +133,15 @@ impl Ledger {
             .or_default();
         let mut sharers = std::mem::take(&mut entry.sharers);
         sharers.extend(working.iter().cloned());
-        let rise = entry.baseline().map_or(0.0, |last| rise(last, reading));
+        let rise = entry
+            .baseline(login)
+            .map_or(0.0, |last| rise(last, reading));
         let since_ms = std::mem::replace(&mut entry.asked_ms, asked_ms);
         entry.last = Some(reading);
         entry.read_at = Some(now);
         entry.failed = false;
         entry.idle = working.is_empty();
+        login.clone_into(&mut entry.login);
         entry.sharers = working.iter().cloned().collect();
         if rise <= 0.0 || sharers.is_empty() {
             return (Vec::new(), since_ms);
@@ -163,8 +172,9 @@ fn rise(last: Reading, now: Reading) -> f64 {
     }
 }
 
-/// Reads an account's limit for the meter: the assistant and account id.
-pub(crate) type Reader = Box<dyn Fn(&str, &str) -> Option<Reading> + Send + Sync>;
+/// Reads an account's limit for the meter, given the assistant and the
+/// account and login turns ran as, and says which login it read.
+pub(crate) type Reader = Box<dyn Fn(&str, &str) -> Option<(Reading, String)> + Send + Sync>;
 /// Stops a chat that has used its quota.
 pub(crate) type Stopper = Box<dyn Fn(&str) + Send + Sync>;
 
@@ -291,7 +301,7 @@ impl Pass {
                         provider.clone(),
                         account.clone(),
                         entry.sharers.iter().cloned().collect::<Vec<_>>(),
-                        entry.baseline().is_some(),
+                        entry.last.is_some() && !entry.idle,
                         entry.read_at,
                         entry.tried_at.map(|at| {
                             let gap = if entry.failed {
@@ -356,11 +366,22 @@ impl Pass {
             {
                 entry.tried_at = Some(Instant::now());
             }
-            let Some(reading) = (self.reader)(&provider, &account) else {
+            let Some((reading, login)) = (self.reader)(&provider, &account) else {
+                // With nothing at work here any more, what the account uses
+                // until the next reading is nobody's here: the next turn reads
+                // afresh rather than from before the gap.
+                let idle = !self
+                    .runtime
+                    .working_accounts()
+                    .iter()
+                    .any(|(_, p, a)| *p == provider && *a == account);
                 if let Ok(mut ledger) = self.ledger.lock()
                     && let Some(entry) = ledger.accounts.get_mut(&key)
                 {
                     entry.failed = true;
+                    if idle {
+                        entry.last = None;
+                    }
                 }
                 next = next.min(FAILED_READ_GAP);
                 continue;
@@ -378,6 +399,7 @@ impl Pass {
                     &provider,
                     &account,
                     reading,
+                    &login,
                     &here_now,
                     Instant::now(),
                     asked_ms,
@@ -423,30 +445,28 @@ mod tests {
         working: &[String],
         now: Instant,
     ) -> Vec<(String, f64)> {
-        ledger.record(provider, account, reading, working, now, 0).0
+        ledger
+            .record(provider, account, reading, "login", working, now, 0)
+            .0
     }
 
     #[test]
     fn shares_say_when_the_use_they_count_began() {
         let mut ledger = Ledger::default();
         let now = Instant::now();
-        ledger.record(
-            "claude",
-            "default",
-            reading(10.0, 1),
-            &chats(&["a"]),
-            now,
-            100,
-        );
-        let (shares, since) = ledger.record(
-            "claude",
-            "default",
-            reading(12.0, 1),
-            &chats(&["a"]),
-            now,
-            200,
-        );
+        let a = chats(&["a"]);
+        ledger.record("claude", "default", reading(10.0, 1), "login", &a, now, 100);
+        let (shares, since) =
+            ledger.record("claude", "default", reading(12.0, 1), "login", &a, now, 200);
         assert_eq!((shares, since), (vec![("a".to_owned(), 2.0)], 100));
+        // A reading of another login, such as once the CLI signed in to
+        // someone else, starts afresh rather than counting the difference.
+        let (shares, _) =
+            ledger.record("claude", "default", reading(80.0, 1), "other", &a, now, 300);
+        assert!(shares.is_empty());
+        let (shares, _) =
+            ledger.record("claude", "default", reading(81.0, 1), "other", &a, now, 400);
+        assert_eq!(shares, vec![("a".to_owned(), 1.0)]);
     }
 
     fn chats(names: &[&str]) -> Vec<String> {
