@@ -6774,6 +6774,15 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
     if !columns.contains("agent_record_id") {
         database.execute("ALTER TABLE chats ADD COLUMN agent_record_id INTEGER", [])?;
     }
+    // However a worker's chat goes, its card in the parent goes with it:
+    // nothing would ever end a card for a chat that is gone.
+    database.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS chats_remove_agent_card AFTER DELETE ON chats \
+         WHEN OLD.agent_record_id IS NOT NULL BEGIN \
+           DELETE FROM messages WHERE id = OLD.agent_record_id \
+             AND chat_id = OLD.parent_chat_id AND role = 'tool'; \
+         END;",
+    )?;
     if !columns.contains("report_to_parent") {
         database.execute(
             "ALTER TABLE chats ADD COLUMN report_to_parent INTEGER NOT NULL DEFAULT 0",
@@ -13032,6 +13041,48 @@ mod tests {
         store
             .set_option(&json!({"chat": chat["id"], "option": option, "value": value}))
             .unwrap();
+    }
+
+    #[test]
+    fn a_workers_card_goes_when_its_chat_does() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let parent = new_chat_on(&store, &folder, "claude");
+        let parent_id = parent["id"].as_str().unwrap();
+        let child = store
+            .new_child_chat(
+                &json!({"folder": folder, "backend": "claude"}),
+                parent_id,
+                true,
+            )
+            .unwrap();
+        let child_id = child["id"].as_str().unwrap();
+        store
+            .open_agent_record(child_id, "Fix it")
+            .unwrap()
+            .unwrap();
+        let cards = || {
+            store.messages(&json!({"chat": parent_id})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| {
+                    row["content"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with(crate::subagent::PREFIX))
+                })
+                .count()
+        };
+        assert_eq!(cards(), 1);
+        store.delete_chat(&json!({"chat": child_id})).unwrap();
+        assert_eq!(cards(), 0);
+        assert_eq!(
+            store
+                .write_agent_record(child_id, "completed", None)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

@@ -889,7 +889,8 @@ impl AgentChatStatus {
 }
 
 /// What the tree says of the chat now wins over the card's last turn: a card
-/// that says it runs while its chat does not was stopped, or cut short.
+/// that says it runs while its chat does not, or whose chat is gone, was
+/// stopped or cut short.
 fn agent_chat_status(card: SubagentState, live: Option<&AgentChatLive>) -> AgentChatStatus {
     match (card, live) {
         (_, Some(live)) if live.working => AgentChatStatus::Running,
@@ -897,7 +898,6 @@ fn agent_chat_status(card: SubagentState, live: Option<&AgentChatLive>) -> Agent
         (_, Some(live)) if live.waiting => AgentChatStatus::NeedsYou,
         (SubagentState::Failed, _) => AgentChatStatus::Failed,
         (SubagentState::Completed, _) => AgentChatStatus::Done,
-        (SubagentState::Running, None) => AgentChatStatus::Running,
         _ => AgentChatStatus::Stopped,
     }
 }

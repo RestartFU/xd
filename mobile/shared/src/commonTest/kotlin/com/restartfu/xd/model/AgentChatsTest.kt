@@ -29,6 +29,8 @@ class AgentChatsTest {
         assertEquals(AgentChatStatus.PAUSED, agentChatStatus(card, chat.copy(paused = true)))
         assertEquals(AgentChatStatus.NEEDS_YOU, agentChatStatus(card, chat.copy(questionWaiting = true)))
         assertEquals(AgentChatStatus.STOPPED, agentChatStatus(card, chat))
+        // A card for a chat that is gone does not run forever.
+        assertEquals(AgentChatStatus.STOPPED, agentChatStatus(card, null))
         val done = card.copy(state = SubagentState.SUCCESS)
         assertEquals(AgentChatStatus.DONE, agentChatStatus(done, chat))
         assertEquals(AgentChatStatus.FAILED, agentChatStatus(card.copy(state = SubagentState.FAILURE), chat))

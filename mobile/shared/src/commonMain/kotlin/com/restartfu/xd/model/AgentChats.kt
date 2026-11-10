@@ -54,7 +54,7 @@ public enum class AgentChatStatus(public val label: String) {
 /**
  * How the agent chat behind [run] stands. What the tree says of the chat now,
  * [chat], wins over the card's last turn: a card that says it runs while its
- * chat does not was stopped or cut short.
+ * chat does not, or whose chat is gone, was stopped or cut short.
  */
 public fun agentChatStatus(run: SubagentRun, chat: ChatSummary?): AgentChatStatus = when {
     chat?.working == true -> AgentChatStatus.RUNNING
@@ -62,6 +62,5 @@ public fun agentChatStatus(run: SubagentRun, chat: ChatSummary?): AgentChatStatu
     chat?.questionWaiting == true -> AgentChatStatus.NEEDS_YOU
     run.state == SubagentState.FAILURE -> AgentChatStatus.FAILED
     run.state == SubagentState.SUCCESS -> AgentChatStatus.DONE
-    run.state == SubagentState.RUNNING && chat == null -> AgentChatStatus.RUNNING
     else -> AgentChatStatus.STOPPED
 }

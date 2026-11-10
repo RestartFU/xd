@@ -1347,10 +1347,16 @@ impl Engine {
         if let Err(error) = self.terminal_owner(chat_id) {
             return error_reply(error);
         }
+        // A worker's card leaves its parent with it; the parent reloads.
+        let parent = store.chat_parent(chat_id).ok().flatten();
         match store.delete_chat(request) {
             Ok(reply) => {
                 if let Some(runtime) = &self.runtime {
                     runtime.discard_chat(chat_id);
+                }
+                if let Some((parent, _)) = parent {
+                    self.events
+                        .publish(json!({"event": "changed", "chat": parent}));
                 }
                 if reply["session_deleted"] == true
                     && let Some(session) = reply["session"].as_str()
