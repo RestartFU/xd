@@ -436,12 +436,11 @@ impl Pass {
     /// baseline nothing to measure against; a failed one keeps it while the
     /// account works.
     fn unreadable(&self, key: &(String, String), seen: &[String], other_login: bool) {
-        let working = self.working_on(&key.0, &key.1);
-        let idle = working.is_empty();
         let Ok(mut ledger) = self.ledger.lock() else {
             return;
         };
-        self.take_activity(&mut ledger);
+        let working = self.workers(&mut ledger, &key.0, &key.1);
+        let idle = working.is_empty();
         let Some(entry) = ledger.accounts.get_mut(key) else {
             return;
         };
@@ -468,6 +467,24 @@ impl Pass {
         if idle && entry.sharers.is_empty() {
             ledger.accounts.remove(key);
         }
+    }
+
+    /// Who works on the account now, read with the ledger held, then every
+    /// start and end reported up to here taken into it: one reported from
+    /// when the runtime was asked is newer than what it said, and wins.
+    fn workers(&self, ledger: &mut Ledger, provider: &str, account: &str) -> Vec<(String, String)> {
+        let asked_at = Instant::now();
+        let mut working = self.working_on(provider, account);
+        for (chat_id, p, tag, still, at) in self.take_activity(ledger) {
+            if at < asked_at || p != provider || crate::accounts::tag_account(&tag) != account {
+                continue;
+            }
+            working.retain(|(id, _)| *id != chat_id);
+            if still {
+                working.push((chat_id, tag));
+            }
+        }
+        working
     }
 
     /// The chats working on one account now, each with the account and login
@@ -594,7 +611,7 @@ impl Pass {
                 next = next.min(due_in);
                 continue;
             }
-            // Read without the ledger, which turns starting and ending wait on.
+            // Read without the ledger held: a probe can take seconds.
             let asked_ms = crate::accounts::now_ms();
             let key = (provider.clone(), account.clone());
             if let Ok(mut ledger) = self.ledger.lock()
@@ -617,22 +634,7 @@ impl Pass {
                 // Who works on the account now, then every start and end
                 // reported up to here, so the ledger records no older picture
                 // than this. Nothing but this thread takes the ledger.
-                let asked_at = Instant::now();
-                let mut working_now = self.working_on(&provider, &account);
-                // A start or end reported from when the runtime was asked is
-                // newer than what it said, and wins.
-                for (chat_id, p, tag, working, at) in self.take_activity(&mut ledger) {
-                    if at < asked_at
-                        || p != provider
-                        || crate::accounts::tag_account(&tag) != account
-                    {
-                        continue;
-                    }
-                    working_now.retain(|(id, _)| *id != chat_id);
-                    if working {
-                        working_now.push((chat_id, tag));
-                    }
-                }
+                let working_now = self.workers(&mut ledger, &provider, &account);
                 // A turn known to run as another login than the one read, such
                 // as after the user's own CLI signed in to someone else, is not
                 // measured by this reading, nor is anyone beside it: whether it
