@@ -102,7 +102,9 @@ struct AccountLedger {
     sharers: BTreeSet<String>,
     /// The account and login each sharer's turns ran as, when known, so a
     /// reading of another login is not counted against any of them.
-    logins: HashMap<String, String>,
+    /// Every (chat, account and login) pair seen since `last`: a chat whose
+    /// turns changed login within one interval leaves both.
+    logins: BTreeSet<(String, String)>,
 }
 
 /// What the meter knows of each account, by assistant and account id.
@@ -160,7 +162,7 @@ impl Ledger {
             .accounts
             .get_mut(&(provider.to_owned(), account.to_owned()))
         {
-            entry.logins.insert(chat_id.to_owned(), tag.to_owned());
+            entry.logins.insert((chat_id.to_owned(), tag.to_owned()));
         }
     }
 
@@ -250,7 +252,7 @@ impl Ledger {
         login.clone_into(&mut entry.login);
         entry.sharers = working.iter().cloned().collect();
         let kept = &entry.sharers;
-        entry.logins.retain(|chat_id, _| kept.contains(chat_id));
+        entry.logins.retain(|(chat_id, _)| kept.contains(chat_id));
         if rise <= 0.0 || sharers.is_empty() {
             return (Vec::new(), since_ms);
         }
@@ -455,10 +457,14 @@ impl Pass {
             !seen.contains(chat_id) || working.iter().any(|(id, _)| id == chat_id)
         });
         let kept = &entry.sharers;
-        entry.logins.retain(|chat_id, _| kept.contains(chat_id));
-        for (chat_id, tag) in &working {
-            entry.logins.insert(chat_id.clone(), tag.clone());
-        }
+        entry.logins.retain(|(chat_id, _)| kept.contains(chat_id));
+        // What still works keeps only the login it runs as now.
+        entry.logins.retain(|pair| {
+            working
+                .iter()
+                .any(|(id, tag)| (id, tag) == (&pair.0, &pair.1))
+        });
+        entry.logins.extend(working.iter().cloned());
         if idle && entry.sharers.is_empty() {
             ledger.accounts.remove(key);
         }
@@ -638,17 +644,17 @@ impl Pass {
                             .accounts
                             .get(&key)
                             .into_iter()
-                            .flat_map(|entry| entry.logins.values()),
+                            .flat_map(|entry| entry.logins.iter().map(|(_, tag)| tag)),
                     )
                     .any(|tag| !tag.ends_with("#?") && !crate::accounts::same_login(tag, &login));
                 if other_login {
                     None
                 } else {
                     let here_now = working_now
-                        .into_iter()
-                        .map(|(chat_id, _)| chat_id)
+                        .iter()
+                        .map(|(chat_id, _)| chat_id.clone())
                         .collect::<Vec<_>>();
-                    Some(ledger.record(
+                    let recorded = ledger.record(
                         &provider,
                         &account,
                         reading,
@@ -656,7 +662,12 @@ impl Pass {
                         &here_now,
                         Instant::now(),
                         asked_ms,
-                    ))
+                    );
+                    // The next interval starts with the logins working now.
+                    if let Some(entry) = ledger.accounts.get_mut(&key) {
+                        entry.logins = working_now.into_iter().collect();
+                    }
+                    Some(recorded)
                 }
             };
             let Some((shares, since_ms)) = recorded else {
@@ -856,7 +867,15 @@ mod tests {
         ledger.turn("claude", "default#b", "a", true);
         ledger.turn("claude", "default#b", "a", false);
         let key = ("claude".to_owned(), "default".to_owned());
-        assert_eq!(ledger.accounts[&key].logins["a"], "default#b");
+        assert!(
+            ledger.accounts[&key]
+                .logins
+                .contains(&("a".to_owned(), "default#b".to_owned()))
+        );
+        // The same chat on another login within the interval leaves both.
+        ledger.turn("claude", "default#c", "a", true);
+        assert_eq!(ledger.accounts[&key].logins.len(), 2);
+        ledger.turn("claude", "default#c", "a", false);
         record_in(&mut ledger, "claude", "default", reading(1.0, 1), &[], now);
         assert!(ledger.accounts[&key].logins.is_empty());
     }

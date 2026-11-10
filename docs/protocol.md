@@ -817,7 +817,10 @@ chat. It is `null`, and no chat is limited, until a client chooses one.
 `set-chat-quota-settings` takes `percent`, a number or `null`, replies like
 `chat-quota-settings`, broadcasts `chat-quota-settings`, and applies at once.
 Turning the default on starts the count of every chat that follows it, so
-nothing used before counts; changing its number keeps each count.
+nothing used before counts; changing its number keeps each count, and an idle
+chat already past a lower number stops at once, while one at work stops at the
+meter's next look. A message sent to a chat that has used its quota waits in its
+queue, as if it had stopped.
 The broadcast goes out before the reply. Every chat that follows the default
 changes with it, so clients read their open chats again when it arrives. A request without `percent` changes
 nothing.

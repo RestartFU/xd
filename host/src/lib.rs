@@ -1833,6 +1833,8 @@ impl Engine {
             Ok(percent) => {
                 self.events
                     .publish(json!({"event": "chat-quota-settings", "percent": percent}));
+                // A lower default can have stopped idle chats.
+                self.events.publish(json!({"event": "tree"}));
                 self.wake_quota_meter();
                 json!({"ok": true, "percent": percent})
             }

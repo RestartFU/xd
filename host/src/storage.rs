@@ -1962,6 +1962,17 @@ impl StateStore {
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
         // Not even queued: no turn on a retired assistant would ever take it.
         validate_backend(&backend)?;
+        // A chat that has used its quota, such as one the default was lowered
+        // under, is stopped before it starts anything more.
+        let mut paused = paused;
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        if !quota.reached && quota.spent() && !working {
+            transaction.execute(
+                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                [chat_id],
+            )?;
+            paused = true;
+        }
         match continues {
             Some(Continuation::AfterRestart(last_message)) => {
                 let latest = transaction.query_row(
@@ -3144,6 +3155,15 @@ impl StateStore {
                 "UPDATE chats SET quota_used = 0, quota_since_ms = ? \
                  WHERE quota_own = 0 AND quota_reached = 0",
                 [crate::accounts::now_ms()],
+            )?;
+        } else if let Some(percent) = percent {
+            // A lower default applies at once: an idle chat that has used it
+            // already waits for a new quota. The meter stops one at work.
+            transaction.execute(
+                "UPDATE chats SET quota_reached = 1, paused = 1 \
+                 WHERE quota_own = 0 AND quota_reached = 0 AND host_working = 0 \
+                 AND quota_used + 1e-9 >= ?",
+                [percent as f64],
             )?;
         }
         transaction.commit()?;
@@ -15814,6 +15834,42 @@ mod tests {
         set(json!(10));
         assert_eq!(store.chat_quota("chat").unwrap().used, 0.0);
         assert_eq!(store.add_quota_use("chat", 5.0, 0).unwrap(), None);
+        // A lower default applies at once to an idle chat already past it,
+        // and what is sent to it then waits.
+        store.add_quota_use("chat", 8.0, i64::MAX).unwrap();
+        set(json!(5));
+        assert!(store.chat_quota("chat").unwrap().reached);
+        assert!(matches!(
+            store
+                .prepare_send(&json!({"chat": "chat", "text": "more"}))
+                .unwrap(),
+            SendDisposition::Queued { .. }
+        ));
+    }
+
+    #[test]
+    fn a_send_to_a_chat_past_its_quota_waits() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .set_chat_quota(&json!({"chat": "chat", "percent": 5}))
+            .unwrap();
+        store.add_quota_use("chat", 6.0, i64::MAX).unwrap();
+        // Not yet marked, as when the meter has not stopped it: the send
+        // marks it and waits rather than starting a turn.
+        assert!(!store.chat_quota("chat").unwrap().reached);
+        assert!(matches!(
+            store
+                .prepare_send(&json!({"chat": "chat", "text": "go"}))
+                .unwrap(),
+            SendDisposition::Queued { .. }
+        ));
+        assert!(store.chat_quota("chat").unwrap().reached);
     }
 
     #[test]
