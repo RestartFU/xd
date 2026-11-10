@@ -16,6 +16,7 @@ use crate::{
         platform_clipboard_image, preferred_clipboard_content, previous_word_boundary,
     },
     selection::TextSelection,
+    undo::{EditHistory, EditKind, Snapshot},
 };
 
 actions!(
@@ -41,6 +42,8 @@ actions!(
         Cut,
         Copy,
         Submit,
+        Undo,
+        Redo,
     ]
 );
 
@@ -147,6 +150,10 @@ pub struct ComposerInput {
     /// Sized to sit inside a toolbar field instead of a form row.
     compact: bool,
     colors: Option<ThemeColors>,
+    history: EditHistory,
+    /// The state before a delete key widened the selection to what it
+    /// deletes, and how that delete groups with the ones around it.
+    pending_edit: Option<(Snapshot, EditKind)>,
 }
 
 impl EventEmitter<ComposerEvent> for ComposerInput {}
@@ -171,6 +178,8 @@ impl ComposerInput {
             concealed: false,
             compact: false,
             colors: None,
+            history: EditHistory::default(),
+            pending_edit: None,
         }
     }
 
@@ -235,6 +244,8 @@ impl ComposerInput {
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
+        self.history.clear();
+        self.pending_edit = None;
         let content = text.into();
         if self.content == content {
             return;
@@ -263,6 +274,74 @@ impl ComposerInput {
     fn changed(&self, cx: &mut Context<Self>) {
         cx.emit(ComposerEvent::Changed(self.content.to_string()));
         cx.notify();
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            text: self.content.clone(),
+            selection: self.selected_range.clone(),
+            reversed: self.selection_reversed,
+        }
+    }
+
+    /// Remembers the caret before a delete key selects what it deletes, so
+    /// undoing puts the caret back rather than selecting deleted text.
+    fn begin_delete(&mut self, kind: EditKind) {
+        let kind = if self.selected_range.is_empty() {
+            kind
+        } else {
+            EditKind::Other
+        };
+        self.pending_edit = Some((self.snapshot(), kind));
+    }
+
+    /// Notes the edit about to replace `range` with `text`, unless it changes
+    /// nothing or finishes an input-method composition already noted.
+    fn record_edit(&mut self, range: &Range<usize>, text: &str) {
+        let pending = self.pending_edit.take();
+        if range.is_empty() && text.is_empty() {
+            return;
+        }
+        if self.marked_range.is_some() {
+            self.history.break_group();
+            return;
+        }
+        let (before, kind) = pending.unwrap_or_else(|| {
+            let kind = if range.is_empty() && text.graphemes(true).count() == 1 {
+                EditKind::Insert
+            } else {
+                EditKind::Other
+            };
+            (self.snapshot(), kind)
+        });
+        self.history.record(before, kind, range.clone(), text);
+    }
+
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal {
+            return;
+        }
+        if let Some(snapshot) = self.history.undo(self.snapshot()) {
+            self.restore(snapshot, cx);
+        }
+    }
+
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal {
+            return;
+        }
+        if let Some(snapshot) = self.history.redo(self.snapshot()) {
+            self.restore(snapshot, cx);
+        }
+    }
+
+    fn restore(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        self.content = snapshot.text;
+        self.selected_range = snapshot.selection;
+        self.selection_reversed = snapshot.reversed;
+        self.marked_range = None;
+        self.pending_edit = None;
+        self.changed(cx);
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -353,6 +432,7 @@ impl ComposerInput {
         if self.terminal_bytes(vec![0x7f], cx) {
             return;
         }
+        self.begin_delete(EditKind::Delete);
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
         }
@@ -363,6 +443,7 @@ impl ComposerInput {
         if self.terminal_bytes(b"\x1b[3~".to_vec(), cx) {
             return;
         }
+        self.begin_delete(EditKind::Delete);
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
         }
@@ -374,6 +455,7 @@ impl ComposerInput {
         if self.terminal_bytes(vec![0x17], cx) {
             return;
         }
+        self.begin_delete(EditKind::Other);
         if self.selected_range.is_empty() {
             let offset = previous_word_boundary(&self.content, self.cursor_offset());
             self.select_to(offset, cx);
@@ -390,6 +472,7 @@ impl ComposerInput {
         if self.terminal_bytes(b"\x1bd".to_vec(), cx) {
             return;
         }
+        self.begin_delete(EditKind::Other);
         if self.selected_range.is_empty() {
             let offset = next_word_boundary(&self.content, self.cursor_offset());
             self.select_to(offset, cx);
@@ -776,6 +859,7 @@ impl EntityInputHandler for ComposerInput {
             .map(|range| self.range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        self.record_edit(&range, new_text);
         self.content =
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         let cursor = range.start + new_text.len();
@@ -798,6 +882,12 @@ impl EntityInputHandler for ComposerInput {
             .map(|range| self.range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        // A composition is one step, noted when it starts.
+        if self.marked_range.is_none() && !self.terminal {
+            self.pending_edit = None;
+            self.history
+                .record(self.snapshot(), EditKind::Other, range.clone(), new_text);
+        }
         self.content =
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.marked_range =
@@ -1075,6 +1165,8 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::page_up))
@@ -1171,5 +1263,23 @@ mod tests {
         );
         // Deleting text never leaves a gap past its end.
         assert_eq!(caret_scroll(px(202.), px(20.), px(20.), visible), px(0.));
+    }
+
+    #[gpui::test]
+    fn ctrl_z_undoes_typing_in_a_single_line_box(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.bind_keys(crate::undo_key_bindings()));
+        let (input, cx) = cx.add_window_view(|_, cx| ComposerInput::new(cx, ""));
+        input.update_in(cx, |input, window, cx| {
+            window.focus(&input.focus_handle(cx));
+        });
+        cx.run_until_parked();
+        let text = |input: &Entity<ComposerInput>, cx: &mut gpui::VisualTestContext| {
+            input.read_with(cx, |input, _| input.content.to_string())
+        };
+        cx.simulate_input("my project");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(text(&input, cx), "my");
+        cx.simulate_keystrokes("ctrl-y");
+        assert_eq!(text(&input, cx), "my project");
     }
 }
