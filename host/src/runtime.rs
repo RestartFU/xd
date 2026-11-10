@@ -99,7 +99,8 @@ pub(crate) const ACCOUNT_SWITCH_PREFIX: &str = "account_switch\n";
 const HANDOFF_LIMIT: usize = 48 * 1024;
 
 /// Records kept per chat before the oldest are forgotten. A forgotten record
-/// stays in the transcript; it just stops receiving updates.
+/// stays in the transcript; it just stops receiving updates. An agent that is
+/// still running is not forgotten, or nothing could end its card.
 const MAX_RECORDS_PER_CHAT: usize = 200;
 /// Lines held between turns for a process whose idle output waits for the
 /// next turn.
@@ -3020,12 +3021,22 @@ impl TurnRuntime {
         let key = if patch.key.is_empty() {
             book.aliases.get(patch.task_id.as_deref()?)?.clone()
         } else {
-            if let Some(task) = &patch.task_id {
-                book.aliases.insert(task.clone(), patch.key.clone());
-            }
             patch.key.clone()
         };
         let record_key = format!("subagent:{key}");
+        // Only word that an agent started, or how it ended, opens a card. Its
+        // progress alone does not: an agent this host no longer remembers would
+        // get a second card that says it is running and that nothing ends.
+        if patch.status.is_none() && !book.entries.contains_key(&record_key) {
+            return None;
+        }
+        // Only a card that exists gets an alias, so every alias goes when its
+        // card is forgotten.
+        if !patch.key.is_empty()
+            && let Some(task) = &patch.task_id
+        {
+            book.aliases.insert(task.clone(), patch.key.clone());
+        }
         let entry = Self::record_entry(book, &record_key);
         let run = entry.run.get_or_insert_with(|| SubagentRun::new(&key));
         run.apply(SubagentPatch { key, ..patch });
@@ -3065,7 +3076,20 @@ impl TurnRuntime {
         if !book.entries.contains_key(key) {
             book.order.push_back(key.to_owned());
             while book.order.len() > MAX_RECORDS_PER_CHAT {
-                if let Some(old) = book.order.pop_front() {
+                let running = |key: &String| {
+                    book.entries
+                        .get(key)
+                        .and_then(|entry| entry.run.as_ref())
+                        .is_some_and(|run| run.status == SubagentStatus::Running)
+                };
+                // The new record is last. If every other one is a running
+                // agent, the book grows until one of them ends.
+                let newest = book.order.len() - 1;
+                let Some(position) = book.order.iter().take(newest).position(|key| !running(key))
+                else {
+                    break;
+                };
+                if let Some(old) = book.order.remove(position) {
                     book.entries.remove(&old);
                     book.aliases
                         .retain(|_, target| format!("subagent:{target}") != old);
@@ -3558,6 +3582,115 @@ mod tests {
         );
         assert_eq!(usage_snapshot(0, 0, 1_000_000, 0), None);
         assert_eq!(usage_snapshot(1, 0, 0, 0), None);
+    }
+
+    /// A long chat starts far more agents than the host remembers. One that is
+    /// still working when two hundred newer cards arrive must keep its card, so
+    /// its report ends it, and progress from an agent the host has forgotten
+    /// must not open a second card that says it is running forever.
+    #[test]
+    fn a_running_agent_outlives_newer_records_and_progress_opens_no_card() {
+        use std::{env, fs};
+
+        let root = env::temp_dir().join(format!(
+            "xd-runtime-records-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let runtime = TurnRuntime::new(
+            store,
+            Arc::new(EventBus::default()),
+            Arc::new(SecretsStore::new(None)),
+        );
+        let mut next_id = 0;
+        let mut fold = |patch: SubagentPatch| {
+            let write = runtime.fold_subagent("chat", "", patch)?;
+            Some(match write {
+                RecordWrite::New { key, text } => {
+                    next_id += 1;
+                    runtime.bind_record("chat", &key, next_id);
+                    (true, crate::subagent::decode(&text).unwrap())
+                }
+                RecordWrite::Update { text, .. } => {
+                    (false, crate::subagent::decode(&text).unwrap())
+                }
+            })
+        };
+        let started = |key: &str| SubagentPatch {
+            task_id: Some(format!("task-{key}")),
+            description: Some(format!("Review {key}")),
+            status: Some(SubagentStatus::Running),
+            ..SubagentPatch::new(key)
+        };
+        let finished = |key: &str| SubagentPatch {
+            status: Some(SubagentStatus::Completed),
+            ..SubagentPatch::new(key)
+        };
+
+        fold(started("long")).unwrap();
+        fold(started("done")).unwrap();
+        fold(finished("done")).unwrap();
+        for index in 0..MAX_RECORDS_PER_CHAT {
+            let key = format!("short-{index}");
+            fold(started(&key)).unwrap();
+            fold(finished(&key)).unwrap();
+        }
+
+        // The long agent's progress still reaches its own card.
+        let (new, record) = fold(SubagentPatch {
+            activity: Some("Running tests".into()),
+            ..SubagentPatch::new("long")
+        })
+        .unwrap();
+        assert!(!new);
+        assert_eq!(record["description"], "Review long");
+        assert_eq!(record["status"], "running");
+
+        // Its report, by task id alone, ends it.
+        let (new, record) = fold(SubagentPatch {
+            task_id: Some("task-long".into()),
+            status: Some(SubagentStatus::Completed),
+            ..SubagentPatch::new("")
+        })
+        .unwrap();
+        assert!(!new);
+        assert_eq!(record["status"], "completed");
+
+        // A finished agent was forgotten, and its late progress opens nothing,
+        // even under both of its ids. Nor does it leave an alias behind for a
+        // later report by task id to open a second card with.
+        assert!(
+            fold(SubagentPatch {
+                task_id: Some("task-done".into()),
+                activity: Some("Still going".into()),
+                ..SubagentPatch::new("done")
+            })
+            .is_none()
+        );
+        assert!(
+            fold(SubagentPatch {
+                task_id: Some("task-done".into()),
+                status: Some(SubagentStatus::Completed),
+                ..SubagentPatch::new("")
+            })
+            .is_none()
+        );
+        let records = runtime.inner.records.lock().unwrap();
+        let book = &records["chat"];
+        assert_eq!(book.entries.len(), MAX_RECORDS_PER_CHAT);
+        assert!(!book.aliases.contains_key("task-done"));
+        assert!(
+            book.aliases
+                .values()
+                .all(|key| book.entries.contains_key(&format!("subagent:{key}")))
+        );
+        drop(records);
+
+        drop(runtime);
+        let _ = fs::remove_dir_all(root);
     }
 
     fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
