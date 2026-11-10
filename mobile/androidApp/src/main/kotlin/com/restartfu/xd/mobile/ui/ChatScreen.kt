@@ -366,7 +366,14 @@ internal fun ChatScreen(
         ),
     )
     LaunchedEffect(listState, model) {
-        snapshotFlow { followTarget.value }.collect { target ->
+        // The newest row's drawn height too: a streaming reply is drawn at a
+        // pace, so its last words can land after the text that woke this.
+        snapshotFlow {
+            val target = followTarget.value
+            val drawnHeight = listState.layoutInfo.visibleItemsInfo
+                .firstOrNull { it.index == target.lastIndex }?.size
+            target to drawnHeight
+        }.collect { (target, _) ->
             if (model.landed && target.count > 0 && following.value) {
                 try {
                     listState.scrollToEnd(target.lastIndex, animated = true)

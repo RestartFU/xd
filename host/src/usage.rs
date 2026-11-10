@@ -1526,14 +1526,11 @@ fn scan_source(
         if modified < earliest_ms {
             continue;
         }
-        let cached = cache
-            .files
-            .get(path)
-            .filter(|cached| {
-                cached.size == metadata.len()
-                    && cached.modified_ms == modified
-                    && (!cached.read_on || cached.resume.full_read_at.elapsed() < FULL_REREAD_AFTER)
-            });
+        let cached = cache.files.get(path).filter(|cached| {
+            cached.size == metadata.len()
+                && cached.modified_ms == modified
+                && (!cached.read_on || cached.resume.full_read_at.elapsed() < FULL_REREAD_AFTER)
+        });
         if let Some(cached) = cached {
             scan.records.push(cached.records.clone());
             scan.malformed_records += cached.malformed;
@@ -3204,12 +3201,21 @@ mod tests {
         let start = format!(
             "{}{}{}",
             line(json!({"timestamp": at(60), "type": "session_meta", "payload": {"id": "thread"}})),
-            line(json!({"timestamp": at(60), "type": "turn_context", "payload": {"model": "gpt-5.5"}})),
-            line(token_count_line(&at(50), usage(100, 0, 10, 0), usage(100, 0, 10, 0))),
+            line(
+                json!({"timestamp": at(60), "type": "turn_context", "payload": {"model": "gpt-5.5"}})
+            ),
+            line(token_count_line(
+                &at(50),
+                usage(100, 0, 10, 0),
+                usage(100, 0, 10, 0)
+            )),
         );
         let scan = |cache: &mut ScanCache| -> Vec<UsageRecord> {
             let scan = scan_source("codex", Some(&directory), 0, cache);
-            scan.records.iter().flat_map(|records| records.iter().cloned()).collect()
+            scan.records
+                .iter()
+                .flat_map(|records| records.iter().cloned())
+                .collect()
         };
         let mut cache = ScanCache::default();
         fs::write(&path, &start).unwrap();
@@ -3217,7 +3223,11 @@ mod tests {
         // Grows, so it is read on from where it left off.
         let grown = format!(
             "{start}{}",
-            line(token_count_line(&at(40), usage(20, 0, 2, 0), usage(120, 0, 12, 0))),
+            line(token_count_line(
+                &at(40),
+                usage(20, 0, 2, 0),
+                usage(120, 0, 12, 0)
+            )),
         );
         fs::write(&path, &grown).unwrap();
         assert_eq!(scan(&mut cache).len(), 2);
@@ -3229,7 +3239,12 @@ mod tests {
         assert_eq!(rewritten.len(), grown.len());
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
         fs::write(&path, &rewritten).unwrap();
-        fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
         let entry = cache.files.get_mut(&path).unwrap();
         entry.resume.head.clear();
         entry.resume.check.clear();

@@ -8676,9 +8676,10 @@ fn repository_head_signature_at(workdir: &Path) -> String {
     if let Some(signature) = head_file_signature(workdir) {
         return signature;
     }
-    let Ok((status, stdout, _)) =
-        run_git(workdir, &["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"])
-    else {
+    let Ok((status, stdout, _)) = run_git(
+        workdir,
+        &["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"],
+    ) else {
         return String::new();
     };
     if !status.success() {
@@ -8700,7 +8701,10 @@ fn head_file_signature(workdir: &Path) -> Option<String> {
     let Some(reference) = head.strip_prefix("ref:").map(str::trim) else {
         return Some(head);
     };
-    if !reference.starts_with("refs/") || reference.contains("..") {
+    // Only branches live in the common directory as plain files; worktree
+    // refs (`refs/worktree/`, `refs/bisect/` and the like) are per worktree,
+    // so git resolves anything else.
+    if !reference.starts_with("refs/heads/") || reference.contains("..") {
         return None;
     }
     let target = match fs::read_to_string(common.join(reference)) {
@@ -17060,6 +17064,14 @@ mod tests {
         let through_git = repository_head_signature_at(&repository);
         git(&["commit", "-q", "--allow-empty", "-m", "through the alias"]);
         assert_ne!(repository_head_signature_at(&repository), through_git);
+        // A worktree-local ref lives in the worktree's own Git directory, not
+        // the common one, so it is left to git as well.
+        git(&["update-ref", "refs/worktree/local", "HEAD"]);
+        git(&["symbolic-ref", "HEAD", "refs/worktree/local"]);
+        assert_eq!(head_file_signature(&repository.join("src")), None);
+        let local = repository_head_signature_at(&repository);
+        git(&["commit", "-q", "--allow-empty", "-m", "on a worktree ref"]);
+        assert_ne!(repository_head_signature_at(&repository), local);
     }
 
     #[test]
