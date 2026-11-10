@@ -3021,9 +3021,6 @@ impl TurnRuntime {
         let key = if patch.key.is_empty() {
             book.aliases.get(patch.task_id.as_deref()?)?.clone()
         } else {
-            if let Some(task) = &patch.task_id {
-                book.aliases.insert(task.clone(), patch.key.clone());
-            }
             patch.key.clone()
         };
         let record_key = format!("subagent:{key}");
@@ -3032,6 +3029,13 @@ impl TurnRuntime {
         // get a second card that says it is running and that nothing ends.
         if patch.status.is_none() && !book.entries.contains_key(&record_key) {
             return None;
+        }
+        // Only a card that exists gets an alias, so every alias goes when its
+        // card is forgotten.
+        if !patch.key.is_empty()
+            && let Some(task) = &patch.task_id
+        {
+            book.aliases.insert(task.clone(), patch.key.clone());
         }
         let entry = Self::record_entry(book, &record_key);
         let run = entry.run.get_or_insert_with(|| SubagentRun::new(&key));
@@ -3655,16 +3659,35 @@ mod tests {
         assert!(!new);
         assert_eq!(record["status"], "completed");
 
-        // A finished agent was forgotten, and its late progress opens nothing.
+        // A finished agent was forgotten, and its late progress opens nothing,
+        // even under both of its ids. Nor does it leave an alias behind for a
+        // later report by task id to open a second card with.
         assert!(
             fold(SubagentPatch {
+                task_id: Some("task-done".into()),
                 activity: Some("Still going".into()),
                 ..SubagentPatch::new("done")
             })
             .is_none()
         );
-        let book_size = runtime.inner.records.lock().unwrap()["chat"].entries.len();
-        assert_eq!(book_size, MAX_RECORDS_PER_CHAT);
+        assert!(
+            fold(SubagentPatch {
+                task_id: Some("task-done".into()),
+                status: Some(SubagentStatus::Completed),
+                ..SubagentPatch::new("")
+            })
+            .is_none()
+        );
+        let records = runtime.inner.records.lock().unwrap();
+        let book = &records["chat"];
+        assert_eq!(book.entries.len(), MAX_RECORDS_PER_CHAT);
+        assert!(!book.aliases.contains_key("task-done"));
+        assert!(
+            book.aliases
+                .values()
+                .all(|key| book.entries.contains_key(&format!("subagent:{key}")))
+        );
+        drop(records);
 
         drop(runtime);
         let _ = fs::remove_dir_all(root);
