@@ -23,6 +23,7 @@ mod auth;
 mod background_process;
 mod background_tasks;
 mod chat_title;
+mod child_agents;
 mod cli_updates;
 mod cli_versions;
 mod codex_app;
@@ -328,6 +329,10 @@ impl Engine {
             Some("git-pr-create") => self.git_create_pull_request(&request),
             Some("link-pull-requests") => self.link_pull_requests(&request),
             Some("unlink-pull-request") => self.unlink_pull_request(&request),
+            Some("start-agent") => self.start_agent(&request),
+            Some("list-agents") => self.list_agents(&request),
+            Some("message-agent") => self.message_agent(&request),
+            Some("stop-agent") => self.stop_agent(&request),
             Some("git-draft") => self
                 .git_drafts
                 .start(&request)
@@ -3484,6 +3489,102 @@ mod tests {
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["_xd_request"], 7);
         assert!(reply["error"].as_str().unwrap().contains("terminal-open"));
+    }
+
+    /// An agent started through start_agent runs as a chat nested under the
+    /// chat that started it, and its finished turn comes back to that chat.
+    #[cfg(unix)]
+    #[test]
+    fn a_started_agent_runs_as_a_child_chat_and_reports_back() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("xd-child-agent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = root.join("claude");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+case "$*" in *--strict-mcp-config*) exit 0;; esac
+while read message; do
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}'
+echo '{"type":"result","terminal_reason":"completed","result":"Done."}'
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+        let (engine, parent) = steer_engine(&root);
+        let engine = Arc::new(engine);
+        engine.start_reporting_agents();
+        let store = engine.store.as_ref().unwrap();
+        let wait_for = |what: &str, ready: &dyn Fn() -> bool| {
+            for _ in 0..400 {
+                if ready() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            panic!("timed out waiting for {what}");
+        };
+
+        let started = engine.dispatch(json!({"op": "start-agent", "chat": parent,
+            "prompt": "Fix the tests", "title": "Tests", "workspace": "this_worktree"}));
+        assert_eq!(started["ok"], true, "{started}");
+        assert_eq!(started["backend"], "claude");
+        let child = started["agent"].as_str().unwrap().to_owned();
+        let tree = engine.dispatch(json!({"op": "tree"}));
+        let listed = tree["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chat| chat["id"] == child)
+            .unwrap();
+        assert_eq!(listed["parent"], parent);
+        assert_eq!(listed["title"], "Tests");
+        assert_eq!(tree["child_chats"], true);
+
+        let parent_reply = |text: &str| {
+            store.messages(&json!({"chat": parent})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row["content"]
+                        .as_str()
+                        .is_some_and(|row| row.starts_with(text))
+                })
+        };
+        wait_for("the report to reach the parent", &|| {
+            parent_reply(&format!(
+                "[xd] Agent \"Tests\" ({child}) is done with its turn."
+            ))
+        });
+        wait_for("the parent to answer it", &|| {
+            parent_reply("Done.") && store.chat(&parent).unwrap()["working"] == false
+        });
+        let agents = engine.dispatch(json!({"op": "list-agents", "chat": parent}));
+        assert_eq!(agents["agents"][0]["id"], child, "{agents}");
+        assert_eq!(agents["agents"][0]["status"], "finished");
+        assert_eq!(agents["agents"][0]["reply"], "Done.");
+
+        let nested = engine.dispatch(json!({"op": "start-agent", "chat": child, "prompt": "More"}));
+        assert_eq!(nested["ok"], false);
+        let stranger = engine
+            .dispatch(json!({"op": "message-agent", "chat": child, "agent": parent, "text": "Hi"}));
+        assert_eq!(stranger["ok"], false);
+        let stopped = engine.dispatch(json!({"op": "stop-agent", "chat": parent, "agent": child}));
+        assert_eq!(stopped, json!({"ok": true, "was_working": false}));
+
+        for chat in [&parent, &child] {
+            engine.runtime.as_ref().unwrap().discard_chat(chat);
+        }
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn steer_engine(root: &std::path::Path) -> (Engine, String) {

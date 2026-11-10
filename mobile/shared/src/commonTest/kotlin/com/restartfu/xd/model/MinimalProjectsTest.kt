@@ -215,4 +215,29 @@ class MinimalProjectsTest {
         assertEquals(PauseAllAction.PAUSE, paused.pauseActionFor("inner"))
         assertEquals(listOf(false, true), paused.minimalSessions("site").map { it.paused })
     }
+
+    @Test
+    fun sessionsAnAgentStartedListRightBelowTheSessionThatStartedThem() {
+        val ids = listOf("w2", "other", "w1", "lead", "orphan", "settledWorker", "gone")
+        val parents = mapOf("w2" to "lead", "w1" to "lead", "orphan" to "missing", "settledWorker" to "gone")
+        val snapshot = TreeSnapshot(
+            chats = ids.map { chat(it, "compiler", it, "claude") },
+            sessions = ids.map {
+                WorkspaceSession(
+                    it,
+                    "compiler",
+                    it,
+                    listOf(it),
+                    parentId = parents[it],
+                    settledAt = if (it == "gone") 100 else null,
+                )
+            },
+        )
+
+        assertEquals(
+            listOf("other" to false, "lead" to false, "w2" to true, "w1" to true, "orphan" to false, "settledWorker" to false),
+            snapshot.activeSessions("compiler").map { it.id to it.nested },
+        )
+        assertEquals("lead", snapshot.minimalSessions("compiler").first { it.id == "w1" }.parentId)
+    }
 }

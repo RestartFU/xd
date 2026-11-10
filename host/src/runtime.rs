@@ -77,6 +77,9 @@ struct RuntimeInner {
     auth: AuthManager,
     /// Continues a chat after its account ran out and another took over.
     on_account_switch: Mutex<Option<AccountSwitchHandler>>,
+    /// Told when a turn ends for good: not stopped, and not going on under
+    /// another account.
+    on_turn_settled: Mutex<Option<TurnSettledHandler>>,
     /// Chats whose move to another account was already explained to the user.
     explained_switches: Mutex<HashSet<String>>,
     /// False while sessions from before accounts were kept are being filed as
@@ -91,6 +94,9 @@ struct RuntimeInner {
 /// Continues a chat on another account. Takes the chat and its newest user
 /// message, which must still be its newest for the continuation to go ahead.
 pub(crate) type AccountSwitchHandler = Box<dyn Fn(String, i64) + Send + Sync>;
+
+/// Hears that a chat's turn ended for good. Takes the chat.
+pub(crate) type TurnSettledHandler = Box<dyn Fn(String) + Send + Sync>;
 
 /// Marks a `tool` row that says a chat moved to another account. A client that
 /// does not know it shows the sentence after it as a small tool row.
@@ -541,6 +547,7 @@ impl TurnRuntime {
                 records: Mutex::new(HashMap::new()),
                 auth,
                 on_account_switch: Mutex::new(None),
+                on_turn_settled: Mutex::new(None),
                 explained_switches: Mutex::new(HashSet::new()),
                 account_gate: std::sync::RwLock::new(()),
                 filing: Arc::new((Mutex::new(true), std::sync::Condvar::new())),
@@ -615,6 +622,12 @@ impl TurnRuntime {
 
     pub(crate) fn set_account_switch_handler(&self, handler: AccountSwitchHandler) {
         if let Ok(mut current) = self.inner.on_account_switch.lock() {
+            *current = Some(handler);
+        }
+    }
+
+    pub(crate) fn set_turn_settled_handler(&self, handler: TurnSettledHandler) {
+        if let Ok(mut current) = self.inner.on_turn_settled.lock() {
             *current = Some(handler);
         }
     }
@@ -1365,7 +1378,13 @@ impl TurnRuntime {
         }
         let link_tool = crate::agent_tools::offered(&turn.backend);
         if link_tool {
-            let hint = crate::agent_tools::HINT;
+            // An agent another agent started cannot start its own.
+            let started_by_agent = self
+                .inner
+                .store
+                .chat_parent(&turn.chat_id)
+                .is_ok_and(|parent| parent.is_some());
+            let hint = crate::agent_tools::hint(started_by_agent);
             turn.system_prompt = Some(match turn.system_prompt.take() {
                 Some(prompt) if !prompt.is_empty() => format!("{prompt}\n\n{hint}"),
                 _ => hint.to_owned(),
@@ -2860,8 +2879,16 @@ impl TurnRuntime {
             context_usage,
         );
         drop(succession);
+        let moves_on = matches!(limited, Some((AfterLimit::Switches(_), _)));
         if let Some((outcome, message)) = limited {
             self.continue_after_limit(&chat_id, outcome, message);
+        }
+        if !was_cancelled
+            && !moves_on
+            && let Ok(handler) = self.inner.on_turn_settled.lock()
+            && let Some(handler) = handler.as_ref()
+        {
+            handler(chat_id.clone());
         }
         if keeps_process {
             self.pump_idle(&chat_id);

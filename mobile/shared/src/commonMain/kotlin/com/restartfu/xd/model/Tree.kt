@@ -79,6 +79,8 @@ public data class WorkspaceSession(
     val terminalChatId: String = "session:$id",
     val settledAt: Long? = null,
     val autoSettleDisabled: Boolean = false,
+    /** The session whose agent started this one; its row nests under that one's. */
+    val parentId: String? = null,
 )
 
 public data class TreeSnapshot(

@@ -224,6 +224,14 @@ list of `{url, state}` oldest first, where `url` is the canonical
 absent until the host has asked GitHub. The member is absent when the chat has
 none. See [Linked pull requests](#linked-pull-requests).
 
+A host whose agents can start agents of their own adds a top-level
+`"child_chats":true`. A chat such an agent started has `parent`, the id of the
+chat that started it, while that chat is still listed. When it works in a
+session of its own, that session's `sessions` entry has `parent`, the id of the
+parent chat's session; clients list it right below that session, indented. A
+chat started in its parent's own session is just another of its tabs. See
+[Agents an agent starts](#agents-an-agent-starts).
+
 ### `background-task-output`
 
 Read-only request: `{"op":"background-task-output","chat":"<chat-id>"}`.
@@ -1136,9 +1144,45 @@ settling when its lookups find one.
 
 Agents link the rest themselves. The daemon starts Claude and Codex with an MCP
 server, `xd-host mcp --database PATH --workspaces PATH --chat ID`, named `xd`,
-whose one tool, `link_pull_requests`, takes `urls` and sends
-`link-pull-requests` with `"source":"agent"` for its chat. The tool is approved
-in advance, and one sentence in the agent's instructions says when to use it.
+whose tool `link_pull_requests` takes `urls` and sends `link-pull-requests`
+with `"source":"agent"` for its chat. The tools are approved in advance, and the
+agent's instructions say when to use them.
+
+### Agents an agent starts
+
+The same `xd` MCP server gives an agent four more tools, each sent to the daemon
+as a request for the server's chat:
+
+| Tool | Request | Does |
+| --- | --- | --- |
+| `start_agent` | `start-agent` | Starts a chat under this one and sends it `prompt`. |
+| `list_agents` | `list-agents` | Lists this chat's agents, or the one named by `agent`. |
+| `message_agent` | `message-agent` | Sends one of them `text`, queued behind a running turn. |
+| `stop_agent` | `stop-agent` | Stops one of them, as `cancel` would. |
+
+```json
+{"op":"start-agent","chat":"lead","prompt":"Fix CI on #12","title":"CI","assistant":"codex","workspace":"new_worktree"}
+{"ok":true,"agent":"worker","backend":"codex","model":"gpt-5.5","reports":true}
+{"op":"list-agents","chat":"lead"}
+{"ok":true,"agents":[{"id":"worker","title":"CI","assistant":"codex","model":"gpt-5.5","status":"working","reply":"…"}]}
+```
+
+`start-agent` makes an ordinary chat in the parent's project. `assistant` is
+`claude` or `codex` and defaults to the parent's; on the same assistant the
+model and effort default to the parent's too. The chat always gets the parent's
+workspace access. `workspace` is `new_worktree`, the default, for a git worktree
+of its own, or `this_worktree` for another tab of the parent's session. The new
+chat then runs like any other: its turns go to the account xd chooses for them,
+in priority order, and it keeps running whatever happens to the parent's agent
+process. A chat that another agent started cannot start agents itself, and a
+chat can have at most 10 agents at work at once.
+
+With `notify` left true, each turn of the new chat that ends for good, neither
+stopped nor moving to another account, sends the parent a message beginning
+`[xd] Agent` with the reply or error. A parent at work gets it queued; a paused
+parent gets it in its queue without resuming. Statuses in `list-agents` are
+`working`, `paused`, `waiting for an answer`, `stopped with an error`,
+`finished` and `idle`.
 
 `move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
 to move the folder to the workspace root. A folder cannot be moved into itself

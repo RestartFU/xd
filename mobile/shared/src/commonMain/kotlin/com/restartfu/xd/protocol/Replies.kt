@@ -72,6 +72,8 @@ public data class SessionSummaryReply(
     /** Seconds since the epoch when the session was settled; absent while it is active. */
     @SerialName("settled_at") val settledAt: Long? = null,
     @SerialName("auto_settle_disabled") val autoSettleDisabled: Boolean = false,
+    /** The session whose agent started this one's through xd's start_agent tool. */
+    val parent: String? = null,
 )
 
 @Serializable

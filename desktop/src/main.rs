@@ -115,8 +115,8 @@ use input::{
 };
 use minimal::{
     AgentCli, MinimalRoute, ProjectCard, SessionCard, SettledCard, age_label, folder_tree,
-    next_active_session, project_cards, project_sessions, reconcile_route, resumable_session,
-    settled_cards, tree_descendants,
+    nest_sessions, next_active_session, project_cards, project_sessions, reconcile_route,
+    resumable_session, settled_cards, tree_descendants,
 };
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
@@ -202,6 +202,8 @@ const CATALOG_SESSION_MIN_WIDTH: f32 = 384.0;
 const CARD_HEIGHT: f32 = 30.0;
 /// How far the sidebar indents a project or folder for each folder it is in.
 const CATALOG_INDENT: f32 = 12.0;
+/// How far a session another session's agent started sits in from that one.
+const SESSION_NEST_INDENT: f32 = 10.0;
 /// How long the sidebar offers to undo a settle.
 const SETTLE_UNDO_LIFETIME: Duration = Duration::from_secs(5);
 /// Rows of the Settled shelf shown at first, and how many Show more adds.
@@ -14349,6 +14351,12 @@ impl XdDesktop {
                     continue;
                 }
             }
+            let sessions = nest_sessions(sessions, |card| {
+                self.model
+                    .session_for_chat(&card.id)
+                    .map(|session| (session.id.clone(), session.parent.clone()))
+                    .unwrap_or_else(|| (card.id.clone(), None))
+            });
             matches += 1;
             let open = self.project_open(&project.id, finding);
             let signals = sessions
@@ -14361,7 +14369,8 @@ impl XdDesktop {
                     let instance = session_instance;
                     session_instance += 1;
                     let selected = active_chat_id == Some(session.id.as_str());
-                    cards.push(self.render_session_card(
+                    let nested = session.nested;
+                    let card = self.render_session_card(
                         colors,
                         &project.id,
                         session_index,
@@ -14369,7 +14378,20 @@ impl XdDesktop {
                         instance,
                         selected,
                         cx,
-                    ));
+                    );
+                    cards.push(if nested {
+                        // Started by the agent of the session above: indented
+                        // under it, along a guide line.
+                        div()
+                            .ml(px(SESSION_NEST_INDENT))
+                            .pl(px(4.0))
+                            .border_l_1()
+                            .border_color(rgb(colors.border))
+                            .child(card)
+                            .into_any_element()
+                    } else {
+                        card
+                    });
                 }
             } else {
                 session_instance += sessions.len();

@@ -43,6 +43,10 @@ public data class MinimalSession(
     val backend: String = agent?.wire.orEmpty(),
     /** One of its chats was stopped by pausing every chat and has not resumed. */
     val paused: Boolean = false,
+    /** The session whose agent started this one through xd's start_agent tool. */
+    val parentId: String? = null,
+    /** Listed right below the session that started it, by [nestedUnderParents]. */
+    val nested: Boolean = false,
 ) {
     val settled: Boolean get() = settledAt != null
 
@@ -108,13 +112,39 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
             autoSettleDisabled = workspace?.autoSettleDisabled ?: false,
             backend = first.backend,
             paused = grouped.any(ChatSummary::paused),
+            parentId = workspace?.parentId,
         )
     }
 }
 
-/** A project's sessions that are not settled, in the host's order. */
+/**
+ * A project's sessions that are not settled, in the host's order, except that
+ * each one an agent started lists right below the session that started it.
+ */
 public fun TreeSnapshot.activeSessions(projectId: String): List<MinimalSession> =
-    minimalSessions(projectId).filterNot(MinimalSession::settled)
+    minimalSessions(projectId).filterNot(MinimalSession::settled).nestedUnderParents()
+
+/**
+ * Lists each session an agent started right below the session that started
+ * it, marked [MinimalSession.nested], in the order they came. One whose parent
+ * is not listed, such as a settled one, stays where it was.
+ */
+public fun List<MinimalSession>.nestedUnderParents(): List<MinimalSession> {
+    val listed = map(MinimalSession::id).toSet()
+    fun parentOf(session: MinimalSession): String? =
+        session.parentId?.takeIf { it != session.id && it in listed }
+    val placed = mutableSetOf<String>()
+    val nested = ArrayList<MinimalSession>(size)
+    for (session in this) {
+        if (parentOf(session) != null || !placed.add(session.id)) continue
+        nested += session
+        for (child in this) {
+            if (parentOf(child) == session.id && placed.add(child.id)) nested += child.copy(nested = true)
+        }
+    }
+    // A chain deeper than one level, which the host never makes, still shows.
+    return nested + filter { it.id !in placed }
+}
 
 /** Every settled session, most recently settled first, as the desktop's shelf lists them. */
 public fun TreeSnapshot.settledSessions(): List<SettledSession> = minimalProjects().flatMap { project ->

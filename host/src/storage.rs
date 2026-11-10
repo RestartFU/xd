@@ -341,6 +341,31 @@ pub enum SendDisposition {
     Start { reply: Value, turn: TurnSpec },
 }
 
+/// The chat an agent works in, as [`StateStore::agent_origin`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentOrigin {
+    pub folder: String,
+    pub backend: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub access: Option<String>,
+    pub session: String,
+    pub parent: Option<String>,
+}
+
+/// A chat another chat's agent started, as [`StateStore::child_agents`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildAgent {
+    pub id: String,
+    pub title: String,
+    pub backend: String,
+    pub model: Option<String>,
+    pub working: bool,
+    pub paused: bool,
+    pub reply: Option<String>,
+    pub error: Option<String>,
+}
+
 pub struct TurnFinish {
     pub last_message_id: i64,
     pub next: Option<TurnSpec>,
@@ -765,7 +790,8 @@ impl StateStore {
         let mut statement = database.prepare(
             "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir, session_mode, workspace_session_id, \
              (SELECT CASE WHEN role = 'assistant' THEN content END FROM messages \
-              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1), paused FROM chats \
+              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1), paused, \
+             parent_chat_id FROM chats \
              ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
         let stored_chats = statement
@@ -782,10 +808,18 @@ impl StateStore {
                     row.get::<_, String>(8)?,
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, bool>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             })?
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
         drop(statement);
+        // Each chat's session, so a chat started by another names the session
+        // its sidebar row nests under.
+        let chat_sessions = stored_chats
+            .iter()
+            .filter(|chat| visible_ids.contains(chat.1.as_str()))
+            .map(|chat| (chat.0.clone(), chat.8.clone()))
+            .collect::<HashMap<_, _>>();
 
         let mut statement = database.prepare(
             "SELECT id, CASE WHEN settled_override = 'settled' \
@@ -858,7 +892,20 @@ impl StateStore {
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
         for (
-            (id, folder, title, backend, working, _, _, session_mode, session, last_reply, paused),
+            (
+                id,
+                folder,
+                title,
+                backend,
+                working,
+                _,
+                _,
+                session_mode,
+                session,
+                last_reply,
+                paused,
+                parent,
+            ),
             workdir,
         ) in visible_chats
         {
@@ -900,6 +947,18 @@ impl StateStore {
             if paused {
                 chat["paused"] = Value::Bool(true);
             }
+            // Only a parent still shown, so a chat whose parent was deleted
+            // stands on its own again.
+            let parent_session = parent
+                .as_ref()
+                .and_then(|parent| Some((parent, chat_sessions.get(parent)?)));
+            if let Some((parent, _)) = parent_session {
+                chat["parent"] = Value::String(parent.clone());
+            }
+            let parent_session = parent_session
+                .map(|(_, parent_session)| parent_session)
+                .filter(|parent_session| **parent_session != session)
+                .cloned();
             if let Some(links) = linked_pull_requests.remove(&id) {
                 chat["pull_requests"] = Value::Array(links);
             }
@@ -919,6 +978,11 @@ impl StateStore {
                 if working {
                     group["working"] = json!(true);
                 }
+                if group.get("parent").is_none()
+                    && let Some(parent_session) = parent_session
+                {
+                    group["parent"] = Value::String(parent_session);
+                }
             } else {
                 let session_title = session_titles.remove(&session).unwrap_or_default();
                 let mut group = json!({"id": session, "folder": folder, "title": session_title,
@@ -931,6 +995,9 @@ impl StateStore {
                 }
                 if auto_settle_disabled {
                     group["auto_settle_disabled"] = json!(true);
+                }
+                if let Some(parent_session) = parent_session {
+                    group["parent"] = Value::String(parent_session);
                 }
                 sessions.push(group);
             }
@@ -951,6 +1018,9 @@ impl StateStore {
             // The host keeps folders of projects; older hosts ignore `group`
             // and `owner` and would make a project instead.
             "folder_groups": true,
+            // Chats and sessions name the chat and session whose agent
+            // started them; older hosts never start one.
+            "child_chats": true,
         }))
     }
 
@@ -2944,6 +3014,79 @@ impl StateStore {
         Ok(changed == 1)
     }
 
+    /// What a chat's agent needs to start another: where it works and on what.
+    pub fn agent_origin(&self, chat_id: &str) -> Result<AgentOrigin, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database
+            .query_row(
+                "SELECT folder_id, backend, model, effort, access, workspace_session_id, \
+                 parent_chat_id FROM chats WHERE id = ?",
+                [chat_id],
+                |row| {
+                    Ok(AgentOrigin {
+                        folder: row.get(0)?,
+                        backend: row.get(1)?,
+                        model: row.get(2)?,
+                        effort: row.get(3)?,
+                        access: row.get(4)?,
+                        session: row.get(5)?,
+                        parent: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))
+    }
+
+    /// The chat that started `chat_id`, and whether `chat_id` reports its
+    /// finished turns back to it. `None` for a chat nobody started.
+    pub fn chat_parent(&self, chat_id: &str) -> Result<Option<(String, bool)>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database
+            .query_row(
+                "SELECT parent_chat_id, report_to_parent FROM chats WHERE id = ?",
+                [chat_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()?
+            .and_then(|(parent, reports)| Some((parent?, reports))))
+    }
+
+    /// The chats `parent`'s agent started, oldest first.
+    pub fn child_agents(&self, parent: &str) -> Result<Vec<ChildAgent>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(
+            "SELECT id, COALESCE(title, ''), backend, model, host_working, paused, \
+             (SELECT content FROM messages WHERE chat_id = chats.id AND role = 'assistant' \
+              ORDER BY id DESC LIMIT 1), \
+             (SELECT role FROM messages WHERE chat_id = chats.id \
+              AND role IN ('assistant', 'error', 'user') ORDER BY id DESC LIMIT 1), \
+             (SELECT content FROM messages WHERE chat_id = chats.id AND role = 'error' \
+              ORDER BY id DESC LIMIT 1) \
+             FROM chats WHERE parent_chat_id = ? ORDER BY created_at, rowid",
+        )?;
+        let children = statement
+            .query_map([parent], |row| {
+                let last_role = row.get::<_, Option<String>>(7)?;
+                Ok(ChildAgent {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    backend: row.get(2)?,
+                    model: row.get(3)?,
+                    working: row.get(4)?,
+                    paused: row.get(5)?,
+                    reply: row.get(6)?,
+                    // An error after its last reply is how its last turn ended.
+                    error: (last_role.as_deref() == Some("error"))
+                        .then(|| row.get::<_, Option<String>>(8))
+                        .transpose()?
+                        .flatten(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(children)
+    }
+
     pub fn chat_is_paused(&self, chat_id: &str) -> Result<bool, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         Ok(database
@@ -4510,6 +4653,25 @@ impl StateStore {
     }
 
     pub fn new_chat(&self, request: &Value) -> Result<Value, StorageError> {
+        self.new_chat_under(request, None)
+    }
+
+    /// A chat another chat's agent started with xd's start_agent tool. It
+    /// reports each finished turn back to `parent` when `reports` is set.
+    pub fn new_child_chat(
+        &self,
+        request: &Value,
+        parent: &str,
+        reports: bool,
+    ) -> Result<Value, StorageError> {
+        self.new_chat_under(request, Some((parent, reports)))
+    }
+
+    fn new_chat_under(
+        &self,
+        request: &Value,
+        parent: Option<(&str, bool)>,
+    ) -> Result<Value, StorageError> {
         let requested_folder = optional_string(request, "folder")?;
         let requested_session = optional_string(request, "session")?;
         let title = optional_string(request, "title")?.unwrap_or("New Chat");
@@ -4782,8 +4944,9 @@ impl StateStore {
         transaction.execute(
             "INSERT INTO chats \
              (id, folder_id, title, backend, model, effort, access, plan, fast, claude_mode, \
-              workdir, original_workdir, sort_order, created_at, updated_at, last_user_message_at, session_mode, workspace_session_id, new_worktree) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              workdir, original_workdir, sort_order, created_at, updated_at, last_user_message_at, session_mode, workspace_session_id, new_worktree, \
+              parent_chat_id, report_to_parent) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id,
                 folder_id,
@@ -4804,6 +4967,8 @@ impl StateStore {
                 "chat",
                 session,
                 shared.as_ref().is_some_and(|shared| shared.3),
+                parent.map(|(parent, _)| parent),
+                parent.is_some_and(|(_, reports)| reports),
             ],
         )?;
         let attachments =
@@ -6420,6 +6585,16 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
     if !columns.contains("paused") {
         database.execute(
             "ALTER TABLE chats ADD COLUMN paused INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    // The chat whose agent started this one through xd's start_agent tool.
+    if !columns.contains("parent_chat_id") {
+        database.execute("ALTER TABLE chats ADD COLUMN parent_chat_id TEXT", [])?;
+    }
+    if !columns.contains("report_to_parent") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN report_to_parent INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
@@ -12673,6 +12848,97 @@ mod tests {
         store
             .set_option(&json!({"chat": chat["id"], "option": option, "value": value}))
             .unwrap();
+    }
+
+    #[test]
+    fn a_child_chat_nests_under_the_chat_that_started_it() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let parent = new_chat_on(&store, &folder, "claude");
+        let parent_id = parent["id"].as_str().unwrap();
+        let child = store
+            .new_child_chat(
+                &json!({"folder": folder, "backend": "codex", "title": "Worker"}),
+                parent_id,
+                true,
+            )
+            .unwrap();
+        let child_id = child["id"].as_str().unwrap();
+        let tab = store
+            .new_child_chat(
+                &json!({"folder": folder, "session": parent["session"]}),
+                parent_id,
+                false,
+            )
+            .unwrap();
+
+        let tree = store.tree().unwrap();
+        let chat = |id: &str| {
+            tree["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|chat| chat["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        let session = |id: &Value| {
+            tree["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|session| session["id"] == *id)
+                .unwrap()
+                .clone()
+        };
+        assert!(chat(parent_id).get("parent").is_none());
+        assert_eq!(chat(child_id)["parent"], parent_id);
+        assert_eq!(chat(tab["id"].as_str().unwrap())["parent"], parent_id);
+        // A worker in its own session nests that session under the parent's;
+        // one working in the parent's session is just another of its tabs.
+        assert_eq!(session(&child["session"])["parent"], parent["session"]);
+        assert!(session(&parent["session"]).get("parent").is_none());
+        assert_eq!(
+            store.chat_parent(child_id).unwrap(),
+            Some((parent_id.to_owned(), true))
+        );
+        assert_eq!(
+            store.chat_parent(tab["id"].as_str().unwrap()).unwrap(),
+            Some((parent_id.to_owned(), false))
+        );
+        assert_eq!(store.chat_parent(parent_id).unwrap(), None);
+        let children = store.child_agents(parent_id).unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].id, child_id);
+        assert_eq!(children[0].title, "Worker");
+        assert_eq!(children[0].backend, "codex");
+        let origin = store.agent_origin(child_id).unwrap();
+        assert_eq!(origin.parent.as_deref(), Some(parent_id));
+        assert_eq!(origin.session, child["session"]);
+
+        // Once the parent is gone, the worker stands on its own.
+        store
+            .database
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM chats WHERE id = ?", [parent_id])
+            .unwrap();
+        let tree = store.tree().unwrap();
+        let orphan = tree["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chat| chat["id"] == child_id)
+            .unwrap();
+        assert!(orphan.get("parent").is_none());
+        assert!(
+            tree["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|session| session.get("parent").is_none())
+        );
     }
 
     #[test]

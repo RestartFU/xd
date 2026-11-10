@@ -87,6 +87,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
@@ -1588,6 +1590,9 @@ private fun ProjectMenu(
 }
 
 /** Indent per folder level on the Projects page, in dp. */
+/** How far a session another session's agent started sits in from that one. */
+private const val SESSION_NEST_INDENT = 12
+
 private const val FOLDER_INDENT = 16
 
 /** Told when New folder is offered by a host that would make a project instead. */
@@ -1999,6 +2004,25 @@ private fun SessionRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = 18.dp)
+            .then(
+                // Started by the agent of the session above: indented under
+                // it, along a guide line, as on the desktop.
+                if (session.nested) {
+                    Modifier
+                        .padding(start = SESSION_NEST_INDENT.dp)
+                        .drawBehind {
+                            drawLine(
+                                signals.rule,
+                                Offset(0f, 0f),
+                                Offset(0f, size.height),
+                                strokeWidth = 1.dp.toPx(),
+                            )
+                        }
+                        .padding(start = 4.dp)
+                } else {
+                    Modifier
+                },
+            )
             .heightIn(min = 64.dp)
             .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)

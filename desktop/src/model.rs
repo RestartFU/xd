@@ -424,6 +424,10 @@ pub struct SessionSummary {
     pub background_tasks: u32,
     #[serde(default)]
     pub terminal_chat: String,
+    /// The session whose agent started this one's through xd's start_agent
+    /// tool. Its sidebar row nests under that session's.
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -831,6 +835,7 @@ fn normalize_sessions(snapshot: &mut TreeSnapshot, body: &Value) {
             working: chat.working,
             terminal_working: chat.terminal_working,
             background_tasks: chat.background_tasks,
+            parent: None,
             terminal_chat: session_id
                 .map(|id| format!("session:{id}"))
                 .unwrap_or_else(|| chat.id.clone()),
@@ -2096,6 +2101,7 @@ impl AppModel {
                 terminal_working: chat.terminal_working,
                 background_tasks: chat.background_tasks,
                 terminal_chat: chat.id.clone(),
+                parent: None,
             })
             .collect();
         model
