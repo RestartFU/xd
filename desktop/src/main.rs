@@ -387,8 +387,8 @@ impl SessionSignal {
     fn color(self, colors: ThemeColors) -> u32 {
         match self {
             Self::Idle => colors.faint,
-            Self::Paused => colors.muted,
-            Self::Working | Self::Background(_) => colors.working,
+            Self::Paused | Self::Background(_) => colors.muted,
+            Self::Working => colors.working,
             Self::Waiting => colors.waiting,
             Self::Done => colors.done,
         }
@@ -415,8 +415,8 @@ fn background_label(count: u32) -> String {
     )
 }
 
-/// The mark for work still running in the background: a ring in the working
-/// color that holds still, where a working dot is filled and pulses.
+/// The mark for work still running in the background: a gray ring that holds
+/// still, where a working dot is green, filled, and pulses.
 fn background_ring(size: f32, color: u32) -> gpui::Div {
     div()
         .size(px(size))
@@ -829,6 +829,28 @@ gpui::actions!(xd, [CloseSearch, CopyRenderedSelection, ToggleUsage]);
 struct OpenBrowserUrl {
     url: String,
     window: gpui::AnyWindowHandle,
+}
+
+/// Whether a link click asked for the computer's own web browser rather than
+/// the chat's browser pane: Ctrl+click, or Cmd+click on macOS.
+fn opens_in_system_browser(modifiers: gpui::Modifiers) -> bool {
+    modifiers.secondary()
+}
+
+/// Opens a clicked link in the chat's browser pane, or in the computer's
+/// default web browser when the click held Ctrl (Cmd on macOS).
+fn open_clicked_link(url: &str, window: &mut Window, cx: &mut App) {
+    if opens_in_system_browser(window.modifiers()) {
+        cx.open_url(url);
+        return;
+    }
+    window.dispatch_action(
+        Box::new(OpenBrowserUrl {
+            url: url.to_owned(),
+            window: window.window_handle(),
+        }),
+        cx,
+    );
 }
 
 /// A transcript image was clicked. Routed by window, like a link click, for the
@@ -2438,6 +2460,18 @@ struct XdDesktop {
     /// The chat the new chat view created, which it stays on screen for
     /// until that chat opens.
     new_chat_started: Option<String>,
+    /// The token of the new chat the view sent off and waits on.
+    chat_create_token: Option<u64>,
+    /// The last token given to a new chat sent off.
+    new_chat_tokens: u64,
+    /// New chats sent off whose view was left before the host answered.
+    starting_chats: Vec<new_chat::StartingChat>,
+    /// The new-chat drafts holding something, by draft key, shown in the
+    /// sidebar as draft chats.
+    new_chat_draft_keys: HashSet<String>,
+    /// The draft keys saved or emptied this run, which the listing of
+    /// drafts saved before must not bring back.
+    new_chat_drafts_written: HashSet<String>,
     chat_create_title: String,
     chat_create_submitting: bool,
     chat_create_worktree: Option<NewSessionWorktree>,
@@ -2579,6 +2613,7 @@ impl XdDesktop {
         let desktop = cx.weak_entity();
         window.on_window_should_close(cx, move |_, cx| {
             let _ = desktop.update(cx, |desktop, cx| {
+                desktop.keep_starting_messages(cx);
                 desktop.persist_new_chat_draft();
                 desktop.flush_new_chat_draft();
                 desktop.shutdown_browsers(cx);
@@ -3135,6 +3170,11 @@ impl XdDesktop {
             new_chat_attachments: Vec::new(),
             new_chat_submitted_attachments: Vec::new(),
             new_chat_started: None,
+            chat_create_token: None,
+            new_chat_tokens: 0,
+            starting_chats: Vec::new(),
+            new_chat_draft_keys: HashSet::new(),
+            new_chat_drafts_written: HashSet::new(),
             chat_create_title: String::new(),
             chat_create_submitting: false,
             chat_create_worktree: None,
@@ -3222,6 +3262,7 @@ impl XdDesktop {
             }
         }
         desktop.listen_for_terminal_runtime(terminal_updates, cx);
+        desktop.load_new_chat_draft_keys(cx);
         #[cfg(target_os = "linux")]
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(activation) = clicked_notifications.recv().await {
@@ -3563,6 +3604,8 @@ impl XdDesktop {
         if !self.flush_draft_before_navigation() {
             return false;
         }
+        // An unsent draft stays saved, and a chat being started goes on.
+        self.leave_chat_create();
         self.stash_terminal_panel();
         std::mem::swap(&mut self.model, &mut self.inactive_model);
         self.active_endpoint = endpoint;
@@ -3595,9 +3638,11 @@ impl XdDesktop {
         self.project_add_menu = None;
         self.creating_chat_folder = None;
         self.creating_chat_session = None;
+        self.new_chat_started = None;
         self.new_chat_submitted_prompt = None;
         self.new_chat_submitted_attachments.clear();
         self.chat_create_submitting = false;
+        self.chat_create_token = None;
         self.workspace_context_folder = None;
         self.workspace_defaults = None;
         self.workspace_clone_status = None;
@@ -3860,13 +3905,18 @@ impl XdDesktop {
                 let remote_model = self.endpoint_model_mut(ChatEndpoint::Remote);
                 remote_model.connected = false;
                 remote_model.connection_error = Some(format!("{message} Reconnecting…"));
+                self.release_starting_chats(ChatEndpoint::Remote, cx);
                 if self.active_endpoint == ChatEndpoint::Remote {
                     self.background_reading = false;
+                    if self.chat_create_in_flight() {
+                        self.reopen_failed_chat_create(cx);
+                    }
                     // Created already: sending its message again would make another.
                     if self.new_chat_started.take().is_some() {
                         self.creating_chat_folder = None;
                     }
                     self.chat_create_submitting = false;
+                    self.chat_create_token = None;
                     self.new_chat_submitted_prompt = None;
                     self.new_chat_submitted_attachments.clear();
                     self.sending = false;
@@ -3923,7 +3973,13 @@ impl XdDesktop {
                 } else {
                     let value = Value::Object(body);
                     let tree = matches!(&kind, RequestKind::Tree);
-                    if !self.handle_workspace_create_reply(ChatEndpoint::Remote, &kind, &value, cx)
+                    if !self.handle_starting_chat_reply(ChatEndpoint::Remote, &kind, &value, cx)
+                        && !self.handle_workspace_create_reply(
+                            ChatEndpoint::Remote,
+                            &kind,
+                            &value,
+                            cx,
+                        )
                         && !self.handle_cached_terminal_reply(ChatEndpoint::Remote, &kind, &value)
                     {
                         let applied =
@@ -4120,6 +4176,7 @@ impl XdDesktop {
                     self.host = None;
                     self.inactive_model.connected = false;
                     self.inactive_model.connection_error = Some(format!("{message} Reconnecting…"));
+                    self.release_starting_chats(ChatEndpoint::Local, cx);
                     if let Some(panel) = &mut self.self_update_panel {
                         panel.busy = false;
                         panel.error =
@@ -4139,16 +4196,19 @@ impl XdDesktop {
                     } else {
                         let value = Value::Object(body);
                         let tree = matches!(&kind, RequestKind::Tree);
-                        if !self.handle_workspace_create_reply(
-                            ChatEndpoint::Local,
-                            &kind,
-                            &value,
-                            cx,
-                        ) && !self.handle_cached_terminal_reply(
-                            ChatEndpoint::Local,
-                            &kind,
-                            &value,
-                        ) {
+                        if !self.handle_starting_chat_reply(ChatEndpoint::Local, &kind, &value, cx)
+                            && !self.handle_workspace_create_reply(
+                                ChatEndpoint::Local,
+                                &kind,
+                                &value,
+                                cx,
+                            )
+                            && !self.handle_cached_terminal_reply(
+                                ChatEndpoint::Local,
+                                &kind,
+                                &value,
+                            )
+                        {
                             let applied =
                                 Self::apply_passive_reply(&mut self.inactive_model, &kind, value);
                             if tree && applied {
@@ -4224,11 +4284,16 @@ impl XdDesktop {
                 self.transcript_page_loading = false;
                 self.transcript_refresh_pending = false;
                 self.workspace_create_submitting = false;
+                if self.chat_create_in_flight() {
+                    self.reopen_failed_chat_create(cx);
+                }
                 // Created already: sending its message again would make another.
                 if self.new_chat_started.take().is_some() {
                     self.creating_chat_folder = None;
                 }
+                self.release_starting_chats(ChatEndpoint::Local, cx);
                 self.chat_create_submitting = false;
+                self.chat_create_token = None;
                 self.new_chat_submitted_prompt = None;
                 self.new_chat_submitted_attachments.clear();
                 self.workspace_context_loading = false;
@@ -4340,7 +4405,9 @@ impl XdDesktop {
             }
             return;
         }
-        if self.handle_workspace_create_reply(self.active_endpoint, &kind, &value, cx) {
+        if self.handle_starting_chat_reply(self.active_endpoint, &kind, &value, cx)
+            || self.handle_workspace_create_reply(self.active_endpoint, &kind, &value, cx)
+        {
             return;
         }
         if self.handle_cached_terminal_reply(self.active_endpoint, &kind, &value) {
@@ -4440,13 +4507,12 @@ impl XdDesktop {
                     self.transcript_refresh_pending = false;
                     self.transcript_tail_pending = false;
                 }
-                RequestKind::NewChat {
-                    folder_id, title, ..
-                } => {
-                    if self.creating_chat_folder.as_deref() == Some(folder_id)
-                        && self.chat_create_title.trim() == title
+                RequestKind::NewChat { token, .. } => {
+                    if *token != 0
+                        && self.chat_create_token == Some(*token)
+                        && self.chat_create_submitting
                     {
-                        self.chat_create_submitting = false;
+                        self.reopen_failed_chat_create(cx);
                     }
                 }
                 RequestKind::FolderContext { folder_id }
@@ -5688,17 +5754,25 @@ impl XdDesktop {
                 self.request_tree();
             }
             RequestKind::NewChat {
-                folder_id, title, ..
+                folder_id, token, ..
             } => {
+                let attached = token != 0
+                    && self.chat_create_token == Some(token)
+                    && self.chat_create_submitting;
                 let Some(chat_id) = value.get("id").and_then(Value::as_str) else {
-                    self.chat_create_submitting = false;
+                    if attached {
+                        self.reopen_failed_chat_create(cx);
+                    }
                     self.model.connection_error = Some("The host returned no chat id.".into());
                     return;
                 };
-                if self.creating_chat_folder.as_deref() == Some(folder_id.as_str())
-                    && self.chat_create_title.trim() == title
-                    && self.chat_create_submitting
-                {
+                if token != 0 && !attached {
+                    // Sent from a view since left, with nothing waiting on
+                    // it here: it shows in the tree, and is not opened.
+                    self.request_tree();
+                    return;
+                }
+                if attached {
                     if let Some(host) = self.active_host()
                         && let Err(error) = host.set_draft(
                             chat_id,
@@ -5719,9 +5793,9 @@ impl XdDesktop {
                             attachments: self.new_chat_submitted_attachments.clone(),
                         },
                     );
-                    self.clear_new_chat_draft();
                     // The view stays, showing the message, until the chat
                     // opens in its place.
+                    self.chat_create_token = None;
                     self.new_chat_started = Some(chat_id.to_owned());
                 }
                 // The tree supplies session_mode. Opening from the creation
@@ -7682,15 +7756,19 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.chat_create_in_flight() || !self.flush_draft_before_navigation() {
+        if !self.flush_draft_before_navigation() {
             return;
         }
         // Chats created and not opened yet send their first messages anyway.
         self.send_first_messages_aside(None);
-        // One already created, still showing its message, gives way.
-        if self.new_chat_started.is_some() {
+        // The new chat open gives way: its draft stays saved, and one sent
+        // off goes on starting.
+        if self.creating_chat_folder.is_some() {
             self.cancel_chat_create(cx);
         }
+        // A chat made a moment ago no longer opens by itself: this one was
+        // picked instead.
+        self.pending_minimal_session = None;
         self.new_chat_generation += 1;
         self.new_chat_reading = 0;
         self.new_chat_prompt.clear();
@@ -7807,10 +7885,11 @@ impl XdDesktop {
     }
 
     fn cancel_chat_create(&mut self, cx: &mut Context<Self>) {
-        self.persist_new_chat_draft();
+        self.leave_chat_create();
         self.creating_chat_folder = None;
         self.creating_chat_session = None;
         self.new_chat_started = None;
+        self.chat_create_token = None;
         self.new_chat_submitted_prompt = None;
         self.new_chat_submitted_attachments.clear();
         self.chat_create_title.clear();
@@ -8464,6 +8543,22 @@ impl XdDesktop {
             self.set_browser_open(true);
             let _ = self.settings.save();
             cx.notify();
+        }
+    }
+
+    /// Opens a clicked link in the chat's browser pane, or in the computer's
+    /// default web browser when the click held Ctrl (Cmd on macOS).
+    fn open_link(
+        &mut self,
+        url: &str,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if opens_in_system_browser(event.modifiers()) {
+            cx.open_url(url);
+        } else {
+            self.open_browser_url(url, window, cx);
         }
     }
 
@@ -11547,7 +11642,7 @@ impl XdDesktop {
                     .cursor_pointer()
                     .hover(|row| row.text_color(rgb(colors.text)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_background_tasks(cx)))
-                    .child(background_ring(7.0, colors.working))
+                    .child(background_ring(7.0, colors.muted))
                     .child(background_label(count))
                     .child(icon(
                         if expanded {
@@ -11929,9 +12024,6 @@ impl XdDesktop {
         if !self.flush_draft_before_navigation() {
             return;
         }
-        if self.chat_create_in_flight() {
-            return;
-        }
         if self.creating_chat_folder.is_some() {
             self.cancel_chat_create(cx);
         }
@@ -12166,6 +12258,13 @@ impl XdDesktop {
         if self.new_chat_prompt.trim().is_empty() && self.new_chat_attachments.is_empty() {
             return;
         }
+        // A message put back beside a newer draft can hold more files than
+        // one message takes.
+        if let Err(error) = message_fits(&self.new_chat_attachments) {
+            self.model.connection_error = Some(error);
+            cx.notify();
+            return;
+        }
         if self.chat_create_sources_loading
             && matches!(
                 self.chat_create_worktree,
@@ -12189,6 +12288,7 @@ impl XdDesktop {
         }
         let title = chat_create_title(&self.chat_create_title).to_owned();
         let agent = self.minimal_new_session_agent.protocol_name();
+        let token = self.new_chat_tokens + 1;
         let result = self
             .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
@@ -12210,11 +12310,17 @@ impl XdDesktop {
                         worktree_backend: self.settings.git_writer.backend(),
                         worktree_model: self.settings.git_writer_model.as_deref(),
                     }),
+                    token,
                 )
             });
         match result {
             Ok(()) => {
+                self.new_chat_tokens = token;
                 self.remember_new_chat_choices();
+                // The message is the chat's now, and the project's next new
+                // chat starts empty. It comes back if the chat is not made.
+                self.clear_new_chat_draft();
+                self.chat_create_token = Some(token);
                 self.chat_create_title = title;
                 self.new_chat_submitted_prompt = Some(self.new_chat_prompt.clone());
                 self.new_chat_submitted_attachments = self.new_chat_attachments.clone();
@@ -12384,13 +12490,7 @@ impl XdDesktop {
                     ranges,
                     move |index, window, cx| {
                         if let Some(url) = urls.get(index) {
-                            window.dispatch_action(
-                                Box::new(OpenBrowserUrl {
-                                    url: url.clone(),
-                                    window: window.window_handle(),
-                                }),
-                                cx,
-                            );
+                            open_clicked_link(url, window, cx);
                         }
                     },
                 )
@@ -12975,8 +13075,8 @@ impl XdDesktop {
                             })
                             .into()
                         })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_browser_url(&url, window, cx);
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            this.open_link(&url, event, window, cx);
                         }))
                         .child(
                             svg()
@@ -13099,8 +13199,8 @@ impl XdDesktop {
                         })
                         .into()
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_browser_url(&url, window, cx);
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.open_link(&url, event, window, cx);
                     }))
                     .child(icon(
                         GIT_PULL_REQUEST_ICON,
@@ -13217,9 +13317,9 @@ impl XdDesktop {
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(colors.surface_high)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.close_pull_request_panel(window, cx);
-                        this.open_browser_url(&open_url, window, cx);
+                        this.open_link(&open_url, event, window, cx);
                     }))
                     .child(icon(
                         GIT_PULL_REQUEST_ICON,
@@ -14561,6 +14661,14 @@ impl XdDesktop {
                 .collect::<Vec<_>>();
             let mut cards = Vec::new();
             if open {
+                if !finding {
+                    cards.extend(self.render_draft_chat_rows(
+                        colors,
+                        &project.id,
+                        project_index,
+                        cx,
+                    ));
+                }
                 for (session_index, session) in sessions.into_iter().enumerate() {
                     let instance = session_instance;
                     session_instance += 1;
@@ -15226,13 +15334,7 @@ impl XdDesktop {
             ranges,
             move |link, window, cx| {
                 if let Some(url) = urls.get(link) {
-                    window.dispatch_action(
-                        Box::new(OpenBrowserUrl {
-                            url: url.clone(),
-                            window: window.window_handle(),
-                        }),
-                        cx,
-                    );
+                    open_clicked_link(url, window, cx);
                 }
             },
         )
@@ -19589,8 +19691,12 @@ impl XdDesktop {
             f32::from(window.viewport_size().width),
         );
         let route = self.minimal_route.clone();
+        // A new chat open takes the place of the chat that was, there and in
+        // the sidebar.
         let active_chat = match &route {
-            MinimalRoute::Cli { chat_id, .. } => Some(chat_id.clone()),
+            MinimalRoute::Cli { chat_id, .. } if self.creating_chat_folder.is_none() => {
+                Some(chat_id.clone())
+            }
             _ => None,
         };
         let catalog_width = self.catalog_width(window);
@@ -19617,8 +19723,12 @@ impl XdDesktop {
                     }),
                 )
         });
-        let toolbar = matches!(&route, MinimalRoute::Cli { .. })
-            .then(|| self.render_minimal_context_toolbar(colors, cx));
+        let toolbar = if self.creating_chat_folder.is_some() {
+            Some(self.render_new_chat_toolbar(colors, cx))
+        } else {
+            matches!(&route, MinimalRoute::Cli { .. })
+                .then(|| self.render_minimal_context_toolbar(colors, cx))
+        };
         let content = if self.creating_chat_folder.is_some() {
             self.render_new_chat(colors, window, cx)
         } else {
@@ -24668,7 +24778,7 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[gpui::test]
-    fn clicking_a_native_markdown_link_dispatches_the_integrated_browser_action(
+    fn clicking_a_native_markdown_link_opens_the_browser_pane_or_with_ctrl_the_system_browser(
         cx: &mut gpui::TestAppContext,
     ) {
         struct MarkdownLink {
@@ -24720,6 +24830,15 @@ Binary files /dev/null and b/image.png differ\n";
         let opened_url = cx.update(|_, cx| view.read(cx).opened_url.clone());
         assert_eq!(opened_url.as_deref(), Some("http://localhost:3000"));
         assert!(cx.opened_url().is_none());
+
+        // Ctrl+click (Cmd+click on macOS) hands the link to the computer's own
+        // browser and leaves the browser pane alone.
+        cx.update(|_, cx| view.update(cx, |view, _| view.opened_url = None));
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::secondary_key());
+
+        let opened_url = cx.update(|_, cx| view.read(cx).opened_url.clone());
+        assert!(opened_url.is_none());
+        assert_eq!(cx.opened_url().as_deref(), Some("http://localhost:3000"));
     }
 
     #[test]
@@ -25556,6 +25675,26 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(pane.read(cx).current_url().as_deref(), Some(url));
         });
         assert!(cx.opened_url().is_none(), "it stays inside the app");
+
+        // Ctrl+click (Cmd+click on macOS) opens it in the computer's browser.
+        cx.update(|_, cx| desktop.read(cx).browser_panes["local/chat/pr-chat"].clone())
+            .update(cx, |pane, cx| {
+                pane.navigate("http://localhost:3000/elsewhere", cx)
+            });
+        let chip = cx
+            .debug_bounds("minimal-session-pull-request")
+            .expect("the chip stays in the header");
+        cx.simulate_click(chip.center(), gpui::Modifiers::secondary_key());
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url().as_deref(), Some(url));
+        desktop.update(cx, |desktop, cx| {
+            let pane = desktop.browser_panes["local/chat/pr-chat"].clone();
+            assert_eq!(
+                pane.read(cx).current_url().as_deref(),
+                Some("http://localhost:3000/elsewhere"),
+                "the browser pane keeps its page"
+            );
+        });
     }
 
     fn show_linked_pull_requests(
@@ -25660,6 +25799,28 @@ Binary files /dev/null and b/image.png differ\n";
                 Some("http://localhost:3000/o/r/pull/2")
             );
             assert!(desktop.pull_request_panel.is_none());
+        });
+        assert!(
+            cx.opened_url().is_none(),
+            "a plain click stays inside the app"
+        );
+
+        let chip = cx
+            .debug_bounds("minimal-session-pull-request-0")
+            .expect("the first chip");
+        cx.simulate_click(chip.center(), gpui::Modifiers::secondary_key());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("http://localhost:3000/o/r/pull/1"),
+            "Ctrl+click opens the computer's browser"
+        );
+        desktop.update(cx, |desktop, cx| {
+            let pane = desktop.browser_panes["local/chat/pr-chat"].clone();
+            assert_eq!(
+                pane.read(cx).current_url().as_deref(),
+                Some("http://localhost:3000/o/r/pull/2")
+            );
         });
 
         let more = cx
@@ -26210,7 +26371,7 @@ Binary files /dev/null and b/image.png differ\n";
         assert!(signal_tab(SessionSignal::Idle, colors).is_none());
         assert!(signal_tab(SessionSignal::Background(1), colors).is_some());
         assert_eq!(SessionSignal::Waiting.color(colors), colors.waiting);
-        assert_eq!(SessionSignal::Background(1).color(colors), colors.working);
+        assert_eq!(SessionSignal::Background(1).color(colors), colors.muted);
     }
 
     #[test]
@@ -27287,6 +27448,7 @@ Binary files /dev/null and b/image.png differ\n";
                         folder_id: "project".into(),
                         title: "New Chat".into(),
                         workdir: None,
+                        token: 0,
                     },
                     serde_json::json!({"ok": true, "id": "chat", "backend": "codex"})
                         .as_object()
@@ -29098,7 +29260,7 @@ Binary files /dev/null and b/image.png differ\n";
 
         assert!(terminal.contains("markdown::web_links("));
         assert!(terminal.contains("selectable_links_in_document("));
-        assert!(terminal.contains("Box::new(OpenBrowserUrl"));
+        assert!(terminal.contains("open_clicked_link(url, window, cx)"));
     }
 
     #[test]

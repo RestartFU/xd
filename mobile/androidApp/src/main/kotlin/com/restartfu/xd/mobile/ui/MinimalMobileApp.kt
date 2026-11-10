@@ -75,6 +75,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -104,6 +105,7 @@ import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
+import com.restartfu.xd.mobile.StartingSession
 import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.mobile.UsageViewModel
 import com.restartfu.xd.model.DirectAgent
@@ -249,8 +251,15 @@ internal fun MinimalMobileApp(
             stores.retain(tree.chats.map { it.id }.toSet(), sessions.map { it.id }.toSet())
         }
     }
+    val place = listOf(mobileDestination, activeSessionId, chatSelections, hiddenChatIds)
+    SideEffect { model.place = place }
     LaunchedEffect(created, tree.chats) {
         created?.let { result ->
+            // Gone somewhere else since it was asked for: it stays in its project.
+            if (result.place != null && result.place != place) {
+                model.consumeCreatedDirectSession(result)
+                return@let
+            }
             val chat = tree.chats.firstOrNull { it.id == result.chatId } ?: return@let
             activeSessionId = chat.sessionId
             chatSelections = chatSelections + (chat.sessionId to chat.id)
@@ -264,11 +273,21 @@ internal fun MinimalMobileApp(
         model.client.setVisibleChat(visibleChatId)
         onDispose { model.client.setVisibleChat(null) }
     }
-    val showProjects = { mobileDestination = MobileDestination.PROJECTS }
-    val showTerminal = { mobileDestination = MobileDestination.TERMINAL }
-    val showUsage = { mobileDestination = MobileDestination.USAGE }
+    val showProjects = {
+        model.stopOpeningStartingSessions()
+        mobileDestination = MobileDestination.PROJECTS
+    }
+    val showTerminal = {
+        model.stopOpeningStartingSessions()
+        mobileDestination = MobileDestination.TERMINAL
+    }
+    val showUsage = {
+        model.stopOpeningStartingSessions()
+        mobileDestination = MobileDestination.USAGE
+    }
     val addChat: (MinimalSession) -> Unit = { session ->
         if (session.terminalChatId.startsWith("session:")) {
+            model.stopOpeningStartingSessions()
             createChatIn = session
         } else {
             scope.launch { snackbar.showSnackbar("Update the connected host to add chats inside a session.") }
@@ -330,6 +349,8 @@ internal fun MinimalMobileApp(
                     }
                     mobileDestination == MobileDestination.SESSIONS && activeSession != null -> {
                         val selectTab = { id: String ->
+                            // A tab picked: a chat still starting does not take its place.
+                            model.stopOpeningStartingSessions()
                             hiddenChatIds = hiddenChatIds - id
                             chatSelections = chatSelections + (activeSession.id to id)
                         }
@@ -426,6 +447,7 @@ internal fun MinimalMobileApp(
                         onRenameProject = { renamingProjectId = it.id },
                         onDeleteProject = { deletingProject = it },
                         open = { _, session ->
+                            model.stopOpeningStartingSessions()
                             activeSessionId = session.id
                             // Opening a session always reveals at least its most recent chat.
                             if (session.chatIds.all { it in hiddenChatIds }) {
@@ -603,6 +625,7 @@ private fun MinimalProjectsHome(
     open: (MinimalProject, MinimalSession) -> Unit,
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
+    val starting by model.startingSessions.collectAsStateWithLifecycle()
     var shelfOpen by rememberSaveable { mutableStateOf(false) }
     // Saved by project id, so an open editor survives recreating the activity.
     var contextForId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -639,7 +662,10 @@ private fun MinimalProjectsHome(
     var pickingProject by rememberSaveable { mutableStateOf(false) }
     // Opened on the list, so Back from the form returns to it.
     var startedFromList by rememberSaveable { mutableStateOf(false) }
+    // Opening another form moves on from a session still starting: it is not
+    // opened when made.
     val newSession = {
+        model.stopOpeningStartingSessions()
         val only = projects.singleOrNull()
         if (only != null) {
             createSessionIn = only.id
@@ -650,6 +676,7 @@ private fun MinimalProjectsHome(
         }
     }
     val newSessionIn = { projectId: String ->
+        model.stopOpeningStartingSessions()
         createSessionIn = projectId
         pickingProject = false
         startedFromList = false
@@ -773,6 +800,7 @@ private fun MinimalProjectsHome(
                                         project = project,
                                         icon = ownerIcons[project.owner],
                                         sessions = tree.activeSessions(project.id),
+                                        starting = starting.filter { it.projectId == project.id && it.sessionId == null },
                                         signalOf = signalOf,
                                         open = { session -> open(project, session) },
                                         actions = actions,
@@ -1414,7 +1442,8 @@ private fun SessionSignal.color(): Color {
     val signals = LocalXdSignals.current
     return when (this) {
         SessionSignal.IDLE, SessionSignal.PAUSED -> signals.faint
-        SessionSignal.WORKING, SessionSignal.BACKGROUND -> signals.working
+        SessionSignal.WORKING -> signals.working
+        SessionSignal.BACKGROUND -> MaterialTheme.colorScheme.onSurfaceVariant
         SessionSignal.WAITING -> signals.waiting
         SessionSignal.DONE -> signals.done
     }
@@ -1959,6 +1988,8 @@ private fun OpenDrawer(
     project: MinimalProject,
     icon: ByteArray?,
     sessions: List<MinimalSession>,
+    /** New sessions sent to the host and not made yet. */
+    starting: List<StartingSession>,
     signalOf: (MinimalSession) -> SessionSignal,
     open: (MinimalSession) -> Unit,
     actions: SessionActions,
@@ -1984,8 +2015,11 @@ private fun OpenDrawer(
             pause = pause,
             menu = menu,
         )
+        starting.forEach { session ->
+            key("starting-${session.id}") { StartingRow(session) }
+        }
         // Kept to one quiet line: several empty projects can be open at once.
-        if (sessions.isEmpty()) {
+        if (sessions.isEmpty() && starting.isEmpty()) {
             Text(
                 "No sessions yet",
                 modifier = Modifier.padding(start = 30.dp, end = 10.dp, bottom = 6.dp),
@@ -1998,6 +2032,38 @@ private fun OpenDrawer(
             key(session.id) {
                 SessionRow(session = session, signal = signalOf(session), onClick = { open(session) }, actions = actions)
             }
+        }
+    }
+}
+
+/** A new session the host is still setting up, laid out as its row will be. */
+@Composable
+private fun StartingRow(session: StartingSession) {
+    val signals = LocalXdSignals.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 18.dp)
+            .heightIn(min = 64.dp)
+            .padding(start = 12.dp, end = 16.dp)
+            .semantics(mergeDescendants = true) {},
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        BackendIcon(session.agent.wire, size = 15.dp)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                session.title,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "Starting…",
+                style = MaterialTheme.typography.labelMedium,
+                color = signals.working,
+                maxLines = 1,
+            )
         }
     }
 }

@@ -420,7 +420,7 @@ private fun SessionForm(
         mutableStateOf(runCatching { restored.optJSONObject("worktree")?.let(::worktreeFromJson) }.getOrNull())
     }
     var page by rememberSaveable(draftKey) { mutableStateOf(FormPage.FORM) }
-    LaunchedEffect(draftKey, title, agent, effort, access, plan, worktree, startFromRemote) {
+    val saveDraft = {
         draftKey?.let { key ->
             drafts.edit().putString(
                 key,
@@ -430,6 +430,7 @@ private fun SessionForm(
             ).apply()
         }
     }
+    LaunchedEffect(draftKey, title, agent, effort, access, plan, worktree, startFromRemote) { saveDraft() }
     if (places != null) {
         LaunchedEffect(Unit) {
             try {
@@ -464,6 +465,9 @@ private fun SessionForm(
     }
     val busy = blocker != null && blocker.endsWith("…")
     val create = {
+        // Saved as sent, so the draft is let go once the session is made
+        // rather than kept for an edit the effect had not saved yet.
+        saveDraft()
         onCreate(
             NewSessionRequest(
                 title = title.trim(),
