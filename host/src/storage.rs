@@ -8857,13 +8857,26 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
     if !owned_by_this_user(&[root, &root.join(".git"), &git_dir]) {
         return None;
     }
-    let config = fs::read_to_string(common.join("config")).unwrap_or_default();
+    // A config Git cannot read makes it refuse the repository; none at all
+    // is fine.
+    let config = match fs::read_to_string(common.join("config")) {
+        Ok(config) => config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return None,
+    };
     // Included files can set anything, and Git rejects config it cannot
     // parse, so only plain config is read here.
     if !plain_config(&config) {
         return None;
     }
-    if git_dir.join("commondir").is_file() {
+    let linked = git_dir.join("commondir").is_file();
+    // Of the layouts a `.git` file makes, only a linked worktree is read
+    // here; a submodule or a separate Git directory is listed by Git in its
+    // own way.
+    if !linked && !fs::metadata(root.join(".git")).ok()?.is_dir() {
+        return None;
+    }
+    if linked {
         // A linked worktree's directory in the repository names the worktree
         // it belongs to. Git lists the worktree there, and as prunable once
         // nothing is, so one moved by hand has no branch, as before.
@@ -10615,6 +10628,13 @@ mod tests {
         assert_eq!(listed(&hollow).as_deref(), Some("main"));
         assert_eq!(worktree_branch(&hollow).as_deref(), Some("main"));
 
+        // A config Git cannot read.
+        let unreadable = fixture.root.join("unreadable");
+        fs::create_dir_all(&unreadable).unwrap();
+        git(&unreadable, &["init", "-q", "-b", "main"]);
+        fs::write(unreadable.join(".git/config"), [0xff, 0xfe, b'\n']).unwrap();
+        assert_eq!(head_branch(&fs::canonicalize(&unreadable).unwrap()), None);
+
         // A `.git` file that names no repository stops the search there.
         let broken = repository.join("nested/broken");
         fs::create_dir_all(&broken).unwrap();
@@ -10694,9 +10714,8 @@ mod tests {
         assert_eq!(listed(&included), None);
         assert_eq!(worktree_branch(&included), None);
 
-        // A separate Git directory whose name ends in a space. Git lists this
-        // checkout at its Git directory rather than where it is, so the list
-        // has no branch for it; its HEAD says what `git status` does.
+        // A separate Git directory, whose name ends in a space, is left to
+        // Git, which lists the checkout at its Git directory.
         let separate = fixture.root.join("separate");
         let spaced = fixture.root.join("admin ");
         fs::create_dir_all(&separate).unwrap();
@@ -10711,8 +10730,8 @@ mod tests {
                 spaced.to_str().unwrap(),
             ],
         );
-        assert_eq!(listed(&separate), None);
-        assert_eq!(worktree_branch(&separate).as_deref(), Some("main"));
+        assert_eq!(worktree_branch(&separate), listed(&separate));
+        assert_eq!(head_branch(&fs::canonicalize(&separate).unwrap()), None);
 
         // Config Git cannot parse makes Git refuse the repository.
         let garbled = fixture.root.join("garbled");
