@@ -2408,12 +2408,9 @@ struct XdDesktop {
     auto_delete: Option<AutoDeleteRules>,
     /// The host's default chat quota, once a host with `chat_quotas` says it.
     chat_quota: Option<ChatQuotaSettings>,
-    /// How many `chat-quota-settings` broadcasts have arrived, and how many
-    /// had when the latest request about the default was sent. A reply is
-    /// older than any broadcast that came after its request, since the host
-    /// broadcasts each change before it answers.
+    /// How many `chat-quota-settings` broadcasts have arrived; each request
+    /// about the default carries the count from when it was sent.
     chat_quota_broadcasts: u64,
-    chat_quota_asked_at: u64,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
@@ -3131,7 +3128,6 @@ impl XdDesktop {
             auto_delete: None,
             chat_quota: None,
             chat_quota_broadcasts: 0,
-            chat_quota_asked_at: 0,
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
             sidebar_move: None,
@@ -3530,8 +3526,8 @@ impl XdDesktop {
                 | RequestKind::SetAutoSettleSettings
                 | RequestKind::AutoDeleteSettings
                 | RequestKind::SetAutoDeleteSettings
-                | RequestKind::ChatQuotaSettings
-                | RequestKind::SetChatQuotaSettings
+                | RequestKind::ChatQuotaSettings { .. }
+                | RequestKind::SetChatQuotaSettings { .. }
                 | RequestKind::SetChatQuota { .. }
                 | RequestKind::RenameFolder { .. }
                 | RequestKind::MoveFolder { .. }
@@ -3848,6 +3844,10 @@ impl XdDesktop {
             && let Err(error) = host.tree()
         {
             self.remote_error = Some(error);
+        }
+        // Broadcasts sent while away were missed.
+        if self.active_endpoint == ChatEndpoint::Remote {
+            self.request_chat_quota_settings();
         }
         if let Some(host) = &self.remote_host {
             let _ = host.agent_catalog();
@@ -4263,6 +4263,8 @@ impl XdDesktop {
                 self.model.connection_error = None;
                 self.request_tree();
                 self.request_agent_catalog();
+                // Broadcasts sent while away were missed.
+                self.request_chat_quota_settings();
                 if let Some(host) = &self.host {
                     self.request_local_host_state(host);
                 }
@@ -4455,7 +4457,7 @@ impl XdDesktop {
                     | RequestKind::SetChatTitleSettings
                     | RequestKind::AutoSettleSettings
                     | RequestKind::AutoDeleteSettings
-                    | RequestKind::ChatQuotaSettings
+                    | RequestKind::ChatQuotaSettings { .. }
             ) {
                 self.model.connection_error = Some(
                     value
@@ -4479,9 +4481,9 @@ impl XdDesktop {
                 RequestKind::PauseAll { .. } => self.pause_all_pending = false,
                 RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
                 RequestKind::SetAutoDeleteSettings => self.request_auto_delete_settings(),
-                RequestKind::ChatQuotaSettings => self.chat_quota = None,
+                RequestKind::ChatQuotaSettings { .. } => self.chat_quota = None,
                 // The switch moved ahead of the host, so take back its answer.
-                RequestKind::SetChatQuotaSettings => self.request_chat_quota_settings(),
+                RequestKind::SetChatQuotaSettings { .. } => self.request_chat_quota_settings(),
                 RequestKind::SetChatQuota { chat_id } => self.chat_quota_set(chat_id),
                 RequestKind::Send { chat_id, .. } => {
                     self.sending = false;
@@ -5819,8 +5821,11 @@ impl XdDesktop {
             RequestKind::AutoDeleteSettings | RequestKind::SetAutoDeleteSettings => {
                 self.auto_delete = AutoDeleteRules::from_value(&value);
             }
-            RequestKind::ChatQuotaSettings | RequestKind::SetChatQuotaSettings => {
-                if self.chat_quota_broadcasts == self.chat_quota_asked_at {
+            RequestKind::ChatQuotaSettings { broadcasts }
+            | RequestKind::SetChatQuotaSettings { broadcasts } => {
+                // A broadcast since the request was sent is newer than its
+                // reply, since the host broadcasts each change before it answers.
+                if self.chat_quota_broadcasts == broadcasts {
                     self.chat_quota = ChatQuotaSettings::from_value(&value);
                 }
             }
@@ -6531,6 +6536,10 @@ impl XdDesktop {
             "chat-quota-settings" => {
                 self.chat_quota_broadcasts += 1;
                 self.chat_quota = ChatQuotaSettings::from_value(&body);
+                // An open chat that follows the default has a new quota too.
+                if let Some(chat_id) = self.model.selected_chat.clone() {
+                    self.request_chat(&chat_id);
+                }
             }
             "owner-icon" => {
                 if let Some(owner) = body.get("owner").and_then(Value::as_str).map(str::to_owned) {
@@ -24299,7 +24308,7 @@ Binary files /dev/null and b/image.png differ\n";
             );
             assert!(desktop.model.chat_quotas_supported);
             desktop.handle_reply(
-                RequestKind::ChatQuotaSettings,
+                RequestKind::ChatQuotaSettings { broadcasts: 0 },
                 serde_json::json!({"ok": true, "percent": null})
                     .as_object()
                     .unwrap()
@@ -24339,7 +24348,7 @@ Binary files /dev/null and b/image.png differ\n";
                 cx,
             );
             desktop.handle_reply(
-                RequestKind::SetChatQuotaSettings,
+                RequestKind::SetChatQuotaSettings { broadcasts: 1 },
                 serde_json::json!({"ok": true, "percent": null})
                     .as_object()
                     .unwrap()
@@ -24350,6 +24359,43 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(
                 desktop.chat_quota,
                 Some(ChatQuotaSettings { percent: Some(30) })
+            );
+            // Overlapping requests each keep their own place: an older one's
+            // reply arriving after a newer request was sent still loses to the
+            // broadcast between them, and the newer one's reply applies.
+            let reply = |percent: Value| {
+                serde_json::json!({"ok": true, "percent": percent})
+                    .as_object()
+                    .unwrap()
+                    .clone()
+            };
+            let older = desktop.chat_quota_broadcasts;
+            desktop.handle_event(
+                "chat-quota-settings",
+                serde_json::json!({"percent": 40}),
+                None,
+                cx,
+            );
+            let newer = desktop.chat_quota_broadcasts;
+            desktop.handle_reply(
+                RequestKind::ChatQuotaSettings { broadcasts: older },
+                reply(Value::Null),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop.chat_quota,
+                Some(ChatQuotaSettings { percent: Some(40) })
+            );
+            desktop.handle_reply(
+                RequestKind::ChatQuotaSettings { broadcasts: newer },
+                reply(serde_json::json!(40)),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop.chat_quota,
+                Some(ChatQuotaSettings { percent: Some(40) })
             );
         });
         // The first request the desktop sent is the tree's ask, not one before it.

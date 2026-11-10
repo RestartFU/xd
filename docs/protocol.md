@@ -815,7 +815,9 @@ the user before it goes on.
 `percent`, a whole number from 1 to 100, is the host's default quota for every
 chat. It is `null`, and no chat is limited, until a client chooses one.
 `set-chat-quota-settings` takes `percent`, a number or `null`, replies like
-`chat-quota-settings`, broadcasts `chat-quota-settings`, and applies at once. A request without `percent` changes
+`chat-quota-settings`, broadcasts `chat-quota-settings`, and applies at once.
+The broadcast goes out before the reply. Every chat that follows the default
+changes with it, so clients read their open chats again when it arrives. A request without `percent` changes
 nothing.
 
 `set-chat-quota` gives one chat its own quota: `percent` from 1 to 100, or

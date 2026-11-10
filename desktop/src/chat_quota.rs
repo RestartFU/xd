@@ -45,9 +45,9 @@ impl XdDesktop {
         if !self.model.chat_quotas_supported {
             return;
         }
-        self.chat_quota_asked_at = self.chat_quota_broadcasts;
+        let broadcasts = self.chat_quota_broadcasts;
         if let Some(host) = self.active_host()
-            && let Err(error) = host.chat_quota_settings()
+            && let Err(error) = host.chat_quota_settings(broadcasts)
         {
             self.model.connection_error = Some(error);
         }
@@ -58,11 +58,11 @@ impl XdDesktop {
         settings: ChatQuotaSettings,
         cx: &mut Context<Self>,
     ) {
-        self.chat_quota_asked_at = self.chat_quota_broadcasts;
+        let broadcasts = self.chat_quota_broadcasts;
         let result = self
             .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|host| host.set_chat_quota_settings(settings));
+            .and_then(|host| host.set_chat_quota_settings(settings, broadcasts));
         match result {
             Ok(()) => self.chat_quota = Some(settings),
             Err(error) => self.model.connection_error = Some(error),

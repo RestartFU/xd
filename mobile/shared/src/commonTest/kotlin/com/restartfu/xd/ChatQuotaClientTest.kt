@@ -116,6 +116,25 @@ class ChatQuotaClientTest {
         assertFalse(session.state.value.quotaReached)
     }
 
+    @Test
+    fun aNewDefaultReadsTheOpenChatAgain() = runTest {
+        val (client, socket) = connected(backgroundScope)
+        client.openChat("chat")
+        runCurrent()
+        socket.receive(
+            """{"ok":true,"title":"Hello","backend":"codex","plan":false,"queue":[],"working":false,""" +
+                """"resumable":false,"quota":{"percent":10,"used":1.0,"own":false},""" +
+                """"items":[],"new_worktree":false,"has_messages":true}""",
+        )
+        runCurrent()
+        socket.receive("""{"ok":true,"total_messages":0,"last_message_id":0,"messages":[]}""")
+        runCurrent()
+        val before = socket.sentOps().count { it == "chat" }
+        socket.receive("""{"event":"chat-quota-settings","percent":null}""")
+        runCurrent()
+        assertTrue(socket.sentOps().count { it == "chat" } > before)
+    }
+
     private suspend fun TestScope.connected(scope: CoroutineScope): Pair<XdClient, FakeSocket> {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), scope)
@@ -134,6 +153,10 @@ class ChatQuotaClientTest {
     }
 
     private fun FakeSocket.lastLine(): String = writes.last().decodeToString()
+
+    private fun FakeSocket.sentOps(): List<String> = writes.mapNotNull {
+        Regex(""""op":"([^"]+)"""").find(it.decodeToString())?.groupValues?.get(1)
+    }
 
     private fun FakeSocket.lastOp(): String =
         Regex(""""op":"([^"]+)"""").find(lastLine())?.groupValues?.get(1) ?: error("No op in ${lastLine()}")

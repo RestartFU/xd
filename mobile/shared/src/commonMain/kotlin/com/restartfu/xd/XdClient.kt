@@ -418,7 +418,11 @@ public class XdClient(
                     autoSettleLock.withLock { autoSettleBroadcasts.update { it + 1 } }
                     rereadAutoSettle()
                 }
-                if (eventName == "chat-quota-settings") chatQuotaBroadcast(event.value)
+                if (eventName == "chat-quota-settings") {
+                    chatQuotaBroadcast(event.value)
+                    // Open chats that follow the default have a new quota too.
+                    sessions.value.values.forEach { entry -> entry.core.requestReload() }
+                }
                 if (eventName == "owner-icon") {
                     (event.value["owner"] as? JsonPrimitive)?.contentOrNull?.let { owner ->
                         recordOwnerIcon(owner, event.value)

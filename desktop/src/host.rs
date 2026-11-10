@@ -525,8 +525,14 @@ pub enum RequestKind {
     SetAutoSettleSettings,
     AutoDeleteSettings,
     SetAutoDeleteSettings,
-    ChatQuotaSettings,
-    SetChatQuotaSettings,
+    /// `broadcasts` is how many `chat-quota-settings` broadcasts had arrived
+    /// when the request was sent; a reply is older than any after it.
+    ChatQuotaSettings {
+        broadcasts: u64,
+    },
+    SetChatQuotaSettings {
+        broadcasts: u64,
+    },
     /// `set-chat-quota`: a new quota for one chat, which goes on if it had
     /// stopped at its last one.
     SetChatQuota {
@@ -1552,16 +1558,20 @@ impl HostHandle {
         )
     }
 
-    pub fn chat_quota_settings(&self) -> Result<(), String> {
+    pub fn chat_quota_settings(&self, broadcasts: u64) -> Result<(), String> {
         self.send(
-            RequestKind::ChatQuotaSettings,
+            RequestKind::ChatQuotaSettings { broadcasts },
             json!({"op": "chat-quota-settings"}),
         )
     }
 
-    pub fn set_chat_quota_settings(&self, settings: ChatQuotaSettings) -> Result<(), String> {
+    pub fn set_chat_quota_settings(
+        &self,
+        settings: ChatQuotaSettings,
+        broadcasts: u64,
+    ) -> Result<(), String> {
         self.send(
-            RequestKind::SetChatQuotaSettings,
+            RequestKind::SetChatQuotaSettings { broadcasts },
             json!({"op": "set-chat-quota-settings", "percent": settings.percent}),
         )
     }
@@ -4218,21 +4228,21 @@ mod tests {
                 ..
             }
         ));
-        host.chat_quota_settings().unwrap();
+        host.chat_quota_settings(0).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
             HostUpdate::Reply {
-                kind: RequestKind::ChatQuotaSettings,
+                kind: RequestKind::ChatQuotaSettings { .. },
                 ..
             }
         ));
         for percent in [Some(10), None] {
-            host.set_chat_quota_settings(ChatQuotaSettings { percent })
+            host.set_chat_quota_settings(ChatQuotaSettings { percent }, 0)
                 .unwrap();
             assert!(matches!(
                 updates.recv_blocking().unwrap(),
                 HostUpdate::Reply {
-                    kind: RequestKind::SetChatQuotaSettings,
+                    kind: RequestKind::SetChatQuotaSettings { .. },
                     ..
                 }
             ));
