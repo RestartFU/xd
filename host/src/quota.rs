@@ -100,6 +100,9 @@ struct AccountLedger {
     login: String,
     /// Every chat that worked on the account since `last`.
     sharers: BTreeSet<String>,
+    /// The account and login each sharer's turns ran as, when known, so a
+    /// reading of another login is not counted against any of them.
+    logins: HashMap<String, String>,
 }
 
 /// What the meter knows of each account, by assistant and account id.
@@ -130,8 +133,23 @@ impl Ledger {
 
     /// A chat started a turn on the account (`working`), or ended one,
     /// still `working` when background work of its own goes on.
-    pub(crate) fn turn(&mut self, provider: &str, account: &str, chat_id: &str, working: bool) {
-        self.turn_at(provider, account, chat_id, working, Instant::now());
+    /// `tag` is the account and login the turn ran as.
+    pub(crate) fn turn(&mut self, provider: &str, tag: &str, chat_id: &str, working: bool) {
+        let account = crate::accounts::tag_account(tag).to_owned();
+        self.note_login(provider, tag, chat_id);
+        self.turn_at(provider, &account, chat_id, working, Instant::now());
+    }
+
+    /// [`Self::note`] for a chat whose turn runs as the login in `tag`.
+    fn note_login(&mut self, provider: &str, tag: &str, chat_id: &str) {
+        let account = crate::accounts::tag_account(tag);
+        self.note(provider, account, chat_id);
+        if let Some(entry) = self
+            .accounts
+            .get_mut(&(provider.to_owned(), account.to_owned()))
+        {
+            entry.logins.insert(chat_id.to_owned(), tag.to_owned());
+        }
     }
 
     /// Takes in who works on the account now: a chat whose background work
@@ -219,6 +237,8 @@ impl Ledger {
         entry.idle = working.is_empty();
         login.clone_into(&mut entry.login);
         entry.sharers = working.iter().cloned().collect();
+        let kept = &entry.sharers;
+        entry.logins.retain(|chat_id, _| kept.contains(chat_id));
         if rise <= 0.0 || sharers.is_empty() {
             return (Vec::new(), since_ms);
         }
@@ -307,12 +327,7 @@ impl QuotaMeter {
             let wake = Arc::downgrade(&wake);
             runtime.set_activity_handler(Box::new(move |chat_id, provider, tag, working| {
                 if let Ok(mut ledger) = ledger.lock() {
-                    ledger.turn(
-                        provider,
-                        crate::accounts::tag_account(tag),
-                        chat_id,
-                        working,
-                    );
+                    ledger.turn(provider, tag, chat_id, working);
                 }
                 if let Some(wake) = wake.upgrade()
                     && let Ok(wake) = wake.lock()
@@ -410,12 +425,13 @@ impl Pass {
         // Filed by account: turns on one account share its every rise, even
         // if some began before its login was known. The logins they ran as
         // decide below whether a reading is theirs at all.
-        let working = by_account(self.runtime.working_accounts());
-        for (chat_id, provider, account) in &working {
-            if let Ok(mut ledger) = self.ledger.lock() {
-                ledger.note(provider, account, chat_id);
+        let tagged = self.runtime.working_accounts();
+        if let Ok(mut ledger) = self.ledger.lock() {
+            for (chat_id, provider, tag) in &tagged {
+                ledger.note_login(provider, tag, chat_id);
             }
         }
+        let working = by_account(tagged);
         let limited = |chat_id: &str| {
             self.store
                 .chat_quota(chat_id)
@@ -533,10 +549,29 @@ impl Pass {
             let working_now = self.working_on(&provider, &account);
             // A turn known to run as another login than the one read, such as
             // after the user's own CLI signed in to someone else, is not
-            // measured by this reading, nor is anyone beside it.
+            // measured by this reading, nor is anyone beside it: whether it
+            // still works or worked since the last reading.
+            let known = self
+                .ledger
+                .lock()
+                .ok()
+                .and_then(|ledger| {
+                    Some(
+                        ledger
+                            .accounts
+                            .get(&key)?
+                            .logins
+                            .values()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap_or_default();
             if working_now
                 .iter()
-                .any(|(_, tag)| !tag.ends_with("#?") && !crate::accounts::same_login(tag, &login))
+                .map(|(_, tag)| tag)
+                .chain(&known)
+                .any(|tag| !tag.ends_with("#?") && !crate::accounts::same_login(tag, &login))
             {
                 self.unreadable(&key, &sharers, true);
                 next = next.min(FAILED_READ_GAP);
@@ -741,6 +776,18 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn the_login_of_a_turn_that_ended_is_kept_until_the_next_reading() {
+        let mut ledger = Ledger::default();
+        let now = Instant::now();
+        ledger.turn("claude", "default#b", "a", true);
+        ledger.turn("claude", "default#b", "a", false);
+        let key = ("claude".to_owned(), "default".to_owned());
+        assert_eq!(ledger.accounts[&key].logins["a"], "default#b");
+        record_in(&mut ledger, "claude", "default", reading(1.0, 1), &[], now);
+        assert!(ledger.accounts[&key].logins.is_empty());
     }
 
     #[test]
