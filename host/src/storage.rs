@@ -8866,7 +8866,7 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
         if fs::canonicalize(listed.parent()?).ok() != Some(root.to_owned()) {
             return Some(None);
         }
-    } else if bare_repository(&config) {
+    } else if bare_repository(&config)? {
         // Git lists a bare repository without a branch.
         return Some(None);
     }
@@ -8995,40 +8995,46 @@ fn config_includes(config: &str) -> bool {
     })
 }
 
-/// Whether a repository's config says it is bare (`core.bare`).
-fn bare_repository(config: &str) -> bool {
+/// Whether a repository's config says it is bare (`core.bare`), or `None`
+/// for a value only Git can read.
+fn bare_repository(config: &str) -> Option<bool> {
     let mut core = false;
     let mut bare = false;
     for line in config.lines() {
         let line = line.trim();
-        if let Some(header) = line.strip_prefix('[') {
+        let setting = if let Some(header) = line.strip_prefix('[') {
             let (name, rest) = header.split_once(']').unwrap_or((header, ""));
             core = name.trim().eq_ignore_ascii_case("core");
             // A key may follow the header on the same line.
-            let rest = rest.trim();
-            if core && !rest.is_empty() {
-                bare = config_bool(rest, "bare").unwrap_or(bare);
+            rest.trim()
+        } else {
+            line
+        };
+        if core && !setting.is_empty() {
+            match config_bool(setting, "bare") {
+                Some(Some(value)) => bare = value,
+                Some(None) => return None,
+                None => {}
             }
-        } else if core {
-            bare = config_bool(line, "bare").unwrap_or(bare);
         }
     }
-    bare
+    Some(bare)
 }
 
-/// The boolean `line` sets `key` to, if it sets that key. A key alone is true.
-fn config_bool(line: &str, key: &str) -> Option<bool> {
+/// The boolean `line` sets `key` to: `None` when it sets another key, and
+/// `Some(None)` for a value other than Git's usual spellings. A key alone is
+/// true.
+fn config_bool(line: &str, key: &str) -> Option<Option<bool>> {
     let line = line.split(['#', ';']).next().unwrap_or_default().trim();
     let (name, value) = line.split_once('=').unwrap_or((line, "true"));
     if !name.trim().eq_ignore_ascii_case(key) {
         return None;
     }
-    let value = value.trim().trim_matches('"').to_ascii_lowercase();
-    match value.as_str() {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
         "true" | "yes" | "on" | "1" => Some(true),
         "false" | "no" | "off" | "0" | "" => Some(false),
         _ => None,
-    }
+    })
 }
 
 /// What `git worktree list` says is checked out in the worktree holding the
@@ -10633,6 +10639,14 @@ mod tests {
         );
         assert_eq!(listed(&separate), None);
         assert_eq!(worktree_branch(&separate).as_deref(), Some("main"));
+
+        // A bare setting spelled as Git also reads it.
+        let numbered = fixture.root.join("numbered");
+        fs::create_dir_all(&numbered).unwrap();
+        git(&numbered, &["init", "-q", "-b", "main"]);
+        git(&numbered, &["config", "core.bare", "2"]);
+        assert_eq!(listed(&numbered), None);
+        assert_eq!(worktree_branch(&numbered), None);
 
         // HEAD naming what Git would not take as a branch or commit.
         let odd = fixture.root.join("odd");
