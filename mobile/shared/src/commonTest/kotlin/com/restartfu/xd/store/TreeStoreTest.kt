@@ -87,13 +87,14 @@ class TreeStoreTest {
         val refresh = async { store.refresh() }
         runCurrent()
         factory.latest.receive(
-            """{"ok":true,"pause_all":true,"folders":[],"chats":[""" +
+            """{"ok":true,"pause_all":true,"pause_folders":true,"folders":[],"chats":[""" +
                 """{"id":"one","folder":"f","title":"One","backend":"codex","working":false,"paused":true},""" +
                 """{"id":"two","folder":"f","title":"Two","backend":"claude","working":false}],"_xd_request":2}""",
         )
         runCurrent()
         refresh.await()
         assertTrue(store.state.value.pauseAll)
+        assertTrue(store.state.value.pauseFolders)
         assertEquals(listOf(true, false), store.state.value.chats.map { it.paused })
     }
 

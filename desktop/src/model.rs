@@ -691,8 +691,8 @@ pub struct AppModel {
     /// The connected host keeps folders of projects. An older one ignores the
     /// request and makes a project instead.
     pub folder_groups_supported: bool,
-    /// The connected host can pause and resume every chat at once.
-    pub pause_all_supported: bool,
+    /// The connected host can pause and resume one project's chats at once.
+    pub pause_folders_supported: bool,
     /// The connected host keeps pull requests linked to chats and lists them
     /// in the tree. An older one knows only the branch's pull request.
     pub linked_pull_requests_supported: bool,
@@ -767,9 +767,10 @@ struct TreeSnapshot {
     /// The host keeps folders of projects; older hosts leave this out.
     #[serde(default)]
     folder_groups: bool,
-    /// The host answers `pause-all` and `resume-all`; older hosts leave this out.
+    /// The host answers `pause-all` and `resume-all` for one folder's chats;
+    /// older hosts leave this out, and would pause every chat instead.
     #[serde(default)]
-    pause_all: bool,
+    pause_folders: bool,
     /// The host keeps pull requests linked to chats; older hosts leave this out.
     #[serde(default)]
     linked_pull_requests: bool,
@@ -867,31 +868,58 @@ pub struct MessagePageChange {
     pub reset: bool,
 }
 
-/// What the button beside "Projects" offers.
+/// What a project's pause button offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseAllAction {
-    /// Stop every chat at work. `ready` is false while nothing is.
-    Pause { ready: bool },
-    /// Pick up the chats a pause stopped.
+    /// Stop every chat at work in the project.
+    Pause,
+    /// Pick up the project's chats a pause stopped.
     Resume,
 }
 
 impl AppModel {
-    /// Resume while any chat is paused, otherwise pause. `None` on a host
-    /// that cannot do either.
-    pub fn pause_all_action(&self) -> Option<PauseAllAction> {
-        if !self.pause_all_supported {
+    /// Resume while any of the project's chats is paused, pause while any is
+    /// at work, and nothing otherwise, or on a host that cannot pause one
+    /// project. Chats in folders or projects inside it count too, as the host
+    /// counts them.
+    pub fn pause_action_for(&self, folder_id: &str) -> Option<PauseAllAction> {
+        if !self.pause_folders_supported {
             return None;
         }
-        if self.chats.iter().any(|chat| chat.paused) {
-            return Some(PauseAllAction::Resume);
+        let chats = self
+            .chats
+            .iter()
+            .filter(|chat| self.folder_within(&chat.folder, folder_id));
+        let mut action = None;
+        for chat in chats {
+            if chat.paused {
+                return Some(PauseAllAction::Resume);
+            }
+            if chat.working || chat.background_tasks > 0 {
+                action = Some(PauseAllAction::Pause);
+            }
         }
-        Some(PauseAllAction::Pause {
-            ready: self
-                .chats
+        action
+    }
+
+    /// Whether `folder_id` is `ancestor` or lies inside it.
+    fn folder_within(&self, folder_id: &str, ancestor: &str) -> bool {
+        let mut current = Some(folder_id);
+        // Bounded, so a cycle in a broken tree cannot spin forever.
+        for _ in 0..=self.folders.len() {
+            let Some(id) = current else {
+                return false;
+            };
+            if id == ancestor {
+                return true;
+            }
+            current = self
+                .folders
                 .iter()
-                .any(|chat| chat.working || chat.background_tasks > 0),
-        })
+                .find(|folder| folder.id == id)
+                .and_then(|folder| folder.parent.as_deref());
+        }
+        false
     }
 
     pub fn session_for_chat(&self, chat_id: &str) -> Option<&SessionSummary> {
@@ -1075,7 +1103,7 @@ impl AppModel {
         self.settlement_supported = snapshot.settlement;
         self.folder_reorder_supported = snapshot.folder_reorder;
         self.folder_groups_supported = snapshot.folder_groups;
-        self.pause_all_supported = snapshot.pause_all;
+        self.pause_folders_supported = snapshot.pause_folders;
         self.linked_pull_requests_supported = snapshot.linked_pull_requests;
         self.refresh_session_activity();
         self.connected = true;
@@ -1955,7 +1983,7 @@ impl AppModel {
             settlement_supported: true,
             folder_reorder_supported: true,
             folder_groups_supported: true,
-            pause_all_supported: false,
+            pause_folders_supported: false,
             linked_pull_requests_supported: false,
             folders: vec![Folder {
                 id: "workspace-xd".into(),
@@ -2118,39 +2146,42 @@ mod tests {
     }
 
     #[test]
-    fn the_pause_button_resumes_while_any_chat_is_paused() {
+    fn a_project_pause_button_follows_its_own_chats() {
+        let mut tree = json!({
+            "folders":[
+                {"id":"site","name":"Site"},
+                {"id":"inner","name":"Inner","parent":"site"},
+                {"id":"app","name":"App"}
+            ],
+            "chats":[
+                {"id":"a","folder":"site","title":"A","backend":"codex"},
+                {"id":"b","folder":"inner","title":"B","backend":"claude"},
+                {"id":"c","folder":"app","title":"C","backend":"codex"}
+            ]
+        });
         let mut model = AppModel::default();
-        model.apply_tree(&grouped_tree()).unwrap();
+        model.apply_tree(&tree).unwrap();
         assert_eq!(
-            model.pause_all_action(),
+            model.pause_action_for("site"),
             None,
             "an older host leaves it out"
         );
 
-        let mut tree = grouped_tree();
-        tree["pause_all"] = json!(true);
+        tree["pause_folders"] = json!(true);
         model.apply_tree(&tree).unwrap();
-        assert_eq!(
-            model.pause_all_action(),
-            Some(PauseAllAction::Pause { ready: false })
-        );
+        assert_eq!(model.pause_action_for("site"), None, "nothing to pause");
         tree["chats"][1]["background_tasks"] = json!(1);
         model.apply_tree(&tree).unwrap();
-        assert_eq!(
-            model.pause_all_action(),
-            Some(PauseAllAction::Pause { ready: true })
-        );
+        assert_eq!(model.pause_action_for("site"), Some(PauseAllAction::Pause));
+        assert_eq!(model.pause_action_for("inner"), Some(PauseAllAction::Pause));
+        assert_eq!(model.pause_action_for("app"), None);
         tree["chats"][1]["background_tasks"] = json!(0);
-        tree["chats"][0]["working"] = json!(true);
+        tree["chats"][2]["working"] = json!(true);
+        tree["chats"][0]["paused"] = json!(true);
         model.apply_tree(&tree).unwrap();
-        assert_eq!(
-            model.pause_all_action(),
-            Some(PauseAllAction::Pause { ready: true })
-        );
-        tree["chats"][1]["paused"] = json!(true);
-        model.apply_tree(&tree).unwrap();
-        assert!(model.chats[1].paused);
-        assert_eq!(model.pause_all_action(), Some(PauseAllAction::Resume));
+        assert_eq!(model.pause_action_for("site"), Some(PauseAllAction::Resume));
+        assert_eq!(model.pause_action_for("inner"), None);
+        assert_eq!(model.pause_action_for("app"), Some(PauseAllAction::Pause));
     }
 
     #[test]

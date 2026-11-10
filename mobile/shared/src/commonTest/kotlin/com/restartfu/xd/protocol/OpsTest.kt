@@ -105,8 +105,8 @@ class OpsTest {
 
     @Test
     fun pausingAndResumingEveryChatNameNoChat() {
-        assertEquals("""{"op":"pause-all"}""", Ops.pauseAll().toString())
-        assertEquals("""{"op":"resume-all"}""", Ops.resumeAll().toString())
+        assertEquals("""{"op":"pause-all","folder":"f"}""", Ops.pauseAll("f").toString())
+        assertEquals("""{"op":"resume-all","folder":"f"}""", Ops.resumeAll("f").toString())
     }
 
     @Test

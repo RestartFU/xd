@@ -168,30 +168,40 @@ class ProjectsScreenshotTest {
 
     @Test fun longListLight() = longList("long-list-light", MinimalThemePreset.LIGHT)
 
-    @Test fun pausingStopsEveryChatThenOffersResume() = shoot("paused-dark", MinimalThemePreset.DARK) {
-        check(shows("Pause all chats") && !shows("Resume paused chats") && !shows("Paused"))
-        this@ProjectsScreenshotTest.compose.onNode(hasContentDescription("Pause all chats")).assertIsEnabled()
-        click("Pause all chats")
-        awaitShown("Resume paused chats")
+    @Test fun pausingAProjectStopsOnlyItsChats() = shoot("paused-dark", MinimalThemePreset.DARK) {
+        // Only projects with work show the button: web runs a turn, shop waits on a task.
+        check(shows("Pause chats in web") && shows("Pause chats in shop"))
+        check(!shows("Pause chats in xd") && !shows("Resume chats in web") && !shows("Paused"))
+        this@ProjectsScreenshotTest.compose.onNode(hasContentDescription("Pause chats in web")).assertIsEnabled()
+        click("Pause chats in web")
+        awaitShown("Resume chats in web")
         check(sent("pause-all") == 1) { "pause-all was sent ${sent("pause-all")} times" }
-        // The working session and the one waiting on a background task both say so.
-        check(shows("Resume paused chats") && !shows("Pause all chats") && shows("Paused"))
+        check(folderOf("pause-all") == "web") { "pause-all went to ${folderOf("pause-all")}" }
+        // shop is another project, so it keeps working.
+        check(shows("Resume chats in web") && shows("Pause chats in shop") && shows("Paused"))
     }
 
     @Test fun pausedLight() = shoot("paused-light", MinimalThemePreset.LIGHT, paused = true) {
-        check(shows("Resume paused chats") && shows("Paused"))
+        check(shows("Resume chats in web") && shows("Resume chats in shop") && shows("Paused"))
     }
 
-    @Test fun resumingContinuesEveryPausedChat() = shoot("resumed-dark", MinimalThemePreset.DARK, paused = true) {
-        click("Resume paused chats")
-        awaitShown("Pause all chats")
+    @Test fun resumingAProjectContinuesItsChats() = shoot("resumed-dark", MinimalThemePreset.DARK, paused = true) {
+        click("Resume chats in web")
+        awaitShown("Pause chats in web")
         check(sent("resume-all") == 1) { "resume-all was sent ${sent("resume-all")} times" }
-        check(!shows("Resume paused chats") && !shows("Paused"))
+        check(folderOf("resume-all") == "web") { "resume-all went to ${folderOf("resume-all")}" }
+        check(!shows("Resume chats in web") && shows("Resume chats in shop"))
     }
 
     @Test fun anOlderHostHasNoPauseButton() = shoot("no-pause-dark", MinimalThemePreset.DARK, pauseAll = false) {
-        check(shows("Projects") && !shows("Pause all chats") && !shows("Resume paused chats"))
+        check(shows("Projects") && !shows("Pause chats in web") && !shows("Resume chats in web"))
     }
+
+    /** The folder the last [op] request named. */
+    private fun folderOf(op: String): String? = synchronized(SENT) { SENT.toList() }
+        .map { Json.parseToJsonElement(it).jsonObject }
+        .lastOrNull { it["op"]?.jsonPrimitive?.content == op }
+        ?.get("folder")?.jsonPrimitive?.content
 
     /** How many [op] requests the app sent. */
     private fun sent(op: String): Int = synchronized(SENT) { SENT.toList() }
@@ -302,7 +312,7 @@ class ProjectsScreenshotTest {
         pauseAll: Boolean = true,
         steps: Screen.() -> Unit = {},
     ) {
-        chatsPaused = paused
+        pausedFolders = if (paused) setOf("web", "shop") else emptySet()
         canPauseAll = pauseAll
         val activity = compose.activity
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -487,7 +497,11 @@ class ProjectsScreenshotTest {
                 val request = Json.parseToJsonElement(line).jsonObject
                 val id = request["_xd_request"]?.jsonPrimitive?.longOrNull
                 val op = request["op"]?.jsonPrimitive?.content
-                val body = reply(op, request["owner"]?.jsonPrimitive?.content)
+                val body = reply(
+                    op,
+                    request["owner"]?.jsonPrimitive?.content,
+                    request["folder"]?.jsonPrimitive?.content,
+                )
                     .removeSuffix("}") + (if (id != null) ""","_xd_request":$id}""" else "}")
                 Thread { Thread.sleep(5); listener?.onBytes((body + "\n").encodeToByteArray()) }.start()
             }
@@ -495,12 +509,12 @@ class ProjectsScreenshotTest {
 
         override fun close() = Unit
 
-        private fun reply(op: String?, owner: String?): String = when (op) {
+        private fun reply(op: String?, owner: String?, folder: String?): String = when (op) {
             "tree" -> (if (longTree) TREE_LONG else TREE)
-                .let { if (chatsPaused) paused(it) else it }
-                .let { if (canPauseAll) it else it.replace("\"pause_all\":true,", "") }
-            "pause-all" -> { chatsPaused = true; """{"ok":true,"paused":["c3","c4"]}""" }
-            "resume-all" -> { chatsPaused = false; """{"ok":true,"resumed":["c3","c4"]}""" }
+                .let { paused(it) }
+                .let { if (canPauseAll) it else it.replace("\"pause_all\":true,\"pause_folders\":true,", "") }
+            "pause-all" -> { pausedFolders = pausedFolders + folder.orEmpty(); """{"ok":true,"paused":[]}""" }
+            "resume-all" -> { pausedFolders = pausedFolders - folder.orEmpty(); """{"ok":true,"resumed":[]}""" }
             "owner-icon" -> """{"ok":true,"owner":"$owner","mime":"image/png","data":"${avatar(owner.orEmpty())}"}"""
             else -> """{"ok":true}"""
         }
@@ -511,15 +525,21 @@ class ProjectsScreenshotTest {
         /** Whether the scripted host answers with [TREE_LONG]. */
         @Volatile var longTree = false
 
-        /** Whether the scripted host has paused every chat, which stops web's turn and shop's task. */
-        @Volatile var chatsPaused = false
+        /** The projects the scripted host has paused: web's turn and shop's task stop with theirs. */
+        @Volatile var pausedFolders = emptySet<String>()
 
         /** Whether the scripted host says it can pause every chat. */
         @Volatile var canPauseAll = true
 
         fun paused(tree: String): String = tree
-            .replace(""""working":true,"session":"s3"}""", """"working":false,"paused":true,"session":"s3"}""")
-            .replace(""""background_tasks":1,"session":"s4"}""", """"paused":true,"session":"s4"}""")
+            .let {
+                if ("web" in pausedFolders) it.replace(""""working":true,"session":"s3"}""", """"working":false,"paused":true,"session":"s3"}""")
+                else it
+            }
+            .let {
+                if ("shop" in pausedFolders) it.replace(""""background_tasks":1,"session":"s4"}""", """"paused":true,"session":"s4"}""")
+                else it
+            }
 
         /** [TREE] with a dozen more sessions, so the list runs past the bottom of the screen. */
         val TREE_LONG by lazy {
@@ -541,7 +561,7 @@ class ProjectsScreenshotTest {
         val SENT: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
 
         /** An organization holding a project and a folder of client sites, beside two plain projects. */
-        val TREE = """{"ok":true,"settlement":true,"folder_reorder":true,"folder_groups":true,"pause_all":true,"folders":[""" +
+        val TREE = """{"ok":true,"settlement":true,"folder_reorder":true,"folder_groups":true,"pause_all":true,"pause_folders":true,"folders":[""" +
             """{"id":"xd","name":"xd","owner":"RestartFU"},""" +
             """{"id":"acme","name":"acme","group":true,"owner":"acme"},""" +
             """{"id":"web","name":"web","parent":"acme","owner":"acme"},""" +

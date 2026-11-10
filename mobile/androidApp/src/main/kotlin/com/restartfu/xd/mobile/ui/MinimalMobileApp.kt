@@ -36,7 +36,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
@@ -131,8 +130,7 @@ import com.restartfu.xd.model.SettledSession
 import com.restartfu.xd.model.activeSessions
 import com.restartfu.xd.model.settledSessions
 import com.restartfu.xd.model.PauseAllAction
-import com.restartfu.xd.model.anythingToPause
-import com.restartfu.xd.model.pauseAllAction
+import com.restartfu.xd.model.pauseActionFor
 import com.restartfu.xd.protocol.Ops
 import androidx.compose.material3.RadioButton
 import com.restartfu.xd.protocol.BranchSourceReply
@@ -660,18 +658,24 @@ private fun MinimalProjectsHome(
             .background(MaterialTheme.colorScheme.background)
             .navigationBarsPadding(),
     ) {
-        val pauseAction = tree.pauseAllAction
         val pausingAll by model.pausingAll.collectAsStateWithLifecycle()
-        ProductHeader(link = link, title = "Projects", onSettings = { settingsOpen = true }) {
-            // Hidden on a host that cannot pause every chat.
-            if (pauseAction != null) PauseAllButton(
-                action = pauseAction,
-                enabled = !pausingAll && (pauseAction == PauseAllAction.RESUME || tree.anythingToPause),
-                onClick = {
-                    if (pauseAction == PauseAllAction.RESUME) model.resumeAll() else model.pauseAll()
-                },
-            )
+        // Each project's own pause button, beside its +; hidden with nothing to pause.
+        val pauseFor: (MinimalProject) -> (@Composable () -> Unit)? = { project ->
+            tree.pauseActionFor(project.id)?.let { action ->
+                {
+                    PauseProjectButton(
+                        projectName = project.name,
+                        action = action,
+                        enabled = !pausingAll,
+                        onClick = {
+                            if (action == PauseAllAction.RESUME) model.resumeProject(project.id)
+                            else model.pauseProject(project.id)
+                        },
+                    )
+                }
+            }
         }
+        ProductHeader(link = link, title = "Projects", onSettings = { settingsOpen = true })
         when {
             loading && projects.isEmpty() -> Box(
                 Modifier.fillMaxSize(),
@@ -757,6 +761,7 @@ private fun MinimalProjectsHome(
                                         actions = actions,
                                         toggle = toggle,
                                         onNewSession = { newSessionIn(project.id) },
+                                        pause = pauseFor(project),
                                         menu = menu,
                                     )
                                 } else {
@@ -766,6 +771,7 @@ private fun MinimalProjectsHome(
                                         icon = ownerIcons[project.owner],
                                         signals = tree.activeSessions(project.id).map(signalOf),
                                         onClick = toggle,
+                                        pause = pauseFor(project),
                                         menu = menu,
                                     )
                                 }
@@ -1194,8 +1200,6 @@ private fun ProductHeader(
     link: Link,
     title: String,
     onSettings: () -> Unit,
-    /** Buttons for the page itself, just after its title. */
-    actions: @Composable () -> Unit = {},
 ) {
     Row(
         modifier = Modifier
@@ -1220,7 +1224,6 @@ private fun ProductHeader(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        actions()
         val up = link is Link.Up
         Box(
             modifier = Modifier.size(48.dp),
@@ -1248,26 +1251,26 @@ private fun ProductHeader(
 }
 
 /**
- * Pauses every working chat for stepping away from work, then turns into
- * the button that resumes them all.
+ * Pauses a project's working chats for stepping away from work, then turns
+ * into the button that resumes them.
  */
 @Composable
-private fun PauseAllButton(action: PauseAllAction, enabled: Boolean, onClick: () -> Unit) {
+private fun PauseProjectButton(
+    projectName: String,
+    action: PauseAllAction,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
     val resume = action == PauseAllAction.RESUME
-    val label = if (resume) "Resume paused chats" else "Pause all chats"
+    val label = if (resume) "Resume chats in $projectName" else "Pause chats in $projectName"
     IconTooltip(label) {
-        IconButton(
-            onClick = onClick,
-            enabled = enabled,
-            modifier = Modifier.size(48.dp),
-            colors = IconButtonDefaults.iconButtonColors(
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            ),
-        ) {
+        IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(48.dp)) {
             Icon(
                 painter = painterResource(if (resume) R.drawable.ic_play else R.drawable.ic_pause),
                 contentDescription = label,
-                modifier = Modifier.size(20.dp),
+                tint = if (resume) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp),
             )
         }
     }
@@ -1442,6 +1445,8 @@ private fun DrawerRow(
     icon: ByteArray? = null,
     /** Starts a session here; offered on an open project. */
     onNewSession: (() -> Unit)? = null,
+    /** Pauses or resumes the project's chats, just before its +. */
+    pause: (@Composable () -> Unit)? = null,
     menu: (@Composable () -> Unit)? = null,
 ) {
     val faint = LocalXdSignals.current.faint
@@ -1490,6 +1495,7 @@ private fun DrawerRow(
         }
         // A closed project still shows which of its sessions need a look.
         if (!open) SignalDots(signals)
+        pause?.invoke()
         onNewSession?.let { start ->
             IconButton(onClick = start, modifier = Modifier.size(48.dp)) {
                 Icon(
@@ -1939,6 +1945,7 @@ private fun OpenDrawer(
     /** Closes the project. */
     toggle: () -> Unit,
     onNewSession: () -> Unit,
+    pause: (@Composable () -> Unit)?,
     menu: @Composable () -> Unit,
 ) {
     Column(
@@ -1954,6 +1961,7 @@ private fun OpenDrawer(
             onClick = toggle,
             icon = icon,
             onNewSession = onNewSession,
+            pause = pause,
             menu = menu,
         )
         // Kept to one quiet line: several empty projects can be open at once.

@@ -944,8 +944,10 @@ impl StateStore {
             "settlement": true,
             "linked_pull_requests": true,
             "folder_reorder": true,
-            // The host answers `pause-all` and `resume-all`.
+            // The host answers `pause-all` and `resume-all`, for every chat or
+            // for one folder's.
             "pause_all": true,
+            "pause_folders": true,
             // The host keeps folders of projects; older hosts ignore `group`
             // and `owner` and would make a project instead.
             "folder_groups": true,

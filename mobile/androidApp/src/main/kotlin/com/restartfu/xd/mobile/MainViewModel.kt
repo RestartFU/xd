@@ -756,11 +756,13 @@ class MainViewModel @JvmOverloads constructor(
         client.deleteSession(sessionId)
     }
 
-    /** Stops every working chat on the host, for stepping away from work. */
-    fun pauseAll() = pauseOrResumeAll("Could not pause the chats") { client.pauseAll() }
+    /** Stops every working chat in project [folderId], for stepping away from work. */
+    fun pauseProject(folderId: String) =
+        pauseOrResumeAll("Could not pause the chats") { client.pauseAll(folderId) }
 
-    /** Continues every chat [pauseAll] stopped. */
-    fun resumeAll() = pauseOrResumeAll("Could not resume the chats") { client.resumeAll() }
+    /** Continues every chat in project [folderId] that [pauseProject] stopped. */
+    fun resumeProject(folderId: String) =
+        pauseOrResumeAll("Could not resume the chats") { client.resumeAll(folderId) }
 
     private fun pauseOrResumeAll(failure: String, action: suspend () -> Unit) {
         if (_pausingAll.value) return

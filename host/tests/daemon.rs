@@ -643,6 +643,55 @@ fn pausing_all_holds_working_chats_until_they_resume() {
 }
 
 #[test]
+fn pausing_a_project_leaves_the_others_running() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    let mut chat_in = |name: &str| {
+        let folder = client.call(json!({"op":"new-folder", "name":name}));
+        assert_eq!(folder["ok"], true, "{folder}");
+        let chat = client.call(json!({"op":"new-chat", "folder":folder["id"], "backend":"codex"}));
+        assert_eq!(chat["ok"], true, "{chat}");
+        (
+            folder["id"].as_str().unwrap().to_owned(),
+            chat["id"].as_str().unwrap().to_owned(),
+        )
+    };
+    let (site, site_chat) = chat_in("Site");
+    let (app, app_chat) = chat_in("App");
+    let tree = client.call(json!({"op":"tree"}));
+    assert_eq!(tree["pause_folders"], true, "{tree}");
+    for chat in [&site_chat, &app_chat] {
+        let reply = client.call(json!({"op":"send", "chat":chat, "text":"forever"}));
+        assert_eq!(reply["ok"], true, "{reply}");
+    }
+
+    let reply = client.call(json!({"op":"pause-all", "folder":site}));
+    assert_eq!(reply["paused"], json!([site_chat]), "{reply}");
+    client.wait_for(json!({"op":"chat", "chat":site_chat}), |reply| {
+        reply["working"] == false
+    });
+    let other = client.call(json!({"op":"chat", "chat":app_chat}));
+    assert_eq!(other["working"], true, "{other}");
+
+    // Resuming another project finds nothing paused there.
+    let reply = client.call(json!({"op":"resume-all", "folder":app}));
+    assert_eq!(reply["resumed"], json!([]), "{reply}");
+    let reply = client.call(json!({"op":"resume-all", "folder":site}));
+    assert_eq!(reply["resumed"], json!([site_chat]), "{reply}");
+    let refused = client.call(json!({"op":"pause-all", "folder":7}));
+    assert_eq!(refused["ok"], false, "{refused}");
+
+    // Without a folder it is still every chat.
+    client.wait_for(json!({"op":"chat", "chat":site_chat}), |reply| {
+        reply["working"] == false
+    });
+    let reply = client.call(json!({"op":"send", "chat":site_chat, "text":"forever"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let reply = client.call(json!({"op":"pause-all"}));
+    assert_eq!(reply["paused"].as_array().unwrap().len(), 2, "{reply}");
+}
+
+#[test]
 fn a_restart_continues_cut_off_turns_only_when_asked() {
     let continued = |client: &mut Client<UnixStream, UnixStream>, chat: &str| {
         client.call(json!({"op":"messages", "chat":chat}))["messages"]

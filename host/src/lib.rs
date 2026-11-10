@@ -479,8 +479,8 @@ impl Engine {
                 }
             }
             Some("cancel") => self.cancel(&request),
-            Some("pause-all") => self.pause_all(),
-            Some("resume-all") => self.resume_all(),
+            Some("pause-all") => self.pause_all(&request),
+            Some("resume-all") => self.resume_all(&request),
             Some("new-folder") => self.new_folder(&request),
             Some("set-folder-context") => {
                 self.tree_mutation(|store| store.set_folder_context(&request))
@@ -2052,9 +2052,13 @@ impl Engine {
     /// Stops every chat at work, and every chat whose agent still runs
     /// background agents or shells between turns, so nothing goes on while the
     /// user is away. Each keeps its queue until [`Self::resume_all`].
-    fn pause_all(&self) -> Value {
+    fn pause_all(&self, request: &Value) -> Value {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return error_reply("Rust host state storage is not configured.");
+        };
+        let folder = match pause_scope(request) {
+            Ok(folder) => folder,
+            Err(error) => return error_reply(error),
         };
         // Every chat that may have work, a superset decided one by one below
         // under its locks. A send holds the chat's gate from before the chat
@@ -2089,8 +2093,15 @@ impl Engine {
             Ok(working) => working.into_iter().for_each(&mut add),
             Err(error) => return error_reply(error),
         }
+        // Another project's chats are never waited on; the check is made again
+        // under each gate below.
+        chats.retain(|chat_id| in_scope(store, chat_id, folder));
         let mut paused = Vec::new();
         let mut pause = |chat_id: String, gate: std::sync::MutexGuard<'_, ()>| {
+            // Asked under the gate too: a chat moved out of the folder stays.
+            if !in_scope(store, &chat_id, folder) {
+                return;
+            }
             // The gate is held so no message can start a turn between marking
             // the chat and stopping it: the stop would take the new turn instead.
             let stopped = runtime.stop_chat_if(&chat_id, |background| {
@@ -2140,16 +2151,29 @@ impl Engine {
 
     /// Picks every paused chat back up: continues the turn pausing cut short,
     /// after which its queue runs as usual.
-    fn resume_all(&self) -> Value {
+    fn resume_all(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
         };
+        let folder = match pause_scope(request) {
+            Ok(folder) => folder,
+            Err(error) => return error_reply(error),
+        };
         let chats = match store.paused_chats() {
-            Ok(chats) => chats,
+            Ok(chats) => chats
+                .into_iter()
+                .filter(|chat_id| in_scope(store, chat_id, folder))
+                .collect::<Vec<_>>(),
             Err(error) => return error_reply(error),
         };
         let mut resumed = Vec::new();
         for chat_id in chats {
+            // Asked again as each chat's turn comes: one moved to another
+            // project since the list was read stays paused. A move racing this
+            // check is ordered either way, as if it came just after the resume.
+            if !in_scope(store, &chat_id, folder) {
+                continue;
+            }
             let before = store.latest_user_message(&chat_id).ok();
             let reply = self.send_message_inner(
                 &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
@@ -2176,7 +2200,9 @@ impl Engine {
                 let Ok(_execution) = gate.lock() else {
                     continue;
                 };
-                if !store.unpause_chat(&chat_id).unwrap_or(false) {
+                if !in_scope(store, &chat_id, folder)
+                    || !store.unpause_chat(&chat_id).unwrap_or(false)
+                {
                     continue;
                 }
                 self.events.publish(json!({"event": "tree"}));
@@ -2915,6 +2941,25 @@ fn required_string<'a>(request: &'a Value, key: &str, message: &str) -> Result<&
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| message.into())
+}
+
+/// The folder `pause-all` and `resume-all` keep to, if they were given one.
+fn pause_scope(request: &Value) -> Result<Option<&str>, &'static str> {
+    match request.get("folder") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(folder)) if !folder.is_empty() => Ok(Some(folder)),
+        Some(_) => Err("folder must be a folder id"),
+    }
+}
+
+/// Whether the chat is in `folder`, or in a folder or project inside it.
+/// Without a folder, every chat is.
+fn in_scope(store: &StateStore, chat_id: &str, folder: Option<&str>) -> bool {
+    folder.is_none_or(|folder| {
+        store
+            .folder_lineage_for_chat(chat_id)
+            .is_ok_and(|lineage| lineage.iter().any(|id| id == folder))
+    })
 }
 
 /// Adds `background_tasks` to every chat and session in the tree: how many
