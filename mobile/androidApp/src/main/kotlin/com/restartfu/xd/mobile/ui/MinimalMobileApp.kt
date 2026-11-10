@@ -336,6 +336,8 @@ internal fun MinimalMobileApp(
                     }
                     mobileDestination == MobileDestination.SESSIONS && activeSession != null -> {
                         val selectTab = { id: String ->
+                            // A tab picked: a chat still starting does not take its place.
+                            model.stopOpeningStartingSessions()
                             hiddenChatIds = hiddenChatIds - id
                             chatSelections = chatSelections + (activeSession.id to id)
                         }
