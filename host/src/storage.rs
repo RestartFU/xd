@@ -8889,7 +8889,13 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
         let backlink = fs::read_to_string(git_dir.join("gitdir")).ok()?;
         let listed = git_dir.join(backlink.trim_end_matches(['\n', '\r']));
         let dot_git = root.join(".git");
-        if !fs::symlink_metadata(&dot_git).ok()?.is_file()
+        // Git lists the worktrees it finds in the repository's `worktrees`.
+        let registered = fs::canonicalize(&git_dir)
+            .ok()
+            .and_then(|git_dir| git_dir.parent().map(Path::to_path_buf))
+            == fs::canonicalize(common.join("worktrees")).ok();
+        if !registered
+            || !fs::symlink_metadata(&dot_git).ok()?.is_file()
             || fs::canonicalize(&listed).ok() != Some(dot_git)
         {
             return None;
@@ -8926,7 +8932,12 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
             // no commit yet, and Git lists it either way.
             let loose = common.join("refs/heads").join(branch);
             let plain = match fs::symlink_metadata(&loose) {
-                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                // Git then reads the packed refs, and refuses them if they
+                // are malformed.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    plain_packed_refs(&common)
+                }
+                Err(_) => false,
                 Ok(metadata) if metadata.is_file() => {
                     fs::read(&loose).is_ok_and(|reference| sha1_line(&reference))
                 }
@@ -8939,6 +8950,46 @@ fn head_branch(workdir: &Path) -> Option<Option<String>> {
             && !config.to_ascii_lowercase().contains("objectformat"))
         .then(|| Some("Detached HEAD".into())),
     }
+}
+
+/// Whether the repository's packed refs, if any, are as Git writes them:
+/// an optional header, then SHA-1 ids each followed by a ref name or peeled
+/// on a line of their own. Very large files are left to Git.
+fn plain_packed_refs(common: &Path) -> bool {
+    const LIMIT: u64 = 4 * 1024 * 1024;
+    let path = common.join("packed-refs");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
+    };
+    if !metadata.is_file() || metadata.len() > LIMIT {
+        return false;
+    }
+    let Ok(contents) = fs::read(&path) else {
+        return false;
+    };
+    contents
+        .split(|byte| *byte == b'\n')
+        .enumerate()
+        .all(|(index, line)| {
+            if line.is_empty() {
+                return true;
+            }
+            if index == 0 && line.starts_with(b"# pack-refs with:") {
+                return true;
+            }
+            if let Some(peeled) = line.strip_prefix(b"^") {
+                return sha1_line(peeled);
+            }
+            match line.iter().position(|byte| *byte == b' ') {
+                Some(space) => {
+                    sha1_line(&line[..space])
+                        && line[space + 1..].starts_with(b"refs/")
+                        && line[space + 1..].iter().all(|byte| byte.is_ascii_graphic())
+                }
+                None => false,
+            }
+        })
 }
 
 /// Whether `contents` is a SHA-1 object id, as Git writes a ref.
@@ -10912,7 +10963,22 @@ mod tests {
                 "initial",
             ],
         );
+        let main_ref = fs::read(corrupt.join(".git/refs/heads/main")).unwrap();
         fs::write(corrupt.join(".git/refs/heads/main"), "garbage\n").unwrap();
+        assert_eq!(worktree_branch(&corrupt), listed(&corrupt));
+        assert_eq!(head_branch(&fs::canonicalize(&corrupt).unwrap()), None);
+
+        // A packed branch is read from the packed refs, unless Git would
+        // refuse them.
+        fs::write(corrupt.join(".git/refs/heads/main"), main_ref).unwrap();
+        git(&corrupt, &["pack-refs", "--all"]);
+        assert!(!corrupt.join(".git/refs/heads/main").exists());
+        assert_eq!(worktree_branch(&corrupt).as_deref(), Some("main"));
+        assert!(head_branch(&fs::canonicalize(&corrupt).unwrap()).is_some());
+        let packed = corrupt.join(".git/packed-refs");
+        let mut refs = fs::read_to_string(&packed).unwrap();
+        refs.push_str("not a packed ref\n");
+        fs::write(&packed, refs).unwrap();
         assert_eq!(worktree_branch(&corrupt), listed(&corrupt));
         assert_eq!(head_branch(&fs::canonicalize(&corrupt).unwrap()), None);
 
@@ -10968,6 +11034,31 @@ mod tests {
         assert_eq!(worktree_branch(&linked), listed(&linked));
         fs::remove_file(linked.join(".git")).unwrap();
         fs::rename(&moved_link, linked.join(".git")).unwrap();
+        assert_eq!(worktree_branch(&linked).as_deref(), Some("feature/x"));
+
+        // A worktree whose entry was moved out of the repository's
+        // `worktrees`, where Git does not look for it.
+        let entry = repository.join(".git/worktrees/linked");
+        let outside_entry = fixture.root.join("linked-entry");
+        fs::rename(&entry, &outside_entry).unwrap();
+        fs::write(
+            outside_entry.join("commondir"),
+            format!("{}\n", repository.join(".git").display()),
+        )
+        .unwrap();
+        fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", outside_entry.display()),
+        )
+        .unwrap();
+        assert_eq!(worktree_branch(&linked), listed(&linked));
+        fs::rename(&outside_entry, &entry).unwrap();
+        fs::write(entry.join("commondir"), "../..\n").unwrap();
+        fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", entry.display()),
+        )
+        .unwrap();
         assert_eq!(worktree_branch(&linked).as_deref(), Some("feature/x"));
 
         // A worktree moved by hand is not where Git lists it, so neither has
