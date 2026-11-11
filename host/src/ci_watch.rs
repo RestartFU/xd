@@ -734,6 +734,11 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
                 }
                 Ok(status) => {
                     failed_polls = 0;
+                    // Finished checks that could not be read again count only
+                    // in a row: checks still at work start the count over.
+                    if !status.complete() {
+                        unconfirmed = 0;
+                    }
                     last = Some(status.clone());
                     let before = pushed.commit.clone();
                     let check = pushed.observe(
@@ -800,8 +805,12 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
                     // after any failed poll.
                     let current = match &ending {
                         Ending::Finished(done) => match read_status(store, &workdir, url) {
-                            Ok(now) if same_checks(store, &workdir, done, &now) => true,
+                            Ok(now) if same_checks(store, &workdir, done, &now) => {
+                                unconfirmed = 0;
+                                true
+                            }
                             Ok(now) => {
+                                unconfirmed = 0;
                                 first = Some(now);
                                 false
                             }
