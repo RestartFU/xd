@@ -482,7 +482,7 @@ fn snapshot(page: &impl Page) -> Result<Outcome, String> {
 
 /// Scrolls element `number` into view and returns its centre, in CSS pixels
 /// from the top left of the view, or why it cannot be clicked there.
-fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
+fn locate(page: &impl Page, number: &str, scroll: bool) -> Result<(f64, f64), String> {
     let found = evaluate(
         page,
         &format!(
@@ -490,7 +490,8 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                 const refs = window.__xdBrowserRefs;
                 const element = refs instanceof Map ? refs.get({number}) : undefined;
                 if (!element || !element.isConnected) return {{missing: true}};
-                element.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}});
+                if ({scroll})
+                    element.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}});
                 const box = element.getBoundingClientRect();
                 const x = box.left + box.width / 2, y = box.top + box.height / 2;
                 if (box.width === 0 || box.height === 0) return {{hidden: true}};
@@ -514,8 +515,13 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                 // for through shadow roots, as `within` looks.
                 const controlAt = node => {{
                     for (let at = node; at; at = at.assignedSlot || at.parentNode || at.host)
-                        if (at.nodeType === 1 && (at.isContentEditable || at.matches(
-                            'a[href], button, input, select, textarea, summary, '
+                        // An editable area counts by its editing host, not by
+                        // each paragraph in it; links by href in any namespace,
+                        // as an SVG link's xlink:href is.
+                        if (at.nodeType === 1 && ((at.isContentEditable
+                            && !(at.parentElement && at.parentElement.isContentEditable))
+                            || at.matches(
+                            'a[href], a[*|href], button, input, select, textarea, summary, '
                             + ['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
                                'menuitemcheckbox', 'menuitemradio', 'option', 'combobox', 'textbox',
                                'searchbox', 'slider', 'spinbutton', 'treeitem']
@@ -562,17 +568,28 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
 }
 
 fn click(page: &impl Page, number: &str, double: bool) -> Result<(), String> {
-    let (x, y) = locate(page, number)?;
-    let mouse = |kind: &str, count: u32| {
+    let mouse = |kind: &str, (x, y): (f64, f64), count: u32| {
         json!({"type": kind, "x": x, "y": y,
             "button": if kind == "mouseMoved" { "none" } else { "left" },
             "buttons": if kind == "mousePressed" { 1 } else { 0 }, "clickCount": count})
     };
-    page.call(
-        "Input.dispatchMouseEvent",
-        mouse("mouseMoved", 0),
-        CALL_TIMEOUT,
-    )?;
+    let mut point = locate(page, number, true)?;
+    // Moving over a page can change it, as a card that shows its buttons
+    // on hover does, so the point is checked again before the press, and
+    // followed if the element moved.
+    for _ in 0..3 {
+        page.call(
+            "Input.dispatchMouseEvent",
+            mouse("mouseMoved", point, 0),
+            CALL_TIMEOUT,
+        )?;
+        let again = locate(page, number, false)?;
+        if (again.0 - point.0).abs() < 1.0 && (again.1 - point.1).abs() < 1.0 {
+            break;
+        }
+        point = again;
+    }
+    let mouse = |kind: &str, count: u32| mouse(kind, point, count);
     for count in 1..=if double { 2 } else { 1 } {
         held(
             page,
@@ -1158,6 +1175,11 @@ mod tests {
                 value(json!({"x": 40.5, "y": 12, "covered": null})),
             ),
             ("Input.dispatchMouseEvent", Ok(json!({}))),
+            // Checked again with the mouse over it.
+            (
+                "Runtime.evaluate",
+                value(json!({"x": 40.5, "y": 12, "covered": null})),
+            ),
             ("Input.dispatchMouseEvent", Ok(json!({}))),
             ("Input.dispatchMouseEvent", Ok(json!({}))),
             // A new document replaced the marked one, and has loaded.
@@ -1172,10 +1194,66 @@ mod tests {
                 .unwrap()
                 .contains("get(7)")
         );
-        assert_eq!(calls[3].1["type"], "mousePressed");
-        assert_eq!(calls[3].1["x"], 40.5);
-        assert_eq!(calls[3].1["clickCount"], 1);
-        assert_eq!(calls[4].1["type"], "mouseReleased");
+        assert_eq!(calls[2].1["type"], "mouseMoved");
+        assert_eq!(calls[4].1["type"], "mousePressed");
+        assert_eq!(calls[4].1["x"], 40.5);
+        assert_eq!(calls[4].1["clickCount"], 1);
+        assert_eq!(calls[5].1["type"], "mouseReleased");
+    }
+
+    #[test]
+    fn what_hovering_shows_is_checked_before_the_press() {
+        // A card shows a button over its middle once the mouse is over it.
+        let covered = Script::new(vec![
+            ("Runtime.evaluate", value(json!(null))),
+            (
+                "Runtime.evaluate",
+                value(json!({"x": 5, "y": 5, "covered": null})),
+            ),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+            (
+                "Runtime.evaluate",
+                value(json!({"x": 5, "y": 5, "covered": "button"})),
+            ),
+        ]);
+        let error = run(&covered, &json!({"action": "click", "ref": "e3"})).unwrap_err();
+        assert!(error.contains("would reach button"), "{error}");
+        assert_eq!(
+            covered
+                .calls
+                .borrow()
+                .iter()
+                .filter(|(_, params)| params["type"] == "mousePressed")
+                .count(),
+            0
+        );
+        // One that moves when hovered is followed to where it is.
+        let moved = Script::new(vec![
+            ("Runtime.evaluate", value(json!(null))),
+            (
+                "Runtime.evaluate",
+                value(json!({"x": 5, "y": 5, "covered": null})),
+            ),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+            (
+                "Runtime.evaluate",
+                value(json!({"x": 9, "y": 5, "covered": null})),
+            ),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+            (
+                "Runtime.evaluate",
+                value(json!({"x": 9, "y": 5, "covered": null})),
+            ),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+            ("Runtime.evaluate", value(json!([false, "complete"]))),
+            ("Runtime.evaluate", page()),
+        ]);
+        run(&moved, &json!({"action": "click", "ref": "e3"})).unwrap();
+        let calls = moved.calls.borrow();
+        assert_eq!(calls[4].1["x"], 9.0);
+        assert_eq!(calls[6].1["type"], "mousePressed");
+        assert_eq!(calls[6].1["x"], 9.0);
     }
 
     #[test]
@@ -1258,6 +1336,10 @@ mod tests {
                 value(json!({"x": 5, "y": 5, "covered": null})),
             ),
             ("Input.dispatchMouseEvent", Ok(json!({}))),
+            (
+                "Runtime.evaluate",
+                value(json!({"x": 5, "y": 5, "covered": null})),
+            ),
             ("Input.dispatchMouseEvent", Ok(json!({}))),
             ("Input.dispatchMouseEvent", Ok(json!({}))),
             // The old document stays while the server takes its time, longer
@@ -1426,6 +1508,10 @@ mod tests {
                 value(json!({"x": 5, "y": 5, "covered": null})),
             ),
             ("Input.dispatchMouseEvent", Ok(json!({}))),
+            (
+                "Runtime.evaluate",
+                value(json!({"x": 5, "y": 5, "covered": null})),
+            ),
             ("Input.dispatchMouseEvent", Ok(json!({}))),
             ("Input.dispatchMouseEvent", Ok(json!({}))),
         ]);
@@ -1433,7 +1519,7 @@ mod tests {
         // Stopped as soon as the button goes down.
         let page = StopAfter {
             script: &script,
-            calls: 4,
+            calls: 5,
             cancelled: &cancelled,
         };
         let outcome = super::run(
@@ -1444,9 +1530,9 @@ mod tests {
         );
         assert_eq!(outcome, Err(CANCELLED.into()));
         let calls = script.calls.borrow();
-        assert_eq!(calls[3].1["type"], "mousePressed");
-        assert_eq!(calls[4].1["type"], "mouseReleased");
-        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[4].1["type"], "mousePressed");
+        assert_eq!(calls[5].1["type"], "mouseReleased");
+        assert_eq!(calls.len(), 6);
     }
 
     /// Stopped while its key press still waited to be sent, which never is.
