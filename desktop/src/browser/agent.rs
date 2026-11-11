@@ -489,9 +489,16 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                 // click; one that lets clicks through to its container does
                 // not get it.
                 // Through a label, unless the point is on another control in
-                // it, such as a link, which takes the click for itself.
-                const control = top && top.closest
-                    && top.closest('a[href], button, input, select, textarea, summary, [role], [contenteditable]');
+                // it, such as a link, which takes the click for itself. Looked
+                // for through shadow roots, as `within` looks.
+                const controlAt = node => {{
+                    for (let at = node; at; at = at.parentNode || at.host)
+                        if (at.nodeType === 1 && at.matches(
+                            'a[href], button, input, select, textarea, summary, [role], [contenteditable]'))
+                            return at;
+                    return null;
+                }};
+                const control = top && controlAt(top);
                 const reaches = top && (within(element, top)
                     || (element.labels && [...element.labels].some(label => within(label, top)
                         && (!control || control === element || !within(label, control)))));

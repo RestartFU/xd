@@ -1109,6 +1109,9 @@ pub struct DevTools {
     shared: SharedState,
     /// Set once the command these calls are for is stopped.
     cancelled: Arc<AtomicBool>,
+    /// Calls are sent however long CEF takes, even after their caller has
+    /// stopped waiting, as letting go of a pressed key must be.
+    deliver: bool,
 }
 
 impl DevTools {
@@ -1118,11 +1121,13 @@ impl DevTools {
         Self { cancelled, ..self }
     }
 
-    /// The same page, for calls nothing stops, such as letting go of a key.
+    /// The same page, for calls nothing stops and that are always sent, such
+    /// as letting go of a key.
     pub fn unstoppable(&self) -> Self {
         Self {
             shared: self.shared.clone(),
             cancelled: Arc::default(),
+            deliver: true,
         }
     }
 
@@ -1195,6 +1200,10 @@ impl DevTools {
                     format!("The command was stopped; the page may still finish {method}.")
                 })
             }
+            Err(mpsc::RecvTimeoutError::Timeout) if self.deliver => Err(format!(
+                "The page did not answer {method} within {} seconds; it still gets it.",
+                timeout.as_secs()
+            )),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let abandoned = state
                     .compare_exchange(
@@ -1423,6 +1432,7 @@ impl ChromiumView {
         DevTools {
             shared: self.shared.clone(),
             cancelled: Arc::default(),
+            deliver: false,
         }
     }
 
