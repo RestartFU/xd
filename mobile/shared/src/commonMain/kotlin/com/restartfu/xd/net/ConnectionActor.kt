@@ -719,11 +719,12 @@ private fun validateConnection(connection: SshConnection) {
 }
 
 /**
- * A host's stable name across connections: its pinned key's fingerprint,
- * or where it is reached when no key is pinned.
+ * A host's stable name across connections: the key pinned when it was paired,
+ * else its pinned SSH key's fingerprint, else where it is reached.
  */
 internal fun hostIdentity(connection: SshConnection): String =
-    connection.hostKey?.fingerprint?.let { "key:$it" }
+    (connection.authentication as? SshAuthentication.Paired)?.fingerprint?.let { "paired:$it" }
+        ?: connection.hostKey?.fingerprint?.let { "key:$it" }
         ?: "ssh:${connection.username}@${connection.host}:${connection.port}"
 
 private fun remoteName(connection: SshConnection): String =
