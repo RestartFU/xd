@@ -4601,6 +4601,58 @@ impl StateStore {
         run_gh(workdir, arguments)
     }
 
+    /// Runs the GitHub CLI in `workdir` as [`Self::run_gh`] does, keeping only
+    /// the last `keep` bytes of what it writes to stdout, however much that
+    /// is. Answers whether it succeeded, and that tail.
+    pub(crate) fn run_gh_tail(
+        &self,
+        workdir: &Path,
+        arguments: &[&str],
+        keep: usize,
+    ) -> Result<(bool, Vec<u8>), StorageError> {
+        let executable = env::var_os("XD_GH_EXECUTABLE").unwrap_or_else(|| "gh".into());
+        let mut child = Command::new(executable)
+            .args(arguments)
+            .current_dir(workdir)
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|source| StorageError::Filesystem {
+                context: "Cannot run GitHub CLI".into(),
+                source,
+            })?;
+        let stdout = child.stdout.take().expect("piped gh stdout");
+        let reader = thread::spawn(move || read_tail(stdout, keep));
+        let deadline = Instant::now() + GIT_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|source| StorageError::Filesystem {
+                    context: "Cannot wait for the GitHub CLI".into(),
+                    source,
+                })?
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(StorageError::InvalidRequest(
+                    "The GitHub CLI timed out.".into(),
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let tail = reader
+            .join()
+            .map_err(|_| StorageError::InvalidRequest("Cannot read the GitHub CLI.".into()))?;
+        Ok((status.success(), tail))
+    }
+
     /// Runs Git in `workdir` with nothing to prompt for, under the shared
     /// output and time bounds.
     pub(crate) fn run_git(
@@ -10125,6 +10177,21 @@ fn run_gh(
         }
     })?;
     collect_git_output(child, GIT_TIMEOUT)
+}
+
+/// The last `keep` bytes `stream` gives, reading it to its end.
+fn read_tail(mut stream: impl Read, keep: usize) -> Vec<u8> {
+    let mut tail = std::collections::VecDeque::with_capacity(keep.min(1 << 20));
+    let mut buffer = [0_u8; 8192];
+    while let Ok(count) = stream.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        tail.extend(&buffer[..count]);
+        let excess = tail.len().saturating_sub(keep);
+        tail.drain(..excess);
+    }
+    tail.into()
 }
 
 fn command_failure(stdout: &[u8], stderr: &[u8], fallback: &str) -> StorageError {

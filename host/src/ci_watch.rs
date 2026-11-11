@@ -51,6 +51,8 @@ const QUIET_FOR: Duration = Duration::from_secs(60);
 const LOGGED_JOBS: usize = 3;
 const LOG_LINES: usize = 30;
 const LOG_LINE_CHARS: usize = 300;
+/// How much of the end of a failed job's log is read for its last lines.
+const LOG_TAIL_BYTES: usize = 256 * 1024;
 const LISTED_CHECKS: usize = 20;
 
 /// Starts watches once the daemon is up; see [`Engine::start_ci_watches`].
@@ -1323,8 +1325,9 @@ fn actions_job(link: &str) -> Option<(String, String)> {
 
 /// The last lines a failed Actions job logged in its failed steps.
 fn failed_log(store: &StateStore, workdir: &Path, repository: &str, job: &str) -> Option<String> {
-    let (status, stdout, _) = store
-        .run_gh(
+    // Only the end is quoted, so only the end is kept, however long the log.
+    let (succeeded, stdout) = store
+        .run_gh_tail(
             workdir,
             &[
                 "run",
@@ -1335,9 +1338,10 @@ fn failed_log(store: &StateStore, workdir: &Path, repository: &str, job: &str) -
                 "--repo",
                 repository,
             ],
+            LOG_TAIL_BYTES,
         )
         .ok()?;
-    if !status.success() {
+    if !succeeded {
         return None;
     }
     let output = String::from_utf8_lossy(&stdout);
@@ -1952,7 +1956,10 @@ case "$1 $2" in
 "pr view")
   n=$(cat "{root_text}/polls" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{root_text}/polls"
   if [ $n -le 2 ]; then cat "{root_text}/pending.json"; else cat "{root_text}/done.json"; fi ;;
-"run view") printf 'linux\tTest\t2026-11-11T12:20:01.1Z error: it broke\n' ;;
+"run view")
+  # A long log: only its end may be quoted, past any output limit.
+  yes "$(printf 'linux\tTest\t2026-11-11T12:20:00.0Z filler')" | head -n 230000
+  printf 'linux\tTest\t2026-11-11T12:20:01.1Z error: it broke\n' ;;
 *) exit 1 ;;
 esac
 "#
@@ -2023,10 +2030,13 @@ done
         assert_eq!(reports.len(), 1, "{reports:?}");
         assert_eq!(
             reports[0],
-            "[xd] CI failed on https://github.com/o/r/pull/7 at 1e3d4a4.\n\n\
-             1 of 2 checks did not pass (1 passed):\n\
-             - pr / linux: failure (https://github.com/o/r/actions/runs/4/job/13)\n\n\
-             The end of pr / linux's failed steps:\n\n```\nerror: it broke\n```"
+            format!(
+                "[xd] CI failed on https://github.com/o/r/pull/7 at 1e3d4a4.\n\n\
+                 1 of 2 checks did not pass (1 passed):\n\
+                 - pr / linux: failure (https://github.com/o/r/actions/runs/4/job/13)\n\n\
+                 The end of pr / linux's failed steps:\n\n```\n{}error: it broke\n```",
+                "filler\n".repeat(LOG_LINES - 1)
+            )
         );
         assert!(store.ci_watches().unwrap().is_empty());
         // One card stands for the watch, rewritten in place as it went.
