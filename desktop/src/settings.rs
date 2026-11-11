@@ -526,10 +526,7 @@ mod tests {
                 ),
             ]),
             collapsed_folders: vec!["folder-a".into(), "folder-b".into()],
-            collapsed_session_sets: HashMap::from([(
-                "local".into(),
-                vec!["session:lead".into()],
-            )]),
+            collapsed_session_sets: HashMap::from([("local".into(), vec!["session:lead".into()])]),
             settled_shelf_expanded: true,
             collapsed_diff_files: HashMap::from([(
                 "local/chat-restore/working".into(),

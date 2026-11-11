@@ -362,9 +362,8 @@ class ProjectsScreenshotTest {
         click("Hide the agents Reconnect backoff started")
         check(!shows("Retry jitter") && !shows("Backoff tests")) { "the folded session still shows its agents" }
         check(shows("Show the agents Reconnect backoff started") && shows("Usage page"))
-        val lead = bounds { hasText("Reconnect backoff") }
-        val count = bounds { hasText("2") }
-        check(count.top < lead.bottom && count.bottom > lead.top) { "the count sits at $count, not on the row at $lead" }
+        // The count of what it holds sits on the folded row itself.
+        bounds { hasText("Reconnect backoff") and hasText("2") }
     }
 
     @Test fun unfoldingASessionShowsTheAgentsItStarted() = withWorkerSessions("workers-unfolded-dark") {
