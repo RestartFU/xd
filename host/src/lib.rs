@@ -1871,13 +1871,18 @@ impl Engine {
     /// Stops a chat that has used its quota, as `pause-all` stops a chat,
     /// and marks it so only a new quota picks it back up.
     fn stop_for_quota(&self, chat_id: &str) {
-        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
-            return;
-        };
         let Ok(gate) = self.chat_execution_gate(chat_id) else {
             return;
         };
         let Ok(_execution) = gate.lock() else {
+            return;
+        };
+        self.stop_for_quota_gated(chat_id);
+    }
+
+    /// [`Self::stop_for_quota`] for a caller that holds the chat's gate.
+    fn stop_for_quota_gated(&self, chat_id: &str) {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return;
         };
         // Asked again under the gate: a new quota may have come meanwhile.
@@ -1914,6 +1919,13 @@ impl Engine {
         let (Some(store), Some(runtime)) = (self.store.clone(), self.runtime.clone()) else {
             return;
         };
+        // A chat charged past its quota just before the host went down was
+        // not stopped yet; nothing runs as the host starts, so mark it now.
+        match store.mark_spent_quotas() {
+            Ok(marked) if !marked.is_empty() => self.events.publish(json!({"event": "tree"})),
+            Ok(_) => {}
+            Err(error) => eprintln!("xd-host: cannot check chat quotas: {error}"),
+        }
         let auth = self.auth.clone();
         let reader: quota::Reader = Box::new(move |provider, account| {
             if !auth.signed_in(provider, account) {
@@ -2299,6 +2311,15 @@ impl Engine {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
         };
+        // A chat past its quota but not yet stopped, such as one the meter
+        // charged just before the host went down, stops now, for good, before
+        // anything is sent: whatever runs in it ends and the message waits.
+        if store
+            .chat_quota(chat_id)
+            .is_ok_and(|quota| !quota.reached && quota.spent())
+        {
+            self.stop_for_quota_gated(chat_id);
+        }
         let was_paused = store.chat_is_paused(chat_id).unwrap_or(false);
         let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false) || was_paused;
         let prepared = match continues {

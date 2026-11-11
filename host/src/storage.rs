@@ -3288,6 +3288,33 @@ impl StateStore {
         Ok(true)
     }
 
+    /// Marks every chat past its quota that is not marked yet, as the host
+    /// starts and nothing runs. Returns the chats it marked.
+    pub fn mark_spent_quotas(&self) -> Result<Vec<String>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let candidates = {
+            let mut statement = transaction.prepare(
+                "SELECT id FROM chats WHERE quota_reached = 0 AND quota_used > 0 ORDER BY id",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut marked = Vec::new();
+        for chat_id in candidates {
+            if read_chat_quota(&transaction, &chat_id)?.spent() {
+                transaction.execute(
+                    "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                    [&chat_id],
+                )?;
+                marked.push(chat_id);
+            }
+        }
+        transaction.commit()?;
+        Ok(marked)
+    }
+
     /// What a chat's agent needs to start another: where it works and on what.
     pub fn agent_origin(&self, chat_id: &str) -> Result<AgentOrigin, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
@@ -16239,6 +16266,29 @@ mod tests {
                 .unwrap(),
             SendDisposition::Queued { .. }
         ));
+    }
+
+    #[test]
+    fn chats_left_past_their_quota_are_marked_as_the_host_starts() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "spent", "folder");
+        fixture.insert_chat(&database, "within", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        for chat in ["spent", "within"] {
+            store
+                .set_chat_quota(&json!({"chat": chat, "percent": 5}))
+                .unwrap();
+        }
+        store.add_quota_use("spent", 6.0, i64::MAX).unwrap();
+        store.add_quota_use("within", 2.0, i64::MAX).unwrap();
+        assert_eq!(store.mark_spent_quotas().unwrap(), ["spent"]);
+        assert!(store.chat_quota("spent").unwrap().reached);
+        assert!(!store.chat_quota("within").unwrap().reached);
+        assert!(store.mark_spent_quotas().unwrap().is_empty());
     }
 
     #[test]
