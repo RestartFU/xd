@@ -2615,6 +2615,8 @@ struct XdDesktop {
     browser_panes: HashMap<String, Entity<BrowserPane>>,
     /// The window, for work that arrives without one, such as agents' browser commands.
     window_handle: gpui::AnyWindowHandle,
+    /// Agents' browser commands still running here.
+    browser_commands: RunningBrowserCommands,
     browser_drag: Option<(f32, u16)>,
     /// Drag origin and starting width while resizing the catalog sidebar.
     catalog_drag: Option<(f32, u16)>,
@@ -2689,16 +2691,60 @@ struct XdDesktop {
     error_generation: u64,
 }
 
+/// Each running command's stop flag, by connection and request.
+type BrowserCommandFlags = HashMap<(ChatEndpoint, u64), Arc<std::sync::atomic::AtomicBool>>;
+
+/// Agents' browser commands running on this desktop, by connection and
+/// request, each with the flag that stops it once its host gives up on it.
+#[derive(Clone, Default)]
+struct RunningBrowserCommands(Arc<std::sync::Mutex<BrowserCommandFlags>>);
+
+impl RunningBrowserCommands {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BrowserCommandFlags> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn start(&self, command: (ChatEndpoint, u64)) -> Arc<std::sync::atomic::AtomicBool> {
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.lock().insert(command, cancelled.clone());
+        cancelled
+    }
+
+    fn finish(&self, command: (ChatEndpoint, u64)) {
+        self.lock().remove(&command);
+    }
+
+    fn cancel(&self, mut which: impl FnMut((ChatEndpoint, u64)) -> bool) {
+        self.lock().retain(|command, cancelled| {
+            let stop = which(*command);
+            if stop {
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            }
+            !stop
+        });
+    }
+}
+
 /// The answer to one agent's browser command. Dropped unsent, as when the page
 /// goes before the command reaches it, it answers that the command did not
 /// run, so the agent is not left waiting for the host to give up.
 struct BrowserAnswer {
     host: Option<HostHandle>,
     request: u64,
+    running: Option<(RunningBrowserCommands, ChatEndpoint)>,
 }
 
 impl BrowserAnswer {
     fn send(mut self, outcome: Result<Value, String>) {
+        self.answer(outcome);
+    }
+
+    fn answer(&mut self, outcome: Result<Value, String>) {
+        if let Some((running, endpoint)) = self.running.take() {
+            running.finish((endpoint, self.request));
+        }
         if let Some(host) = self.host.take() {
             let _ = host.browser_result(self.request, outcome);
         }
@@ -2707,11 +2753,10 @@ impl BrowserAnswer {
 
 impl Drop for BrowserAnswer {
     fn drop(&mut self) {
-        if let Some(host) = self.host.take() {
-            let _ = host.browser_result(
-                self.request,
-                Err("The browser closed before the command could run.".into()),
-            );
+        if self.host.is_some() {
+            self.answer(Err(
+                "The browser closed before the command could run.".into()
+            ));
         }
     }
 }
@@ -3384,6 +3429,7 @@ impl XdDesktop {
             terminal_panel: None,
             browser_panes: HashMap::new(),
             window_handle: browser_window,
+            browser_commands: RunningBrowserCommands::default(),
             browser_drag: None,
             catalog_drag: None,
             browser_restore_focus: false,
@@ -9018,6 +9064,19 @@ impl XdDesktop {
                 self.receive_browser_command(endpoint, body, cx);
                 true
             }
+            HostUpdate::Event { name, body, .. } if name == "browser-cancel" => {
+                if let Some(request) = body.get("request").and_then(Value::as_u64) {
+                    self.browser_commands
+                        .cancel(|running| running == (endpoint, request));
+                }
+                true
+            }
+            // The host has failed what it sent on this connection; do no more of it.
+            HostUpdate::Disconnected { .. } => {
+                self.browser_commands
+                    .cancel(|(running, _)| running == endpoint);
+                false
+            }
             _ => false,
         }
     }
@@ -9034,9 +9093,11 @@ impl XdDesktop {
         ) else {
             return;
         };
+        let cancelled = self.browser_commands.start((endpoint, request));
         let answer = BrowserAnswer {
             host: Some(host),
             request,
+            running: Some((self.browser_commands.clone(), endpoint)),
         };
         let reply = move |outcome: Result<Value, String>| answer.send(outcome);
         let Some(chat_id) = body.get("chat").and_then(Value::as_str).map(str::to_owned) else {
@@ -9050,7 +9111,9 @@ impl XdDesktop {
         cx.defer(move |cx| {
             let _ = window.update(cx, |_, window, cx| {
                 let _ = desktop.update(cx, |desktop, cx| {
-                    desktop.run_browser_command(endpoint, &chat_id, command, reply, window, cx);
+                    desktop.run_browser_command(
+                        endpoint, &chat_id, command, cancelled, reply, window, cx,
+                    );
                 });
             });
         });
@@ -9058,15 +9121,29 @@ impl XdDesktop {
 
     /// Runs an agent's browser command in its chat's browser, which it opens,
     /// so the user sees what the agent does there whenever they look.
+    #[allow(clippy::too_many_arguments)]
     fn run_browser_command(
         &mut self,
         endpoint: ChatEndpoint,
         chat_id: &str,
         command: Value,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
         reply: impl FnOnce(Result<Value, String>) + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Which pane is the chat's depends on its session, which the tree says.
+        if !self
+            .endpoint_model(endpoint)
+            .chats
+            .iter()
+            .any(|chat| chat.id == chat_id)
+        {
+            reply(Err(
+                "The xd app has not loaded this chat yet. Try again in a few seconds.".into(),
+            ));
+            return;
+        }
         let key = self.chat_browser_scope_key(endpoint, chat_id);
         let shown = endpoint == self.active_endpoint && key == self.browser_scope_key();
         if self.set_scope_browser_open(key.clone(), true) {
@@ -9091,7 +9168,7 @@ impl XdDesktop {
             if !shown {
                 pane.set_visible(false);
             }
-            pane.run_agent_command(command, reply, window, cx);
+            pane.run_agent_command(command, cancelled, reply, window, cx);
         });
         if shown {
             self.sync_browser_pane(window, cx);
@@ -27797,7 +27874,45 @@ Binary files /dev/null and b/image.png differ\n";
                     .read(cx)
                     .is_visible()
             );
+            // Answered commands are no longer running.
+            assert!(desktop.browser_commands.lock().is_empty());
+
+            // A chat the tree has not shown yet could belong to a session,
+            // whose pane it would share, so it waits for the tree.
+            let generation = desktop.connection_generation;
+            desktop.handle_host_update(command(9, "unknown"), generation, cx);
         });
+        cx.run_until_parked();
+        let refused = answer(&mut requests);
+        assert_eq!(refused["request"], 9);
+        assert_eq!(
+            refused["error"],
+            "The xd app has not loaded this chat yet. Try again in a few seconds."
+        );
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(!desktop.browser_panes.contains_key("local/chat/unknown"));
+        });
+    }
+
+    #[test]
+    fn the_host_giving_up_stops_its_running_browser_commands() {
+        let running = RunningBrowserCommands::default();
+        let first = running.start((ChatEndpoint::Local, 1));
+        let second = running.start((ChatEndpoint::Local, 2));
+        let remote = running.start((ChatEndpoint::Remote, 1));
+        let stopped = |flag: &Arc<std::sync::atomic::AtomicBool>| {
+            flag.load(std::sync::atomic::Ordering::Acquire)
+        };
+        // A `browser-cancel` for one command.
+        running.cancel(|command| command == (ChatEndpoint::Local, 1));
+        assert!(stopped(&first) && !stopped(&second) && !stopped(&remote));
+        // A connection that drops takes its commands with it, and no others.
+        running.cancel(|(endpoint, _)| endpoint == ChatEndpoint::Local);
+        assert!(stopped(&second) && !stopped(&remote));
+        assert_eq!(
+            running.lock().keys().copied().collect::<Vec<_>>(),
+            [(ChatEndpoint::Remote, 1)]
+        );
     }
 
     #[cfg(unix)]
@@ -27806,13 +27921,19 @@ Binary files /dev/null and b/image.png differ\n";
         use std::io::BufRead;
 
         let (host, mut requests) = socket_host("browser-answer-test");
+        let running = RunningBrowserCommands::default();
+        let started = running.start((ChatEndpoint::Local, 3));
         drop(BrowserAnswer {
             host: Some(host.clone()),
             request: 3,
+            running: Some((running.clone(), ChatEndpoint::Local)),
         });
+        assert!(running.lock().is_empty());
+        assert!(!started.load(std::sync::atomic::Ordering::Acquire));
         BrowserAnswer {
             host: Some(host),
             request: 4,
+            running: None,
         }
         .send(Ok(serde_json::json!({"text": "Done."})));
         let mut answers = Vec::new();

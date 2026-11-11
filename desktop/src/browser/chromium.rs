@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
-        atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering},
         mpsc,
     },
     time::Duration,
@@ -1001,16 +1001,31 @@ wrap_dev_tools_message_observer! {
     }
 }
 
+/// Where a DevTools call is: waiting for CEF's UI thread, sent to the page,
+/// or given up on by its caller before it was sent, so never to be sent.
+const CALL_WAITING: u8 = 0;
+const CALL_SENT: u8 = 1;
+const CALL_ABANDONED: u8 = 2;
+
 // Sends one DevTools message, which CEF accepts only on its UI thread.
 wrap_task! {
     struct SendDevToolsMessage {
         shared: SharedState,
         id: i32,
         message: Vec<u8>,
+        state: Arc<AtomicU8>,
     }
 
     impl Task {
         fn execute(&self) {
+            // A caller that stopped waiting has reported the call as failed.
+            if self
+                .state
+                .compare_exchange(CALL_WAITING, CALL_SENT, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return;
+            }
             let (host, calls, observed) = {
                 let shared = lock(&self.shared);
                 (
@@ -1079,7 +1094,8 @@ impl DevTools {
         let message =
             serde_json::to_vec(&serde_json::json!({"id": id, "method": method, "params": params}))
                 .map_err(|error| error.to_string())?;
-        let mut task = SendDevToolsMessage::new(self.shared.clone(), id, message);
+        let state = Arc::new(AtomicU8::new(CALL_WAITING));
+        let mut task = SendDevToolsMessage::new(self.shared.clone(), id, message, state.clone());
         if post_task(ThreadId::UI, Some(&mut task)) != 1 {
             calls.take(id);
             return Err("The browser has shut down.".into());
@@ -1088,10 +1104,25 @@ impl DevTools {
         calls.take(id);
         match result {
             Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-                "The page did not answer {method} within {} seconds.",
-                timeout.as_secs()
-            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let abandoned = state
+                    .compare_exchange(
+                        CALL_WAITING,
+                        CALL_ABANDONED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok();
+                Err(if abandoned {
+                    format!("The browser was too busy to run {method}, so it did not.")
+                } else {
+                    format!(
+                        "The page took {method} but did not answer within {} seconds, so it \
+                         may have happened.",
+                        timeout.as_secs()
+                    )
+                })
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err("The page has closed.".into()),
         }
     }

@@ -7,7 +7,7 @@
 use std::{
     sync::{
         Mutex, MutexGuard, TryLockError,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -43,15 +43,19 @@ impl Page for super::chromium::DevTools {
     }
 }
 
-/// A page whose calls stop at a command's deadline, so a command the host
-/// has given up on cannot go on to click or submit anything.
+/// A page whose calls stop at a command's deadline, or once the host gives
+/// up on the command, so it cannot go on to click or submit anything.
 struct Bounded<'a, P> {
     page: &'a P,
     deadline: Instant,
+    cancelled: &'a AtomicBool,
 }
 
 impl<P: Page> Page for Bounded<'_, P> {
     fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(CANCELLED.into());
+        }
         let left = self.time_left();
         if left.is_zero() {
             return Err(OUT_OF_TIME.into());
@@ -72,6 +76,7 @@ impl<P: Page> Page for Bounded<'_, P> {
 /// before the host stops waiting, so the agent hears how it went.
 pub const COMMAND_TIME: Duration = Duration::from_secs(90);
 const OUT_OF_TIME: &str = "The browser command ran out of time, so xd stopped it.";
+const CANCELLED: &str = "The host stopped waiting for this browser command, so xd stopped it.";
 /// How long one DevTools call may take.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a command waits for a page it opened to finish loading.
@@ -82,9 +87,17 @@ const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(15);
 const SETTLE_TIME: Duration = Duration::from_millis(600);
 
 /// Waits for the page's other commands to finish, so two agents sharing it
-/// cannot type into each other's fields. Gives up at `deadline`.
-pub fn take_turn(turns: &Mutex<()>, deadline: Instant) -> Result<MutexGuard<'_, ()>, String> {
+/// cannot type into each other's fields. Gives up at `deadline`, or once
+/// `cancelled`.
+pub fn take_turn<'a>(
+    turns: &'a Mutex<()>,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<MutexGuard<'a, ()>, String> {
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(CANCELLED.into());
+        }
         match turns.try_lock() {
             Ok(turn) => return Ok(turn),
             Err(TryLockError::Poisoned(turn)) => return Ok(turn.into_inner()),
@@ -123,17 +136,27 @@ impl Outcome {
     }
 }
 
-/// Carries out `command` on `page`, by `deadline`. The address of a
-/// `navigate` command must already be checked; see `normalize_url`.
-pub fn run(page: &impl Page, command: &Value, deadline: Instant) -> Result<Outcome, String> {
-    let page = &Bounded { page, deadline };
+/// Carries out `command` on `page`, by `deadline` and until `cancelled`. The
+/// address of a `navigate` command must already be checked; see
+/// `normalize_url`.
+pub fn run(
+    page: &impl Page,
+    command: &Value,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Outcome, String> {
+    let page = &Bounded {
+        page,
+        deadline,
+        cancelled,
+    };
     let text = |key: &str| command.get(key).and_then(Value::as_str);
     let flag = |key: &str| command.get(key).and_then(Value::as_bool) == Some(true);
     match text("action").unwrap_or_default() {
         "navigate" => {
             let url = text("url").ok_or("Pass url, the address to open.")?;
-            navigate(page, url)?;
-            snapshot(page)
+            let loading = navigate(page, url)?;
+            settled_snapshot(page, loading)
         }
         "history" => {
             let loading = history(page, text("direction").unwrap_or_default())?;
@@ -249,7 +272,8 @@ fn clip(mut text: String) -> String {
     text
 }
 
-fn navigate(page: &impl Page, url: &str) -> Result<(), String> {
+/// Returns whether the page was still loading when the wait for it ended.
+fn navigate(page: &impl Page, url: &str) -> Result<bool, String> {
     // Answered once the new page is committed, or with why it could not be.
     let reply = page.call("Page.navigate", json!({"url": url}), LOAD_TIMEOUT)?;
     if let Some(error) = reply["errorText"]
@@ -291,37 +315,29 @@ fn history(page: &impl Page, direction: &str) -> Result<bool, String> {
     Ok(settle(page, &before, SETTLE_TIME))
 }
 
-/// The page as an action found it.
-struct Before {
-    /// Set on the document, so [`settle`] can tell when another replaces it.
-    mark: String,
-    /// Already loading, so its loading says nothing about the action.
-    loading: bool,
-}
-
-fn mark(page: &impl Page) -> Result<Before, String> {
+/// Marks the current document, so [`settle`] can tell when another
+/// replaces it.
+fn mark(page: &impl Page) -> Result<String, String> {
     static MARKS: AtomicU64 = AtomicU64::new(0);
     let mark = format!(
         "xd-{}-{}",
         std::process::id(),
         MARKS.fetch_add(1, Ordering::Relaxed)
     );
-    let loading = page.is_loading();
     evaluate(page, &format!("window.__xdBrowserMark = {mark:?}"))?;
-    Ok(Before { mark, loading })
+    Ok(mark)
 }
 
 /// Waits for whatever an action started: a navigation to finish, or, when
 /// none has begun within `quiet`, nothing. A navigation still waiting for its
 /// server keeps the old document, so the page's loading state is what tells
-/// it has begun. Returns whether the page was still loading when the wait
-/// ended.
-fn settle(page: &impl Page, before: &Before, quiet: Duration) -> bool {
+/// it has begun; a page that keeps loading is waited for until the time runs
+/// out. Returns whether the page was still loading when the wait ended.
+fn settle(page: &impl Page, mark: &str, quiet: Duration) -> bool {
     let started = Instant::now();
     let end = started + NAVIGATION_TIMEOUT.min(page.time_left());
-    let mark = &before.mark;
     loop {
-        let loading = page.is_loading() && !before.loading;
+        let loading = page.is_loading();
         // Fails while one document gives way to the next.
         let state = evaluate(
             page,
@@ -331,7 +347,7 @@ fn settle(page: &impl Page, before: &Before, quiet: Duration) -> bool {
             Some(state) if !loading && state[0] == true && started.elapsed() >= quiet => {
                 return false;
             }
-            Some(state) if !loading && state[0] == false && state[1] == "complete" => {
+            Some(state) if state[0] == false && state[1] == "complete" => {
                 thread::sleep(Duration::from_millis(200));
                 return false;
             }
@@ -356,22 +372,34 @@ fn settled_snapshot(page: &impl Page, loading: bool) -> Result<Outcome, String> 
     Ok(outcome)
 }
 
-fn wait_for_load(page: &impl Page, timeout: Duration) -> Result<(), String> {
+/// Returns whether the page was still loading when the wait ended. A page
+/// is usable while a slow resource holds up its load event, so that is no
+/// failure.
+fn wait_for_load(page: &impl Page, timeout: Duration) -> Result<bool, String> {
     let started = Instant::now();
     let timeout = timeout.min(page.time_left());
     while started.elapsed() < timeout {
         if evaluate(page, "document.readyState").ok() == Some(json!("complete")) {
             thread::sleep(Duration::from_millis(200));
-            return Ok(());
+            return Ok(false);
         }
         thread::sleep(Duration::from_millis(100));
     }
-    // The page is usable while a slow resource holds up its load event.
-    Ok(())
+    Ok(true)
 }
 
+/// The most refs one snapshot hands out. Its text limit allows far fewer.
+const REFS_PER_SNAPSHOT: u64 = 5_000;
+
 fn snapshot(page: &impl Page) -> Result<Outcome, String> {
-    let value = evaluate(page, &format!("({SNAPSHOT_SCRIPT})({MAX_TEXT})"))?;
+    // Numbers no snapshot has used, on any page, so a ref another agent was
+    // given can only ever name the element it was given for.
+    static NEXT_REF: AtomicU64 = AtomicU64::new(0);
+    let first = NEXT_REF.fetch_add(REFS_PER_SNAPSHOT, Ordering::Relaxed);
+    let value = evaluate(
+        page,
+        &format!("({SNAPSHOT_SCRIPT})({MAX_TEXT}, {first}, {REFS_PER_SNAPSHOT})"),
+    )?;
     let field = |key: &str| value[key].as_str().unwrap_or_default();
     Ok(Outcome::text(format!(
         "Page: {}\nAddress: {}\n\n{}",
@@ -388,7 +416,8 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
         page,
         &format!(
             "(() => {{
-                const element = (window.__xdBrowserRefs || [])[{number}];
+                const refs = window.__xdBrowserRefs;
+                const element = refs instanceof Map ? refs.get({number}) : undefined;
                 if (!element || !element.isConnected) return {{missing: true}};
                 element.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}});
                 const box = element.getBoundingClientRect();
@@ -461,7 +490,8 @@ fn type_text(page: &impl Page, number: &str, text: &str, append: bool) -> Result
         page,
         &format!(
             "(() => {{
-                const element = (window.__xdBrowserRefs || [])[{number}];
+                const refs = window.__xdBrowserRefs;
+                const element = refs instanceof Map ? refs.get({number}) : undefined;
                 if (!element || !element.isConnected) return 'missing';
                 element.scrollIntoView({{block: 'center', behavior: 'instant'}});
                 element.focus();
@@ -647,10 +677,13 @@ fn screenshot(page: &impl Page, full_page: bool) -> Result<Outcome, String> {
 }
 
 /// Reads the page as text, numbering its controls so commands can name them.
-/// Takes the most text to return; leaves the controls in
-/// `window.__xdBrowserRefs`, by number.
-const SNAPSHOT_SCRIPT: &str = r#"(limit) => {
-  const refs = [];
+/// Takes the most text to return, the first number to use and how many it
+/// may. Adds the controls to `window.__xdBrowserRefs`, by number, which keeps
+/// those of recent snapshots, since another agent may still use them.
+const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
+  if (!(window.__xdBrowserRefs instanceof Map)) window.__xdBrowserRefs = new Map();
+  const refs = window.__xdBrowserRefs;
+  let next = first;
   const lines = [];
   let size = 0;
   let full = false;
@@ -723,7 +756,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit) => {
       name = element.innerText;
     if (!name) name = element.getAttribute('title') || element.getAttribute('placeholder')
       || element.getAttribute('alt') || (element.querySelector('img[alt]') || {}).alt || '';
-    let line = `[e${refs.length}] ${role}`;
+    let line = `[e${next}] ${role}`;
     name = short(name, 120);
     if (name) line += ` "${name}"`;
     if (tag === 'A') {
@@ -792,12 +825,13 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit) => {
     }
     if (tag === 'svg' || tag === 'SVG') return;
     const role = kind(element, tag, style);
-    if (role) {
+    if (role && next < first + most) {
       const box = element.getBoundingClientRect();
       if (box.width > 0 && box.height > 0) {
         flush();
         add(describe(element, tag, role));
-        refs.push(element);
+        refs.set(next, element);
+        next += 1;
         // A control's own text is its name; a clickable area may hold more
         // controls.
         if (role !== 'clickable' && tag !== 'SUMMARY') return;
@@ -825,7 +859,11 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit) => {
   };
   walk(document.body || document.documentElement);
   flush();
-  window.__xdBrowserRefs = refs;
+  // Keep the newest; a ref older than these says to take a new snapshot.
+  for (const number of refs.keys()) {
+    if (refs.size <= 20000) break;
+    refs.delete(number);
+  }
   return {url: location.href, title: document.title, text: lines.join('\n')};
 }"#;
 
@@ -841,6 +879,8 @@ mod tests {
         calls: RefCell<Vec<(String, Value)>>,
         /// Whether the page is loading, each time it is asked; then not.
         loading: RefCell<VecDeque<bool>>,
+        /// What `Runtime.evaluate` answers once the script runs out.
+        fallback: Option<Value>,
     }
 
     impl Script {
@@ -849,6 +889,7 @@ mod tests {
                 answers: RefCell::new(answers.into()),
                 calls: RefCell::default(),
                 loading: RefCell::default(),
+                fallback: None,
             }
         }
 
@@ -864,11 +905,12 @@ mod tests {
     impl Page for Script {
         fn call(&self, method: &str, params: Value, _: Duration) -> Result<Value, String> {
             self.calls.borrow_mut().push((method.to_owned(), params));
-            let (expected, answer) = self
-                .answers
-                .borrow_mut()
-                .pop_front()
-                .unwrap_or_else(|| panic!("no answer left for {method}"));
+            let next = self.answers.borrow_mut().pop_front();
+            let (expected, answer) = match (next, &self.fallback) {
+                (Some(next), _) => next,
+                (None, Some(fallback)) => ("Runtime.evaluate", value(fallback.clone())),
+                (None, None) => panic!("no answer left for {method}"),
+            };
             assert_eq!(method, expected);
             answer
         }
@@ -879,7 +921,12 @@ mod tests {
     }
 
     fn run(page: &Script, command: &Value) -> Result<Outcome, String> {
-        super::run(page, command, Instant::now() + COMMAND_TIME)
+        super::run(
+            page,
+            command,
+            Instant::now() + COMMAND_TIME,
+            &AtomicBool::new(false),
+        )
     }
 
     fn value(value: Value) -> Result<Value, String> {
@@ -949,7 +996,12 @@ mod tests {
         ]);
         run(&script, &json!({"action": "click", "ref": "e7"})).unwrap();
         let calls = script.calls.borrow();
-        assert!(calls[1].1["expression"].as_str().unwrap().contains("[7]"));
+        assert!(
+            calls[1].1["expression"]
+                .as_str()
+                .unwrap()
+                .contains("get(7)")
+        );
         assert_eq!(calls[3].1["type"], "mousePressed");
         assert_eq!(calls[3].1["x"], 40.5);
         assert_eq!(calls[3].1["clickCount"], 1);
@@ -1064,24 +1116,73 @@ mod tests {
             super::run(
                 &script,
                 &json!({"action": "press_key", "key": "Enter"}),
-                Instant::now()
+                Instant::now(),
+                &AtomicBool::new(false)
             ),
             Err(OUT_OF_TIME.into())
+        );
+        assert_eq!(
+            super::run(
+                &script,
+                &json!({"action": "press_key", "key": "Enter"}),
+                Instant::now() + COMMAND_TIME,
+                &AtomicBool::new(true)
+            ),
+            Err(CANCELLED.into())
         );
         assert!(script.calls.borrow().is_empty());
     }
 
     #[test]
+    fn a_page_that_keeps_loading_is_not_taken_for_a_settled_one() {
+        let mut script = Script::new(vec![
+            ("Runtime.evaluate", value(json!(null))),
+            ("Input.dispatchKeyEvent", Ok(json!({}))),
+            ("Input.dispatchKeyEvent", Ok(json!({}))),
+        ]);
+        // The old document stays, and the page keeps loading, as it already
+        // was before the key: a navigation could still be on its way.
+        script.fallback = Some(json!([true, "complete"]));
+        *script.loading.borrow_mut() = [true; 1000].into();
+        let started = Instant::now();
+        let outcome = super::run(
+            &script,
+            &json!({"action": "press_key", "key": "Enter"}),
+            // Ends the wait well before the usual 15 seconds.
+            started + SETTLE_TIME * 2,
+            &AtomicBool::new(false),
+        );
+        // It waited past the time an unchanged page counts as settled, until
+        // the deadline, which then refused the snapshot.
+        assert!(started.elapsed() >= SETTLE_TIME * 2);
+        assert_eq!(outcome, Err(OUT_OF_TIME.into()));
+    }
+
+    #[test]
     fn commands_on_one_page_take_turns() {
         let turns = Mutex::new(());
-        let first = take_turn(&turns, Instant::now() + Duration::from_secs(1)).unwrap();
+        let running = AtomicBool::new(false);
+        let first = take_turn(&turns, Instant::now() + Duration::from_secs(1), &running).unwrap();
         assert!(
-            take_turn(&turns, Instant::now() + Duration::from_millis(100))
-                .unwrap_err()
-                .contains("busy")
+            take_turn(
+                &turns,
+                Instant::now() + Duration::from_millis(100),
+                &running
+            )
+            .unwrap_err()
+            .contains("busy")
+        );
+        assert_eq!(
+            take_turn(
+                &turns,
+                Instant::now() + Duration::from_secs(1),
+                &AtomicBool::new(true)
+            )
+            .unwrap_err(),
+            CANCELLED
         );
         drop(first);
-        assert!(take_turn(&turns, Instant::now()).is_ok());
+        assert!(take_turn(&turns, Instant::now(), &running).is_ok());
     }
 
     #[test]

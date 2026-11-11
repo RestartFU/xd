@@ -455,6 +455,7 @@ impl BrowserPane {
     pub fn run_agent_command(
         &mut self,
         mut command: serde_json::Value,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
         reply: impl FnOnce(Result<serde_json::Value, String>) + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -488,14 +489,16 @@ impl BrowserPane {
                 .name("xd-browser-agent".into())
                 .spawn(move || {
                     let turns = page.turns();
-                    let outcome = agent::take_turn(&turns, deadline).and_then(|_turn| {
-                        let left = deadline.saturating_duration_since(std::time::Instant::now());
-                        page.wait_until_started(left.min(Duration::from_secs(10)))?;
-                        page.wake();
-                        let outcome = agent::run(&page, &command, deadline);
-                        page.sleep();
-                        outcome
-                    });
+                    let outcome =
+                        agent::take_turn(&turns, deadline, &cancelled).and_then(|_turn| {
+                            let left =
+                                deadline.saturating_duration_since(std::time::Instant::now());
+                            page.wait_until_started(left.min(Duration::from_secs(10)))?;
+                            page.wake();
+                            let outcome = agent::run(&page, &command, deadline, &cancelled);
+                            page.sleep();
+                            outcome
+                        });
                     reply(outcome.map(agent::Outcome::into_value));
                 });
             if let Err(error) = spawned {
@@ -504,7 +507,7 @@ impl BrowserPane {
         });
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (native, command);
+            let _ = (native, command, cancelled);
             reply(Err(
                 "Agents can use xd's browser only on Linux, where it is Chromium.".into(),
             ));

@@ -1315,7 +1315,7 @@ desktop runs them, so the daemon relays each one:
 | --- | --- | --- |
 | `browser_navigate` | `navigate` | Opens `url` (`http`/`https`; no scheme means https, or http for localhost), in a new tab with `new_tab`, and waits for it to load. |
 | `browser_history` | `history` | Goes `back` or `forward`, or `reload`s, as `direction` says. |
-| `browser_snapshot` | `snapshot` | Reads the page as text, numbering its controls as refs such as `e12`. |
+| `browser_snapshot` | `snapshot` | Reads the page as text, numbering its controls as refs such as `e12`. A ref is never reused on a page, so one an agent was given names only that element, or none. |
 | `browser_click` | `click` | Clicks the middle of `ref`, twice with `double`. |
 | `browser_type` | `type` | Replaces `ref`'s text with `text`, or adds to it with `append`, and presses Enter with `submit`. |
 | `browser_press_key` | `press_key` | Presses `key`, a key name such as `Enter` or one character. |
@@ -1343,12 +1343,17 @@ connection only, and waits up to two minutes:
 `browser-result` carries `result` or `error`, and only the connection that was
 asked can answer. Both are answered as soon as they are read. With no desktop
 offering, `browser` fails at once, and it fails as soon as the desktop that was
-asked disconnects. The MCP server turns `result.text` and `result.image` into
+asked disconnects. A command not answered in time also gets
+`{"event":"browser-cancel","request":4}`, and the desktop does no more of it;
+it does the same for every command of a connection that drops, and gives each
+command 90 seconds. The MCP server turns `result.text` and `result.image` into
 text and image content.
 
 The desktop runs the command on the selected tab of the chat's browser pane,
 opening the pane for that chat; a chat not on screen keeps its pane hidden while
-its page still loads and paints. It drives the page through Chromium's DevTools
+its page still loads and paints. Commands on one page run one at a time. A
+command for a chat the desktop's tree does not have yet fails, asking the agent
+to try again, since the chat's session decides its pane. It drives the page through Chromium's DevTools
 protocol, so only the Linux desktop offers its browser. A remote host's agents
 are told that a localhost page is on the user's computer.
 ## Events

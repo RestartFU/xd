@@ -4,7 +4,9 @@
 //! A desktop offers its browser with `browser-provider` once connected. The
 //! agent's tool server asks with `browser`, which waits here while the newest
 //! desktop still connected gets a `browser-command` event and answers it with
-//! `browser-result`. Only the desktop that was asked can answer.
+//! `browser-result`. Only the desktop that was asked can answer. A command the
+//! relay stops waiting for gets `browser-cancel`, so the desktop does no more
+//! of it after the agent has been told it failed.
 
 use std::{
     collections::HashMap,
@@ -80,7 +82,7 @@ impl BrowserRelay {
         timeout: Duration,
     ) -> Value {
         let (answer, answered) = sync_channel(1);
-        let request = {
+        let (request, provider) = {
             let mut state = self.state();
             state
                 .providers
@@ -97,14 +99,21 @@ impl BrowserRelay {
                 json!({"event": "browser-command", "request": request, "chat": chat,
                     "command": command}),
             );
-            request
+            (request, provider)
         };
         let reply = answered.recv_timeout(timeout);
         self.state().waiting.remove(&request);
         match reply {
             Ok(answer) => answer,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => json!({"ok": false,
-                "error": "The xd desktop app did not finish the browser command in time."}),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                events.publish_to(
+                    provider,
+                    json!({"event": "browser-cancel", "request": request}),
+                );
+                json!({"ok": false,
+                    "error": "The xd desktop app did not finish the browser command in time, \
+                        so it was stopped."})
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => json!({"ok": false,
                 "error": "The xd desktop app disconnected before the browser command finished."}),
         }
@@ -227,6 +236,28 @@ mod tests {
         let reply = running.join().unwrap();
         assert_eq!(reply["ok"], false);
         assert!(reply["error"].as_str().unwrap().contains("disconnected"));
+    }
+
+    #[test]
+    fn a_command_not_answered_in_time_is_cancelled_on_the_desktop() {
+        let events = EventBus::default();
+        let relay = BrowserRelay::default();
+        let (desktop, desktop_events) = subscriber(&events);
+        relay.offer(desktop);
+        let reply = relay.run(&events, "c", json!({}), Duration::from_millis(50));
+        assert_eq!(reply["ok"], false);
+        let command = desktop_events.try_recv().unwrap();
+        let cancel = desktop_events.try_recv().unwrap();
+        assert_eq!(cancel["event"], "browser-cancel");
+        assert_eq!(cancel["request"], command["request"]);
+        // Too late to answer now.
+        assert_eq!(
+            relay.answer(
+                desktop,
+                &json!({"request": command["request"], "result": {}})
+            )["ok"],
+            false
+        );
     }
 
     #[test]
