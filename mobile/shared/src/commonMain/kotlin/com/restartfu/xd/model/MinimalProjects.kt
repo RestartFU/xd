@@ -66,6 +66,16 @@ public data class MinimalSession(
 public fun backgroundTasksLabel(count: Int): String =
     "Waiting on $count background task${if (count == 1) "" else "s"}"
 
+/**
+ * How many background tasks the row below the chat names: between turns, the
+ * background agents and shells still running, unless the agents tray already
+ * lists at least that many running in the transcript, so the row would only
+ * repeat it. Tasks the transcript does not show, such as hidden ones or those
+ * in pages not loaded yet, still bring the row back. As on the desktop.
+ */
+public fun backgroundRowCount(working: Boolean, listed: Int, waitingOn: Int): Int =
+    if (working || listed >= waitingOn) 0 else waitingOn
+
 /** A settled session on the shelf, with the project it belongs to. */
 public data class SettledSession(
     val project: MinimalProject,
@@ -153,6 +163,30 @@ public fun List<MinimalSession>.nestedUnderParents(): List<MinimalSession> {
     }
     // Sessions whose parents start one another in a loop still show.
     return nested + filter { it.id !in placed }
+}
+
+/**
+ * How many sessions [nestedUnderParents] lists right below the one at [index]
+ * because its agent started them, or theirs did, and so on down. Folding that
+ * session hides exactly these.
+ */
+public fun List<MinimalSession>.startedBelow(index: Int): Int {
+    val depth = this[index].depth
+    return drop(index + 1).takeWhile { it.depth > depth }.size
+}
+
+/**
+ * The sessions above [sessionId] in the line of agents that started one
+ * another, nearest first: the ones to unfold so its row shows.
+ */
+public fun TreeSnapshot.sessionsAbove(sessionId: String): List<String> {
+    val above = mutableListOf<String>()
+    var parent = sessions.firstOrNull { it.id == sessionId }?.parentId
+    while (parent != null && parent != sessionId && parent !in above) {
+        above += parent
+        parent = sessions.firstOrNull { it.id == parent }?.parentId
+    }
+    return above
 }
 
 /** Every settled session, most recently settled first, as the desktop's shelf lists them. */

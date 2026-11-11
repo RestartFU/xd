@@ -94,6 +94,20 @@ public class MobileSettings(context: Context) {
         _collapsedFolders.value = next
     }
 
+    private val _collapsedSessions = MutableStateFlow(
+        preferences.getStringSet(KEY_COLLAPSED_SESSIONS, null).orEmpty().toSet(),
+    )
+
+    /** Sessions folded over the sessions their agents started, as on the desktop. */
+    public val collapsedSessions: StateFlow<Set<String>> = _collapsedSessions.asStateFlow()
+
+    public fun setSessionsFolded(sessionIds: Collection<String>, folded: Boolean) {
+        val next = if (folded) _collapsedSessions.value + sessionIds else _collapsedSessions.value - sessionIds.toSet()
+        if (next == _collapsedSessions.value) return
+        preferences.edit().putStringSet(KEY_COLLAPSED_SESSIONS, next).apply()
+        _collapsedSessions.value = next
+    }
+
     private val _theme = MutableStateFlow(
         MinimalThemePreset.fromKey(preferences.getString(KEY_THEME, null)),
     )
@@ -123,6 +137,7 @@ public class MobileSettings(context: Context) {
         const val KEY_ALLOW_ALL_PERMISSIONS = "allow_all_permissions"
         const val KEY_THEME = "minimal_theme"
         const val KEY_COLLAPSED_FOLDERS = "collapsed_folders"
+        const val KEY_COLLAPSED_SESSIONS = "collapsed_sessions"
         const val KEY_LAST_SESSION_PROJECT = "last_session_project"
         const val KEY_RESUME_CHATS = "resume_chats"
         const val KEY_RESET_ATTEMPT = "usage_reset_attempt:"

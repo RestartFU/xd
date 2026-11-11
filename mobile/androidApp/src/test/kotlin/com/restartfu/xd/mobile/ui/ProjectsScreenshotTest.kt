@@ -354,6 +354,34 @@ class ProjectsScreenshotTest {
     }
 
     /**
+     * Folding Reconnect backoff hides the two sessions its agent started and
+     * says how many it holds; unfolding brings them back.
+     */
+    @Test fun foldingASessionHidesTheAgentsItStarted() = withWorkerSessions("workers-folded-dark") {
+        check(shows("Retry jitter") && shows("Backoff tests"))
+        click("Hide the agents Reconnect backoff started")
+        check(!shows("Retry jitter") && !shows("Backoff tests")) { "the folded session still shows its agents" }
+        check(shows("Show the agents Reconnect backoff started") && shows("Usage page"))
+        // The count of what it holds sits on the folded row itself.
+        bounds { hasText("Reconnect backoff") and hasText("2") }
+    }
+
+    @Test fun unfoldingASessionShowsTheAgentsItStarted() = withWorkerSessions("workers-unfolded-dark") {
+        click("Hide the agents Reconnect backoff started")
+        click("Show the agents Reconnect backoff started")
+        check(shows("Retry jitter") && shows("Backoff tests")) { "unfolding did not bring the agents back" }
+    }
+
+    private fun withWorkerSessions(name: String, steps: Screen.() -> Unit) {
+        withWorkers = true
+        try {
+            shoot(name, MinimalThemePreset.DARK, steps = steps)
+        } finally {
+            withWorkers = false
+        }
+    }
+
+    /**
      * A worker at work shows in the lead's tray; tapping it opens the worker's
      * own chat, with its work and a way back, where a message goes to it.
      */

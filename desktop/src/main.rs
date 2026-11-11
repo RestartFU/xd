@@ -120,7 +120,7 @@ use input::{
 use minimal::{
     AgentCli, MinimalRoute, ProjectCard, SessionCard, SettledCard, age_label, folder_tree,
     nest_sessions, next_active_session, project_cards, project_sessions, reconcile_route,
-    resumable_session, settled_cards, tree_descendants,
+    resumable_session, settled_cards, started_below, tree_descendants,
 };
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
@@ -355,6 +355,19 @@ fn settings_switch(colors: ThemeColors, enabled: bool) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// What a session row shows of the sessions its agent started, which list
+/// right below it.
+struct SessionFold {
+    /// The session's key, which the folded set holds.
+    key: String,
+    /// How many sessions below it its agent started, or theirs did.
+    workers: usize,
+    folded: bool,
+    /// The signals of the sessions folding hides, so the row still shows
+    /// which of them need a look.
+    hidden: Vec<SessionSignal>,
+}
+
 /// What a session's signal tab says about its agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionSignal {
@@ -426,6 +439,19 @@ fn background_label(count: u32) -> String {
         "Waiting on {count} background task{}",
         if count == 1 { "" } else { "s" }
     )
+}
+
+/// How many background tasks the row below the chat names: between turns,
+/// the background agents and shells still running, unless the agents tray
+/// already lists at least that many running in the transcript, so the row
+/// would only repeat it. Tasks the transcript does not show, such as hidden
+/// ones or those in pages not loaded yet, still bring the row back.
+fn background_row_count(working: bool, listed: usize, waiting_on: u32) -> u32 {
+    if working || listed >= waiting_on as usize {
+        0
+    } else {
+        waiting_on
+    }
 }
 
 /// The mark for work still running in the background: a gray ring that holds
@@ -2504,6 +2530,8 @@ struct XdDesktop {
     sidebar_move_submitting: bool,
     sidebar_move_destination: Option<Option<String>>,
     collapsed_folders: HashSet<String>,
+    /// Sessions folded over the sessions their agents started, by session key.
+    collapsed_sessions: HashSet<String>,
     /// Drawers other than the current project that the user opened by hand.
     /// Filters the catalog to projects and sessions whose names match.
     catalog_find_input: Entity<ComposerInput>,
@@ -3075,6 +3103,13 @@ impl XdDesktop {
             .flatten()
             .cloned()
             .collect();
+        let collapsed_sessions = settings
+            .collapsed_session_sets
+            .get(&active_connection)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
         let corrected_active_connection =
             settings.active_connection.as_deref() != Some(active_connection.as_str());
         settings.active_connection = Some(active_connection);
@@ -3230,6 +3265,7 @@ impl XdDesktop {
             sidebar_move_submitting: false,
             sidebar_move_destination: None,
             collapsed_folders,
+            collapsed_sessions,
             catalog_find_input,
             catalog_query: String::new(),
             creating_workspace: false,
@@ -5187,6 +5223,11 @@ impl XdDesktop {
                         .any(|folder| &folder.id == folder_id)
                 });
                 self.persist_collapsed_folders();
+                self.collapsed_sessions.retain(|key| {
+                    self.model.sessions.iter().any(|session| &session.id == key)
+                        || self.model.chats.iter().any(|chat| &chat.id == key)
+                });
+                self.persist_collapsed_sessions();
                 self.prune_settle_undo();
                 if self
                     .workspace_context_folder
@@ -8985,6 +9026,14 @@ impl XdDesktop {
 
     fn restore_collapsed_folders(&mut self) {
         let key = self.current_connection_key();
+        self.collapsed_sessions = self
+            .settings
+            .collapsed_session_sets
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
         self.collapsed_folders = self
             .settings
             .collapsed_folder_sets
@@ -11971,6 +12020,56 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// Folds a session over the sessions its agent started, or unfolds it.
+    fn toggle_session_folded(&mut self, session_key: String, cx: &mut Context<Self>) {
+        if !self.collapsed_sessions.remove(&session_key) {
+            self.collapsed_sessions.insert(session_key);
+        }
+        self.persist_collapsed_sessions();
+        cx.notify();
+    }
+
+    /// Unfolds every session above `chat_id`'s in the line of agents that
+    /// started one another, so its row shows.
+    fn reveal_started_session(&mut self, chat_id: &str) {
+        let mut parent = self
+            .model
+            .session_for_chat(chat_id)
+            .and_then(|session| session.parent.clone());
+        let mut seen = HashSet::new();
+        let mut changed = false;
+        while let Some(key) = parent.filter(|key| seen.insert(key.clone())) {
+            changed |= self.collapsed_sessions.remove(&key);
+            parent = self
+                .model
+                .sessions
+                .iter()
+                .find(|session| session.id == key)
+                .and_then(|session| session.parent.clone());
+        }
+        if changed {
+            self.persist_collapsed_sessions();
+        }
+    }
+
+    fn persist_collapsed_sessions(&mut self) {
+        let key = self.current_connection_key();
+        let mut collapsed = self.collapsed_sessions.iter().cloned().collect::<Vec<_>>();
+        collapsed.sort();
+        let saved = self.settings.collapsed_session_sets.get(&key);
+        if saved.map_or(collapsed.is_empty(), |saved| *saved == collapsed) {
+            return;
+        }
+        if collapsed.is_empty() {
+            self.settings.collapsed_session_sets.remove(&key);
+        } else {
+            self.settings.collapsed_session_sets.insert(key, collapsed);
+        }
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+    }
+
     fn persist_collapsed_folders(&mut self) {
         let key = self.current_connection_key();
         let mut collapsed = self.collapsed_folders.iter().cloned().collect::<Vec<_>>();
@@ -12263,6 +12362,7 @@ impl XdDesktop {
         else {
             return;
         };
+        self.reveal_started_session(chat_id);
         self.open_minimal_session(project_id, chat_id.to_owned(), agent, window, cx);
     }
 
@@ -13957,6 +14057,7 @@ impl XdDesktop {
         session: SessionCard,
         instance: usize,
         selected: bool,
+        fold: Option<SessionFold>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let emphasized = selected;
@@ -14101,7 +14202,58 @@ impl XdDesktop {
                     )
                 },
             )
+            // Folded, it says how many sessions it hides and which of them
+            // need a look, the way a closed project does.
+            .when_some(fold.as_ref().filter(|fold| fold.folded), |row, fold| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(rgb(colors.faint))
+                        .child(fold.workers.to_string()),
+                )
+                .child(drawer_tabs(&fold.hidden, colors))
+            })
             .children(signal_tab(signal, colors))
+            .when_some(fold, |row, fold| {
+                let label = if fold.folded {
+                    "Show the agents it started"
+                } else {
+                    "Hide the agents it started"
+                };
+                let key = fold.key;
+                // In the gutter left of the assistant's icon, under the
+                // project's own chevron, so titles stay lined up.
+                row.child(
+                    div()
+                        .id(("minimal-session-fold", instance))
+                        .absolute()
+                        .left(px(-6.0))
+                        .top_0()
+                        .bottom_0()
+                        .w(px(16.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(colors.border)))
+                        .tooltip(move |_, cx| cx.new(|_| PaneTooltip { label, colors }).into())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_session_folded(key.clone(), cx);
+                        }))
+                        .child(icon(
+                            if fold.folded {
+                                CHEVRON_RIGHT_ICON
+                            } else {
+                                CHEVRON_DOWN_ICON
+                            },
+                            10.0,
+                            colors.faint,
+                        )),
+                )
+            })
             .when_some(settle_session, |row, session_id| {
                 row.child(
                     session_row_action(
@@ -14876,9 +15028,36 @@ impl XdDesktop {
                         cx,
                     ));
                 }
+                let workers = (0..sessions.len())
+                    .map(|index| started_below(&sessions, index))
+                    .collect::<Vec<_>>();
+                // A folded session hides the run of sessions below it that
+                // its agent started; a search shows every match.
+                let mut hidden_until = 0;
                 for (session_index, session) in sessions.into_iter().enumerate() {
                     let instance = session_instance;
                     session_instance += 1;
+                    if session_index < hidden_until {
+                        continue;
+                    }
+                    let fold = (workers[session_index] > 0).then(|| {
+                        let key = self.model.session_key_for_chat(&session.id);
+                        let folded = !finding && self.collapsed_sessions.contains(&key);
+                        let end = session_index + 1 + workers[session_index];
+                        if folded {
+                            hidden_until = end;
+                        }
+                        SessionFold {
+                            key,
+                            workers: workers[session_index],
+                            folded,
+                            hidden: if folded {
+                                signals[session_index + 1..end].to_vec()
+                            } else {
+                                Vec::new()
+                            },
+                        }
+                    });
                     let selected = active_chat_id == Some(session.id.as_str());
                     let depth = session.depth;
                     let mut card = self.render_session_card(
@@ -14888,6 +15067,7 @@ impl XdDesktop {
                         session,
                         instance,
                         selected,
+                        fold,
                         cx,
                     );
                     // Started by the agent of a session above: indented under
@@ -18682,16 +18862,16 @@ impl XdDesktop {
                 self.model.working && !self.sending
             };
         let working = self.model.working;
-        // Between turns, the background agents and shells still running.
-        let waiting_on = if working {
-            0
-        } else {
+        let tray_workers = self.tray_workers();
+        let waiting_on = background_row_count(
+            working,
+            self.transcript_snapshot.running_agents.len(),
             self.model
                 .selected_chat
                 .as_deref()
                 .and_then(|id| self.model.chats.iter().find(|chat| chat.id == id))
-                .map_or(0, |chat| chat.waiting_on())
-        };
+                .map_or(0, |chat| chat.waiting_on()),
+        );
         self.background_visible = waiting_on > 0;
         if self
             .background_expanded
@@ -18724,7 +18904,7 @@ impl XdDesktop {
         let agents_tray = Self::render_agents_tray(
             colors,
             &self.transcript_snapshot.running_agents,
-            &self.tray_workers(),
+            &tray_workers,
             self.agents_tray_open,
         );
         let supports_effort = self
@@ -26849,6 +27029,17 @@ Binary files /dev/null and b/image.png differ\n";
             SessionSignal::Background(2).label().to_string(),
             "Waiting on 2 background tasks"
         );
+    }
+
+    #[test]
+    fn the_background_row_stays_away_while_the_tray_lists_the_work() {
+        assert_eq!(background_row_count(false, 0, 2), 2);
+        assert_eq!(background_row_count(false, 2, 2), 0);
+        assert_eq!(background_row_count(false, 3, 2), 0);
+        // One task the transcript does not show is still worth the row.
+        assert_eq!(background_row_count(false, 1, 2), 2);
+        assert_eq!(background_row_count(true, 0, 2), 0);
+        assert_eq!(background_row_count(false, 0, 0), 0);
     }
 
     #[test]

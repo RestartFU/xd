@@ -133,6 +133,8 @@ import androidx.compose.material3.SnackbarResult
 import com.restartfu.xd.model.SettledSession
 import com.restartfu.xd.model.activeSessions
 import com.restartfu.xd.model.settledSessions
+import com.restartfu.xd.model.sessionsAbove
+import com.restartfu.xd.model.startedBelow
 import com.restartfu.xd.model.PauseAllAction
 import com.restartfu.xd.model.pauseActionFor
 import com.restartfu.xd.model.waitingOnUser
@@ -422,6 +424,8 @@ internal fun MinimalMobileApp(
                                     startedBy = activeChat.parentId?.let { parent -> tree.chats.firstOrNull { it.id == parent } },
                                     openChat = { id ->
                                         tree.chats.firstOrNull { it.id == id }?.let { chat ->
+                                            // Unfolded on the way, so its row shows on the Projects page.
+                                            settings.setSessionsFolded(tree.sessionsAbove(chat.sessionId), false)
                                             activeSessionId = chat.sessionId
                                             chatSelections = chatSelections + (chat.sessionId to chat.id)
                                             hiddenChatIds = hiddenChatIds - chat.id
@@ -646,6 +650,7 @@ private fun MinimalProjectsHome(
     var deletingFolderId by rememberSaveable { mutableStateOf<String?>(null) }
     var movingId by rememberSaveable { mutableStateOf<String?>(null) }
     val collapsed by settings.collapsedFolders.collectAsStateWithLifecycle()
+    val foldedSessions by settings.collapsedSessions.collectAsStateWithLifecycle()
     // An earlier project or folder is still being made; another waits rather than being dropped.
     val creatingWorkspace by model.creatingWorkspace.collectAsStateWithLifecycle()
     val ownerIcons by model.client.ownerIcons.collectAsStateWithLifecycle()
@@ -808,6 +813,8 @@ private fun MinimalProjectsHome(
                                         signalOf = signalOf,
                                         open = { session -> open(project, session) },
                                         actions = actions,
+                                        folded = foldedSessions,
+                                        fold = { session, folded -> settings.setSessionsFolded(listOf(session.id), folded) },
                                         toggle = toggle,
                                         onNewSession = { newSessionIn(project.id) },
                                         pause = pauseFor(project),
@@ -1997,6 +2004,9 @@ private fun OpenDrawer(
     signalOf: (MinimalSession) -> SessionSignal,
     open: (MinimalSession) -> Unit,
     actions: SessionActions,
+    /** Sessions folded over the sessions their agents started. */
+    folded: Set<String>,
+    fold: (MinimalSession, Boolean) -> Unit,
     /** Closes the project. */
     toggle: () -> Unit,
     onNewSession: () -> Unit,
@@ -2031,10 +2041,27 @@ private fun OpenDrawer(
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
-        sessions.forEach { session ->
+        // A folded session hides the run of sessions below it that its agent started.
+        var hiddenUntil = 0
+        sessions.forEachIndexed { index, session ->
+            if (index < hiddenUntil) return@forEachIndexed
+            val workers = sessions.startedBelow(index)
+            val isFolded = workers > 0 && session.id in folded
+            if (isFolded) hiddenUntil = index + 1 + workers
             // Keyed so a row's open menu stays with its session when others come and go.
             key(session.id) {
-                SessionRow(session = session, signal = signalOf(session), onClick = { open(session) }, actions = actions)
+                SessionRow(
+                    session = session,
+                    signal = signalOf(session),
+                    onClick = { open(session) },
+                    actions = actions,
+                    fold = if (workers == 0) null else SessionFold(
+                        workers = workers,
+                        folded = isFolded,
+                        hidden = if (isFolded) sessions.subList(index + 1, hiddenUntil).map(signalOf) else emptyList(),
+                        toggle = { fold(session, !isFolded) },
+                    ),
+                )
             }
         }
     }
@@ -2072,6 +2099,16 @@ private fun StartingRow(session: StartingSession) {
     }
 }
 
+/** What a session row shows of the sessions its agent started, which list right below it. */
+private class SessionFold(
+    /** How many sessions below it its agent started, or theirs did. */
+    val workers: Int,
+    val folded: Boolean,
+    /** The signals of the sessions folding hides, so the row still shows which need a look. */
+    val hidden: List<SessionSignal>,
+    val toggle: () -> Unit,
+)
+
 /**
  * One session, on one line: its agent, its title, and a status mark only when
  * there is something to say. A branch shows when the session has its own.
@@ -2083,6 +2120,7 @@ private fun SessionRow(
     onClick: () -> Unit,
     actions: SessionActions,
     subtitle: String? = null,
+    fold: SessionFold? = null,
 ) {
     val signals = LocalXdSignals.current
     Row(
@@ -2140,7 +2178,27 @@ private fun SessionRow(
                 )
             }
         }
+        // Folded, it says how many sessions it hides and which of them need a
+        // look, the way a closed project does.
+        if (fold?.folded == true) {
+            Text("${fold.workers}", fontSize = 12.sp, color = signals.faint)
+            SignalDots(fold.hidden)
+        }
         SignalMark(signal, backgroundTasks = session.backgroundTasks)
+        if (fold != null) {
+            IconButton(onClick = fold.toggle, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    painterResource(if (fold.folded) R.drawable.ic_chevron_right else R.drawable.ic_chevron_down),
+                    contentDescription = if (fold.folded) {
+                        "Show the agents ${session.title} started"
+                    } else {
+                        "Hide the agents ${session.title} started"
+                    },
+                    tint = signals.faint,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
         if (session.settled) {
             IconButton(onClick = { actions.unsettle(session) }, modifier = Modifier.size(48.dp)) {
                 Icon(

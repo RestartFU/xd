@@ -71,10 +71,24 @@ class ChatScreenshotTest {
     @Test fun phoneExpandedBackgroundTasksLight() =
         shoot("phone-background-expanded-light", MinimalThemePreset.LIGHT, backgroundTasks = 2, expanded = true)
 
-    private fun shoot(name: String, theme: MinimalThemePreset, backgroundTasks: Int = 0, expanded: Boolean = false) {
+    /**
+     * The background tasks are an agent and a command the transcript lists, so
+     * the agents tray names them and the row that would repeat it stays away.
+     */
+    @Test fun phoneBackgroundTasksInTheTray() =
+        shoot("phone-background-tray-dark", MinimalThemePreset.DARK, backgroundTasks = 2, agents = true)
+
+    private fun shoot(
+        name: String,
+        theme: MinimalThemePreset,
+        backgroundTasks: Int = 0,
+        expanded: Boolean = false,
+        agents: Boolean = false,
+    ) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val working = backgroundTasks == 0
-        val client = XdClient({ ScriptedSocket(working) }, NoCredentials, scope)
+        val messages = if (agents) MESSAGES + BACKGROUND_AGENTS else MESSAGES
+        val client = XdClient({ ScriptedSocket(working, messages) }, NoCredentials, scope)
         runBlocking { client.connect(connection) }
         val chat = ChatViewModel(client, "chat")
         val chats = listOf(
@@ -107,6 +121,10 @@ class ChatScreenshotTest {
             Thread.sleep(30)
         }
         check(chat.state.value.visibleItems.size >= 6)
+        if (agents) {
+            compose.onNodeWithText("1 agent and 1 command running").assertIsDisplayed()
+            compose.onNodeWithText("Waiting on 2 background tasks").assertDoesNotExist()
+        }
         if (expanded) {
             compose.onNodeWithText("Waiting on 2 background tasks").performClick()
             repeat(30) {
@@ -142,7 +160,10 @@ class ChatScreenshotTest {
     )
 
     /** Answers each request from a fixed script, echoing its request id. */
-    private class ScriptedSocket(private val working: Boolean) : PlatformSocket {
+    private class ScriptedSocket(
+        private val working: Boolean,
+        private val messages: List<Pair<String, String>>,
+    ) : PlatformSocket {
         private var listener: PlatformSocketListener? = null
 
         override fun connect(connection: SshConnection, listener: PlatformSocketListener) {
@@ -173,8 +194,8 @@ class ChatScreenshotTest {
             "chat" -> """{"ok":true,"title":"Fix reconnect backoff","backend":"claude","commands":[],"plan":false,""" +
                 """"queue":[],"working":$working,"label":"Claude","working_for":48,"items":[],"new_worktree":false,""" +
                 """"has_messages":true,"model":"claude-opus-5-5","effort":"high"}"""
-            "messages" -> """{"ok":true,"total_messages":${MESSAGES.size},"last_message_id":${MESSAGES.size},"messages":[""" +
-                MESSAGES.mapIndexed { i, (role, text) ->
+            "messages" -> """{"ok":true,"total_messages":${messages.size},"last_message_id":${messages.size},"messages":[""" +
+                messages.mapIndexed { i, (role, text) ->
                     """{"id":${i + 1},"role":"$role","content":${kotlinx.serialization.json.JsonPrimitive(text)},"at":${1762500000 + i}}"""
                 }.joinToString(",") + "]}"
             "agent-catalog" -> """{"ok":true,"backends":[{"id":"claude","name":"Claude Code",""" +
@@ -184,6 +205,19 @@ class ChatScreenshotTest {
     }
 
     private companion object {
+        val STARTED = System.currentTimeMillis() - 17_000
+
+        /** A reviewer agent and a CI watch the turn left running in the background. */
+        val BACKGROUND_AGENTS = listOf(
+            "tool" to "subagent_run\n" +
+                """{"key":"toolu_review","provider":"Claude","agent":"general-purpose","description":"Review the reconnect change",""" +
+                """"status":"running","background":true,"started_at":$STARTED}""",
+            "tool" to "subagent_run\n" +
+                """{"key":"toolu_ci","provider":"Claude","agent":"Shell","description":"Watch CI",""" +
+                """"status":"running","background":true,"started_at":$STARTED}""",
+            "assistant" to "I started a reviewer and a CI watch in the background. I'll report back when they finish.",
+        )
+
         val MESSAGES = listOf(
             "user" to "The Android client hammers the host after a network drop. Make reconnect back off, and keep the chat usable while it retries.",
             "assistant" to "I'll start with the connection actor, since that's where retries are scheduled.",

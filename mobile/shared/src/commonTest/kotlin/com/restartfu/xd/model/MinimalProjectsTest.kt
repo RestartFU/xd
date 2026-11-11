@@ -119,6 +119,17 @@ class MinimalProjectsTest {
     }
 
     @Test
+    fun backgroundRowStaysAwayWhileTheTrayListsTheWork() {
+        assertEquals(2, backgroundRowCount(working = false, listed = 0, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = false, listed = 2, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = false, listed = 3, waitingOn = 2))
+        // One task the transcript does not show is still worth the row.
+        assertEquals(2, backgroundRowCount(working = false, listed = 1, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = true, listed = 0, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = false, listed = 0, waitingOn = 0))
+    }
+
+    @Test
     fun deletingOriginalChatKeepsSessionAndSharedTerminalIdentity() {
         val snapshot = TreeSnapshot(
             chats = listOf(chat("sibling", "project", "Review", "claude").copy(sessionId = "session")),
@@ -250,5 +261,11 @@ class MinimalProjectsTest {
             snapshot.activeSessions("compiler").map { it.id to it.depth },
         )
         assertEquals("lead", snapshot.minimalSessions("compiler").first { it.id == "w1" }.parentId)
+        val listed = snapshot.activeSessions("compiler")
+        assertEquals(listOf(0, 3, 0, 1, 0, 0, 0, 0, 0), listed.indices.map(listed::startedBelow))
+        assertEquals(listOf("w1", "lead"), snapshot.sessionsAbove("deep"))
+        assertEquals(emptyList(), snapshot.sessionsAbove("lead"))
+        // A loop of parents ends instead of going round.
+        assertEquals(listOf("loopB"), snapshot.sessionsAbove("loopA"))
     }
 }
