@@ -2,8 +2,10 @@
 //! them, by hand or on the host's own schedule.
 //!
 //! The rules run in the daemon so they keep working while every client is
-//! closed. Settling only ever changes where a session is listed: it closes no
-//! terminal, and work an agent is still doing goes on. The same sweep stops
+//! closed. Settling changes where a session is listed: it closes no terminal,
+//! and work its own agent is still doing goes on. The agents its chats started
+//! go, though, since nothing more will be asked of them; the rules wait while
+//! one is at work, and settling by hand stops it. The same sweep stops
 //! agent processes with nothing left to do; see
 //! [`TurnRuntime::release_idle_agents`], and then deletes what has sat idle
 //! for longer still, when the user asked for that; see [`crate::deletion`].
