@@ -1112,6 +1112,8 @@ pub struct DevTools {
     /// Calls are sent however long CEF takes, even after their caller has
     /// stopped waiting, as letting go of a pressed key must be.
     deliver: bool,
+    /// Whether the last call reached the page, or may have.
+    last_sent: Arc<AtomicBool>,
 }
 
 impl DevTools {
@@ -1128,7 +1130,14 @@ impl DevTools {
             shared: self.shared.clone(),
             cancelled: Arc::default(),
             deliver: true,
+            last_sent: Arc::default(),
         }
+    }
+
+    /// Whether the last call reached the page, or may have. One refused,
+    /// given up on or stopped before CEF sent it did not.
+    pub fn last_call_sent(&self) -> bool {
+        self.last_sent.load(Ordering::Acquire)
     }
 
     /// Calls `method` and waits up to `timeout` for its result.
@@ -1137,6 +1146,22 @@ impl DevTools {
         method: &str,
         params: serde_json::Value,
         timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let state = Arc::new(AtomicU8::new(CALL_WAITING));
+        let result = self.send(method, params, timeout, &state);
+        self.last_sent.store(
+            state.load(Ordering::Acquire) == CALL_SENT,
+            Ordering::Release,
+        );
+        result
+    }
+
+    fn send(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+        state: &Arc<AtomicU8>,
     ) -> Result<serde_json::Value, String> {
         let calls = {
             let shared = lock(&self.shared);
@@ -1160,7 +1185,6 @@ impl DevTools {
         let message =
             serde_json::to_vec(&serde_json::json!({"id": id, "method": method, "params": params}))
                 .map_err(|error| error.to_string())?;
-        let state = Arc::new(AtomicU8::new(CALL_WAITING));
         let mut task = SendDevToolsMessage::new(
             self.shared.clone(),
             id,
@@ -1433,6 +1457,7 @@ impl ChromiumView {
             shared: self.shared.clone(),
             cancelled: Arc::default(),
             deliver: false,
+            last_sent: Arc::default(),
         }
     }
 

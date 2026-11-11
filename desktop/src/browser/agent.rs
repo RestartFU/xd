@@ -5,6 +5,7 @@
 //! agent. It blocks, so it runs on a thread of its own.
 
 use std::{
+    cell::Cell,
     sync::{
         Mutex, MutexGuard, TryLockError,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -31,6 +32,12 @@ pub trait Page {
         Duration::MAX
     }
 
+    /// Whether the last call reached the page, or may have: false for one
+    /// refused or stopped before it was sent.
+    fn last_call_sent(&self) -> bool {
+        true
+    }
+
     /// Calls `method` even once the command is stopped or out of time: for
     /// letting go of a button or key it pressed, which must not stay held.
     fn call_regardless(
@@ -53,6 +60,10 @@ impl Page for super::chromium::DevTools {
         super::chromium::DevTools::is_loading(self)
     }
 
+    fn last_call_sent(&self) -> bool {
+        super::chromium::DevTools::last_call_sent(self)
+    }
+
     fn call_regardless(
         &self,
         method: &str,
@@ -69,10 +80,13 @@ struct Bounded<'a, P> {
     page: &'a P,
     deadline: Instant,
     cancelled: &'a AtomicBool,
+    /// The last call was refused here, so never sent.
+    refused: Cell<bool>,
 }
 
 impl<P: Page> Page for Bounded<'_, P> {
     fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        self.refused.set(true);
         if self.cancelled.load(Ordering::Acquire) {
             return Err(CANCELLED.into());
         }
@@ -80,7 +94,12 @@ impl<P: Page> Page for Bounded<'_, P> {
         if left.is_zero() {
             return Err(OUT_OF_TIME.into());
         }
+        self.refused.set(false);
         self.page.call(method, params, timeout.min(left))
+    }
+
+    fn last_call_sent(&self) -> bool {
+        !self.refused.get() && self.page.last_call_sent()
     }
 
     fn is_loading(&self) -> bool {
@@ -184,6 +203,7 @@ pub fn run(
         page,
         deadline,
         cancelled,
+        refused: Cell::new(false),
     };
     let text = |key: &str| command.get(key).and_then(Value::as_str);
     let flag = |key: &str| command.get(key).and_then(Value::as_bool) == Some(true);
@@ -494,7 +514,12 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                 const controlAt = node => {{
                     for (let at = node; at; at = at.parentNode || at.host)
                         if (at.nodeType === 1 && at.matches(
-                            'a[href], button, input, select, textarea, summary, [role], [contenteditable]'))
+                            'a[href], button, input, select, textarea, summary, '
+                            + '[contenteditable]:not([contenteditable=false]), '
+                            + ['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
+                               'menuitemcheckbox', 'menuitemradio', 'option', 'combobox', 'textbox',
+                               'searchbox', 'slider', 'spinbutton', 'treeitem']
+                                .map(role => `[role=${{role}}]`).join(', ')))
                             return at;
                     return null;
                 }};
@@ -566,19 +591,19 @@ fn click(page: &impl Page, number: &str, double: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Presses with `down` and lets go with `up`. Once `down` has been tried,
-/// `up` is sent whatever became of it, even for a command stopped or out of
-/// time meanwhile, so no button or key is left held on the page.
+/// Presses with `down` and lets go with `up`. Once `down` has reached the
+/// page, or may have, `up` is sent whatever became of it, even for a command
+/// stopped or out of time meanwhile, so no button or key is left held; one
+/// never sent gets no `up`, which the page could act on instead.
 fn held(
     page: &impl Page,
     down: impl FnOnce() -> Result<Value, String>,
     up: impl FnOnce() -> Result<Value, String>,
 ) -> Result<(), String> {
-    if page.time_left().is_zero() {
-        // Refused before anything is pressed.
-        return down().map(|_| ());
-    }
     let pressed = down();
+    if pressed.is_err() && !page.last_call_sent() {
+        return pressed.map(|_| ());
+    }
     let released = up();
     pressed.and(released).map(|_| ())
 }
@@ -1401,6 +1426,49 @@ mod tests {
         assert_eq!(calls[3].1["type"], "mousePressed");
         assert_eq!(calls[4].1["type"], "mouseReleased");
         assert_eq!(calls.len(), 5);
+    }
+
+    /// Stopped while its key press still waited to be sent, which never is.
+    struct StoppedBeforeSending<'a> {
+        script: &'a Script,
+        cancelled: &'a AtomicBool,
+        sent: Cell<bool>,
+    }
+
+    impl Page for StoppedBeforeSending<'_> {
+        fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+            if method == "Input.dispatchKeyEvent" {
+                self.cancelled.store(true, Ordering::Release);
+                self.sent.set(false);
+                return Err("The command was stopped.".into());
+            }
+            self.sent.set(true);
+            self.script.call(method, params, timeout)
+        }
+
+        fn last_call_sent(&self) -> bool {
+            self.sent.get()
+        }
+    }
+
+    #[test]
+    fn a_key_never_pressed_is_not_let_go_of() {
+        let script = Script::new(vec![("Runtime.evaluate", value(json!(null)))]);
+        let cancelled = AtomicBool::new(false);
+        let page = StoppedBeforeSending {
+            script: &script,
+            cancelled: &cancelled,
+            sent: Cell::new(true),
+        };
+        let outcome = super::run(
+            &page,
+            &json!({"action": "press_key", "key": "Enter"}),
+            Instant::now() + COMMAND_TIME,
+            &cancelled,
+        );
+        assert_eq!(outcome, Err("The command was stopped.".into()));
+        // Only the mark: no keyUp followed the press that never went.
+        assert_eq!(script.calls.borrow().len(), 1);
     }
 
     #[test]
