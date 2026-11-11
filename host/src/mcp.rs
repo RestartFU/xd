@@ -2,6 +2,7 @@
 //! Each call goes to the running daemon; this process keeps no state.
 
 use std::{
+    collections::HashSet,
     io::{self, BufRead, Read, Write},
     net::Shutdown,
     os::unix::net::UnixStream,
@@ -36,12 +37,12 @@ struct Call {
 #[derive(Default)]
 struct Calls {
     current: Option<Call>,
-    /// Requests cancelled while still waiting their turn, so they never run.
-    cancelled: Vec<Value>,
+    /// Requests read and waiting their turn, by id.
+    queued: HashSet<String>,
+    /// Those of them cancelled, which never run. Only waiting requests are
+    /// kept here, so it holds no more than the queue does.
+    cancelled: HashSet<String>,
 }
-
-/// How many cancelled requests that have not run yet are remembered.
-const MAX_CANCELLED: usize = 64;
 
 type CurrentCall = Arc<Mutex<Calls>>;
 
@@ -70,9 +71,9 @@ pub(super) fn serve(options: HostOptions, chat: &str) -> Result<(), String> {
                 let id = message.get("id").cloned().unwrap_or_default();
                 {
                     let mut calls = lock(&current);
-                    if let Some(at) = calls.cancelled.iter().position(|early| *early == id) {
+                    calls.queued.remove(&id.to_string());
+                    if calls.cancelled.remove(&id.to_string()) {
                         // Cancelled before its turn: not run, and not answered.
-                        calls.cancelled.remove(at);
                         continue;
                     }
                     calls.current = Some(Call {
@@ -117,12 +118,27 @@ fn read_messages(messages: &mpsc::Sender<Vec<u8>>, current: &CurrentCall) {
             Ok(_) => {
                 if let Some(id) = cancelled_request(&line) {
                     cancel(current, &id);
-                } else if messages.send(line).is_err() {
+                    continue;
+                }
+                // Known as waiting before it can be cancelled.
+                if let Some(id) = request_id(&line) {
+                    lock(current).queued.insert(id.to_string());
+                }
+                if messages.send(line).is_err() {
                     return;
                 }
             }
         }
     }
+}
+
+/// The id of a request, which a message without one is not.
+fn request_id(line: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(line)
+        .ok()?
+        .get("id")
+        .filter(|id| !id.is_null())
+        .cloned()
 }
 
 /// The request a `notifications/cancelled` message names, if it is one.
@@ -142,11 +158,12 @@ fn cancel(current: &CurrentCall, id: &Value) {
                 let _ = stream.shutdown(Shutdown::Both);
             }
         }
+        // One still waiting never runs; any other has been answered already.
         None => {
-            if calls.cancelled.len() == MAX_CANCELLED {
-                calls.cancelled.remove(0);
+            let id = id.to_string();
+            if calls.queued.contains(&id) {
+                calls.cancelled.insert(id);
             }
-            calls.cancelled.push(id.clone());
         }
     }
 }
@@ -194,10 +211,19 @@ mod tests {
             .unwrap()
         };
         // Another call's cancellation leaves this one be, and is kept for
-        // when that call's turn comes.
-        cancel(&current, &cancelled_request(&line(json!(8))).unwrap());
+        // when that call's turn comes, however many wait.
+        for id in 8..200 {
+            lock(&current).queued.insert(json!(id).to_string());
+        }
+        for id in 8..200 {
+            cancel(&current, &cancelled_request(&line(json!(id))).unwrap());
+        }
         assert!(!lock(&current).current.as_ref().unwrap().cancelled);
-        assert_eq!(lock(&current).cancelled, [json!(8)]);
+        assert!(lock(&current).cancelled.contains(&json!(8).to_string()));
+        assert_eq!(lock(&current).cancelled.len(), 192);
+        // A cancellation for a call not waiting is not kept.
+        cancel(&current, &cancelled_request(&line(json!(500))).unwrap());
+        assert_eq!(lock(&current).cancelled.len(), 192);
         cancel(&current, &cancelled_request(&line(json!(7))).unwrap());
         assert!(lock(&current).current.as_ref().unwrap().cancelled);
         // The daemon sees the connection end, which stops the command.
