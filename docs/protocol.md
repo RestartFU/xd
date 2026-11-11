@@ -1317,6 +1317,91 @@ Starting an agent creates its chat and starts its first turn before answering,
 so the server waits up to 300 seconds for the daemon, and Codex is started with
 `mcp_servers.xd.tool_timeout_sec=300` so it waits as long for the tool.
 
+### Watching CI
+
+The same server's `watch_ci` tool lets an agent wait for a pull request's
+checks without a `gh run watch` or polling loop in its shell. It sends
+`watch-ci` for its chat, with `pull_request` when the agent named one:
+
+```json
+{"op":"watch-ci","chat":"lead","pull_request":"https://github.com/o/r/pull/7"}
+{"ok":true,"url":"https://github.com/o/r/pull/7","number":7,"head":"1e3d4a4…","checks":4,"pending":3,"finished":false}
+```
+
+Without `pull_request`, the daemon watches the pull request of the branch
+checked out in the chat's workdir. It reads the pull request with
+`gh pr view --json …,statusCheckRollup`, so it needs the GitHub CLI signed in.
+When the chat has no watch of it yet and every check on the head has already
+finished, each with a completion time at least two minutes old, it answers
+`"finished":true` with `report`, the message below, adds a finished card and
+keeps no watch. Otherwise it records the watch, which a
+restarted daemon resumes, and asks GitHub every 15 seconds. The watch follows
+the pull request's head. When the chat's branch tracks the pull request's head
+branch in its head repository, and that upstream holds a commit newer than the
+head GitHub shows, the watch waits up to 20 polls for GitHub to show it (or a
+head built on it), and otherwise stops and says so. The checks count as
+finished once two polls in a row find the same head and the same run and
+outcome of every check, none of them still running, and the checks have been
+still for a minute: by their completion times, or, when a check gives none, by
+the watch having seen the same finished checks for that long. Before the
+report goes out, the daemon reads the pull request once more and goes on
+watching if anything changed, or if the chat's checkout pushed again since the
+poll that decided. A report is final for the head it names: a change in the
+moment it is stored, whether a push from the checkout or a change on GitHub
+alone, is not followed, so an agent that pushes again calls `watch_ci` again. A chat watches at most 8 pull requests at
+once, and asking again for the same one starts its watch over. Deleting the
+chat ends its watches without a report.
+
+#### The CI card
+
+Each watch keeps a card in the chat's transcript: a `tool` row holding
+`ci_run`, a newline and a JSON record, which the host adds when the watch
+starts and rewrites in place, with a `record` event, whenever what it shows
+changes:
+
+```json
+{"url":"https://github.com/o/r/pull/7","number":7,"title":"Fix the settings test",
+ "head":"9f2c7b1","status":"running","started_at":1762900000,
+ "checks":[{"name":"linux","workflow":"pr","state":"failed","conclusion":"failure",
+   "link":"https://github.com/o/r/actions/runs/4/job/13"},
+  {"name":"macos","workflow":"pr","state":"pending"}]}
+```
+
+`status` is `running`, `passed`, `failed` or `stopped`; each check's `state` is
+`pending`, `passed`, `failed` (with GitHub's `conclusion` in words) or
+`skipped`. `counts` gives how many checks are `failed`, `pending`, `passed` and
+`skipped`; `checks` lists failed ones first, then pending, then the rest, at
+most 50, so clients show how many more there are. A running card waiting for
+GitHub to show a pushed commit has
+`waiting_for`, its short hash. A finished or stopped card has `finished_at`,
+and a stopped one `reason`. Asking again for the same pull request stops the
+earlier card with the reason "Watched again below." and starts a new one; an
+answer given at once adds a finished card. Clients draw the card on its own,
+never folded into a run of tool calls, with every check listed, and open the
+pull request's checks from it.
+
+#### The report
+
+When the watch ends, the chat gets one report, held and handed over exactly as
+an agent's report is (see "Agents an agent starts"): never in the user's
+queue, at once when the chat is free, otherwise once its turn ends or it
+resumes. Storing the report, ending the watch and writing the card's last state
+happen in one transaction, so each watch reports once, and a watch that was
+replaced or ended never does. Its first line is one of:
+
+- `[xd] CI passed on <url> at <short head>.`
+- `[xd] CI failed on <url> at <short head>.`
+- `[xd] Stopped watching CI on <url>.`
+
+After it come the counts. A failed run lists each check that did not pass, with
+its conclusion and link, and ends with the last lines of up to three failed
+GitHub Actions jobs' failed steps. A stopped watch gives the reason: the pull
+request was merged or closed first, GitHub never showed the pushed commit, no
+checks ran on its head, GitHub could not be read eight polls in a row, or six
+hours went by. Clients show such a user row as one line, "CI passed", "CI
+failed" or "Stopped watching CI" with the pull request's number, which opens
+the pull request's checks; the card above has the details.
+
 `move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
 to move the folder to the workspace root. A folder cannot be moved into itself
 or one of its descendants, and the host rejects a destination name collision.

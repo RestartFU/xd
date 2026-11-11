@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::{
     Engine, error_reply, required_string,
     runtime::{SettledTurn, TurnNews},
-    storage::{AgentOrigin, ChildAgent, ReportDelivery},
+    storage::{AgentOrigin, ChildAgent, ReportDelivery, StateStore},
 };
 
 /// Agents one chat may have at work at once.
@@ -368,6 +368,24 @@ impl Engine {
         text: &str,
         released: bool,
     ) -> Result<(), String> {
+        self.hand_over_report(parent, |store| {
+            store
+                .deliver_agent_report(parent, child, text, released)
+                .map(Some)
+                .map_err(|error| error.to_string())
+        })
+        .map(|_| ())
+    }
+
+    /// Stores a report for chat `chat` through `store_it`, under the chat's
+    /// gate and the session resources, as a send is, and starts the turn that
+    /// hands it over when the chat is free. `store_it` answers `None` when it
+    /// stored nothing; so does this.
+    pub(crate) fn hand_over_report(
+        &self,
+        chat: &str,
+        store_it: impl FnOnce(&StateStore) -> Result<Option<ReportDelivery>, String>,
+    ) -> Result<Option<()>, String> {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return Err("Rust host state storage is not configured.".into());
         };
@@ -375,7 +393,7 @@ impl Engine {
             .restart_answer
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let gate = self.chat_execution_gate(parent)?;
+        let gate = self.chat_execution_gate(chat)?;
         let _execution = gate
             .lock()
             .map_err(|_| "This session's agent state is unavailable.".to_owned())?;
@@ -385,18 +403,18 @@ impl Engine {
             .map_err(|_| "Session resources are unavailable.".to_owned())?;
         // As for a message: a chat past its quota but not yet stopped stops now.
         if store
-            .chat_quota(parent)
+            .chat_quota(chat)
             .is_ok_and(|quota| !quota.reached && quota.spent())
         {
-            self.stop_for_quota_gated(parent);
+            self.stop_for_quota_gated(chat);
         }
-        let settled = store.chat_has_settlement_override(parent).unwrap_or(false);
-        match store
-            .deliver_agent_report(parent, child, text, released)
-            .map_err(|error| error.to_string())?
-        {
-            ReportDelivery::Held => Ok(()),
-            ReportDelivery::SteeredFirst(front) => self.start_steered(parent, &front),
+        let settled = store.chat_has_settlement_override(chat).unwrap_or(false);
+        let Some(delivery) = store_it(store)? else {
+            return Ok(None);
+        };
+        match delivery {
+            ReportDelivery::Held => Ok(Some(())),
+            ReportDelivery::SteeredFirst(front) => self.start_steered(chat, &front).map(Some),
             ReportDelivery::Start(turn) => {
                 if settled {
                     self.events.publish(json!({"event": "tree"}));
@@ -404,11 +422,11 @@ impl Engine {
                 let started = runtime.start(turn.clone());
                 if let Err(error) = &started {
                     let _ = store.abort_turn_start(&turn.chat_id, error);
-                    runtime.report_start_failure(parent, error, false);
+                    runtime.report_start_failure(chat, error, false);
                 }
                 self.events
-                    .publish(json!({"event": "changed", "chat": parent}));
-                started
+                    .publish(json!({"event": "changed", "chat": chat}));
+                started.map(Some)
             }
         }
     }

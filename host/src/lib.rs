@@ -25,6 +25,7 @@ mod background_tasks;
 mod browser_relay;
 mod chat_title;
 mod child_agents;
+mod ci_watch;
 mod cli_updates;
 mod cli_versions;
 mod codex_app;
@@ -195,6 +196,8 @@ pub struct Engine {
     cli_updates: CliUpdates,
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
+    /// CI watches agents asked for; see [`ci_watch`].
+    ci_watches: ci_watch::CiWatches,
     usage: UsageService,
     owner_icons: Arc<OwnerIcons>,
     terminals: TerminalManager,
@@ -261,6 +264,7 @@ impl Engine {
             cli_updates: CliUpdates::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
+            ci_watches: ci_watch::CiWatches::default(),
             usage: UsageService::new(events.clone(), None),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
             terminals: TerminalManager::new(events.clone()),
@@ -333,6 +337,7 @@ impl Engine {
             cli_updates,
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
+            ci_watches: ci_watch::CiWatches::default(),
             usage: UsageService::new(events.clone(), data_directory.clone())
                 .with_accounts(accounts),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
@@ -438,6 +443,7 @@ impl Engine {
             Some("list-agents") => self.list_agents(&request),
             Some("message-agent") => self.message_agent(&request),
             Some("stop-agent") => self.stop_agent(&request),
+            Some("watch-ci") => self.watch_ci(&request),
             // Only a chat's own tool server, on this machine, drives its browser.
             Some("browser") if self.pairing.is_local(owner) => {
                 self.browser_command(owner, &request)

@@ -398,6 +398,113 @@ pub struct AgentRecord {
     pub created: bool,
 }
 
+/// A pull request whose checks a chat's agent asked xd to watch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CiWatch {
+    pub chat: String,
+    pub url: String,
+    /// This watch's own, so a later watch of the same pull request, which
+    /// gets a new one, is told apart from it.
+    pub token: String,
+    pub created_at: i64,
+    /// A commit the chat pushed that GitHub did not show as the head yet.
+    pub expected_head: Option<String>,
+}
+
+/// A watch [`StateStore::add_ci_watch`] stored, and the write that retired
+/// the card of the watch it replaced.
+pub(crate) struct AddedCiWatch {
+    pub watch: CiWatch,
+    pub retired: Option<CardWrite>,
+}
+
+/// A CI card written to a chat's transcript: new, or rewritten in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CardWrite {
+    pub message_id: i64,
+    pub text: String,
+    pub created: bool,
+}
+
+/// What a card says of a watch another one took over.
+pub(crate) const RETIRED_BY_ANOTHER: &str = "Watched again below.";
+
+/// Writes `text` as the card `card` in `chat_id`'s transcript, or as a new
+/// card when there is none. `None` when it already says exactly that.
+fn write_card(
+    transaction: &rusqlite::Transaction<'_>,
+    chat_id: &str,
+    card: Option<i64>,
+    text: &str,
+) -> Result<Option<CardWrite>, StorageError> {
+    let current = match card {
+        Some(card) => transaction
+            .query_row(
+                "SELECT content FROM messages WHERE id = ? AND chat_id = ? AND role = 'tool'",
+                params![card, chat_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?,
+        None => None,
+    };
+    match (card, current) {
+        (_, Some(current)) if current == text => Ok(None),
+        (Some(card), Some(_)) => {
+            transaction.execute(
+                "UPDATE messages SET content = ? WHERE id = ? AND chat_id = ? AND role = 'tool'",
+                params![text, card, chat_id],
+            )?;
+            Ok(Some(CardWrite {
+                message_id: card,
+                text: text.to_owned(),
+                created: false,
+            }))
+        }
+        _ => {
+            transaction.execute(
+                "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'tool', ?, ?)",
+                params![chat_id, text, now_seconds()],
+            )?;
+            Ok(Some(CardWrite {
+                message_id: transaction.last_insert_rowid(),
+                text: text.to_owned(),
+                created: true,
+            }))
+        }
+    }
+}
+
+/// Marks the running card `card` as stopped for `reason`.
+fn retire_ci_card(
+    transaction: &rusqlite::Transaction<'_>,
+    chat_id: &str,
+    card: i64,
+    reason: &str,
+) -> Result<Option<CardWrite>, StorageError> {
+    let Some(content) = transaction
+        .query_row(
+            "SELECT content FROM messages WHERE id = ? AND chat_id = ? AND role = 'tool'",
+            params![card, chat_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let Some(mut record) = content
+        .strip_prefix(crate::ci_watch::CARD_PREFIX)
+        .and_then(|record| serde_json::from_str::<Value>(record).ok())
+        .filter(|record| record["status"] == "running")
+    else {
+        return Ok(None);
+    };
+    record["status"] = json!("stopped");
+    record["reason"] = json!(reason);
+    record["finished_at"] = json!(now_seconds());
+    let text = format!("{}{record}", crate::ci_watch::CARD_PREFIX);
+    write_card(transaction, chat_id, Some(card), &text)
+}
+
 /// A chat another chat's agent started, as [`StateStore::child_agents`] reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildAgent {
@@ -3770,6 +3877,27 @@ impl StateStore {
         text: &str,
         released: bool,
     ) -> Result<ReportDelivery, StorageError> {
+        let delivery = self.store_report(chat_id, agent_id, text, |transaction| {
+            let replaced = transaction.execute(
+                "DELETE FROM agent_reports WHERE agent_id = ? AND state = 'held'",
+                [agent_id],
+            )?;
+            Ok(!released || replaced > 0)
+        })?;
+        Ok(delivery.unwrap_or(ReportDelivery::Held))
+    }
+
+    /// Stores `text` as a report from `agent_id` for `chat_id` and hands it
+    /// over when the chat is free, as [`Self::deliver_agent_report`] tells.
+    /// `claim` runs first, in the same transaction: when it answers false,
+    /// nothing is stored and the answer is `None`.
+    fn store_report(
+        &self,
+        chat_id: &str,
+        agent_id: &str,
+        text: &str,
+        claim: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<bool, StorageError>,
+    ) -> Result<Option<ReportDelivery>, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         // A chat a restart cut off waits for the user's answer on resuming it.
@@ -3796,13 +3924,9 @@ impl StateStore {
             )?;
             paused = true;
         }
-        let replaced = transaction.execute(
-            "DELETE FROM agent_reports WHERE agent_id = ? AND state = 'held'",
-            [agent_id],
-        )?;
-        if released && replaced == 0 {
+        if !claim(&transaction)? {
             transaction.commit()?;
-            return Ok(ReportDelivery::Held);
+            return Ok(None);
         }
         transaction.execute(
             "INSERT INTO agent_reports (chat_id, agent_id, text, created_at) VALUES (?, ?, ?, ?)",
@@ -3813,9 +3937,9 @@ impl StateStore {
         transaction.commit()?;
         drop(database);
         if working || paused || cut_off {
-            return Ok(ReportDelivery::Held);
+            return Ok(Some(ReportDelivery::Held));
         }
-        self.start_agent_reports(chat_id)
+        self.start_agent_reports(chat_id).map(Some)
     }
 
     #[cfg(test)]
@@ -4472,6 +4596,432 @@ impl StateStore {
     /// is none; a missing `url` means GitHub could not say, which is not the
     /// same as no. `None` outside a repository, on a detached HEAD, and when HEAD
     /// moved during the lookup.
+    /// The directory chat `chat_id`'s agent works in.
+    pub(crate) fn chat_workdir(&self, chat_id: &str) -> Result<PathBuf, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        resolve_chat_workdir(&database, &self.workspace_root, chat_id).map(PathBuf::from)
+    }
+
+    /// Runs the GitHub CLI in `workdir` with nothing to prompt for, under the
+    /// shared output and time bounds.
+    pub(crate) fn run_gh(
+        &self,
+        workdir: &Path,
+        arguments: &[&str],
+    ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
+        run_gh(workdir, arguments)
+    }
+
+    /// Runs the GitHub CLI in `workdir` as [`Self::run_gh`] does, keeping only
+    /// the last `keep` bytes of what it writes to stdout, however much that
+    /// is. Answers whether it succeeded, and that tail.
+    pub(crate) fn run_gh_tail(
+        &self,
+        workdir: &Path,
+        arguments: &[&str],
+        keep: usize,
+    ) -> Result<(bool, Vec<u8>), StorageError> {
+        let executable = env::var_os("XD_GH_EXECUTABLE").unwrap_or_else(|| "gh".into());
+        let mut child = Command::new(executable)
+            .args(arguments)
+            .current_dir(workdir)
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|source| StorageError::Filesystem {
+                context: "Cannot run GitHub CLI".into(),
+                source,
+            })?;
+        let stdout = child.stdout.take().expect("piped gh stdout");
+        let reader = thread::spawn(move || read_tail(stdout, keep));
+        let deadline = Instant::now() + GIT_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|source| StorageError::Filesystem {
+                    context: "Cannot wait for the GitHub CLI".into(),
+                    source,
+                })?
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(StorageError::InvalidRequest(
+                    "The GitHub CLI timed out.".into(),
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let tail = reader
+            .join()
+            .map_err(|_| StorageError::InvalidRequest("Cannot read the GitHub CLI.".into()))?;
+        Ok((status.success(), tail))
+    }
+
+    /// Runs Git in `workdir` with nothing to prompt for, under the shared
+    /// output and time bounds.
+    pub(crate) fn run_git(
+        &self,
+        workdir: &Path,
+        arguments: &[&str],
+    ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
+        run_git_noninteractive(workdir, arguments)
+    }
+
+    /// Records that chat `chat_id`'s agent waits on the checks of pull request
+    /// `url`, in place of any earlier watch of it, so a restarted daemon goes
+    /// on watching. `expected_head` is a commit the chat pushed that GitHub
+    /// did not show yet; without one, the earlier watch's is kept, since the
+    /// new watch drops it once GitHub shows it. `seen` is the watch as the
+    /// caller read it: when the commit waited for changed since, the stored
+    /// one is newer and wins. The earlier watch's card says it was watched
+    /// again. Answers `None` when the chat already has `limit` other watches.
+    pub(crate) fn add_ci_watch(
+        &self,
+        chat_id: &str,
+        url: &str,
+        expected_head: Option<&str>,
+        seen: Option<&CiWatch>,
+        limit: usize,
+    ) -> Result<Option<AddedCiWatch>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let exists = transaction
+            .query_row("SELECT 1 FROM chats WHERE id = ?", [chat_id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(StorageError::NoChat(chat_id.to_owned()));
+        }
+        let others: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM ci_watches WHERE chat_id = ? AND url != ?",
+            params![chat_id, url],
+            |row| row.get(0),
+        )?;
+        if others as usize >= limit {
+            return Ok(None);
+        }
+        let current = transaction
+            .query_row(
+                "SELECT token, expected_head, card_id FROM ci_watches \
+                 WHERE chat_id = ? AND url = ?",
+                params![chat_id, url],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        // What the watch waits for changed since the caller read it, so it
+        // is newer than anything the caller read and is kept.
+        let changed = current.as_ref().is_some_and(|current| {
+            seen.map(|seen| (&seen.token, &seen.expected_head)) != Some((&current.0, &current.1))
+        });
+        let card = current.as_ref().and_then(|current| current.2);
+        let kept = current.and_then(|(_, expected, _)| expected);
+        let expected_head = if changed {
+            kept.or(expected_head.map(str::to_owned))
+        } else {
+            expected_head.map(str::to_owned).or(kept)
+        };
+        let retired = match card {
+            Some(card) => retire_ci_card(&transaction, chat_id, card, RETIRED_BY_ANOTHER)?,
+            None => None,
+        };
+        let watch = CiWatch {
+            chat: chat_id.to_owned(),
+            url: url.to_owned(),
+            token: Uuid::new_v4().to_string(),
+            created_at: now_seconds(),
+            expected_head,
+        };
+        transaction.execute(
+            "INSERT INTO ci_watches (chat_id, url, token, created_at, expected_head, card_id) \
+             VALUES (?, ?, ?, ?, ?, NULL) ON CONFLICT(chat_id, url) DO UPDATE SET \
+             token = excluded.token, created_at = excluded.created_at, \
+             expected_head = excluded.expected_head, card_id = NULL",
+            params![
+                watch.chat,
+                watch.url,
+                watch.token,
+                watch.created_at,
+                watch.expected_head
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(Some(AddedCiWatch { watch, retired }))
+    }
+
+    /// Writes `text` as the card of the watch holding `token`, adding the card
+    /// to the chat's transcript the first time. Answers `None` when the watch
+    /// is no longer this one, or the card already says exactly that.
+    pub(crate) fn write_ci_card(
+        &self,
+        chat_id: &str,
+        url: &str,
+        token: &str,
+        text: &str,
+    ) -> Result<Option<CardWrite>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let Some(card) = transaction
+            .query_row(
+                "SELECT card_id FROM ci_watches WHERE chat_id = ? AND url = ? AND token = ?",
+                params![chat_id, url, token],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let written = write_card(&transaction, chat_id, card, text)?;
+        if let Some(written) = &written
+            && written.created
+        {
+            transaction.execute(
+                "UPDATE ci_watches SET card_id = ? WHERE chat_id = ? AND url = ? AND token = ?",
+                params![written.message_id, chat_id, url, token],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(written)
+    }
+
+    /// Adds a card that no watch keeps, for checks that had finished already.
+    pub(crate) fn add_ci_card(&self, chat_id: &str, text: &str) -> Result<CardWrite, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let written = write_card(&transaction, chat_id, None, text)?
+            .ok_or_else(|| StorageError::InvalidRequest("The card was not written.".into()))?;
+        transaction.commit()?;
+        Ok(written)
+    }
+
+    /// Ends the watch holding `token`: its report `report` waits for the chat
+    /// out of its queue, as an agent's does, and its card says `card`, all in
+    /// one transaction. Answers how the report is handed over, `None` when the
+    /// watch is no longer this one and nothing was stored, and apart from
+    /// that the card's last write, which stands even when the turn that would
+    /// hand the report over could not be prepared.
+    pub(crate) fn deliver_ci_report(
+        &self,
+        chat_id: &str,
+        url: &str,
+        token: &str,
+        report: &str,
+        card: &str,
+    ) -> (
+        Result<Option<ReportDelivery>, StorageError>,
+        Option<CardWrite>,
+    ) {
+        let mut written = None;
+        // Its own chat stands as the source of a report xd itself sends.
+        let delivery = self.store_report(chat_id, chat_id, report, |transaction| {
+            let Some(card_id) = transaction
+                .query_row(
+                    "SELECT card_id FROM ci_watches WHERE chat_id = ? AND url = ? AND token = ?",
+                    params![chat_id, url, token],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()?
+            else {
+                return Ok(false);
+            };
+            transaction.execute(
+                "DELETE FROM ci_watches WHERE chat_id = ? AND url = ? AND token = ?",
+                params![chat_id, url, token],
+            )?;
+            written = write_card(transaction, chat_id, card_id, card)?;
+            Ok(true)
+        });
+        // A card written in a transaction that did not commit never stood.
+        let written = match &delivery {
+            Ok(None) => None,
+            Err(_) if !self.ci_card_stands(chat_id, written.as_ref()) => None,
+            _ => written,
+        };
+        (delivery, written)
+    }
+
+    /// Whether `written` is what chat `chat_id`'s card now says, as after a
+    /// commit.
+    fn ci_card_stands(&self, chat_id: &str, written: Option<&CardWrite>) -> bool {
+        let Some(written) = written else {
+            return false;
+        };
+        let Ok(database) = self.database.lock() else {
+            return false;
+        };
+        database
+            .query_row(
+                "SELECT content FROM messages WHERE id = ? AND chat_id = ? AND role = 'tool'",
+                params![written.message_id, chat_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some_and(|content| content == written.text)
+    }
+
+    /// Forgets the CI watch of `url` for `chat_id`: only the one holding
+    /// `token` when given, so a watch never removes the one that replaced it.
+    /// Its card, if still running, says `reason`. Answers whether there was
+    /// one, and the card's write.
+    pub(crate) fn remove_ci_watch(
+        &self,
+        chat_id: &str,
+        url: &str,
+        token: Option<&str>,
+        reason: &str,
+    ) -> Result<(bool, Option<CardWrite>), StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let card = transaction
+            .query_row(
+                "SELECT card_id FROM ci_watches \
+                 WHERE chat_id = ? AND url = ? AND (?3 IS NULL OR token = ?3)",
+                params![chat_id, url, token],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+        let Some(card) = card else {
+            return Ok((false, None));
+        };
+        transaction.execute(
+            "DELETE FROM ci_watches WHERE chat_id = ? AND url = ? AND (?3 IS NULL OR token = ?3)",
+            params![chat_id, url, token],
+        )?;
+        let retired = match card {
+            Some(card) => retire_ci_card(&transaction, chat_id, card, reason)?,
+            None => None,
+        };
+        transaction.commit()?;
+        Ok((true, retired))
+    }
+
+    /// Chat `chat_id`'s watch of `url`, if it has one.
+    pub(crate) fn ci_watch(
+        &self,
+        chat_id: &str,
+        url: &str,
+    ) -> Result<Option<CiWatch>, StorageError> {
+        Ok(self
+            .ci_watches()?
+            .into_iter()
+            .find(|watch| watch.chat == chat_id && watch.url == url))
+    }
+
+    /// Ends chat `chat_id`'s watch of `url` if it is still exactly `earlier`,
+    /// with the same token and the same commit waited for, or there is none
+    /// when `earlier` is `None`. Answers `None` when it was not; otherwise
+    /// the write of the ended watch's card, which says it was watched again.
+    pub(crate) fn end_ci_watch_if(
+        &self,
+        chat_id: &str,
+        url: &str,
+        earlier: Option<&CiWatch>,
+    ) -> Result<Option<Option<CardWrite>>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT token, expected_head, card_id FROM ci_watches \
+                 WHERE chat_id = ? AND url = ?",
+                params![chat_id, url],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let identity = current
+            .as_ref()
+            .map(|(token, expected, _)| (token.clone(), expected.clone()));
+        let earlier = earlier.map(|watch| (watch.token.clone(), watch.expected_head.clone()));
+        if identity != earlier {
+            return Ok(None);
+        }
+        transaction.execute(
+            "DELETE FROM ci_watches WHERE chat_id = ? AND url = ?",
+            params![chat_id, url],
+        )?;
+        let retired = match current.and_then(|(_, _, card)| card) {
+            Some(card) => retire_ci_card(&transaction, chat_id, card, RETIRED_BY_ANOTHER)?,
+            None => None,
+        };
+        transaction.commit()?;
+        Ok(Some(retired))
+    }
+
+    /// Whether the watch holding `token` is still chat `chat_id`'s watch of
+    /// `url`: neither replaced nor gone with its chat.
+    pub(crate) fn owns_ci_watch(
+        &self,
+        chat_id: &str,
+        url: &str,
+        token: &str,
+    ) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database
+            .query_row(
+                "SELECT 1 FROM ci_watches WHERE chat_id = ? AND url = ? AND token = ?",
+                params![chat_id, url, token],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Records the commit the watch holding `token` waits for GitHub to show.
+    pub(crate) fn set_ci_watch_expected(
+        &self,
+        chat_id: &str,
+        url: &str,
+        token: &str,
+        expected_head: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE ci_watches SET expected_head = ? WHERE chat_id = ? AND url = ? AND token = ?",
+            params![expected_head, chat_id, url, token],
+        )?;
+        Ok(())
+    }
+
+    /// Every recorded CI watch, oldest first.
+    pub(crate) fn ci_watches(&self) -> Result<Vec<CiWatch>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(
+            "SELECT chat_id, url, token, created_at, expected_head FROM ci_watches \
+             ORDER BY created_at, rowid",
+        )?;
+        let watches = statement
+            .query_map([], |row| {
+                Ok(CiWatch {
+                    chat: row.get(0)?,
+                    url: row.get(1)?,
+                    token: row.get(2)?,
+                    created_at: row.get(3)?,
+                    expected_head: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(watches)
+    }
+
     pub(crate) fn chat_pull_request(&self, chat_id: &str) -> Option<Value> {
         let workdir = {
             let database = self.database.lock().ok()?;
@@ -6939,6 +7489,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_draft_chunks(database)?;
             ensure_chat_pull_requests(database)?;
             ensure_agent_reports(database)?;
+            ensure_ci_watches(database)?;
             return Ok(());
         }
     }
@@ -7037,6 +7588,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_draft_chunks(database)?;
     ensure_chat_pull_requests(database)?;
     ensure_agent_reports(database)?;
+    ensure_ci_watches(database)?;
     Ok(())
 }
 
@@ -9712,6 +10264,21 @@ fn run_gh(
     collect_git_output(child, GIT_TIMEOUT)
 }
 
+/// The last `keep` bytes `stream` gives, reading it to its end.
+fn read_tail(mut stream: impl Read, keep: usize) -> Vec<u8> {
+    let mut tail = std::collections::VecDeque::with_capacity(keep.min(1 << 20));
+    let mut buffer = [0_u8; 8192];
+    while let Ok(count) = stream.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        tail.extend(&buffer[..count]);
+        let excess = tail.len().saturating_sub(keep);
+        tail.drain(..excess);
+    }
+    tail.into()
+}
+
 fn command_failure(stdout: &[u8], stderr: &[u8], fallback: &str) -> StorageError {
     let stderr = String::from_utf8_lossy(stderr);
     let stdout = String::from_utf8_lossy(stdout);
@@ -12024,6 +12591,19 @@ fn has_agent_reports(database: &Connection, chat_id: &str) -> Result<bool, Stora
         [chat_id],
         |row| row.get(0),
     )?)
+}
+
+/// Pull requests whose checks a chat's agent asked xd to watch; see
+/// `ci_watch`. Older hosts ignore the table, so the schema version stays.
+fn ensure_ci_watches(database: &Connection) -> Result<(), StorageError> {
+    database.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ci_watches (
+            chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            url TEXT NOT NULL, token TEXT NOT NULL, created_at INTEGER NOT NULL,
+            expected_head TEXT, card_id INTEGER,
+            PRIMARY KEY(chat_id, url));",
+    )?;
+    Ok(())
 }
 
 /// Must run in the same transaction as the chats row update.
