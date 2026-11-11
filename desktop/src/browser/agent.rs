@@ -854,6 +854,15 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
   };
   const skipped = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'META', 'LINK']);
   const controls = 'a[href], button, input, select, textarea, summary, [role], [contenteditable]';
+  // Whether a control is anywhere inside, shadow roots included.
+  const holds = node => {
+    if (node.querySelector(controls)) return true;
+    for (const inner of node.querySelectorAll('*'))
+      if (inner.shadowRoot && holds(inner.shadowRoot)) return true;
+    return false;
+  };
+  const holdsControl = element => holds(element)
+    || Boolean(element.shadowRoot && holds(element.shadowRoot));
   const roles = new Set(['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
     'menuitemcheckbox', 'menuitemradio', 'option', 'combobox', 'textbox', 'searchbox', 'slider',
     'spinbutton', 'treeitem']);
@@ -978,7 +987,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
         // A control's own text is its name; a clickable area may hold more
         // controls.
         if (role !== 'clickable' && tag !== 'SUMMARY') return;
-        if (role === 'clickable' && !element.querySelector(controls)) return;
+        if (role === 'clickable' && !holdsControl(element)) return;
       }
     }
     const heading = /^H([1-6])$/.exec(tag);
@@ -987,7 +996,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
       const title = short(element.innerText, 300);
       if (title) add('#'.repeat(Number(heading[1])) + ' ' + title);
       // A heading's links, as in a list of articles, are still controls.
-      if (element.querySelector(controls)) {
+      if (holdsControl(element)) {
         naming += 1;
         for (const child of children(element)) walk(child);
         naming -= 1;
