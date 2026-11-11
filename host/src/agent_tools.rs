@@ -664,7 +664,9 @@ fn browser(
         _ => json!({}),
     };
     command["action"] = json!(action);
-    match ask(json!({"op": "browser", "command": command})) {
+    // The server never closes only its sending side, so its connection
+    // ending means the agent is gone and the command can stop.
+    match ask(json!({"op": "browser", "command": command, "cancel_on_close": true})) {
         Ok(answer) if answer.get("ok").and_then(Value::as_bool) == Some(true) => {
             let result = &answer["result"];
             let mut content = Vec::new();
@@ -960,7 +962,7 @@ mod tests {
         assert_eq!(
             asked.unwrap(),
             json!({"op": "browser", "command": {"action": "click", "ref": "e3",
-                "chat": "someone-else"}})
+                "chat": "someone-else"}, "cancel_on_close": true})
         );
         assert_eq!(
             result,

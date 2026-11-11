@@ -350,8 +350,11 @@ fn settle(page: &impl Page, mark: &str, quiet: Duration) -> bool {
                 return false;
             }
             Some(state) if !loading && state[0] == false && state[1] == "complete" => {
+                // A page may send the browser on as soon as it has loaded.
                 thread::sleep(Duration::from_millis(200));
-                return false;
+                if !page.is_loading() {
+                    return false;
+                }
             }
             _ => {}
         }
@@ -384,8 +387,11 @@ fn wait_for_load(page: &impl Page, timeout: Duration) -> Result<bool, String> {
         if !page.is_loading()
             && evaluate(page, "document.readyState").ok() == Some(json!("complete"))
         {
+            // A page may send the browser on as soon as it has loaded.
             thread::sleep(Duration::from_millis(200));
-            return Ok(false);
+            if !page.is_loading() {
+                return Ok(false);
+            }
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -1125,6 +1131,26 @@ mod tests {
         let outcome = run(&script, &json!({"action": "press_key", "key": "Enter"})).unwrap();
         assert!(outcome.text.starts_with("Page: Shop"), "{}", outcome.text);
         assert!(script.answers.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_page_that_sends_the_browser_on_once_loaded_is_not_the_result() {
+        let script = Script::new(vec![
+            ("Runtime.evaluate", value(json!(null))),
+            ("Input.dispatchKeyEvent", Ok(json!({}))),
+            ("Input.dispatchKeyEvent", Ok(json!({}))),
+            // Complete and not loading, until it sends the browser on during
+            // the pause that follows.
+            ("Runtime.evaluate", value(json!([false, "complete"]))),
+            ("Runtime.evaluate", value(json!([false, "complete"]))),
+            ("Runtime.evaluate", page()),
+        ]);
+        // Looked at before the pause, after it, then before and after again.
+        *script.loading.borrow_mut() = [false, true, false, false].into();
+        let outcome = run(&script, &json!({"action": "press_key", "key": "Enter"})).unwrap();
+        assert!(outcome.text.starts_with("Page: Shop"), "{}", outcome.text);
+        assert!(script.answers.borrow().is_empty());
+        assert!(script.loading.borrow().is_empty());
     }
 
     #[test]

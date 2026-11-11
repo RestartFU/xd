@@ -9,7 +9,7 @@
 //! `browser-cancel`, so the desktop does no more of it once nobody waits.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Mutex, MutexGuard, PoisonError,
         mpsc::{SyncSender, sync_channel},
@@ -41,12 +41,19 @@ struct RelayState {
     next_request: u64,
     /// Commands sent and not yet answered, by request number.
     waiting: HashMap<u64, Waiting>,
+    /// Connections that have stopped sending, whose commands that asked to
+    /// stop with them are refused, even one read just before they stopped.
+    gone: HashSet<u64>,
 }
 
 struct Waiting {
     provider: u64,
     /// The connection that asked, which the answer goes back on.
     requester: u64,
+    /// Whether the command stops when that connection stops sending. A
+    /// client may instead close its sending side and read on, so only one
+    /// that asked counts its end as giving up.
+    cancel_on_close: bool,
     answer: SyncSender<Value>,
 }
 
@@ -75,19 +82,25 @@ impl BrowserRelay {
                 .retain(|_, waiting| waiting.provider != subscriber);
         }
         self.abandon(events, subscriber);
+        // Gone for good, so nothing more of it can come.
+        self.state().gone.remove(&subscriber);
     }
 
-    /// The connection `requester` has stopped reading, as when an agent's
-    /// tool server exits mid-command: its commands stop on the desktop.
+    /// The connection `requester` has stopped sending, as when an agent's
+    /// tool server exits mid-command: the commands it asked to stop with it
+    /// stop on the desktop, and any it sent last are refused.
     pub(crate) fn abandon(&self, events: &EventBus, requester: u64) {
         let mut abandoned = Vec::new();
-        self.state().waiting.retain(|request, waiting| {
-            let keep = waiting.requester != requester;
+        let mut state = self.state();
+        state.gone.insert(requester);
+        state.waiting.retain(|request, waiting| {
+            let keep = waiting.requester != requester || !waiting.cancel_on_close;
             if !keep {
                 abandoned.push((*request, waiting.provider));
             }
             keep
         });
+        drop(state);
         for (request, provider) in abandoned {
             events.publish_to(
                 provider,
@@ -98,11 +111,13 @@ impl BrowserRelay {
 
     /// Sends `command` for `chat`, asked on connection `requester`, to the
     /// newest connected desktop and waits for its answer, which becomes the
-    /// daemon's reply.
+    /// daemon's reply. With `cancel_on_close`, the command stops once the
+    /// requester stops sending.
     pub(crate) fn run(
         &self,
         events: &EventBus,
         requester: u64,
+        cancel_on_close: bool,
         chat: &str,
         command: Value,
         timeout: Duration,
@@ -110,6 +125,9 @@ impl BrowserRelay {
         let (answer, answered) = sync_channel(1);
         let (request, provider) = {
             let mut state = self.state();
+            if cancel_on_close && state.gone.contains(&requester) {
+                return json!({"ok": false, "error": "The agent's connection closed."});
+            }
             state
                 .providers
                 .retain(|provider| events.subscribed(*provider));
@@ -123,6 +141,7 @@ impl BrowserRelay {
                 Waiting {
                     provider,
                     requester,
+                    cancel_on_close,
                     answer,
                 },
             );
@@ -200,14 +219,14 @@ mod tests {
     fn without_a_desktop_the_agent_is_told_to_open_xd() {
         let events = EventBus::default();
         let relay = BrowserRelay::default();
-        let reply = relay.run(&events, 0, "chat", json!({}), Duration::from_secs(1));
+        let reply = relay.run(&events, 0, true, "chat", json!({}), Duration::from_secs(1));
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["error"], NO_DESKTOP);
         // A desktop that offered and then left counts as none.
         let (gone, _) = subscriber(&events);
         relay.offer(gone);
         events.unsubscribe(gone);
-        let reply = relay.run(&events, 0, "chat", json!({}), Duration::from_secs(1));
+        let reply = relay.run(&events, 0, true, "chat", json!({}), Duration::from_secs(1));
         assert_eq!(reply["error"], NO_DESKTOP);
     }
 
@@ -225,6 +244,7 @@ mod tests {
                 relay.run(
                     &events,
                     0,
+                    true,
                     "chat-1",
                     json!({"action": "snapshot"}),
                     Duration::from_secs(10),
@@ -263,7 +283,9 @@ mod tests {
         relay.offer(desktop);
         let running = {
             let (events, relay) = (events.clone(), relay.clone());
-            thread::spawn(move || relay.run(&events, 0, "c", json!({}), Duration::from_secs(60)))
+            thread::spawn(move || {
+                relay.run(&events, 0, true, "c", json!({}), Duration::from_secs(60))
+            })
         };
         desktop_events.recv_timeout(Duration::from_secs(5)).unwrap();
         relay.forget(&events, desktop);
@@ -278,7 +300,7 @@ mod tests {
         let relay = BrowserRelay::default();
         let (desktop, desktop_events) = subscriber(&events);
         relay.offer(desktop);
-        let reply = relay.run(&events, 0, "c", json!({}), Duration::from_millis(50));
+        let reply = relay.run(&events, 0, true, "c", json!({}), Duration::from_millis(50));
         assert_eq!(reply["ok"], false);
         let command = desktop_events.try_recv().unwrap();
         let cancel = desktop_events.try_recv().unwrap();
@@ -304,7 +326,14 @@ mod tests {
         let running = {
             let (events, relay) = (events.clone(), relay.clone());
             thread::spawn(move || {
-                relay.run(&events, agent, "c", json!({}), Duration::from_secs(60))
+                relay.run(
+                    &events,
+                    agent,
+                    true,
+                    "c",
+                    json!({}),
+                    Duration::from_secs(60),
+                )
             })
         };
         let command = desktop_events.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -316,6 +345,44 @@ mod tests {
         assert_eq!(cancel["event"], "browser-cancel");
         assert_eq!(cancel["request"], command["request"]);
         assert_eq!(running.join().unwrap()["ok"], false);
+        // A command it sent just before going, read only now, never starts.
+        let late = relay.run(&events, agent, true, "c", json!({}), Duration::from_secs(1));
+        assert_eq!(late["error"], "The agent's connection closed.");
+        assert!(desktop_events.try_recv().is_err());
+        // Once the connection is gone for good, its number is forgotten.
+        relay.forget(&events, agent);
+        assert!(!relay.state().gone.contains(&agent));
+    }
+
+    #[test]
+    fn a_client_that_only_stops_sending_still_gets_its_answer() {
+        let events = Arc::new(EventBus::default());
+        let relay = Arc::new(BrowserRelay::default());
+        let (desktop, desktop_events) = subscriber(&events);
+        relay.offer(desktop);
+        let (client, _) = subscriber(&events);
+        let running = {
+            let (events, relay) = (events.clone(), relay.clone());
+            thread::spawn(move || {
+                relay.run(
+                    &events,
+                    client,
+                    false,
+                    "c",
+                    json!({}),
+                    Duration::from_secs(60),
+                )
+            })
+        };
+        let command = desktop_events.recv_timeout(Duration::from_secs(5)).unwrap();
+        // It closed its sending side, and reads on.
+        relay.abandon(&events, client);
+        assert!(desktop_events.try_recv().is_err());
+        relay.answer(
+            desktop,
+            &json!({"request": command["request"], "result": {"text": "Done."}}),
+        );
+        assert_eq!(running.join().unwrap()["ok"], true);
     }
 
     #[test]
@@ -326,7 +393,9 @@ mod tests {
         relay.offer(desktop);
         let running = {
             let (events, relay) = (events.clone(), relay.clone());
-            thread::spawn(move || relay.run(&events, 0, "c", json!({}), Duration::from_secs(60)))
+            thread::spawn(move || {
+                relay.run(&events, 0, true, "c", json!({}), Duration::from_secs(60))
+            })
         };
         let event = desktop_events.recv_timeout(Duration::from_secs(5)).unwrap();
         relay.answer(

@@ -1326,7 +1326,7 @@ All but `evaluate` and `screenshot` answer with a snapshot of the page
 afterwards. The server sends the tool's arguments, with `action`, as `command`:
 
 ```json
-{"op":"browser","chat":"lead","command":{"action":"click","ref":"e3"}}
+{"op":"browser","chat":"lead","command":{"action":"click","ref":"e3"},"cancel_on_close":true}
 {"ok":true,"result":{"text":"Page: Shop\nAddress: http://localhost:3000/\n\n…"}}
 ```
 
@@ -1343,11 +1343,15 @@ connection only, and waits up to two minutes:
 `browser-result` carries `result` or `error`, and only the connection that was
 asked can answer. Both are answered as soon as they are read. With no desktop
 offering, `browser` fails at once, and it fails as soon as the desktop that was
-asked disconnects. A command not answered in time, or whose agent's
-connection closes first, also gets `{"event":"browser-cancel","request":4}`,
-and the desktop does no more of it; it does the same for every command of a
-connection that drops or that it leaves, and gives each command 90 seconds. The MCP server turns `result.text` and `result.image` into
-text and image content.
+asked disconnects. A command not answered in time gets
+`{"event":"browser-cancel","request":4}`, and the desktop does no more of it.
+So does one sent with `cancel_on_close` whose connection stops sending first,
+as the MCP server's does when the agent goes; one read after its connection
+stopped is refused. Without `cancel_on_close`, a client may close its sending
+side and still read the answer. The desktop also stops every command of a
+connection that drops or that it leaves, and gives each command 90 seconds.
+The MCP server turns `result.text` and `result.image` into text and image
+content.
 
 The desktop runs the command on the selected tab of the chat's browser pane,
 opening the pane for that chat; a chat not on screen keeps its pane hidden while

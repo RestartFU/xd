@@ -9040,7 +9040,14 @@ impl XdDesktop {
                     let _ = this.settings.save();
                 }
             }
-            BrowserEvent::Close => this.close_browser(cx),
+            // A page off screen, such as one an agent drives, closes its
+            // own chat's pane, not the one on screen.
+            BrowserEvent::Close if scope == this.browser_scope_key() => this.close_browser(cx),
+            BrowserEvent::Close => {
+                if this.set_scope_browser_open(scope.clone(), false) {
+                    let _ = this.settings.save();
+                }
+            }
             BrowserEvent::AuxiliaryClosed(tab) => {
                 if scope == this.browser_scope_key() && this.native_side_tools_enabled() {
                     this.close_side_tool(
@@ -27917,8 +27924,23 @@ Binary files /dev/null and b/image.png differ\n";
             refused["error"],
             "The xd app has not loaded this chat yet. Try again in a few seconds."
         );
-        cx.update_window_entity(&desktop, |desktop, _, _| {
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
             assert!(!desktop.browser_panes.contains_key("local/chat/unknown"));
+
+            // The agent's page closing itself, off screen, closes its own
+            // chat's pane and leaves the one on screen.
+            let agent = desktop.browser_panes["local/chat/agent"].clone();
+            agent.update(cx, |_, cx| cx.emit(BrowserEvent::Close));
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert!(!desktop.settings.browser_sessions["local/chat/agent"].open);
+            assert!(desktop.browser_is_open());
+            assert!(
+                desktop.browser_panes["local/chat/watched"]
+                    .read(cx)
+                    .is_visible()
+            );
         });
     }
 

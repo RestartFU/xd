@@ -486,7 +486,7 @@ impl BrowserPane {
         let deadline = std::time::Instant::now() + agent::COMMAND_TIME;
         #[cfg(target_os = "linux")]
         native.with_view(move |view| {
-            let page = view.devtools();
+            let page = view.devtools().stopped_by(cancelled.clone());
             let spawned = std::thread::Builder::new()
                 .name("xd-browser-agent".into())
                 .spawn(move || {

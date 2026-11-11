@@ -1215,6 +1215,7 @@ impl Engine {
         self.browser.run(
             &self.events,
             owner,
+            request["cancel_on_close"] == true,
             chat_id,
             command.clone(),
             browser_relay::ANSWER_TIMEOUT,
@@ -3321,8 +3322,8 @@ pub fn serve_daemon_connection(
     });
     // The app has gone even while requests it sent are still being answered.
     engine.release_app_client(subscriber);
-    // As has an agent's tool server, so the browser need not finish its
-    // command; its answer would have nowhere to go.
+    // Its browser commands that asked to stop with it stop: an agent's tool
+    // server that has gone will read no answer.
     engine.browser.abandon(&engine.events, subscriber);
     if result.is_err() {
         let _ = stream.shutdown(std::net::Shutdown::Both);

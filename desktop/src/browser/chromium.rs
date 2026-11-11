@@ -1014,10 +1014,30 @@ wrap_task! {
         id: i32,
         message: Vec<u8>,
         state: Arc<AtomicU8>,
+        cancelled: Arc<AtomicBool>,
     }
 
     impl Task {
         fn execute(&self) {
+            // A command stopped while this waited for the UI thread does no
+            // more, even of what it had already asked for.
+            if self.cancelled.load(Ordering::Acquire)
+                && self
+                    .state
+                    .compare_exchange(
+                        CALL_WAITING,
+                        CALL_ABANDONED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                let calls = lock(&self.shared).devtools.clone();
+                if let Some(answer) = calls.take(self.id) {
+                    let _ = answer.send(Err("The command was stopped.".into()));
+                }
+                return;
+            }
             // A caller that stopped waiting has reported the call as failed.
             if self
                 .state
@@ -1062,9 +1082,17 @@ wrap_task! {
 #[derive(Clone)]
 pub struct DevTools {
     shared: SharedState,
+    /// Set once the command these calls are for is stopped.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl DevTools {
+    /// The same page, for a command `cancelled` stops: calls still waiting
+    /// for CEF's UI thread when it is set are never sent.
+    pub fn stopped_by(self, cancelled: Arc<AtomicBool>) -> Self {
+        Self { cancelled, ..self }
+    }
+
     /// Calls `method` and waits up to `timeout` for its result.
     pub fn call(
         &self,
@@ -1095,7 +1123,13 @@ impl DevTools {
             serde_json::to_vec(&serde_json::json!({"id": id, "method": method, "params": params}))
                 .map_err(|error| error.to_string())?;
         let state = Arc::new(AtomicU8::new(CALL_WAITING));
-        let mut task = SendDevToolsMessage::new(self.shared.clone(), id, message, state.clone());
+        let mut task = SendDevToolsMessage::new(
+            self.shared.clone(),
+            id,
+            message,
+            state.clone(),
+            self.cancelled.clone(),
+        );
         if post_task(ThreadId::UI, Some(&mut task)) != 1 {
             calls.take(id);
             return Err("The browser has shut down.".into());
@@ -1322,6 +1356,7 @@ impl ChromiumView {
     pub fn devtools(&self) -> DevTools {
         DevTools {
             shared: self.shared.clone(),
+            cancelled: Arc::default(),
         }
     }
 
