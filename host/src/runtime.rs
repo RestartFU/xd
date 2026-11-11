@@ -105,9 +105,20 @@ pub(crate) type TurnSettledHandler = Box<dyn Fn(SettledTurn) + Send + Sync>;
 /// Hears that a chat's turn started or ended, with its assistant and the
 /// account and login it runs as.
 /// Called with the chat's succession held, so it must only note it, never wait.
-/// The last argument says whether the chat still works: true as a turn starts,
-/// and as it ends while background work of its own goes on.
-pub(crate) type ActivityHandler = Box<dyn Fn(&str, &str, &str, bool) + Send + Sync>;
+pub(crate) type ActivityHandler = Box<dyn Fn(&str, &str, &str, AgentActivity) + Send + Sync>;
+
+/// What a chat's agent began or stopped doing, for [`ActivityHandler`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentActivity {
+    TurnStarted,
+    /// `background` when background agents or shells of its own go on.
+    TurnEnded {
+        background: bool,
+    },
+    /// Its background agents and shells all ended, or its process went.
+    /// Reported without an assistant or account when the process is gone.
+    BackgroundEnded,
+}
 
 /// A turn that ended for good: neither stopped nor going on elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -677,16 +688,16 @@ impl TurnRuntime {
         chat_id: &str,
         provider: &str,
         account: &str,
-        working: bool,
+        activity: AgentActivity,
     ) {
-        self.note_activity(chat_id, provider, account, working);
+        self.note_activity(chat_id, provider, account, activity);
     }
 
-    fn note_activity(&self, chat_id: &str, provider: &str, account: &str, working: bool) {
+    fn note_activity(&self, chat_id: &str, provider: &str, account: &str, activity: AgentActivity) {
         if let Ok(handler) = self.inner.on_activity.lock()
             && let Some(handler) = handler.as_ref()
         {
-            handler(chat_id, provider, account, working);
+            handler(chat_id, provider, account, activity);
         }
     }
 
@@ -1115,9 +1126,20 @@ impl TurnRuntime {
             Some(session) => {
                 if let Ok(router) = session.router.lock() {
                     publish(router.tasks.len());
+                    if router.tasks.is_empty() {
+                        self.note_activity(
+                            chat_id,
+                            &router.backend,
+                            &session.account,
+                            AgentActivity::BackgroundEnded,
+                        );
+                    }
                 }
             }
-            None => publish(0),
+            None => {
+                publish(0);
+                self.note_activity(chat_id, "", "", AgentActivity::BackgroundEnded);
+            }
         }
     }
 
@@ -1624,7 +1646,12 @@ impl TurnRuntime {
                 },
             );
         }
-        self.note_activity(&turn.chat_id, &turn.backend, &turn.account, true);
+        self.note_activity(
+            &turn.chat_id,
+            &turn.backend,
+            &turn.account,
+            AgentActivity::TurnStarted,
+        );
         let chat_id = turn.chat_id.clone();
         let label = turn.label.clone();
         let backend = turn.backend.clone();
@@ -2970,7 +2997,12 @@ impl TurnRuntime {
         }
         // Still working if background agents or shells of its own go on.
         let background = self.background_tasks(&turn.chat_id) > 0;
-        self.note_activity(&turn.chat_id, &turn.backend, &turn.account, background);
+        self.note_activity(
+            &turn.chat_id,
+            &turn.backend,
+            &turn.account,
+            AgentActivity::TurnEnded { background },
+        );
         if let Ok(mut interactions) = self.inner.interactions.lock() {
             let pending = interactions.entry(turn.chat_id.clone()).or_default();
             pending.requests.clear();

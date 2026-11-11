@@ -19,7 +19,12 @@ use std::{
 
 use serde_json::json;
 
-use crate::{EventBus, accounts::Headroom, runtime::TurnRuntime, storage::StateStore};
+use crate::{
+    EventBus,
+    accounts::Headroom,
+    runtime::{AgentActivity, TurnRuntime},
+    storage::StateStore,
+};
 
 /// How often a limit is read while a chat with a quota works on its account.
 #[cfg(not(test))]
@@ -79,8 +84,10 @@ struct AccountLedger {
     /// The reading the next rise is measured from.
     last: Option<Reading>,
     read_at: Option<Instant>,
-    /// The chats running a turn here, by their starts and ends.
-    running: HashSet<String>,
+    /// The chats running a turn here, and those whose background agents or
+    /// shells go on between turns, as the runtime reported them.
+    turns: HashSet<String>,
+    background: HashSet<String>,
     /// When every turn here last ended, while none has begun since.
     idle_since: Option<Instant>,
     /// Since `last`, every turn here ended and one began again more than
@@ -100,9 +107,8 @@ struct AccountLedger {
     login: String,
     /// Every chat that worked on the account since `last`.
     sharers: BTreeSet<String>,
-    /// The account and login each sharer's turns ran as, when known, so a
-    /// reading of another login is not counted against any of them.
-    /// Every (chat, account and login) pair seen since `last`: a chat whose
+    /// Every (chat, account and login) pair seen since `last`, so a reading
+    /// of another login is not counted against any of them: a chat whose
     /// turns changed login within one interval leaves both.
     logins: BTreeSet<(String, String)>,
 }
@@ -114,6 +120,10 @@ pub(crate) struct Ledger {
 }
 
 impl AccountLedger {
+    fn busy(&self) -> bool {
+        !self.turns.is_empty() || !self.background.is_empty()
+    }
+
     /// Whether the next rise can be measured from `last`: it was not read
     /// while nothing worked here. What the account used while idle, perhaps
     /// outside xd, is nobody's here, so the next turn reads afresh. A turn
@@ -133,25 +143,41 @@ impl Ledger {
             .insert(chat_id.to_owned());
     }
 
-    /// A chat started a turn on the account (`working`), or ended one,
-    /// still `working` when background work of its own goes on.
-    /// `tag` is the account and login the turn ran as.
+    /// A chat started a turn (`true`) or ended one with nothing left running
+    /// (`false`), as the account and login in `tag`.
     #[cfg(test)]
     pub(crate) fn turn(&mut self, provider: &str, tag: &str, chat_id: &str, working: bool) {
-        self.turn_tagged(provider, tag, chat_id, working, Instant::now());
+        self.turn_tagged(
+            provider,
+            tag,
+            chat_id,
+            test_activity(working),
+            Instant::now(),
+        );
     }
 
+    /// What the runtime reported of a chat on the account and login in
+    /// `tag`; a report of background work ending without either is about the
+    /// chat wherever it worked.
     fn turn_tagged(
         &mut self,
         provider: &str,
         tag: &str,
         chat_id: &str,
-        working: bool,
+        activity: AgentActivity,
         at: Instant,
     ) {
+        if provider.is_empty() {
+            for entry in self.accounts.values_mut() {
+                if entry.background.remove(chat_id) && !entry.busy() {
+                    entry.idle_since.get_or_insert(at);
+                }
+            }
+            return;
+        }
         let account = crate::accounts::tag_account(tag).to_owned();
         self.note_login(provider, tag, chat_id);
-        self.turn_at(provider, &account, chat_id, working, at);
+        self.apply_at(provider, &account, chat_id, activity, at);
     }
 
     /// [`Self::note`] for a chat whose turn runs as the login in `tag`.
@@ -173,20 +199,33 @@ impl Ledger {
             .accounts
             .get_mut(&(provider.to_owned(), account.to_owned()))
         {
-            let before = entry.running.len();
-            entry.running.retain(|chat_id| here.contains(chat_id));
-            if before > 0 && entry.running.is_empty() && entry.idle_since.is_none() {
+            let was_busy = entry.busy();
+            entry.turns.retain(|chat_id| here.contains(chat_id));
+            entry.background.retain(|chat_id| here.contains(chat_id));
+            if was_busy && !entry.busy() && entry.idle_since.is_none() {
                 entry.idle_since = Some(now);
             }
         }
     }
 
+    #[cfg(test)]
     fn turn_at(
         &mut self,
         provider: &str,
         account: &str,
         chat_id: &str,
         working: bool,
+        now: Instant,
+    ) {
+        self.apply_at(provider, account, chat_id, test_activity(working), now);
+    }
+
+    fn apply_at(
+        &mut self,
+        provider: &str,
+        account: &str,
+        chat_id: &str,
+        activity: AgentActivity,
         now: Instant,
     ) {
         self.note(provider, account, chat_id);
@@ -196,20 +235,32 @@ impl Ledger {
         else {
             return;
         };
-        if working {
-            entry.running.insert(chat_id.to_owned());
-            if entry
-                .idle_since
-                .take()
-                .is_some_and(|since| now.saturating_duration_since(since) >= IDLE_GAP)
-            {
-                entry.restarted_after_idle = true;
+        match activity {
+            AgentActivity::TurnStarted => {
+                entry.turns.insert(chat_id.to_owned());
+                if entry
+                    .idle_since
+                    .take()
+                    .is_some_and(|since| now.saturating_duration_since(since) >= IDLE_GAP)
+                {
+                    entry.restarted_after_idle = true;
+                }
+                return;
             }
-        } else {
-            entry.running.remove(chat_id);
-            if entry.running.is_empty() {
-                entry.idle_since = Some(now);
+            AgentActivity::TurnEnded { background } => {
+                entry.turns.remove(chat_id);
+                if background {
+                    entry.background.insert(chat_id.to_owned());
+                } else {
+                    entry.background.remove(chat_id);
+                }
             }
+            AgentActivity::BackgroundEnded => {
+                entry.background.remove(chat_id);
+            }
+        }
+        if !entry.busy() {
+            entry.idle_since.get_or_insert(now);
         }
     }
 
@@ -315,9 +366,18 @@ pub(crate) struct QuotaMeter {
     wake: Arc<Mutex<Sender<()>>>,
 }
 
-/// A turn's start or end as the runtime reported it: the chat, assistant,
-/// account and login, whether the chat still works, and when.
-type Activity = (String, String, String, bool, Instant);
+/// What the runtime reported of a chat: the chat, assistant, account and
+/// login, what began or stopped, and when.
+type Activity = (String, String, String, AgentActivity, Instant);
+
+#[cfg(test)]
+fn test_activity(working: bool) -> AgentActivity {
+    if working {
+        AgentActivity::TurnStarted
+    } else {
+        AgentActivity::TurnEnded { background: false }
+    }
+}
 
 struct Pass {
     store: Arc<StateStore>,
@@ -337,13 +397,13 @@ fn activity_handler(
     activity: Arc<Mutex<Vec<Activity>>>,
     wake: std::sync::Weak<Mutex<Sender<()>>>,
 ) -> crate::runtime::ActivityHandler {
-    Box::new(move |chat_id, provider, tag, working| {
+    Box::new(move |chat_id, provider, tag, what| {
         if let Ok(mut activity) = activity.lock() {
             activity.push((
                 chat_id.to_owned(),
                 provider.to_owned(),
                 tag.to_owned(),
-                working,
+                what,
                 Instant::now(),
             ));
         }
@@ -420,8 +480,8 @@ impl Pass {
             .lock()
             .map(|mut activity| std::mem::take(&mut *activity))
             .unwrap_or_default();
-        for (chat_id, provider, tag, working, at) in &queued {
-            ledger.turn_tagged(provider, tag, chat_id, *working, *at);
+        for (chat_id, provider, tag, what, at) in &queued {
+            ledger.turn_tagged(provider, tag, chat_id, *what, *at);
         }
         queued
     }
@@ -475,13 +535,22 @@ impl Pass {
     fn workers(&self, ledger: &mut Ledger, provider: &str, account: &str) -> Vec<(String, String)> {
         let asked_at = Instant::now();
         let mut working = self.working_on(provider, account);
-        for (chat_id, p, tag, still, at) in self.take_activity(ledger) {
-            if at < asked_at || p != provider || crate::accounts::tag_account(&tag) != account {
+        for (chat_id, p, tag, what, at) in self.take_activity(ledger) {
+            let here = p == provider && crate::accounts::tag_account(&tag) == account;
+            // A process gone is reported without where it worked.
+            if at < asked_at || !(here || p.is_empty()) {
                 continue;
             }
-            working.retain(|(id, _)| *id != chat_id);
-            if still {
-                working.push((chat_id, tag));
+            let still = matches!(
+                what,
+                AgentActivity::TurnStarted | AgentActivity::TurnEnded { background: true }
+            );
+            if still && here {
+                if !working.iter().any(|(id, _)| *id == chat_id) {
+                    working.push((chat_id, tag));
+                }
+            } else if !still {
+                working.retain(|(id, _)| *id != chat_id);
             }
         }
         working
@@ -884,6 +953,56 @@ mod tests {
     }
 
     #[test]
+    fn background_work_that_ends_by_itself_leaves_the_account_idle() {
+        let mut ledger = Ledger::default();
+        let now = Instant::now();
+        let a = chats(&["a"]);
+        let ended = AgentActivity::TurnEnded { background: true };
+        ledger.apply_at("claude", "default", "a", AgentActivity::TurnStarted, now);
+        record_in(&mut ledger, "claude", "default", reading(10.0, 1), &a, now);
+        // The turn ends with its background work going on: still busy.
+        ledger.apply_at("claude", "default", "a", ended, now);
+        ledger.apply_at(
+            "claude",
+            "default",
+            "a",
+            AgentActivity::TurnStarted,
+            now + IDLE_GAP,
+        );
+        let shares = record_in(&mut ledger, "claude", "default", reading(12.0, 1), &a, now);
+        assert_eq!(shares, vec![("a".to_owned(), 2.0)]);
+        // That work ends by itself; a turn long after it is an idle gap, even
+        // before any pass saw the account empty.
+        ledger.apply_at("claude", "default", "a", ended, now);
+        ledger.apply_at(
+            "claude",
+            "default",
+            "a",
+            AgentActivity::BackgroundEnded,
+            now,
+        );
+        ledger.apply_at(
+            "claude",
+            "default",
+            "a",
+            AgentActivity::TurnStarted,
+            now + IDLE_GAP,
+        );
+        assert!(record_in(&mut ledger, "claude", "default", reading(20.0, 1), &a, now).is_empty());
+        // A process gone is reported without where it worked.
+        ledger.apply_at("claude", "default", "a", ended, now);
+        ledger.turn_tagged("", "", "a", AgentActivity::BackgroundEnded, now);
+        ledger.apply_at(
+            "claude",
+            "default",
+            "a",
+            AgentActivity::TurnStarted,
+            now + IDLE_GAP,
+        );
+        assert!(record_in(&mut ledger, "claude", "default", reading(25.0, 1), &a, now).is_empty());
+    }
+
+    #[test]
     fn a_reading_of_another_limit_starts_afresh() {
         let mut ledger = Ledger::default();
         let now = Instant::now();
@@ -1020,7 +1139,12 @@ mod tests {
         let (sender, woken) = mpsc::channel();
         let sender = Arc::new(Mutex::new(sender));
         runtime.set_activity_handler(activity_handler(activity.clone(), Arc::downgrade(&sender)));
-        runtime.note_activity_for_test("chat", "claude", "second#login", true);
+        runtime.note_activity_for_test(
+            "chat",
+            "claude",
+            "second#login",
+            AgentActivity::TurnStarted,
+        );
         assert!(woken.try_recv().is_ok());
         let queued = activity.lock().unwrap().clone();
         assert_eq!(queued.len(), 1);
@@ -1031,7 +1155,7 @@ mod tests {
                 &queued[0].2[..],
                 queued[0].3
             ),
-            ("chat", "claude", "second#login", true)
+            ("chat", "claude", "second#login", AgentActivity::TurnStarted)
         );
 
         // Dropping the meter ends its thread, which lets go of the runtime.
