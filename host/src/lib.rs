@@ -432,7 +432,9 @@ impl Engine {
             Some("message-agent") => self.message_agent(&request),
             Some("stop-agent") => self.stop_agent(&request),
             // Only a chat's own tool server, on this machine, drives its browser.
-            Some("browser") if self.pairing.is_local(owner) => self.browser_command(&request),
+            Some("browser") if self.pairing.is_local(owner) => {
+                self.browser_command(owner, &request)
+            }
             Some("browser") => error_reply("Browser commands come from this machine's agents."),
             Some("browser-provider") => {
                 self.browser.offer(owner);
@@ -1197,7 +1199,8 @@ impl Engine {
     }
 
     /// Runs an agent's browser command in its chat's browser, on a desktop.
-    fn browser_command(&self, request: &Value) -> Value {
+    /// `owner` is the connection of the agent's tool server.
+    fn browser_command(&self, owner: u64, request: &Value) -> Value {
         let chat_id = match required_string(request, "chat", "Browser commands need a chat.") {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
@@ -1211,6 +1214,7 @@ impl Engine {
         }
         self.browser.run(
             &self.events,
+            owner,
             chat_id,
             command.clone(),
             browser_relay::ANSWER_TIMEOUT,
@@ -2872,7 +2876,7 @@ impl Engine {
 
     fn unsubscribe(&self, id: u64) {
         self.release_app_client(id);
-        self.browser.forget(id);
+        self.browser.forget(&self.events, id);
         self.pairing.unregister(id);
         self.events.unsubscribe(id);
     }
@@ -3317,6 +3321,9 @@ pub fn serve_daemon_connection(
     });
     // The app has gone even while requests it sent are still being answered.
     engine.release_app_client(subscriber);
+    // As has an agent's tool server, so the browser need not finish its
+    // command; its answer would have nowhere to go.
+    engine.browser.abandon(&engine.events, subscriber);
     if result.is_err() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
     }

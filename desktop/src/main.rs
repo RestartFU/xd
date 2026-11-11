@@ -2691,11 +2691,15 @@ struct XdDesktop {
     error_generation: u64,
 }
 
-/// Each running command's stop flag, by connection and request.
-type BrowserCommandFlags = HashMap<(ChatEndpoint, u64), Arc<std::sync::atomic::AtomicBool>>;
+/// A browser command: its endpoint, the connection generation it came on, and
+/// its request number, which a reconnected host may use again.
+type BrowserCommandKey = (ChatEndpoint, u64, u64);
 
-/// Agents' browser commands running on this desktop, by connection and
-/// request, each with the flag that stops it once its host gives up on it.
+/// Each running command's stop flag.
+type BrowserCommandFlags = HashMap<BrowserCommandKey, Arc<std::sync::atomic::AtomicBool>>;
+
+/// Agents' browser commands running on this desktop, each with the flag that
+/// stops it once its host gives up on it.
 #[derive(Clone, Default)]
 struct RunningBrowserCommands(Arc<std::sync::Mutex<BrowserCommandFlags>>);
 
@@ -2706,17 +2710,17 @@ impl RunningBrowserCommands {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn start(&self, command: (ChatEndpoint, u64)) -> Arc<std::sync::atomic::AtomicBool> {
+    fn start(&self, command: BrowserCommandKey) -> Arc<std::sync::atomic::AtomicBool> {
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.lock().insert(command, cancelled.clone());
         cancelled
     }
 
-    fn finish(&self, command: (ChatEndpoint, u64)) {
+    fn finish(&self, command: BrowserCommandKey) {
         self.lock().remove(&command);
     }
 
-    fn cancel(&self, mut which: impl FnMut((ChatEndpoint, u64)) -> bool) {
+    fn cancel(&self, mut which: impl FnMut(BrowserCommandKey) -> bool) {
         self.lock().retain(|command, cancelled| {
             let stop = which(*command);
             if stop {
@@ -2733,7 +2737,7 @@ impl RunningBrowserCommands {
 struct BrowserAnswer {
     host: Option<HostHandle>,
     request: u64,
-    running: Option<(RunningBrowserCommands, ChatEndpoint)>,
+    running: Option<(RunningBrowserCommands, BrowserCommandKey)>,
 }
 
 impl BrowserAnswer {
@@ -2742,8 +2746,8 @@ impl BrowserAnswer {
     }
 
     fn answer(&mut self, outcome: Result<Value, String>) {
-        if let Some((running, endpoint)) = self.running.take() {
-            running.finish((endpoint, self.request));
+        if let Some((running, command)) = self.running.take() {
+            running.finish(command);
         }
         if let Some(host) = self.host.take() {
             let _ = host.browser_result(self.request, outcome);
@@ -3665,6 +3669,29 @@ impl XdDesktop {
         self.endpoint_host(self.active_endpoint)
     }
 
+    /// Starts `endpoint`'s next connection, which ignores what the one before
+    /// it sends. Agents' browser commands from that one stop: its host can no
+    /// longer hear how they went, and has told its agents they failed.
+    fn advance_connection_generation(&mut self, endpoint: ChatEndpoint) {
+        match endpoint {
+            ChatEndpoint::Local => {
+                self.connection_generation = self.connection_generation.saturating_add(1);
+            }
+            ChatEndpoint::Remote => {
+                self.remote_generation = self.remote_generation.saturating_add(1);
+            }
+        }
+        self.browser_commands
+            .cancel(|(running, _, _)| running == endpoint);
+    }
+
+    fn endpoint_generation(&self, endpoint: ChatEndpoint) -> u64 {
+        match endpoint {
+            ChatEndpoint::Local => self.connection_generation,
+            ChatEndpoint::Remote => self.remote_generation,
+        }
+    }
+
     fn endpoint_host(&self, endpoint: ChatEndpoint) -> Option<&HostHandle> {
         match endpoint {
             ChatEndpoint::Local => self.host.as_ref(),
@@ -3931,7 +3958,7 @@ impl XdDesktop {
         }
         self.connecting = true;
         self.connection_in_flight = false;
-        self.connection_generation = self.connection_generation.saturating_add(1);
+        self.advance_connection_generation(ChatEndpoint::Local);
         let generation = self.connection_generation;
         cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
@@ -4024,7 +4051,7 @@ impl XdDesktop {
             return;
         }
         self.remote_state = RemoteState::Connecting;
-        self.remote_generation = self.remote_generation.saturating_add(1);
+        self.advance_connection_generation(ChatEndpoint::Remote);
         let generation = self.remote_generation;
         cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
@@ -4378,7 +4405,7 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        self.remote_generation = self.remote_generation.saturating_add(1);
+        self.advance_connection_generation(ChatEndpoint::Remote);
         self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
         self.usage_forget_host(ChatEndpoint::Remote, cx);
         self.remote_host = None;
@@ -8346,7 +8373,7 @@ impl XdDesktop {
             .as_ref()
             .is_some_and(|panel| panel.submitting);
         if canceled_connection {
-            self.remote_generation = self.remote_generation.saturating_add(1);
+            self.advance_connection_generation(ChatEndpoint::Remote);
             self.remote_state = self.idle_remote_state();
         }
         self.remote_panel = None;
@@ -8375,7 +8402,7 @@ impl XdDesktop {
                 return;
             }
         };
-        self.remote_generation = self.remote_generation.saturating_add(1);
+        self.advance_connection_generation(ChatEndpoint::Remote);
         let generation = self.remote_generation;
         self.usage_forget_host(ChatEndpoint::Remote, cx);
         self.remote_host = None;
@@ -9066,15 +9093,15 @@ impl XdDesktop {
             }
             HostUpdate::Event { name, body, .. } if name == "browser-cancel" => {
                 if let Some(request) = body.get("request").and_then(Value::as_u64) {
-                    self.browser_commands
-                        .cancel(|running| running == (endpoint, request));
+                    let command = (endpoint, self.endpoint_generation(endpoint), request);
+                    self.browser_commands.cancel(|running| running == command);
                 }
                 true
             }
             // The host has failed what it sent on this connection; do no more of it.
             HostUpdate::Disconnected { .. } => {
                 self.browser_commands
-                    .cancel(|(running, _)| running == endpoint);
+                    .cancel(|(running, _, _)| running == endpoint);
                 false
             }
             _ => false,
@@ -9093,11 +9120,12 @@ impl XdDesktop {
         ) else {
             return;
         };
-        let cancelled = self.browser_commands.start((endpoint, request));
+        let key = (endpoint, self.endpoint_generation(endpoint), request);
+        let cancelled = self.browser_commands.start(key);
         let answer = BrowserAnswer {
             host: Some(host),
             request,
-            running: Some((self.browser_commands.clone(), endpoint)),
+            running: Some((self.browser_commands.clone(), key)),
         };
         let reply = move |outcome: Result<Value, String>| answer.send(outcome);
         let Some(chat_id) = body.get("chat").and_then(Value::as_str).map(str::to_owned) else {
@@ -27897,22 +27925,48 @@ Binary files /dev/null and b/image.png differ\n";
     #[test]
     fn the_host_giving_up_stops_its_running_browser_commands() {
         let running = RunningBrowserCommands::default();
-        let first = running.start((ChatEndpoint::Local, 1));
-        let second = running.start((ChatEndpoint::Local, 2));
-        let remote = running.start((ChatEndpoint::Remote, 1));
+        let first = running.start((ChatEndpoint::Local, 1, 1));
+        let second = running.start((ChatEndpoint::Local, 1, 2));
+        let remote = running.start((ChatEndpoint::Remote, 1, 1));
         let stopped = |flag: &Arc<std::sync::atomic::AtomicBool>| {
             flag.load(std::sync::atomic::Ordering::Acquire)
         };
         // A `browser-cancel` for one command.
-        running.cancel(|command| command == (ChatEndpoint::Local, 1));
+        running.cancel(|command| command == (ChatEndpoint::Local, 1, 1));
         assert!(stopped(&first) && !stopped(&second) && !stopped(&remote));
         // A connection that drops takes its commands with it, and no others.
-        running.cancel(|(endpoint, _)| endpoint == ChatEndpoint::Local);
+        running.cancel(|(endpoint, _, _)| endpoint == ChatEndpoint::Local);
         assert!(stopped(&second) && !stopped(&remote));
         assert_eq!(
             running.lock().keys().copied().collect::<Vec<_>>(),
-            [(ChatEndpoint::Remote, 1)]
+            [(ChatEndpoint::Remote, 1, 1)]
         );
+        // A reconnected host may use the same number again; finishing the
+        // old command leaves the new one's flag.
+        let again = running.start((ChatEndpoint::Remote, 2, 1));
+        running.finish((ChatEndpoint::Remote, 1, 1));
+        running.cancel(|command| command == (ChatEndpoint::Remote, 2, 1));
+        assert!(stopped(&again));
+    }
+
+    #[gpui::test]
+    fn leaving_a_remote_host_stops_its_browser_commands(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            let remote = desktop.browser_commands.start((
+                ChatEndpoint::Remote,
+                desktop.remote_generation,
+                5,
+            ));
+            let local = desktop.browser_commands.start((
+                ChatEndpoint::Local,
+                desktop.connection_generation,
+                5,
+            ));
+            desktop.advance_connection_generation(ChatEndpoint::Remote);
+            assert!(remote.load(std::sync::atomic::Ordering::Acquire));
+            assert!(!local.load(std::sync::atomic::Ordering::Acquire));
+        });
     }
 
     #[cfg(unix)]
@@ -27922,11 +27976,11 @@ Binary files /dev/null and b/image.png differ\n";
 
         let (host, mut requests) = socket_host("browser-answer-test");
         let running = RunningBrowserCommands::default();
-        let started = running.start((ChatEndpoint::Local, 3));
+        let started = running.start((ChatEndpoint::Local, 1, 3));
         drop(BrowserAnswer {
             host: Some(host.clone()),
             request: 3,
-            running: Some((running.clone(), ChatEndpoint::Local)),
+            running: Some((running.clone(), (ChatEndpoint::Local, 1, 3))),
         });
         assert!(running.lock().is_empty());
         assert!(!started.load(std::sync::atomic::Ordering::Acquire));

@@ -330,9 +330,11 @@ fn mark(page: &impl Page) -> Result<String, String> {
 
 /// Waits for whatever an action started: a navigation to finish, or, when
 /// none has begun within `quiet`, nothing. A navigation still waiting for its
-/// server keeps the old document, so the page's loading state is what tells
-/// it has begun; a page that keeps loading is waited for until the time runs
-/// out. Returns whether the page was still loading when the wait ended.
+/// server keeps the old document, and a page that sends the browser straight
+/// on to another shows complete while that one loads, so the page's loading
+/// state is what tells either is under way; a page that keeps loading is
+/// waited for until the time runs out. Returns whether the page was still
+/// loading when the wait ended.
 fn settle(page: &impl Page, mark: &str, quiet: Duration) -> bool {
     let started = Instant::now();
     let end = started + NAVIGATION_TIMEOUT.min(page.time_left());
@@ -347,7 +349,7 @@ fn settle(page: &impl Page, mark: &str, quiet: Duration) -> bool {
             Some(state) if !loading && state[0] == true && started.elapsed() >= quiet => {
                 return false;
             }
-            Some(state) if state[0] == false && state[1] == "complete" => {
+            Some(state) if !loading && state[0] == false && state[1] == "complete" => {
                 thread::sleep(Duration::from_millis(200));
                 return false;
             }
@@ -372,14 +374,16 @@ fn settled_snapshot(page: &impl Page, loading: bool) -> Result<Outcome, String> 
     Ok(outcome)
 }
 
-/// Returns whether the page was still loading when the wait ended. A page
-/// is usable while a slow resource holds up its load event, so that is no
-/// failure.
+/// Returns whether the page was still loading when the wait ended, as when it
+/// sent the browser on to another page or a slow resource holds up its load
+/// event. The page may be usable then, so that is no failure.
 fn wait_for_load(page: &impl Page, timeout: Duration) -> Result<bool, String> {
     let started = Instant::now();
     let timeout = timeout.min(page.time_left());
     while started.elapsed() < timeout {
-        if evaluate(page, "document.readyState").ok() == Some(json!("complete")) {
+        if !page.is_loading()
+            && evaluate(page, "document.readyState").ok() == Some(json!("complete"))
+        {
             thread::sleep(Duration::from_millis(200));
             return Ok(false);
         }
@@ -504,20 +508,7 @@ fn type_text(page: &impl Page, number: &str, text: &str, append: bool) -> Result
                     return false;
                 }};
                 if (!active || !within(element, active)) return 'unfocusable';
-                if (element.isContentEditable || element.matches('input, textarea')) {{
-                    if ({append}) {{
-                        if (element.matches('input, textarea')) {{
-                            try {{ element.setSelectionRange(element.value.length, element.value.length); }} catch {{}}
-                        }} else {{
-                            const range = document.createRange();
-                            range.selectNodeContents(element);
-                            range.collapse(false);
-                            getSelection().removeAllRanges();
-                            getSelection().addRange(range);
-                        }}
-                    }}
-                    return 'ok';
-                }}
+                if (element.isContentEditable || element.matches('input, textarea')) return 'ok';
                 return 'not-text';
             }})()"
         ),
@@ -536,7 +527,18 @@ fn type_text(page: &impl Page, number: &str, text: &str, append: bool) -> Result
         }
         _ => return Err(format!("e{number} cannot take the keyboard focus.")),
     }
-    if !append {
+    if append {
+        // To the end of what is there, which the editor does for every kind
+        // of field, where the selection API has no say over some inputs.
+        key_event(
+            page,
+            "rawKeyDown",
+            &key("End")?,
+            2,
+            &["moveToEndOfDocument"],
+        )?;
+        key_event(page, "keyUp", &key("End")?, 2, &[])?;
+    } else {
         // Select what is there, so the typed text replaces it.
         key_event(page, "rawKeyDown", &key("a")?, 2, &["selectAll"])?;
         key_event(page, "keyUp", &key("a")?, 2, &[])?;
@@ -1097,16 +1099,52 @@ mod tests {
             ("Runtime.evaluate", value(json!([false, "complete"]))),
             ("Runtime.evaluate", page()),
         ]);
-        // Not loading before the click; loading for nine looks after it.
-        let mut loading = vec![false];
-        loading.extend([true; 9]);
-        loading.push(false);
-        *script.loading.borrow_mut() = loading.into();
+        // Loading for the first nine looks after the click, then done.
+        *script.loading.borrow_mut() = [true; 9].into();
         let started = Instant::now();
         let outcome = run(&script, &json!({"action": "click", "ref": "e1"})).unwrap();
         assert!(started.elapsed() > SETTLE_TIME);
         assert!(outcome.text.starts_with("Page: Shop"), "{}", outcome.text);
         assert!(script.answers.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_page_that_sends_the_browser_on_is_not_the_result() {
+        let script = Script::new(vec![
+            ("Runtime.evaluate", value(json!(null))),
+            ("Input.dispatchKeyEvent", Ok(json!({}))),
+            ("Input.dispatchKeyEvent", Ok(json!({}))),
+            // A new document, complete, while the page it sends the browser
+            // to loads.
+            ("Runtime.evaluate", value(json!([false, "complete"]))),
+            ("Runtime.evaluate", value(json!([false, "complete"]))),
+            ("Runtime.evaluate", value(json!([false, "complete"]))),
+            ("Runtime.evaluate", page()),
+        ]);
+        *script.loading.borrow_mut() = [true, true].into();
+        let outcome = run(&script, &json!({"action": "press_key", "key": "Enter"})).unwrap();
+        assert!(outcome.text.starts_with("Page: Shop"), "{}", outcome.text);
+        assert!(script.answers.borrow().is_empty());
+    }
+
+    #[test]
+    fn appending_moves_to_the_end_of_the_field_first() {
+        let mut script = Script::new(vec![
+            ("Runtime.evaluate", value(json!("ok"))),
+            ("Input.dispatchKeyEvent", Ok(json!({}))),
+            ("Input.dispatchKeyEvent", Ok(json!({}))),
+            ("Input.insertText", Ok(json!({}))),
+        ]);
+        // The page stays as it was for the rest.
+        script.fallback = Some(json!([true, "complete"]));
+        let _ = run(
+            &script,
+            &json!({"action": "type", "ref": "e4", "text": ".org", "append": true}),
+        );
+        let calls = script.calls.borrow();
+        assert_eq!(calls[1].1["type"], "rawKeyDown");
+        assert_eq!(calls[1].1["commands"], json!(["moveToEndOfDocument"]));
+        assert_eq!(calls[3].1, json!({"text": ".org"}));
     }
 
     #[test]
