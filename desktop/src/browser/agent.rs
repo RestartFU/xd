@@ -524,9 +524,13 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                     return null;
                 }};
                 const control = top && controlAt(top);
-                const reaches = top && (within(element, top)
-                    || (element.labels && [...element.labels].some(label => within(label, top)
-                        && (!control || control === element || !within(label, control)))));
+                // Inside the element, or its label, unless the point is on
+                // another control in there, such as a nested tree item or a
+                // label's link, which takes the click for itself.
+                const own = holder => within(holder, top)
+                    && (!control || control === element || !within(holder, control));
+                const reaches = top && (own(element)
+                    || (element.labels && [...element.labels].some(own)));
                 const describe = node => node.tagName.toLowerCase()
                     + (node.id ? '#' + node.id : '')
                     + (typeof node.className === 'string' && node.className.trim()
