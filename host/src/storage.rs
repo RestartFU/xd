@@ -3770,7 +3770,7 @@ impl StateStore {
     pub fn start_agent_reports(&self, chat_id: &str) -> Result<ReportDelivery, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let free = transaction
+        let mut free = transaction
             .query_row(
                 "SELECT host_working = 0 AND paused = 0 AND resume_after_restart = 0 \
                  FROM chats WHERE id = ?",
@@ -3779,6 +3779,15 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        // As for a message: a chat that has used its quota stops first.
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        if free && !quota.reached && quota.spent() {
+            transaction.execute(
+                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                [chat_id],
+            )?;
+            free = false;
+        }
         let delivery = if !free || !has_agent_reports(&transaction, chat_id)? {
             ReportDelivery::Held
         } else if let Some(front) = steered_front(&transaction, chat_id)? {

@@ -401,6 +401,13 @@ impl Engine {
             .session_resources
             .lock()
             .map_err(|_| "Session resources are unavailable.".to_owned())?;
+        // As for a message: a chat past its quota but not yet stopped stops now.
+        if store
+            .chat_quota(chat_id)
+            .is_ok_and(|quota| !quota.reached && quota.spent())
+        {
+            self.stop_for_quota_gated(chat_id);
+        }
         let turn = match store
             .start_agent_reports(chat_id)
             .map_err(|error| error.to_string())?

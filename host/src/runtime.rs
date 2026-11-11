@@ -261,6 +261,8 @@ struct Router {
     /// A background task has finished, and the agent has not yet begun the turn
     /// in which it may report on it.
     report_due: bool,
+    /// Its process has ended, so no turn it owes will come.
+    ended: bool,
     /// It was stopped for being idle, so what it said last has nowhere to go.
     released: bool,
     /// Claude's tasks it has started and not yet reported finished, by task id:
@@ -1088,9 +1090,9 @@ impl TurnRuntime {
     /// one lock of its router.
     fn waits_on_background(&self, chat_id: &str) -> bool {
         self.router(chat_id).is_some_and(|router| {
-            router
-                .lock()
-                .is_ok_and(|router| !router.tasks.is_empty() || router.report_due)
+            router.lock().is_ok_and(|router| {
+                !router.ended && (!router.tasks.is_empty() || router.report_due)
+            })
         })
     }
 
@@ -1913,6 +1915,7 @@ impl TurnRuntime {
                     // Whatever the process was running ended with it.
                     had_tasks = !router.tasks.is_empty();
                     router.tasks.clear();
+                    router.ended = true;
                     match router.sink.take() {
                         Some(sink) => {
                             let _ = sink.send(Feed::End);
@@ -1936,8 +1939,12 @@ impl TurnRuntime {
                     {
                         runtime.settle_orphaned_agents(&chat_id);
                     }
-                    // No report on its background work can come from it now.
-                    runtime.release_held_turn(&chat_id, Some(&router));
+                }
+                // No report on its background work can come from it now. A
+                // turn still holding its output is told of after this, and
+                // finds the router ended.
+                if let Some(inner) = inner.upgrade() {
+                    TurnRuntime { inner }.release_held_turn(&chat_id, Some(&router));
                 }
             });
     }
@@ -2247,6 +2254,7 @@ impl TurnRuntime {
             quiet_since: Instant::now(),
             wakes_itself: false,
             report_due: false,
+            ended: false,
             released: false,
             tasks: crate::background_tasks::Tasks::default(),
         }));
@@ -3362,7 +3370,7 @@ impl TurnRuntime {
         }
         let owed = router
             .as_ref()
-            .is_none_or(|router| !router.tasks.is_empty() || router.report_due);
+            .is_none_or(|router| !router.ended && (!router.tasks.is_empty() || router.report_due));
         if !gone && owed {
             return;
         }
@@ -5726,6 +5734,37 @@ read next"#,
         assert_eq!(told.len(), 2, "{told:?}");
         assert!(!told[1].background);
         assert_eq!(told[1].reply, "Tests pass.");
+    }
+
+    /// A process that ends with its turn, while it owed a report on a task,
+    /// will never take that turn: the turn is told of as finished.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_whose_process_ends_with_it_is_not_left_held() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_shell","status":"completed"}}'
+{}"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        let told = settled_turns(&agent.runtime);
+        agent.send("first");
+        wait_for("the turn to be told of as finished", || {
+            told.lock()
+                .unwrap()
+                .last()
+                .is_some_and(|turn| !turn.background)
+        });
+        let told = told.lock().unwrap();
+        assert_eq!(told.last().unwrap().reply, "Answer.", "{told:?}");
+        assert_eq!(
+            told.iter().filter(|turn| !turn.background).count(),
+            1,
+            "{told:?}"
+        );
     }
 
     /// When the process goes with its background work, no turn will report
