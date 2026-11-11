@@ -255,8 +255,10 @@ fn tools() -> Value {
         {
             "name": STOP,
             "title": "Stop an agent",
-            "description": "Stop the turn one of this chat's agents is taking. Its chat stays, \
-                and message_agent starts it again.",
+            "description": "Stop one of this chat's agents and throw it away, once you need \
+                nothing more from it. Any turn it is taking stops and its chat is deleted, so it \
+                no longer shows to the user and cannot be messaged again. Files it wrote in its \
+                worktree stay on disk. To change its course instead, use message_agent.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"agent": agent},
@@ -477,9 +479,9 @@ fn stop(arguments: &Value, ask: impl FnOnce(Value) -> Result<Value, String>) -> 
     ask_daemon(ask, json!({"op": "stop-agent", "agent": agent}), |answer| {
         tool_result(
             if answer["was_working"] == false {
-                "The agent was not working."
+                "Threw the agent away."
             } else {
-                "Stopped the agent's turn."
+                "Stopped the agent's turn and threw it away."
             },
             false,
         )
@@ -736,7 +738,7 @@ mod tests {
             asked.unwrap(),
             json!({"op": "stop-agent", "agent": "child"})
         );
-        assert_eq!(stopped["content"][0]["text"], "The agent was not working.");
+        assert_eq!(stopped["content"][0]["text"], "Threw the agent away.");
     }
 
     #[test]

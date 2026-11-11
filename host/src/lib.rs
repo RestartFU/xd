@@ -1452,7 +1452,24 @@ impl Engine {
         }
         // A worker's card leaves its parent with it; the parent reloads.
         let parent = store.chat_parent(chat_id).ok().flatten();
-        match store.delete_chat(request) {
+        // Deleted under the chat's succession, as a pause decides: a turn
+        // ending now cannot hand over to a queued one between the row going
+        // and its work stopping. Either the ending turn finds no chat and
+        // starts nothing, or the turn it already started is stopped here.
+        let deleted = match &self.runtime {
+            Some(runtime) => {
+                let mut deleted = None;
+                runtime.stop_chat_if(chat_id, |_| {
+                    let result = store.delete_chat(request);
+                    let ok = result.is_ok();
+                    deleted = Some(result);
+                    ok
+                });
+                deleted.expect("stop_chat_if always decides")
+            }
+            None => store.delete_chat(request),
+        };
+        match deleted {
             Ok(reply) => {
                 if let Some(runtime) = &self.runtime {
                     runtime.discard_chat(chat_id);
@@ -3773,9 +3790,6 @@ done
         let stranger = engine
             .dispatch(json!({"op": "message-agent", "chat": child, "agent": parent, "text": "Hi"}));
         assert_eq!(stranger["ok"], false);
-        let stopped = engine.dispatch(json!({"op": "stop-agent", "chat": parent, "agent": child}));
-        assert_eq!(stopped, json!({"ok": true, "was_working": false}));
-
         // A message the user sends the worker that cannot start a turn is
         // reported too; the parent's own message_agent just gets the error.
         engine.runtime.as_ref().unwrap().discard_chat(&child);
@@ -3823,6 +3837,24 @@ done
             "prompt": "More", "workspace": "this_worktree"}));
         assert_eq!(failed_start["ok"], false, "{failed_start}");
         assert_eq!(cards(store).len(), 1);
+
+        // Stopping an agent throws it away: its chat, card and listing go.
+        let stopped = engine.dispatch(json!({"op": "stop-agent", "chat": parent, "agent": child}));
+        assert_eq!(stopped, json!({"ok": true, "was_working": false}));
+        let tree = engine.dispatch(json!({"op": "tree"}));
+        assert!(
+            tree["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|chat| chat["id"] != child),
+            "{tree}"
+        );
+        assert!(cards(store).is_empty());
+        let agents = engine.dispatch(json!({"op": "list-agents", "chat": parent}));
+        assert_eq!(agents, json!({"ok": true, "agents": []}));
+        let again = engine.dispatch(json!({"op": "stop-agent", "chat": parent, "agent": child}));
+        assert_eq!(again["ok"], false, "{again}");
 
         for chat in [&parent, &child] {
             engine.runtime.as_ref().unwrap().discard_chat(chat);
