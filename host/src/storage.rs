@@ -3759,11 +3759,16 @@ impl StateStore {
     /// of its own when the chat is free, otherwise once its turn ends or it
     /// resumes. Unlike a message the user sends, it never joins the queue, so
     /// the user cannot edit, steer or drop it, and it leaves the draft alone.
+    ///
+    /// It replaces any report the agent held back. `released` when it is the
+    /// held report itself, told again as final: it goes only if the held one
+    /// is still there, so it is never handed over twice.
     pub fn deliver_agent_report(
         &self,
         chat_id: &str,
         agent_id: &str,
         text: &str,
+        released: bool,
     ) -> Result<ReportDelivery, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
@@ -3791,6 +3796,14 @@ impl StateStore {
             )?;
             paused = true;
         }
+        let replaced = transaction.execute(
+            "DELETE FROM agent_reports WHERE agent_id = ? AND state = 'held'",
+            [agent_id],
+        )?;
+        if released && replaced == 0 {
+            transaction.commit()?;
+            return Ok(ReportDelivery::Held);
+        }
         transaction.execute(
             "INSERT INTO agent_reports (chat_id, agent_id, text, created_at) VALUES (?, ?, ?, ?)",
             params![chat_id, agent_id, text, now_seconds()],
@@ -3803,6 +3816,16 @@ impl StateStore {
             return Ok(ReportDelivery::Held);
         }
         self.start_agent_reports(chat_id)
+    }
+
+    #[cfg(test)]
+    fn deliver_agent_report_for_test(
+        &self,
+        chat_id: &str,
+        agent_id: &str,
+        text: &str,
+    ) -> Result<ReportDelivery, StorageError> {
+        self.deliver_agent_report(chat_id, agent_id, text, false)
     }
 
     /// Starts the turn that hands a free chat the reports waiting for it:
@@ -16727,7 +16750,11 @@ mod tests {
         // A free chat takes a report at once, in a turn of its own that
         // leaves the user's draft alone.
         let ReportDelivery::Start(turn) = store
-            .deliver_agent_report("lead", "a", "[xd] Agent \"A\" (a) is done with its turn.")
+            .deliver_agent_report_for_test(
+                "lead",
+                "a",
+                "[xd] Agent \"A\" (a) is done with its turn.",
+            )
             .unwrap()
         else {
             panic!("a free chat should take the report now");
@@ -16748,7 +16775,9 @@ mod tests {
         ));
         for (agent, text) in [("a", "[xd] from a"), ("b", "[xd] from b")] {
             assert!(matches!(
-                store.deliver_agent_report("lead", agent, text).unwrap(),
+                store
+                    .deliver_agent_report_for_test("lead", agent, text)
+                    .unwrap(),
                 ReportDelivery::Held
             ));
         }
@@ -16775,7 +16804,7 @@ mod tests {
 
         // A message the user steered goes before a report that came first.
         store
-            .deliver_agent_report("lead", "a", "[xd] again from a")
+            .deliver_agent_report_for_test("lead", "a", "[xd] again from a")
             .unwrap();
         store.requeue_front("lead", "steered").unwrap();
         let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
@@ -16805,7 +16834,7 @@ mod tests {
         );
         assert!(matches!(
             store
-                .deliver_agent_report("lead", "b", "[xd] later from b")
+                .deliver_agent_report_for_test("lead", "b", "[xd] later from b")
                 .unwrap(),
             ReportDelivery::Held
         ));
@@ -16829,14 +16858,14 @@ mod tests {
         // Reports the chat's agent has read for itself are dropped, newer
         // ones kept; one from an agent goes with its chat.
         store
-            .deliver_agent_report("lead", "a", "[xd] read")
+            .deliver_agent_report_for_test("lead", "a", "[xd] read")
             .unwrap();
         let through = store.latest_agent_report("lead", "a").unwrap();
         store
-            .deliver_agent_report("lead", "a", "[xd] unread")
+            .deliver_agent_report_for_test("lead", "a", "[xd] unread")
             .unwrap();
         store
-            .deliver_agent_report("lead", "b", "[xd] from b, gone")
+            .deliver_agent_report_for_test("lead", "b", "[xd] from b, gone")
             .unwrap();
         assert_eq!(store.drop_agent_reports("lead", "a", through).unwrap(), 1);
         store.delete_chat(&json!({"chat": "b"})).unwrap();
@@ -16870,7 +16899,7 @@ mod tests {
         );
         assert!(matches!(
             store
-                .deliver_agent_report("lead", "a", "[xd] behind it")
+                .deliver_agent_report_for_test("lead", "a", "[xd] behind it")
                 .unwrap(),
             ReportDelivery::SteeredFirst(front) if front == "steered"
         ));
@@ -16909,7 +16938,7 @@ mod tests {
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         assert!(
             store
-                .deliver_agent_report("lead", "a", "[xd] done")
+                .deliver_agent_report_for_test("lead", "a", "[xd] done")
                 .is_err()
         );
         assert!(store.has_fresh_reports("lead").unwrap());
@@ -16930,10 +16959,10 @@ mod tests {
             .prepare_send(&json!({"chat": "lead", "text": "work"}))
             .unwrap();
         store
-            .deliver_agent_report("lead", "a", "[xd] first")
+            .deliver_agent_report_for_test("lead", "a", "[xd] first")
             .unwrap();
         store
-            .deliver_agent_report("lead", "a", "[xd] second")
+            .deliver_agent_report_for_test("lead", "a", "[xd] second")
             .unwrap();
         let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
         assert!(finish.next.is_some());
@@ -16947,7 +16976,7 @@ mod tests {
         assert_eq!(store.chats_with_waiting_reports().unwrap(), ["lead"]);
         // The next report takes them along, in their places.
         let ReportDelivery::Start(turn) = store
-            .deliver_agent_report("lead", "a", "[xd] third")
+            .deliver_agent_report_for_test("lead", "a", "[xd] third")
             .unwrap()
         else {
             panic!("the returned reports should go again");
@@ -16973,7 +17002,7 @@ mod tests {
         drop(database);
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         let ReportDelivery::Start(_) = store
-            .deliver_agent_report("lead", "a", "[xd] done")
+            .deliver_agent_report_for_test("lead", "a", "[xd] done")
             .unwrap()
         else {
             panic!("a free chat should take the report");
@@ -17005,7 +17034,7 @@ mod tests {
         drop(database);
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         let ReportDelivery::Start(_) = store
-            .deliver_agent_report("lead", "a", "[xd] done")
+            .deliver_agent_report_for_test("lead", "a", "[xd] done")
             .unwrap()
         else {
             panic!("a free chat should take the report");
@@ -17047,7 +17076,7 @@ mod tests {
             .prepare_send(&json!({"chat": "lead", "text": "ordinary"}))
             .unwrap();
         store
-            .deliver_agent_report("lead", "a", "[xd] news")
+            .deliver_agent_report_for_test("lead", "a", "[xd] news")
             .unwrap();
         // Two steered messages come back, the second behind the first.
         store.requeue_front("lead", "steered A").unwrap();
@@ -17070,7 +17099,7 @@ mod tests {
             .unwrap();
         store.requeue_front("lead", "same").unwrap();
         store
-            .deliver_agent_report("lead", "a", "[xd] ahead")
+            .deliver_agent_report_for_test("lead", "a", "[xd] ahead")
             .unwrap();
         store
             .take_queued(&json!({"chat": "lead", "index": 0, "text": "same"}))
@@ -17081,7 +17110,7 @@ mod tests {
         // A turn that cannot be prepared for the reports still ends the one
         // before it; the reports wait.
         store
-            .deliver_agent_report("lead", "a", "[xd] later")
+            .deliver_agent_report_for_test("lead", "a", "[xd] later")
             .unwrap();
         Connection::open(&fixture.database)
             .unwrap()
@@ -17128,6 +17157,31 @@ mod tests {
         store.hold_agent_report("lead", "a", "[xd] again").unwrap();
         store.drop_held_report("a").unwrap();
         assert!(store.idle_agents_holding_reports().unwrap().is_empty());
+
+        // Told again as final, a held report replaces itself, in one go...
+        store.finish_turn("lead", true, None, 1, false).unwrap();
+        store.hold_agent_report("lead", "a", "[xd] held").unwrap();
+        let ReportDelivery::Start(turn) = store
+            .deliver_agent_report("lead", "a", "[xd] held", true)
+            .unwrap()
+        else {
+            panic!("the released report should go");
+        };
+        assert_eq!(turn.prompt, "[xd] held");
+        assert!(store.idle_agents_holding_reports().unwrap().is_empty());
+        // ...and not again once recovery has handed it over.
+        store.finish_turn("lead", true, None, 1, false).unwrap();
+        store.hold_agent_report("lead", "a", "[xd] once").unwrap();
+        store.release_held_report("a").unwrap();
+        store.start_agent_reports("lead").unwrap();
+        assert!(matches!(
+            store
+                .deliver_agent_report("lead", "a", "[xd] once", true)
+                .unwrap(),
+            ReportDelivery::Held
+        ));
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert!(finish.next.is_none());
     }
 
     #[test]
@@ -17150,7 +17204,7 @@ mod tests {
         assert_eq!(store.chat("lead").unwrap()["working"], false);
         assert!(matches!(
             store
-                .deliver_agent_report("lead", "a", "[xd] done")
+                .deliver_agent_report_for_test("lead", "a", "[xd] done")
                 .unwrap(),
             ReportDelivery::Held
         ));

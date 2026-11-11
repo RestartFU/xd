@@ -158,6 +158,9 @@ pub(crate) struct SettledTurn {
     /// shells of its own go on, so the agent is not done: it takes another
     /// turn once they end, and that one says how the work went.
     pub(crate) background: bool,
+    /// It was held for its background work and is told of again as finished,
+    /// because the agent will take no turn to report on that work.
+    pub(crate) released: bool,
 }
 
 /// Marks a `tool` row that says a chat moved to another account. A client that
@@ -2511,6 +2514,7 @@ impl TurnRuntime {
                     stopped: false,
                     quiet: false,
                     background: false,
+                    released: false,
                 };
                 let next = self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
                 self.settled(settled);
@@ -3116,6 +3120,7 @@ impl TurnRuntime {
             stopped: false,
             quiet: false,
             background: (background || waits_on_background) && success && asked.is_none(),
+            released: false,
         };
         let next_failed = self.finish(
             turn,
@@ -3292,6 +3297,7 @@ impl TurnRuntime {
                 stopped: false,
                 quiet: false,
                 background: false,
+                released: false,
             });
         }
         None
@@ -3311,6 +3317,7 @@ impl TurnRuntime {
             stopped: false,
             quiet,
             background: false,
+            released: false,
         });
     }
 
@@ -3415,6 +3422,7 @@ impl TurnRuntime {
         if let Some((turn, _)) = held.turns.remove(chat_id) {
             self.tell_settled(SettledTurn {
                 background: false,
+                released: true,
                 ..turn
             });
         }
@@ -4177,6 +4185,7 @@ mod tests {
             stopped: false,
             quiet: false,
             background: false,
+            released: false,
         });
         drop(ending);
         reporter.join().unwrap();

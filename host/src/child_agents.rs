@@ -324,11 +324,11 @@ impl Engine {
             None => ("completed", Some(clip_start(&settled.reply, SUMMARY_CHARS))),
         };
         self.write_agent_record(child, status, summary.as_deref());
-        // A later turn of the agent's replaces a report it held back.
-        if !settled.background {
-            let _ = store.drop_held_report(child);
-        }
         if !reports || settled.quiet || settled.stopped {
+            // Nothing to say, so a report it held back has nothing to replace it.
+            if !settled.background {
+                let _ = store.drop_held_report(child);
+            }
             return;
         }
         let title = store
@@ -346,7 +346,10 @@ impl Engine {
             }
             return;
         }
-        if let Err(error) = self.deliver_report(&parent, child, &text) {
+        // Stored in place of any report the agent held back, in one go. One
+        // told again after being held goes only if that held report is still
+        // there: a restart's recovery may have handed it over already.
+        if let Err(error) = self.deliver_report(&parent, child, &text, settled.released) {
             eprintln!("xd-host: cannot report agent {child} to chat {parent}: {error}");
         }
     }
@@ -355,7 +358,13 @@ impl Engine {
     /// the chat is free, otherwise held out of its queue until its turn ends
     /// or it resumes. Decided under the chat's gate, as a send is, so it is
     /// ordered with any pause.
-    fn deliver_report(&self, parent: &str, child: &str, text: &str) -> Result<(), String> {
+    fn deliver_report(
+        &self,
+        parent: &str,
+        child: &str,
+        text: &str,
+        released: bool,
+    ) -> Result<(), String> {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return Err("Rust host state storage is not configured.".into());
         };
@@ -380,7 +389,7 @@ impl Engine {
         }
         let settled = store.chat_has_settlement_override(parent).unwrap_or(false);
         match store
-            .deliver_agent_report(parent, child, text)
+            .deliver_agent_report(parent, child, text, released)
             .map_err(|error| error.to_string())?
         {
             ReportDelivery::Held => Ok(()),
@@ -758,6 +767,7 @@ mod tests {
             stopped: false,
             quiet: false,
             background: false,
+            released: false,
         };
         assert_eq!(
             report("child", "Fix the tests", &settled),
