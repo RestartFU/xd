@@ -82,9 +82,10 @@ struct RuntimeInner {
     on_turn_settled: Mutex<Option<TurnSettledHandler>>,
     /// The last turn of each chat that ended with background work of its own
     /// still going, told of again as finished if the agent never takes
-    /// another: see [`TurnRuntime::release_held_turn`].
+    /// another (see [`TurnRuntime::release_held_turn`]), and the chats whose
+    /// turn is settling.
     /// Each with the process the turn ran in, whose background work it waits on.
-    held_turns: Mutex<HashMap<String, HeldTurn>>,
+    held_turns: Mutex<HeldTurns>,
     /// Told whenever a turn starts or ends, with the chat, assistant, and
     /// account; see [`crate::quota`].
     on_activity: Mutex<Option<ActivityHandler>>,
@@ -128,6 +129,15 @@ pub(crate) enum AgentActivity {
 /// A turn held while its agent's background work goes on, and the router of
 /// the process running that work.
 type HeldTurn = (SettledTurn, Option<std::sync::Weak<Mutex<Router>>>);
+
+/// See [`RuntimeInner::held_turns`].
+#[derive(Default)]
+struct HeldTurns {
+    turns: HashMap<String, HeldTurn>,
+    /// Chats whose turn has left the active turns but not yet been told of.
+    /// Their held turn waits: the turn settling may replace it.
+    settling: HashSet<String>,
+}
 
 /// A turn that ended for good: neither stopped nor going on elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -606,7 +616,7 @@ impl TurnRuntime {
                 auth,
                 on_account_switch: Mutex::new(None),
                 on_turn_settled: Mutex::new(None),
-                held_turns: Mutex::new(HashMap::new()),
+                held_turns: Mutex::new(HeldTurns::default()),
                 on_activity: Mutex::new(None),
                 explained_switches: Mutex::new(HashSet::new()),
                 account_gate: std::sync::RwLock::new(()),
@@ -2083,7 +2093,7 @@ impl TurnRuntime {
     pub(crate) fn discard_chat(&self, chat_id: &str) {
         // A chat thrown away has nothing more to tell of.
         if let Ok(mut held) = self.inner.held_turns.lock() {
-            held.remove(chat_id);
+            held.turns.remove(chat_id);
         }
         self.cancel(chat_id);
         self.drop_session(chat_id);
@@ -3042,6 +3052,11 @@ impl TurnRuntime {
         // account-switch continuation below, which takes the chat's gate.
         let succession = self.succession(&turn.chat_id);
         let succession = succession.lock().unwrap_or_else(|error| error.into_inner());
+        // From leaving the active turns until it is told of, this turn may
+        // replace the chat's held one, which waits for it meanwhile.
+        if let Ok(mut held) = self.inner.held_turns.lock() {
+            held.settling.insert(turn.chat_id.clone());
+        }
         if let Ok(mut active) = self.inner.active.lock()
             && active
                 .get(&turn.chat_id)
@@ -3128,6 +3143,11 @@ impl TurnRuntime {
         if let Some(next_failed) = next_failed {
             self.settled(next_failed);
         }
+        if let Ok(mut held) = self.inner.held_turns.lock() {
+            held.settling.remove(&chat_id);
+        }
+        // Whatever tried to release the held turn meanwhile waited for this.
+        self.release_held_turn(&chat_id, None);
         drop(succession);
         if let Some((outcome, message)) = limited {
             self.continue_after_limit(&chat_id, outcome, message);
@@ -3304,9 +3324,10 @@ impl TurnRuntime {
         match self.inner.held_turns.lock() {
             Ok(mut held) => {
                 if background {
-                    held.insert(chat_id.clone(), (settled.clone(), process));
+                    held.turns
+                        .insert(chat_id.clone(), (settled.clone(), process));
                 } else {
-                    held.remove(&chat_id);
+                    held.turns.remove(&chat_id);
                 }
                 self.tell_settled(settled);
             }
@@ -3342,7 +3363,10 @@ impl TurnRuntime {
         let Ok(mut held) = self.inner.held_turns.lock() else {
             return;
         };
-        let Some((_, process)) = held.get(chat_id) else {
+        if held.settling.contains(chat_id) {
+            return;
+        }
+        let Some((_, process)) = held.turns.get(chat_id) else {
             return;
         };
         let current = self.router(chat_id);
@@ -3374,7 +3398,7 @@ impl TurnRuntime {
         if !gone && owed {
             return;
         }
-        if let Some((turn, _)) = held.remove(chat_id) {
+        if let Some((turn, _)) = held.turns.remove(chat_id) {
             self.tell_settled(SettledTurn {
                 background: false,
                 ..turn
