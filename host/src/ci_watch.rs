@@ -498,13 +498,10 @@ impl Engine {
             {
                 return Ok(None);
             }
-            let delivered = store
-                .deliver_ci_report(&watch.chat, &watch.url, &watch.token, report, shown)
-                .map_err(|error| error.to_string())?;
-            Ok(delivered.map(|(delivery, card)| {
-                written = card;
-                delivery
-            }))
+            let (delivered, card) =
+                store.deliver_ci_report(&watch.chat, &watch.url, &watch.token, report, shown);
+            written = card;
+            delivered.map_err(|error| error.to_string())
         });
         // The card says how it ended even when the turn could not start.
         if let Some(written) = written {
@@ -697,7 +694,7 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
         ..PushedHead::default()
     };
     let mut empty = EmptyPolls::default();
-    let (mut failed_polls, mut refused) = (0_u32, 0_u32);
+    let (mut failed_polls, mut refused, mut unconfirmed) = (0_u32, 0_u32, 0_u32);
     // What GitHub said last, for the card.
     let mut last: Option<Status> = None;
     let mut last_complete: Option<(Vec<String>, i64)> = None;
@@ -768,9 +765,16 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
                     }
                 }
             };
-            if ending.is_none()
-                && now_seconds().saturating_sub(watch.created_at) >= MAX_WATCH.as_secs() as i64
-            {
+            // The deadline holds whatever this poll found, and so does a
+            // run of finished checks that could not be read again.
+            let overdue =
+                now_seconds().saturating_sub(watch.created_at) >= MAX_WATCH.as_secs() as i64;
+            if unconfirmed >= FAILED_POLLS {
+                ending = Some(Ending::Stopped {
+                    url: url.to_owned(),
+                    reason: "xd could not confirm its finished checks.".into(),
+                });
+            } else if overdue && !matches!(ending, Some(Ending::Stopped { .. })) {
                 ending = Some(Ending::Stopped {
                     url: url.to_owned(),
                     reason: "Its checks were still running after 6 hours.".into(),
@@ -802,7 +806,7 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
                                 false
                             }
                             Err(_) => {
-                                failed_polls += 1;
+                                unconfirmed += 1;
                                 false
                             }
                         },
@@ -1778,18 +1782,15 @@ mod tests {
         // current watch's ends it, and its card says how CI went.
         let finished = format!("{CARD_PREFIX}{}", json!({"status": "passed", "url": url}));
         let before = rows().len();
-        assert!(
-            store
-                .deliver_ci_report(&chat, url, &first.token, "[xd] CI passed", &finished)
-                .unwrap()
-                .is_none()
-        );
+        let (refused, card) =
+            store.deliver_ci_report(&chat, url, &first.token, "[xd] CI passed", &finished);
+        assert!(refused.unwrap().is_none());
+        assert_eq!(card, None);
         assert_eq!(store.ci_watches().unwrap().len(), 1);
         assert_eq!(rows().len(), before);
-        let (_, card) = store
-            .deliver_ci_report(&chat, url, &second.token, "[xd] CI passed", &finished)
-            .unwrap()
-            .unwrap();
+        let (delivered, card) =
+            store.deliver_ci_report(&chat, url, &second.token, "[xd] CI passed", &finished);
+        assert!(delivered.unwrap().is_some());
         assert!(card.unwrap().created);
         assert!(store.ci_watches().unwrap().is_empty());
         assert!(rows().contains(&finished));
@@ -1798,6 +1799,7 @@ mod tests {
         assert!(
             store
                 .deliver_ci_report(&chat, url, &second.token, "[xd] CI passed", &finished)
+                .0
                 .unwrap()
                 .is_none()
         );

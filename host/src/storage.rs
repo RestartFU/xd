@@ -4797,9 +4797,10 @@ impl StateStore {
 
     /// Ends the watch holding `token`: its report `report` waits for the chat
     /// out of its queue, as an agent's does, and its card says `card`, all in
-    /// one transaction. Answers `None`, storing nothing, when the watch is no
-    /// longer this one; otherwise how the report is handed over and the
-    /// card's last write.
+    /// one transaction. Answers how the report is handed over, `None` when the
+    /// watch is no longer this one and nothing was stored, and apart from
+    /// that the card's last write, which stands even when the turn that would
+    /// hand the report over could not be prepared.
     pub(crate) fn deliver_ci_report(
         &self,
         chat_id: &str,
@@ -4807,7 +4808,10 @@ impl StateStore {
         token: &str,
         report: &str,
         card: &str,
-    ) -> Result<Option<(ReportDelivery, Option<CardWrite>)>, StorageError> {
+    ) -> (
+        Result<Option<ReportDelivery>, StorageError>,
+        Option<CardWrite>,
+    ) {
         let mut written = None;
         // Its own chat stands as the source of a report xd itself sends.
         let delivery = self.store_report(chat_id, chat_id, report, |transaction| {
@@ -4827,8 +4831,35 @@ impl StateStore {
             )?;
             written = write_card(transaction, chat_id, card_id, card)?;
             Ok(true)
-        })?;
-        Ok(delivery.map(|delivery| (delivery, written)))
+        });
+        // A card written in a transaction that did not commit never stood.
+        let written = match &delivery {
+            Ok(None) => None,
+            Err(_) if !self.ci_card_stands(chat_id, written.as_ref()) => None,
+            _ => written,
+        };
+        (delivery, written)
+    }
+
+    /// Whether `written` is what chat `chat_id`'s card now says, as after a
+    /// commit.
+    fn ci_card_stands(&self, chat_id: &str, written: Option<&CardWrite>) -> bool {
+        let Some(written) = written else {
+            return false;
+        };
+        let Ok(database) = self.database.lock() else {
+            return false;
+        };
+        database
+            .query_row(
+                "SELECT content FROM messages WHERE id = ? AND chat_id = ? AND role = 'tool'",
+                params![written.message_id, chat_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some_and(|content| content == written.text)
     }
 
     /// Forgets the CI watch of `url` for `chat_id`: only the one holding
