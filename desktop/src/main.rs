@@ -24311,6 +24311,7 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     /// Draws the window again, so its debug bounds follow the latest state.
+    #[cfg(unix)]
     fn redraw(cx: &mut gpui::VisualTestContext) {
         cx.run_until_parked();
         cx.update(|window, cx| {
