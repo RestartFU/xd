@@ -3132,6 +3132,13 @@ impl StateStore {
                 mark_waiting_chat_to_resume(&transaction, &chat_id)?;
             }
         }
+        // Reports handed to a turn that is no longer running, such as one an
+        // older host, which knows nothing of them, ended: that turn had them.
+        transaction.execute(
+            "DELETE FROM agent_reports WHERE state = 'handed' \
+             AND chat_id IN (SELECT id FROM chats WHERE host_working = 0)",
+            [],
+        )?;
         transaction.commit()?;
         Ok(interrupted)
     }
@@ -16828,6 +16835,37 @@ mod tests {
             store.start_agent_reports("lead").unwrap(),
             ReportDelivery::Held
         ));
+    }
+
+    #[test]
+    fn reports_handed_to_a_turn_an_older_host_ended_are_cleared_at_start() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let ReportDelivery::Start(_) = store
+            .deliver_agent_report("lead", "a", "[xd] done")
+            .unwrap()
+        else {
+            panic!("a free chat should take the report");
+        };
+        drop(store);
+        // An older host ended that turn, knowing nothing of the reports.
+        Connection::open(&fixture.database)
+            .unwrap()
+            .execute("UPDATE chats SET host_working = 0 WHERE id = 'lead'", [])
+            .unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store.recover_interrupted_turns().unwrap();
+        let left: i64 = Connection::open(&fixture.database)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM agent_reports", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]
