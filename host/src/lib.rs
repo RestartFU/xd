@@ -1452,7 +1452,24 @@ impl Engine {
         }
         // A worker's card leaves its parent with it; the parent reloads.
         let parent = store.chat_parent(chat_id).ok().flatten();
-        match store.delete_chat(request) {
+        // Deleted under the chat's succession, as a pause decides: a turn
+        // ending now cannot hand over to a queued one between the row going
+        // and its work stopping. Either the ending turn finds no chat and
+        // starts nothing, or the turn it already started is stopped here.
+        let deleted = match &self.runtime {
+            Some(runtime) => {
+                let mut deleted = None;
+                runtime.stop_chat_if(chat_id, |_| {
+                    let result = store.delete_chat(request);
+                    let ok = result.is_ok();
+                    deleted = Some(result);
+                    ok
+                });
+                deleted.expect("stop_chat_if always decides")
+            }
+            None => store.delete_chat(request),
+        };
+        match deleted {
             Ok(reply) => {
                 if let Some(runtime) = &self.runtime {
                     runtime.discard_chat(chat_id);
