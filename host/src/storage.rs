@@ -2973,6 +2973,17 @@ impl StateStore {
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
         let mut queue = queue_from_column(Some(&stored));
+        // As for a message: a chat that has used its quota stops here, its
+        // queue and reports waiting for a new one.
+        let mut paused = paused;
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        if !paused && !quota.reached && quota.spent() {
+            transaction.execute(
+                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                [chat_id],
+            )?;
+            paused = true;
+        }
         // Reports from the chat's agents go first, as news the next message
         // may depend on, unless the user steered the message at the front.
         // A paused chat keeps both for when it resumes.
@@ -3815,6 +3826,11 @@ impl StateStore {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(chats)
+    }
+
+    /// Whether any report waits for `chat_id`.
+    pub fn has_waiting_reports(&self, chat_id: &str) -> Result<bool, StorageError> {
+        has_agent_reports(&*self.reader()?, chat_id)
     }
 
     /// The newest report from `agent_id` waiting for `chat_id`, or 0.

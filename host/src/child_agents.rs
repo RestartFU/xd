@@ -295,6 +295,18 @@ impl Engine {
             return;
         };
         let child = settled.chat_id.as_str();
+        // Reports that came while this chat was busy go once it is free, for
+        // the ones a turn ending did not hand over, such as when the turn
+        // after it could not start.
+        if store.has_waiting_reports(child).unwrap_or(false) {
+            let _answer = self
+                .restart_answer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Err(error) = self.start_waiting_reports(child, false) {
+                eprintln!("xd-host: cannot hand chat {child} its agents' reports: {error}");
+            }
+        }
         let Ok(Some((parent, reports))) = store.chat_parent(child) else {
             return;
         };
