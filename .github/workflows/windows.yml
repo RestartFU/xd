@@ -32,6 +32,21 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.ref || github.sha }}
 
+      # The runner's own resolver has been seen failing every lookup of the
+      # Ubuntu archive for an hour at a time while the rest of the internet
+      # resolved. Written out here, not in a script, because a release builds
+      # an older tag that would not have the script; keep the copies in
+      # release, nightly, mobile and windows alike.
+      - name: Resolve through public DNS
+        run: |
+          set -euo pipefail
+          servers=(1.1.1.1 8.8.8.8 1.0.0.1 8.8.4.4)
+          sudo rm -f /etc/resolv.conf
+          printf 'nameserver %s\n' "${servers[@]}" | sudo tee /etc/resolv.conf >/dev/null
+          for host in archive.ubuntu.com security.ubuntu.com; do
+            getent hosts "$host" || echo "::warning::$host does not resolve."
+          done
+
       - name: Install the pinned Rust toolchain and musl compiler
         run: |
           rustup toolchain install 1.95.0 --profile minimal \
