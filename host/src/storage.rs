@@ -3762,16 +3762,14 @@ impl StateStore {
             "INSERT INTO agent_reports (chat_id, agent_id, text, created_at) VALUES (?, ?, ?, ?)",
             params![chat_id, agent_id, text, now_seconds()],
         )?;
-        let delivery = if working || paused || cut_off {
-            ReportDelivery::Held
-        } else if let Some(front) = steered_front(&transaction, chat_id)? {
-            ReportDelivery::SteeredFirst(front)
-        } else {
-            take_agent_reports(&transaction, &self.workspace_root, chat_id)?
-                .map_or(ReportDelivery::Held, ReportDelivery::Start)
-        };
+        // Kept whatever happens next: a turn that cannot be prepared for it,
+        // such as on an assistant xd no longer runs, leaves it waiting.
         transaction.commit()?;
-        Ok(delivery)
+        drop(database);
+        if working || paused || cut_off {
+            return Ok(ReportDelivery::Held);
+        }
+        self.start_agent_reports(chat_id)
     }
 
     /// Starts the turn that hands a free chat the reports waiting for it:
@@ -16731,6 +16729,28 @@ mod tests {
         assert_eq!(finish.next.expect("the report").prompt, "[xd] behind it");
         let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
         assert_eq!(finish.next.expect("the queue").prompt, "ordinary");
+    }
+
+    #[test]
+    fn a_report_whose_turn_cannot_be_prepared_keeps_waiting() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        database
+            .execute("UPDATE chats SET backend = 'jcode' WHERE id = 'lead'", [])
+            .unwrap();
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert!(
+            store
+                .deliver_agent_report("lead", "a", "[xd] done")
+                .is_err()
+        );
+        assert!(store.has_waiting_reports("lead").unwrap());
+        assert_eq!(store.chat("lead").unwrap()["working"], false);
     }
 
     #[test]
