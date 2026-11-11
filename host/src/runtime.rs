@@ -2526,6 +2526,14 @@ impl TurnRuntime {
                     background: false,
                     released: false,
                 };
+                // Its agent never read the reports it was handed: they wait
+                // again, in their places, rather than end with it.
+                if let Err(error) = self.inner.store.return_handed_reports(&turn.chat_id) {
+                    eprintln!(
+                        "xd: cannot give back chat {}'s reports: {error}",
+                        turn.chat_id
+                    );
+                }
                 let next = self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
                 self.settled(settled);
                 if let Some(next) = next {

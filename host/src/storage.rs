@@ -3994,6 +3994,17 @@ impl StateStore {
         )?)
     }
 
+    /// Gives back the reports handed to `chat_id`'s turn, which ends without
+    /// its agent having read them, to wait again in their places.
+    pub fn return_handed_reports(&self, chat_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE agent_reports SET state = 'returned' WHERE chat_id = ? AND state = 'handed'",
+            [chat_id],
+        )?;
+        Ok(())
+    }
+
     pub fn abort_turn_start(&self, chat_id: &str, error: &str) -> Result<(), StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
@@ -17038,6 +17049,16 @@ mod tests {
             panic!("the returned reports should go again");
         };
         assert_eq!(turn.prompt, "[xd] first\n\n[xd] second\n\n[xd] third");
+        // One that started but ended before its agent read them gives them
+        // back too.
+        store.return_handed_reports("lead").unwrap();
+        let finish = store
+            .finish_turn("lead", false, Some("broke"), 1, false)
+            .unwrap();
+        assert_eq!(
+            finish.next.expect("the given-back reports").prompt,
+            "[xd] first\n\n[xd] second\n\n[xd] third"
+        );
         // A turn that ran has read them.
         store.finish_turn("lead", true, None, 1, false).unwrap();
         assert!(store.chats_with_waiting_reports().unwrap().is_empty());
