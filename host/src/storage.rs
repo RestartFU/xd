@@ -2963,7 +2963,7 @@ impl StateStore {
             "DELETE FROM agent_reports WHERE chat_id = ? AND state = 'handed'",
             [chat_id],
         )?;
-        let (stored, paused, queue_first) = transaction
+        let (stored, paused, steered) = transaction
             .query_row(
                 "SELECT COALESCE(queued, ''), paused, queue_first FROM chats WHERE id = ?",
                 [chat_id],
@@ -2971,7 +2971,7 @@ impl StateStore {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, bool>(1)?,
-                        row.get::<_, bool>(2)?,
+                        row.get::<_, i64>(2)?,
                     ))
                 },
             )
@@ -2993,7 +2993,7 @@ impl StateStore {
         // may depend on, unless the user steered the message at the front.
         // A paused chat keeps both for when it resumes.
         let reports = !paused && has_agent_reports(&transaction, chat_id)?;
-        let next_text = if paused || queue.is_empty() || (reports && !queue_first) {
+        let next_text = if paused || queue.is_empty() || (reports && steered == 0) {
             None
         } else {
             Some(queue.remove(0))
@@ -3006,11 +3006,11 @@ impl StateStore {
         transaction.execute(
             "UPDATE chats SET queued = ?, host_working = ?, partial_reply = '', \
              partial_reply_label = NULL, unrecorded_request = NULL, \
-             queue_first = queue_first AND NOT ?, updated_at = ? WHERE id = ?",
+             queue_first = MAX(queue_first - ?, 0), updated_at = ? WHERE id = ?",
             params![
                 encoded,
                 next_text.is_some(),
-                next_text.is_some(),
+                i64::from(next_text.is_some()),
                 now_seconds(),
                 chat_id
             ],
@@ -3035,7 +3035,22 @@ impl StateStore {
                 None,
                 None,
             )?),
-            None if reports => take_agent_reports(&transaction, &self.workspace_root, chat_id)?,
+            // A turn that cannot be prepared for them leaves them waiting,
+            // and this turn's end recorded all the same.
+            None if reports => {
+                transaction.execute_batch("SAVEPOINT reports")?;
+                match take_agent_reports(&transaction, &self.workspace_root, chat_id) {
+                    Ok(turn) => {
+                        transaction.execute_batch("RELEASE reports")?;
+                        turn
+                    }
+                    Err(error) => {
+                        transaction.execute_batch("ROLLBACK TO reports; RELEASE reports")?;
+                        eprintln!("xd: cannot hand chat {chat_id} its agents' reports: {error}");
+                        None
+                    }
+                }
+            }
             None => None,
         };
         transaction.commit()?;
@@ -6545,11 +6560,13 @@ impl StateStore {
         text: &str,
     ) -> Result<Value, StorageError> {
         // Put back because it was steered, so it goes before any agent report.
-        let (_, event) = self.mutate_queue_with(chat_id, None, true, |queue| {
+        let inserted = std::cell::Cell::new(None);
+        let (_, event) = self.mutate_queue_with(chat_id, None, Some(&inserted), |queue| {
             let index = earlier.iter().fold(0, |index, message| {
                 index + usize::from(queue.get(index).map(String::as_str) == Some(*message))
             });
             queue.insert(index, text.to_owned());
+            inserted.set(Some(index));
             Ok(true)
         })?;
         Ok(event)
@@ -6580,25 +6597,32 @@ impl StateStore {
         expected: Option<i64>,
         mutate: impl FnOnce(&mut Vec<String>) -> Result<bool, StorageError>,
     ) -> Result<(Value, Value), StorageError> {
-        self.mutate_queue_with(chat_id, expected, false, mutate)
+        self.mutate_queue_with(chat_id, expected, None, mutate)
     }
 
-    /// [`Self::mutate_queue_at`], marking the front message as one to run
-    /// before any agent report when `steered`.
+    /// [`Self::mutate_queue_at`], counting the message `mutate` puts at the
+    /// index it sets in `steered` among those the user steered, which run
+    /// before any agent report.
     fn mutate_queue_with(
         &self,
         chat_id: &str,
         expected: Option<i64>,
-        steered: bool,
+        steered: Option<&std::cell::Cell<Option<usize>>>,
         mutate: impl FnOnce(&mut Vec<String>) -> Result<bool, StorageError>,
     ) -> Result<(Value, Value), StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let (stored, mut revision) = transaction
+        let (stored, mut revision, leading) = transaction
             .query_row(
-                "SELECT COALESCE(queued, ''), queue_revision FROM chats WHERE id = ?",
+                "SELECT COALESCE(queued, ''), queue_revision, queue_first FROM chats WHERE id = ?",
                 [chat_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
@@ -6608,11 +6632,20 @@ impl StateStore {
             ));
         }
         let mut queue = queue_from_column(Some(&stored));
-        let front = queue.first().cloned();
+        let leading = usize::try_from(leading).unwrap_or(0).min(queue.len());
+        let marked = queue[..leading].to_vec();
         if mutate(&mut queue)? {
-            // The mark is the steered message's own: it goes with it when
-            // that message leaves the front.
-            let same_front = !queue.is_empty() && queue.first() == front.as_ref();
+            // The marks are the steered messages' own: they follow those
+            // messages, and end where another message comes before them.
+            let steered = match steered.and_then(std::cell::Cell::get) {
+                Some(index) => {
+                    let mut others = queue.clone();
+                    others.remove(index);
+                    let kept = steered_prefix(&marked, &others);
+                    if index <= kept { kept + 1 } else { index + 1 }
+                }
+                None => steered_prefix(&marked, &queue),
+            };
             let encoded = if queue.is_empty() {
                 None
             } else {
@@ -6621,15 +6654,8 @@ impl StateStore {
                 })?)
             };
             let changed = transaction.execute(
-                "UPDATE chats SET queued = ?, queue_first = ? OR (queue_first AND ?), \
-                 updated_at = ? WHERE id = ?",
-                params![
-                    encoded,
-                    steered && !queue.is_empty(),
-                    same_front,
-                    now_seconds(),
-                    chat_id
-                ],
+                "UPDATE chats SET queued = ?, queue_first = ?, updated_at = ? WHERE id = ?",
+                params![encoded, steered as i64, now_seconds(), chat_id],
             )?;
             if changed != 1 {
                 return Err(StorageError::NoChat(chat_id.into()));
@@ -11720,8 +11746,9 @@ fn ensure_chat_pull_requests(database: &Connection) -> Result<(), StorageError> 
 /// read them: they are the host's, not the user's, so they never join the
 /// chat's queue. Each goes with either chat. `state` is `waiting`, `handed`
 /// to a turn that has not ended yet, or `returned` by a turn that could not
-/// start, which waits like the rest but does not retry by itself. `queue_first` marks a queue whose
-/// front message the user steered, which goes before any report.
+/// start, which waits like the rest but does not retry by itself.
+/// `queue_first` counts the messages at the front of the queue the user
+/// steered, which go before any report.
 ///
 /// No schema version: older hosts ignore the table and the column, and a
 /// report they leave waiting is delivered once this host runs again.
@@ -11791,15 +11818,25 @@ fn take_agent_reports(
     Ok(Some(turn))
 }
 
+/// How many of `queue`'s first messages are, in order, among `marked`, the
+/// steered messages that led the queue before it changed.
+fn steered_prefix(marked: &[String], queue: &[String]) -> usize {
+    let mut rest = marked.iter();
+    queue
+        .iter()
+        .take_while(|message| rest.any(|marked| marked == *message))
+        .count()
+}
+
 /// The message at the front of the chat's queue when the user steered it
 /// there, which goes before any report.
 fn steered_front(database: &Connection, chat_id: &str) -> Result<Option<String>, StorageError> {
-    let (stored, queue_first) = database.query_row(
+    let (stored, steered) = database.query_row(
         "SELECT COALESCE(queued, ''), queue_first FROM chats WHERE id = ?",
         [chat_id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
     )?;
-    Ok(queue_first
+    Ok((steered > 0)
         .then(|| queue_from_column(Some(&stored)).into_iter().next())
         .flatten())
 }
@@ -16897,6 +16934,60 @@ mod tests {
             panic!("the report should go again");
         };
         assert_eq!(turn.prompt, "[xd] done");
+    }
+
+    #[test]
+    fn every_steered_message_goes_before_reports_and_a_failed_hand_over_ends_the_turn() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let next = |store: &StateStore| {
+            store
+                .finish_turn("lead", true, None, 1, false)
+                .unwrap()
+                .next
+                .map(|turn| turn.prompt)
+        };
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "work"}))
+            .unwrap();
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "ordinary"}))
+            .unwrap();
+        store
+            .deliver_agent_report("lead", "a", "[xd] news")
+            .unwrap();
+        // Two steered messages come back, the second behind the first.
+        store.requeue_front("lead", "steered A").unwrap();
+        store
+            .requeue_after("lead", &["steered A"], "steered B")
+            .unwrap();
+        assert_eq!(
+            store.chat("lead").unwrap()["queue"],
+            json!(["steered A", "steered B", "ordinary"])
+        );
+        assert_eq!(next(&store).as_deref(), Some("steered A"));
+        assert_eq!(next(&store).as_deref(), Some("steered B"));
+        assert_eq!(next(&store).as_deref(), Some("[xd] news"));
+        assert_eq!(next(&store).as_deref(), Some("ordinary"));
+
+        // A turn that cannot be prepared for the reports still ends the one
+        // before it; the reports wait.
+        store
+            .deliver_agent_report("lead", "a", "[xd] later")
+            .unwrap();
+        Connection::open(&fixture.database)
+            .unwrap()
+            .execute("UPDATE chats SET backend = 'jcode' WHERE id = 'lead'", [])
+            .unwrap();
+        assert_eq!(next(&store), None);
+        assert_eq!(store.chat("lead").unwrap()["working"], false);
+        assert!(store.has_fresh_reports("lead").unwrap());
     }
 
     #[test]
