@@ -1083,6 +1083,17 @@ impl TurnRuntime {
             .unwrap_or(0)
     }
 
+    /// Whether the chat's kept process still runs background work of its
+    /// own, or has finished some and owes a turn reporting on it, read under
+    /// one lock of its router.
+    fn waits_on_background(&self, chat_id: &str) -> bool {
+        self.router(chat_id).is_some_and(|router| {
+            router
+                .lock()
+                .is_ok_and(|router| !router.tasks.is_empty() || router.report_due)
+        })
+    }
+
     pub(crate) fn background_task_output(&self, chat_id: &str, task_id: Option<&str>) -> Value {
         let snapshot = self
             .inner
@@ -3032,6 +3043,8 @@ impl TurnRuntime {
         }
         // Still working if background agents or shells of its own go on.
         let background = self.background_tasks(&turn.chat_id) > 0;
+        // Not done either if one ended and the agent owes a turn on it.
+        let waits_on_background = self.waits_on_background(&turn.chat_id);
         self.note_activity(
             &turn.chat_id,
             &turn.backend,
@@ -3079,7 +3092,7 @@ impl TurnRuntime {
             waiting: asked.is_some(),
             stopped: false,
             quiet: false,
-            background: background && success && asked.is_none(),
+            background: (background || waits_on_background) && success && asked.is_none(),
         };
         let next_failed = self.finish(
             turn,
@@ -5669,6 +5682,45 @@ read next"#,
         agent.wait_for_turn_end();
         // Only the report says the agent is done; the held turn is not told
         // of again once its work ends.
+        std::thread::sleep(Duration::from_millis(200));
+        let told = told.lock().unwrap();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert!(!told[1].background);
+        assert_eq!(told[1].reply, "Tests pass.");
+    }
+
+    /// A task that ends just before the turn does still owes the report turn
+    /// Claude takes on it, so the turn is held all the same.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_whose_task_ended_just_before_it_waits_for_the_report_on_it() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_shell","status":"completed"}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Waiting for the tests."}}]}}}}'
+echo '{{"type":"result","subtype":"success","result":"Waiting for the tests."}}'
+read poke
+{}
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Tests pass."}}]}}}}'
+echo '{{"type":"result","subtype":"success","result":"Tests pass."}}'
+read next"#,
+            KeptAgent::INIT,
+            KeptAgent::INIT,
+        ));
+        let told = settled_turns(&agent.runtime);
+        agent.send_and_finish("run the tests");
+        wait_for("the first turn to be told of", || {
+            !told.lock().unwrap().is_empty()
+        });
+        assert!(told.lock().unwrap()[0].background, "{told:?}");
+
+        agent.poke();
+        wait_for("the report on the tests", || {
+            told.lock().unwrap().len() == 2
+        });
+        agent.wait_for_turn_end();
         std::thread::sleep(Duration::from_millis(200));
         let told = told.lock().unwrap();
         assert_eq!(told.len(), 2, "{told:?}");
