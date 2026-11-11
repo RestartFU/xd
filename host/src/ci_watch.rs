@@ -896,6 +896,10 @@ fn judge(
     empty: &mut EmptyPolls,
     now: i64,
 ) -> Option<Ending> {
+    // A poll that finds checks ends any run of polls that found none.
+    if !status.checks.is_empty() {
+        *empty = EmptyPolls::default();
+    }
     if !waiting && status.complete() {
         // Done once two polls in a row agree, so a check that finished
         // before the others were queued is not taken for the whole run,
@@ -1646,6 +1650,13 @@ mod tests {
             assert!(judge(&other, false, &mut None, &mut empty, t()).is_none());
         }
         assert!(judge(&other, false, &mut None, &mut empty, t()).is_some());
+        // A poll that finds checks, even finished ones, starts the grace over.
+        let mut empty = EmptyPolls::default();
+        for _ in 1..NO_CHECKS_POLLS {
+            assert!(judge(&none, false, &mut None, &mut empty, t()).is_none());
+        }
+        assert!(judge(&done, false, &mut None, &mut empty, t()).is_none());
+        assert!(judge(&none, false, &mut None, &mut empty, t()).is_none());
     }
 
     #[test]
