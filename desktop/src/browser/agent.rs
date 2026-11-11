@@ -5,7 +5,10 @@
 //! agent. It blocks, so it runs on a thread of its own.
 
 use std::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex, MutexGuard, TryLockError,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -16,6 +19,17 @@ use serde_json::{Value, json};
 /// [`super::chromium::DevTools`]; tests use a script.
 pub trait Page {
     fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String>;
+
+    /// Whether the page is loading, including a document it has asked for
+    /// and not yet received.
+    fn is_loading(&self) -> bool {
+        false
+    }
+
+    /// How long the command may still take.
+    fn time_left(&self) -> Duration {
+        Duration::MAX
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -23,14 +37,66 @@ impl Page for super::chromium::DevTools {
     fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
         super::chromium::DevTools::call(self, method, params, timeout)
     }
+
+    fn is_loading(&self) -> bool {
+        super::chromium::DevTools::is_loading(self)
+    }
 }
 
+/// A page whose calls stop at a command's deadline, so a command the host
+/// has given up on cannot go on to click or submit anything.
+struct Bounded<'a, P> {
+    page: &'a P,
+    deadline: Instant,
+}
+
+impl<P: Page> Page for Bounded<'_, P> {
+    fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        let left = self.time_left();
+        if left.is_zero() {
+            return Err(OUT_OF_TIME.into());
+        }
+        self.page.call(method, params, timeout.min(left))
+    }
+
+    fn is_loading(&self) -> bool {
+        self.page.is_loading()
+    }
+
+    fn time_left(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+}
+
+/// How long a whole command may take, from when the desktop gets it. It ends
+/// before the host stops waiting, so the agent hears how it went.
+pub const COMMAND_TIME: Duration = Duration::from_secs(90);
+const OUT_OF_TIME: &str = "The browser command ran out of time, so xd stopped it.";
 /// How long one DevTools call may take.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a command waits for a page it opened to finish loading.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a click or key waits for a navigation it started.
+const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a click or key waits to see whether it starts a navigation.
 const SETTLE_TIME: Duration = Duration::from_millis(600);
+
+/// Waits for the page's other commands to finish, so two agents sharing it
+/// cannot type into each other's fields. Gives up at `deadline`.
+pub fn take_turn(turns: &Mutex<()>, deadline: Instant) -> Result<MutexGuard<'_, ()>, String> {
+    loop {
+        match turns.try_lock() {
+            Ok(turn) => return Ok(turn),
+            Err(TryLockError::Poisoned(turn)) => return Ok(turn.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err("Another browser command kept this page busy too long.".into());
+            }
+        }
+    }
+}
 /// The most text a snapshot or a value returns.
 const MAX_TEXT: usize = 40_000;
 /// The tallest full-page screenshot, in CSS pixels.
@@ -57,9 +123,10 @@ impl Outcome {
     }
 }
 
-/// Carries out `command` on `page`. The address of a `navigate` command must
-/// already be checked; see `normalize_url`.
-pub fn run(page: &impl Page, command: &Value) -> Result<Outcome, String> {
+/// Carries out `command` on `page`, by `deadline`. The address of a
+/// `navigate` command must already be checked; see `normalize_url`.
+pub fn run(page: &impl Page, command: &Value, deadline: Instant) -> Result<Outcome, String> {
+    let page = &Bounded { page, deadline };
     let text = |key: &str| command.get(key).and_then(Value::as_str);
     let flag = |key: &str| command.get(key).and_then(Value::as_bool) == Some(true);
     match text("action").unwrap_or_default() {
@@ -69,34 +136,34 @@ pub fn run(page: &impl Page, command: &Value) -> Result<Outcome, String> {
             snapshot(page)
         }
         "history" => {
-            history(page, text("direction").unwrap_or_default())?;
-            snapshot(page)
+            let loading = history(page, text("direction").unwrap_or_default())?;
+            settled_snapshot(page, loading)
         }
         "snapshot" => snapshot(page),
         "click" => {
             let target = element(command)?;
-            let mark = mark(page)?;
+            let before = mark(page)?;
             click(page, &target, flag("double"))?;
-            settle(page, &mark, SETTLE_TIME)?;
-            snapshot(page)
+            let loading = settle(page, &before, SETTLE_TIME);
+            settled_snapshot(page, loading)
         }
         "type" => {
             let target = element(command)?;
             let typed = text("text").ok_or("Pass text, what to type.")?;
             type_text(page, &target, typed, flag("append"))?;
-            let mark = mark(page)?;
+            let before = mark(page)?;
             if flag("submit") {
                 press(page, "Enter")?;
             }
-            settle(page, &mark, SETTLE_TIME)?;
-            snapshot(page)
+            let loading = settle(page, &before, SETTLE_TIME);
+            settled_snapshot(page, loading)
         }
         "press_key" => {
             let key = text("key").ok_or("Pass key, the key to press.")?;
-            let mark = mark(page)?;
+            let before = mark(page)?;
             press(page, key)?;
-            settle(page, &mark, SETTLE_TIME)?;
-            snapshot(page)
+            let loading = settle(page, &before, SETTLE_TIME);
+            settled_snapshot(page, loading)
         }
         "evaluate" => {
             let expression = text("expression").ok_or("Pass expression, the JavaScript to run.")?;
@@ -194,8 +261,9 @@ fn navigate(page: &impl Page, url: &str) -> Result<(), String> {
     wait_for_load(page, LOAD_TIMEOUT)
 }
 
-fn history(page: &impl Page, direction: &str) -> Result<(), String> {
-    let mark = mark(page)?;
+/// Returns whether the page was still loading when the wait for it ended.
+fn history(page: &impl Page, direction: &str) -> Result<bool, String> {
+    let before = mark(page)?;
     match direction {
         "reload" => {
             page.call("Page.reload", json!({}), CALL_TIMEOUT)?;
@@ -220,52 +288,77 @@ fn history(page: &impl Page, direction: &str) -> Result<(), String> {
         }
         _ => return Err("Pass direction: back, forward or reload.".into()),
     }
-    settle(page, &mark, Duration::from_secs(2))
+    Ok(settle(page, &before, SETTLE_TIME))
 }
 
-/// Marks the current document, so [`settle`] can tell when another replaces it.
-fn mark(page: &impl Page) -> Result<String, String> {
+/// The page as an action found it.
+struct Before {
+    /// Set on the document, so [`settle`] can tell when another replaces it.
+    mark: String,
+    /// Already loading, so its loading says nothing about the action.
+    loading: bool,
+}
+
+fn mark(page: &impl Page) -> Result<Before, String> {
     static MARKS: AtomicU64 = AtomicU64::new(0);
     let mark = format!(
         "xd-{}-{}",
         std::process::id(),
         MARKS.fetch_add(1, Ordering::Relaxed)
     );
+    let loading = page.is_loading();
     evaluate(page, &format!("window.__xdBrowserMark = {mark:?}"))?;
-    Ok(mark)
+    Ok(Before { mark, loading })
 }
 
-/// Waits for whatever an action started: a new document to finish loading,
-/// or, if none has begun within `quiet`, nothing.
-fn settle(page: &impl Page, mark: &str, quiet: Duration) -> Result<(), String> {
+/// Waits for whatever an action started: a navigation to finish, or, when
+/// none has begun within `quiet`, nothing. A navigation still waiting for its
+/// server keeps the old document, so the page's loading state is what tells
+/// it has begun. Returns whether the page was still loading when the wait
+/// ended.
+fn settle(page: &impl Page, before: &Before, quiet: Duration) -> bool {
     let started = Instant::now();
+    let end = started + NAVIGATION_TIMEOUT.min(page.time_left());
+    let mark = &before.mark;
     loop {
+        let loading = page.is_loading() && !before.loading;
         // Fails while one document gives way to the next.
         let state = evaluate(
             page,
             &format!("[window.__xdBrowserMark === {mark:?}, document.readyState]"),
         );
         match state.as_ref().ok().and_then(Value::as_array) {
-            Some(state) if state[0] == true => {
-                if started.elapsed() >= quiet {
-                    return Ok(());
-                }
+            Some(state) if !loading && state[0] == true && started.elapsed() >= quiet => {
+                return false;
             }
-            Some(state) if state[1] == "complete" => {
+            Some(state) if !loading && state[0] == false && state[1] == "complete" => {
                 thread::sleep(Duration::from_millis(200));
-                return Ok(());
+                return false;
             }
             _ => {}
         }
-        if started.elapsed() >= LOAD_TIMEOUT {
-            return Ok(());
+        if Instant::now() >= end {
+            return true;
         }
         thread::sleep(Duration::from_millis(100));
     }
 }
 
+/// A snapshot, noting a page that had not finished loading.
+fn settled_snapshot(page: &impl Page, loading: bool) -> Result<Outcome, String> {
+    let mut outcome = snapshot(page)?;
+    if loading {
+        outcome.text = format!(
+            "The page was still loading when xd stopped waiting, so it may change.\n\n{}",
+            outcome.text
+        );
+    }
+    Ok(outcome)
+}
+
 fn wait_for_load(page: &impl Page, timeout: Duration) -> Result<(), String> {
     let started = Instant::now();
+    let timeout = timeout.min(page.time_left());
     while started.elapsed() < timeout {
         if evaluate(page, "document.readyState").ok() == Some(json!("complete")) {
             thread::sleep(Duration::from_millis(200));
@@ -301,9 +394,19 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                 const box = element.getBoundingClientRect();
                 const x = box.left + box.width / 2, y = box.top + box.height / 2;
                 if (box.width === 0 || box.height === 0) return {{hidden: true}};
-                const top = document.elementFromPoint(x, y);
-                const covered = top && !element.contains(top) && !top.contains(element)
-                    && !(element.labels && [...element.labels].some(label => label.contains(top)));
+                // Through shadow roots, which hide their insides from the page.
+                const within = (outer, node) => {{
+                    for (let at = node; at; at = at.parentNode || at.host) if (at === outer) return true;
+                    return false;
+                }};
+                let top = document.elementFromPoint(x, y);
+                while (top && top.shadowRoot) {{
+                    const inner = top.shadowRoot.elementFromPoint(x, y);
+                    if (!inner || inner === top) break;
+                    top = inner;
+                }}
+                const covered = top && !within(element, top) && !within(top, element)
+                    && !(element.labels && [...element.labels].some(label => within(label, top)));
                 const describe = node => node.tagName.toLowerCase()
                     + (node.id ? '#' + node.id : '')
                     + (typeof node.className === 'string' && node.className.trim()
@@ -362,9 +465,15 @@ fn type_text(page: &impl Page, number: &str, text: &str, append: bool) -> Result
                 if (!element || !element.isConnected) return 'missing';
                 element.scrollIntoView({{block: 'center', behavior: 'instant'}});
                 element.focus();
-                const active = document.activeElement;
-                if (!active || !(active === element || element.contains(active)
-                    || (active.shadowRoot && active.contains(element)))) return 'unfocusable';
+                // Focus inside a shadow root shows on the page as its host.
+                let active = document.activeElement;
+                while (active && active.shadowRoot && active.shadowRoot.activeElement)
+                    active = active.shadowRoot.activeElement;
+                const within = (outer, node) => {{
+                    for (let at = node; at; at = at.parentNode || at.host) if (at === outer) return true;
+                    return false;
+                }};
+                if (!active || !within(element, active)) return 'unfocusable';
                 if (element.isContentEditable || element.matches('input, textarea')) {{
                     if ({append}) {{
                         if (element.matches('input, textarea')) {{
@@ -730,6 +839,8 @@ mod tests {
     struct Script {
         answers: RefCell<VecDeque<(&'static str, Result<Value, String>)>>,
         calls: RefCell<Vec<(String, Value)>>,
+        /// Whether the page is loading, each time it is asked; then not.
+        loading: RefCell<VecDeque<bool>>,
     }
 
     impl Script {
@@ -737,6 +848,7 @@ mod tests {
             Self {
                 answers: RefCell::new(answers.into()),
                 calls: RefCell::default(),
+                loading: RefCell::default(),
             }
         }
 
@@ -760,6 +872,14 @@ mod tests {
             assert_eq!(method, expected);
             answer
         }
+
+        fn is_loading(&self) -> bool {
+            self.loading.borrow_mut().pop_front().unwrap_or(false)
+        }
+    }
+
+    fn run(page: &Script, command: &Value) -> Result<Outcome, String> {
+        super::run(page, command, Instant::now() + COMMAND_TIME)
     }
 
     fn value(value: Value) -> Result<Value, String> {
@@ -895,6 +1015,73 @@ mod tests {
         assert_eq!(calls[5].1["type"], "keyDown");
         assert_eq!(calls[5].1["key"], "Enter");
         assert_eq!(calls[5].1["text"], "\r");
+    }
+
+    #[test]
+    fn a_click_waits_for_a_navigation_still_waiting_for_its_server() {
+        let script = Script::new(vec![
+            ("Runtime.evaluate", value(json!(null))),
+            (
+                "Runtime.evaluate",
+                value(json!({"x": 5, "y": 5, "covered": null})),
+            ),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+            // The old document stays while the server takes its time, longer
+            // than a click waits for a navigation to begin.
+            ("Runtime.evaluate", value(json!([true, "complete"]))),
+            ("Runtime.evaluate", value(json!([true, "complete"]))),
+            ("Runtime.evaluate", value(json!([true, "complete"]))),
+            ("Runtime.evaluate", value(json!([true, "complete"]))),
+            ("Runtime.evaluate", value(json!([true, "complete"]))),
+            ("Runtime.evaluate", value(json!([true, "complete"]))),
+            ("Runtime.evaluate", value(json!([true, "complete"]))),
+            ("Runtime.evaluate", value(json!([true, "complete"]))),
+            (
+                "Runtime.evaluate",
+                Err("Execution context was destroyed.".into()),
+            ),
+            ("Runtime.evaluate", value(json!([false, "complete"]))),
+            ("Runtime.evaluate", page()),
+        ]);
+        // Not loading before the click; loading for nine looks after it.
+        let mut loading = vec![false];
+        loading.extend([true; 9]);
+        loading.push(false);
+        *script.loading.borrow_mut() = loading.into();
+        let started = Instant::now();
+        let outcome = run(&script, &json!({"action": "click", "ref": "e1"})).unwrap();
+        assert!(started.elapsed() > SETTLE_TIME);
+        assert!(outcome.text.starts_with("Page: Shop"), "{}", outcome.text);
+        assert!(script.answers.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_command_past_its_deadline_does_nothing_more() {
+        let script = Script::new(vec![]);
+        assert_eq!(
+            super::run(
+                &script,
+                &json!({"action": "press_key", "key": "Enter"}),
+                Instant::now()
+            ),
+            Err(OUT_OF_TIME.into())
+        );
+        assert!(script.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn commands_on_one_page_take_turns() {
+        let turns = Mutex::new(());
+        let first = take_turn(&turns, Instant::now() + Duration::from_secs(1)).unwrap();
+        assert!(
+            take_turn(&turns, Instant::now() + Duration::from_millis(100))
+                .unwrap_err()
+                .contains("busy")
+        );
+        drop(first);
+        assert!(take_turn(&turns, Instant::now()).is_ok());
     }
 
     #[test]

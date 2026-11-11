@@ -480,19 +480,22 @@ impl BrowserPane {
             ));
         };
         #[cfg(target_os = "linux")]
+        let deadline = std::time::Instant::now() + agent::COMMAND_TIME;
+        #[cfg(target_os = "linux")]
         native.with_view(move |view| {
             let page = view.devtools();
             let spawned = std::thread::Builder::new()
                 .name("xd-browser-agent".into())
                 .spawn(move || {
-                    let outcome = page
-                        .wait_until_started(Duration::from_secs(10))
-                        .and_then(|()| {
-                            page.wake();
-                            let outcome = agent::run(&page, &command);
-                            page.sleep();
-                            outcome
-                        });
+                    let turns = page.turns();
+                    let outcome = agent::take_turn(&turns, deadline).and_then(|_turn| {
+                        let left = deadline.saturating_duration_since(std::time::Instant::now());
+                        page.wait_until_started(left.min(Duration::from_secs(10)))?;
+                        page.wake();
+                        let outcome = agent::run(&page, &command, deadline);
+                        page.sleep();
+                        outcome
+                    });
                     reply(outcome.map(agent::Outcome::into_value));
                 });
             if let Err(error) = spawned {

@@ -373,6 +373,8 @@ struct Shared {
     awake: usize,
     devtools: Arc<DevToolsCalls>,
     devtools_observer: Option<SharedRegistration>,
+    /// Held by the agent command running on this page; see `agent::take_turn`.
+    turns: Arc<Mutex<()>>,
 }
 
 type SharedState = Arc<Mutex<Shared>>;
@@ -1092,6 +1094,20 @@ impl DevTools {
             )),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err("The page has closed.".into()),
         }
+    }
+
+    /// What an agent command holds while it runs on this page.
+    pub fn turns(&self) -> Arc<Mutex<()>> {
+        lock(&self.shared).turns.clone()
+    }
+
+    /// Whether the page is loading, from the moment a navigation starts,
+    /// before any of the new document arrives.
+    pub fn is_loading(&self) -> bool {
+        lock(&self.shared)
+            .browser
+            .as_ref()
+            .is_some_and(|browser| browser.0.is_loading() != 0)
     }
 
     /// Waits for CEF to create the page, which a new tab asks for and gets

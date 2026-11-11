@@ -2689,6 +2689,33 @@ struct XdDesktop {
     error_generation: u64,
 }
 
+/// The answer to one agent's browser command. Dropped unsent, as when the page
+/// goes before the command reaches it, it answers that the command did not
+/// run, so the agent is not left waiting for the host to give up.
+struct BrowserAnswer {
+    host: Option<HostHandle>,
+    request: u64,
+}
+
+impl BrowserAnswer {
+    fn send(mut self, outcome: Result<Value, String>) {
+        if let Some(host) = self.host.take() {
+            let _ = host.browser_result(self.request, outcome);
+        }
+    }
+}
+
+impl Drop for BrowserAnswer {
+    fn drop(&mut self) {
+        if let Some(host) = self.host.take() {
+            let _ = host.browser_result(
+                self.request,
+                Err("The browser closed before the command could run.".into()),
+            );
+        }
+    }
+}
+
 /// Told to a remote host's agent whose page is on a local address.
 const REMOTE_LOCALHOST_NOTE: &str = "Note: this browser runs on the user's computer, not on the \
 machine you run on, so a localhost address here reaches the user's computer.";
@@ -9007,9 +9034,11 @@ impl XdDesktop {
         ) else {
             return;
         };
-        let reply = move |outcome: Result<Value, String>| {
-            let _ = host.browser_result(request, outcome);
+        let answer = BrowserAnswer {
+            host: Some(host),
+            request,
         };
+        let reply = move |outcome: Result<Value, String>| answer.send(outcome);
         let Some(chat_id) = body.get("chat").and_then(Value::as_str).map(str::to_owned) else {
             reply(Err("The command named no chat.".into()));
             return;
@@ -27769,6 +27798,39 @@ Binary files /dev/null and b/image.png differ\n";
                     .is_visible()
             );
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_browser_command_dropped_unanswered_still_answers_the_agent() {
+        use std::io::BufRead;
+
+        let (host, mut requests) = socket_host("browser-answer-test");
+        drop(BrowserAnswer {
+            host: Some(host.clone()),
+            request: 3,
+        });
+        BrowserAnswer {
+            host: Some(host),
+            request: 4,
+        }
+        .send(Ok(serde_json::json!({"text": "Done."})));
+        let mut answers = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            requests.read_line(&mut line).unwrap();
+            answers.push(serde_json::from_str::<Value>(&line).unwrap());
+        }
+        assert_eq!(answers[0]["request"], 3);
+        assert_eq!(
+            answers[0]["error"],
+            "The browser closed before the command could run."
+        );
+        // Sent once, not again as it drops.
+        assert_eq!(answers[1]["request"], 4);
+        assert_eq!(answers[1]["result"]["text"], "Done.");
+        let mut extra = String::new();
+        assert!(requests.read_line(&mut extra).is_err() || extra.is_empty());
     }
 
     #[test]
