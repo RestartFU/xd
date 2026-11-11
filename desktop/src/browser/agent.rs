@@ -177,8 +177,10 @@ pub fn run(
         "type" => {
             let target = element(command)?;
             let typed = text("text").ok_or("Pass text, what to type.")?;
-            type_text(page, &target, typed, flag("append"))?;
+            // Marked first: typing alone can send the page on, as a code
+            // field that submits itself does.
             let before = mark(page)?;
+            type_text(page, &target, typed, flag("append"))?;
             if flag("submit") {
                 press(page, "Enter")?;
             }
@@ -452,13 +454,16 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                     if (!inner || inner === top) break;
                     top = inner;
                 }}
-                const covered = top && !within(element, top) && !within(top, element)
-                    && !(element.labels && [...element.labels].some(label => within(label, top)));
+                // Only the element, what it holds, or its label take its
+                // click; one that lets clicks through to its container does
+                // not get it.
+                const reaches = top && (within(element, top)
+                    || (element.labels && [...element.labels].some(label => within(label, top))));
                 const describe = node => node.tagName.toLowerCase()
                     + (node.id ? '#' + node.id : '')
                     + (typeof node.className === 'string' && node.className.trim()
                         ? '.' + node.className.trim().split(/\\s+/).slice(0, 2).join('.') : '');
-                return {{x, y, covered: covered ? describe(top) : null}};
+                return {{x, y, covered: reaches ? null : top ? describe(top) : 'nothing'}};
             }})()"
         ),
     )?;
@@ -474,8 +479,8 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
     }
     if let Some(cover) = found["covered"].as_str() {
         return Err(format!(
-            "e{number} is covered by {cover}, which would get the click. Close or scroll past \
-             it first, or click it with browser_evaluate."
+            "A click on the middle of e{number} would reach {cover}, not e{number}. Close or \
+             scroll past what covers it first, or click it with browser_evaluate."
         ));
     }
     match (found["x"].as_f64(), found["y"].as_f64()) {
@@ -1040,7 +1045,10 @@ mod tests {
             ),
         ]);
         let error = run(&covered, &json!({"action": "click", "ref": "e2"})).unwrap_err();
-        assert!(error.starts_with("e2 is covered by div.modal"), "{error}");
+        assert!(
+            error.starts_with("A click on the middle of e2 would reach div.modal, not e2."),
+            "{error}"
+        );
         assert!(
             !covered
                 .methods()
@@ -1068,11 +1076,11 @@ mod tests {
     #[test]
     fn typing_replaces_the_field_and_can_submit() {
         let script = Script::new(vec![
+            ("Runtime.evaluate", value(json!(null))),
             ("Runtime.evaluate", value(json!("ok"))),
             ("Input.dispatchKeyEvent", Ok(json!({}))),
             ("Input.dispatchKeyEvent", Ok(json!({}))),
             ("Input.insertText", Ok(json!({}))),
-            ("Runtime.evaluate", value(json!(null))),
             ("Input.dispatchKeyEvent", Ok(json!({}))),
             ("Input.dispatchKeyEvent", Ok(json!({}))),
             ("Runtime.evaluate", value(json!([false, "complete"]))),
@@ -1084,8 +1092,15 @@ mod tests {
         )
         .unwrap();
         let calls = script.calls.borrow();
-        assert_eq!(calls[1].1["commands"], json!(["selectAll"]));
-        assert_eq!(calls[3].1, json!({"text": "shoes"}));
+        // The document is marked before typing can send the page on.
+        assert!(
+            calls[0].1["expression"]
+                .as_str()
+                .unwrap()
+                .starts_with("window.__xdBrowserMark")
+        );
+        assert_eq!(calls[2].1["commands"], json!(["selectAll"]));
+        assert_eq!(calls[4].1, json!({"text": "shoes"}));
         assert_eq!(calls[5].1["type"], "keyDown");
         assert_eq!(calls[5].1["key"], "Enter");
         assert_eq!(calls[5].1["text"], "\r");
@@ -1170,6 +1185,7 @@ mod tests {
     #[test]
     fn appending_moves_to_the_end_of_the_field_first() {
         let mut script = Script::new(vec![
+            ("Runtime.evaluate", value(json!(null))),
             ("Runtime.evaluate", value(json!("ok"))),
             ("Input.dispatchKeyEvent", Ok(json!({}))),
             ("Input.dispatchKeyEvent", Ok(json!({}))),
@@ -1182,9 +1198,9 @@ mod tests {
             &json!({"action": "type", "ref": "e4", "text": ".org", "append": true}),
         );
         let calls = script.calls.borrow();
-        assert_eq!(calls[1].1["type"], "rawKeyDown");
-        assert_eq!(calls[1].1["commands"], json!(["moveToEndOfDocument"]));
-        assert_eq!(calls[3].1, json!({"text": ".org"}));
+        assert_eq!(calls[2].1["type"], "rawKeyDown");
+        assert_eq!(calls[2].1["commands"], json!(["moveToEndOfDocument"]));
+        assert_eq!(calls[4].1, json!({"text": ".org"}));
     }
 
     #[test]
