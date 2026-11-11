@@ -55,6 +55,9 @@ const LOG_LINE_CHARS: usize = 300;
 const LOG_TAIL_BYTES: usize = 256 * 1024;
 const LISTED_CHECKS: usize = 20;
 
+/// A chat and the pull request it watches.
+type WatchKey = (String, String);
+
 /// Starts watches once the daemon is up; see [`Engine::start_ci_watches`].
 #[derive(Default)]
 pub(crate) struct CiWatches {
@@ -62,6 +65,9 @@ pub(crate) struct CiWatches {
     /// The token of the thread watching each chat's pull request, so a
     /// replaced thread stops within a moment rather than at its next poll.
     live: Mutex<HashMap<(String, String), String>>,
+    /// Held by a watch's thread while it asks GitHub, so one replaced in the
+    /// middle of that never works alongside the watch that replaced it.
+    gates: Mutex<HashMap<WatchKey, Arc<Mutex<()>>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,6 +156,16 @@ impl Status {
 pub(crate) const CARD_PREFIX: &str = "ci_run\n";
 /// Checks a card lists at most.
 const CARD_CHECKS: usize = 50;
+
+/// What became of a report a watch tried to hand over.
+enum Delivery {
+    /// It was stored, or the watch is no longer this one's to tell.
+    Over,
+    /// The chat pushed since the poll that led to it, so the watch goes on.
+    Moved,
+    /// It was refused before anything was stored.
+    Refused,
+}
 
 /// Where a watch is, as its card shows it.
 enum Phase<'a> {
@@ -375,7 +391,7 @@ impl Engine {
         // report, which only its own end, stored with the report, may keep.
         if earlier.is_none() && expected.is_none() && status.complete() && settled_long_ago(&status)
         {
-            let text = report(&Ending::Finished(status.clone()), store, &workdir);
+            let text = report(&Ending::Finished(status.clone()), store, &workdir, &|| true);
             // Answered at once only if nothing moved while the report was
             // written, and no other request changed the watch meanwhile:
             // asking again starts over, so the watch there was before ends.
@@ -482,20 +498,22 @@ impl Engine {
     /// does, and goes as soon as the chat is free. Decided under the chat's
     /// gate. `upstream` is the commit the checkout's upstream was at when the
     /// poll that led here began: when the chat has pushed since, nothing is
-    /// stored and the watch goes on. Answers whether the watch is over.
+    /// stored and the watch goes on.
     fn deliver_ci_report(
         &self,
         watch: &CiWatch,
         report: &str,
         shown: &str,
         upstream: Option<&str>,
-    ) -> bool {
+    ) -> Delivery {
         let mut written = None;
+        let mut moved = false;
         let handed = self.hand_over_report(&watch.chat, |store| {
             if store
                 .chat_workdir(&watch.chat)
                 .is_ok_and(|workdir| upstream_moved(store, &workdir, upstream))
             {
+                moved = true;
                 return Ok(None);
             }
             let (delivered, card) =
@@ -511,14 +529,19 @@ impl Engine {
             eprintln!("xd-host: cannot report CI to chat {}: {error}", watch.chat);
         }
         // Stored, or no longer this watch's to tell: replaced, gone with its
-        // chat, or stored before a turn failed to start. Otherwise the chat
-        // pushed meanwhile, or the report was refused before it was stored.
-        matches!(handed, Ok(Some(())))
-            || !self.store.as_ref().is_some_and(|store| {
-                store
-                    .owns_ci_watch(&watch.chat, &watch.url, &watch.token)
-                    .unwrap_or(false)
-            })
+        // chat, or stored before a turn failed to start.
+        let owned = self.store.as_ref().is_some_and(|store| {
+            store
+                .owns_ci_watch(&watch.chat, &watch.url, &watch.token)
+                .unwrap_or(false)
+        });
+        if matches!(handed, Ok(Some(()))) || !owned {
+            Delivery::Over
+        } else if moved {
+            Delivery::Moved
+        } else {
+            Delivery::Refused
+        }
     }
 
     /// Tells clients of a card write: a new card reloads the chat, a changed
@@ -594,7 +617,21 @@ impl CiWatches {
         let mut live = self.live.lock().unwrap_or_else(|error| error.into_inner());
         if live.get(key).is_some_and(|live| live == token) {
             live.remove(key);
+            self.gates
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(key);
         }
+    }
+
+    /// The gate the threads watching `key` take turns through.
+    fn gate(&self, key: &(String, String)) -> Arc<Mutex<()>> {
+        self.gates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(key.clone())
+            .or_default()
+            .clone()
     }
 }
 
@@ -706,6 +743,14 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
             if engine.shutdown_requested() {
                 return;
             }
+            // One thread per watch asks GitHub at a time; one replaced while
+            // it waited for its turn stops here.
+            let gate = engine.ci_watches.gate(&leaving.key);
+            let _turn = gate.lock().unwrap_or_else(|error| error.into_inner());
+            let still = || engine.ci_watches.is_live(&leaving.key, token);
+            if !still() {
+                return;
+            }
             let Some(store) = engine.store.as_ref() else {
                 return;
             };
@@ -787,6 +832,7 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
             }
             match ending {
                 None => {
+                    refused = 0;
                     let shown = card(
                         url,
                         last.as_ref(),
@@ -798,7 +844,10 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
                     engine.publish_ci_card(chat, store.write_ci_card(chat, url, token, &shown));
                 }
                 Some(ending) => {
-                    let text = report(&ending, store, &workdir);
+                    let text = report(&ending, store, &workdir, &still);
+                    if !still() {
+                        return;
+                    }
                     // Reading failed jobs' logs takes a while; a push, or a check run
                     // again, meanwhile means there is more to wait for. One that
                     // cannot be read again is not sent on trust: the watch goes on as
@@ -835,14 +884,15 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
                                 card(url, last.as_ref(), Phase::Stopped(reason), watch.created_at)
                             }
                         };
-                        if engine.deliver_ci_report(&watch, &text, &shown, upstream.as_deref()) {
-                            return;
-                        }
                         last_complete = None;
-                        // Refused before it was stored, or the chat pushed meanwhile:
-                        // the next poll looks again, and a report refused every time
-                        // ends the watch after a while.
-                        refused += 1;
+                        match engine.deliver_ci_report(&watch, &text, &shown, upstream.as_deref()) {
+                            Delivery::Over => return,
+                            // Pushed again: the next poll looks at the new head.
+                            Delivery::Moved => {}
+                            // The next poll tries again; refused every time, the
+                            // watch ends after a while.
+                            Delivery::Refused => refused += 1,
+                        }
                         if refused >= FAILED_POLLS {
                             let removed = store.remove_ci_watch(
                                 chat,
@@ -1227,8 +1277,9 @@ fn pushed_head(store: &StateStore, workdir: &Path, status: &Status) -> Option<St
     behind.then(|| upstream.to_ascii_lowercase())
 }
 
-/// The message the chat gets when a watch ends.
-fn report(ending: &Ending, store: &StateStore, workdir: &Path) -> String {
+/// The message the chat gets when a watch ends. `still` says whether the
+/// watch is still the one to report; it stops fetching logs once it is not.
+fn report(ending: &Ending, store: &StateStore, workdir: &Path, still: &dyn Fn() -> bool) -> String {
     let status = match ending {
         Ending::Stopped { url, reason } => {
             return format!("[xd] Stopped watching CI on {url}.\n\n{reason}");
@@ -1296,6 +1347,9 @@ fn report(ending: &Ending, store: &StateStore, workdir: &Path) -> String {
         .take(LOGGED_JOBS)
     {
         let ((repository, job), check) = (check.1, check.0);
+        if !still() {
+            break;
+        }
         if let Some(log) = failed_log(store, workdir, &repository, &job) {
             text.push_str(&format!(
                 "\nThe end of {}'s failed steps:\n\n```\n{log}\n```\n",
@@ -2148,13 +2202,16 @@ done
         ])))
         .unwrap();
         assert_eq!(
-            report(&Ending::Finished(status.clone()), &store, &root),
+            report(&Ending::Finished(status.clone()), &store, &root, &|| true),
             "[xd] CI passed on https://github.com/restartfu/xd/pull/291 at 1e3d4a4.\n\n\
              1 check passed, 1 skipped."
         );
         status.checks.truncate(1);
         status.checks.push(status.checks[0].clone());
-        assert!(report(&Ending::Finished(status), &store, &root).ends_with("\n\n2 checks passed."));
+        assert!(
+            report(&Ending::Finished(status), &store, &root, &|| true)
+                .ends_with("\n\n2 checks passed.")
+        );
         assert_eq!(
             report(
                 &Ending::Stopped {
@@ -2162,7 +2219,8 @@ done
                     reason: "The pull request was merged before its checks finished.".into(),
                 },
                 &store,
-                &root
+                &root,
+                &|| true
             ),
             "[xd] Stopped watching CI on https://github.com/o/r/pull/7.\n\n\
              The pull request was merged before its checks finished."
