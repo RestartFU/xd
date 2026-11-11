@@ -320,6 +320,10 @@ pub enum RequestKind {
     PeerPairing,
     PairRemote,
     HelloRemote,
+    /// Offers this desktop's browser to the host's agents.
+    BrowserProvider,
+    /// What an agent's browser command did; see `browser-command`.
+    BrowserResult,
     RenameDevice {
         device_id: String,
     },
@@ -928,6 +932,29 @@ impl HostHandle {
             RequestKind::HelloRemote,
             json!({"op": "hello", "token": token}),
         )
+    }
+
+    /// Lets the host's agents use this desktop's integrated browser.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn offer_browser(&self) -> Result<(), String> {
+        self.send(
+            RequestKind::BrowserProvider,
+            json!({"op": "browser-provider"}),
+        )
+    }
+
+    /// Answers the host's `browser-command` numbered `request`.
+    pub fn browser_result(
+        &self,
+        request: u64,
+        outcome: Result<Value, String>,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": "browser-result", "request": request});
+        match outcome {
+            Ok(result) => body["result"] = result,
+            Err(error) => body["error"] = json!(error),
+        }
+        self.send(RequestKind::BrowserResult, body)
     }
 
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<(), String> {

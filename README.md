@@ -50,6 +50,9 @@ work going while the app is closed.
   its workspace.
 - **Side pane and terminal** next to every chat: an integrated browser, files, and
   changes on the side, a shell below, all resizable and remembered per chat.
+- **Agents use the browser too.** On Linux, Claude and Codex can open pages in
+  their chat's browser, read them, click, type, and take screenshots while you
+  watch.
 - **Pull requests in place.** Projects, worktrees, and branches live in one
   sidebar, and a chat can link up to 32 pull requests: its branch's PR, ones
   opened from xd or by the agent, and any you add from the session header.

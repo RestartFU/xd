@@ -22,6 +22,7 @@ mod ask;
 mod auth;
 mod background_process;
 mod background_tasks;
+mod browser_relay;
 mod chat_title;
 mod child_agents;
 mod cli_updates;
@@ -213,6 +214,8 @@ pub struct Engine {
     /// Held from saving the default chat quota until it is broadcast, so the
     /// last broadcast always carries the saved value.
     quota_settings: Mutex<()>,
+    /// Desktops offering their browser to agents; see [`browser_relay`].
+    browser: browser_relay::BrowserRelay,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,6 +277,7 @@ impl Engine {
             auto_settler: Mutex::new(None),
             quota_meter: Mutex::new(None),
             quota_settings: Mutex::new(()),
+            browser: browser_relay::BrowserRelay::default(),
             events,
             runtime: None,
         }
@@ -341,6 +345,7 @@ impl Engine {
             auto_settler: Mutex::new(None),
             quota_meter: Mutex::new(None),
             quota_settings: Mutex::new(()),
+            browser: browser_relay::BrowserRelay::default(),
             events,
         };
         engine.auth.refresh_all();
@@ -426,6 +431,16 @@ impl Engine {
             Some("list-agents") => self.list_agents(&request),
             Some("message-agent") => self.message_agent(&request),
             Some("stop-agent") => self.stop_agent(&request),
+            // Only a chat's own tool server, on this machine, drives its browser.
+            Some("browser") if self.pairing.is_local(owner) => {
+                self.browser_command(owner, &request)
+            }
+            Some("browser") => error_reply("Browser commands come from this machine's agents."),
+            Some("browser-provider") => {
+                self.browser.offer(owner);
+                json!({"ok": true})
+            }
+            Some("browser-result") => self.browser.answer(owner, &request),
             Some("git-draft") => self
                 .git_drafts
                 .start(&request)
@@ -1181,6 +1196,30 @@ impl Engine {
             }
             Err(error) => error_reply(error),
         }
+    }
+
+    /// Runs an agent's browser command in its chat's browser, on a desktop.
+    /// `owner` is the connection of the agent's tool server.
+    fn browser_command(&self, owner: u64, request: &Value) -> Value {
+        let chat_id = match required_string(request, "chat", "Browser commands need a chat.") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        let Some(command) = request.get("command").filter(|command| command.is_object()) else {
+            return error_reply("Browser commands need a command.");
+        };
+        let chat = self.read(|store| store.chat(chat_id));
+        if chat["ok"] != true {
+            return chat;
+        }
+        self.browser.run(
+            &self.events,
+            owner,
+            request["cancel_on_close"] == true,
+            chat_id,
+            command.clone(),
+            browser_relay::ANSWER_TIMEOUT,
+        )
     }
 
     /// Links pull requests to a chat, for the user from a client, or for the
@@ -2838,6 +2877,7 @@ impl Engine {
 
     fn unsubscribe(&self, id: u64) {
         self.release_app_client(id);
+        self.browser.forget(&self.events, id);
         self.pairing.unregister(id);
         self.events.unsubscribe(id);
     }
@@ -3178,6 +3218,10 @@ pub fn serve_daemon_connection(
                             | "agent-auth-cancel"
                             | "daemon-stop"
                             | "app-client"
+                            // Answered at once: an agent is waiting on it, and
+                            // the desktop's slower reads must not hold it up.
+                            | "browser-provider"
+                            | "browser-result"
                     )
                 );
             if authenticated && request["op"] == "pause-all" {
@@ -3278,6 +3322,10 @@ pub fn serve_daemon_connection(
     });
     // The app has gone even while requests it sent are still being answered.
     engine.release_app_client(subscriber);
+    // A desktop that has gone answers no more browser commands, and an
+    // agent's tool server that has gone will read no answer: neither waits
+    // for this connection's other work to finish.
+    engine.browser.closed(&engine.events, subscriber);
     if result.is_err() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
     }

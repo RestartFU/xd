@@ -1,5 +1,6 @@
-//! The tools xd gives a chat's agent: linking pull requests to the chat, and
-//! starting and minding agents of its own as chats nested under it.
+//! The tools xd gives a chat's agent: linking pull requests to the chat,
+//! starting and minding agents of its own as chats nested under it, and using
+//! the chat's integrated browser.
 //!
 //! `xd-host mcp` serves them over MCP's stdio transport, one server per agent
 //! process, bound to that process's chat. It hands each call to the daemon,
@@ -22,7 +23,32 @@ pub const START: &str = "start_agent";
 pub const LIST: &str = "list_agents";
 pub const MESSAGE: &str = "message_agent";
 pub const STOP: &str = "stop_agent";
-const TOOLS: [&str; 5] = [TOOL, START, LIST, MESSAGE, STOP];
+/// The browser tools, each the action the desktop runs (see `browser_tools`).
+const BROWSER_TOOLS: [(&str, &str); 8] = [
+    ("browser_navigate", "navigate"),
+    ("browser_history", "history"),
+    ("browser_snapshot", "snapshot"),
+    ("browser_click", "click"),
+    ("browser_type", "type"),
+    ("browser_press_key", "press_key"),
+    ("browser_evaluate", "evaluate"),
+    ("browser_screenshot", "screenshot"),
+];
+const TOOLS: [&str; 13] = [
+    TOOL,
+    START,
+    LIST,
+    MESSAGE,
+    STOP,
+    BROWSER_TOOLS[0].0,
+    BROWSER_TOOLS[1].0,
+    BROWSER_TOOLS[2].0,
+    BROWSER_TOOLS[3].0,
+    BROWSER_TOOLS[4].0,
+    BROWSER_TOOLS[5].0,
+    BROWSER_TOOLS[6].0,
+    BROWSER_TOOLS[7].0,
+];
 /// Added to the agent's instructions when it has the tools. Claude loads MCP
 /// tools only when asked, so without this it would not know to.
 const HINT: &str = "When you open, take over, or push to a pull request \
@@ -30,12 +56,17 @@ other than by running gh pr create here, link it to this chat with xd's \
 link_pull_requests tool. To hand work to another Claude or Codex agent that \
 should outlive this turn or work in parallel, start it with xd's start_agent \
 tool, not codex exec, claude -p or a detached process: xd runs it on the \
-user's preferred account, shows it to them, and sends you its reply here.";
+user's preferred account, shows it to them, and sends you its reply here. \
+To open or use a web page, such as the app you are working on, use xd's \
+browser tools (browser_navigate, browser_snapshot, browser_click and the \
+rest): they drive the Chromium browser beside this chat, which the user sees.";
 /// The same for an agent another agent started, which cannot start its own.
 const STARTED_HINT: &str = "When you open, take over, or push to a pull request \
 other than by running gh pr create here, link it to this chat with xd's \
 link_pull_requests tool. Another agent started you through xd and reads \
-your final reply, so end each turn with what it needs to know.";
+your final reply, so end each turn with what it needs to know. To open or use \
+a web page, use xd's browser tools (browser_navigate, browser_snapshot, \
+browser_click and the rest): they drive the Chromium browser beside this chat.";
 
 /// What the agent's instructions say about the tools. `started_by_agent` is
 /// whether another chat's agent started this one.
@@ -147,7 +178,7 @@ fn add_server(launch: &Launch, command: &mut Command, backend: &str, chat_id: &s
 
 fn tools() -> Value {
     let agent = json!({"type": "string", "description": "The agent's id, as start_agent or list_agents gave it."});
-    json!([
+    let mut tools = json!([
         {
             "name": TOOL,
             "title": "Link pull requests",
@@ -272,7 +303,137 @@ fn tools() -> Value {
                 "openWorldHint": false,
             },
         },
-    ])
+    ]);
+    if let Some(tools) = tools.as_array_mut() {
+        tools.extend(browser_tools());
+    }
+    tools
+}
+
+/// The browser tools. They act on the selected tab of the chat's browser
+/// pane in the xd desktop app, which opens it, so the user sees what the
+/// agent does.
+fn browser_tools() -> Vec<Value> {
+    let element = json!({"type": "string", "description": "The element's ref, such as e12, \
+        from the latest browser_snapshot."});
+    let tool = |name: &str,
+                title: &str,
+                description: &str,
+                properties: Value,
+                required: &[&str],
+                read_only: bool| {
+        json!({
+            "name": name,
+            "title": title,
+            "description": description,
+            "inputSchema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": false,
+            },
+            "annotations": {
+                "readOnlyHint": read_only,
+                "destructiveHint": false,
+                "idempotentHint": read_only,
+                "openWorldHint": true,
+            },
+        })
+    };
+    vec![
+        tool(
+            BROWSER_TOOLS[0].0,
+            "Open a web page",
+            "Open a web address in this chat's browser, the integrated Chromium browser beside \
+                the chat in xd, and wait for it to load. The user sees it, and it shares their \
+                sign-ins and site data. A localhost address, such as localhost:3000, reaches the \
+                computer showing xd. Returns a snapshot of the page.",
+            json!({
+                "url": {"type": "string", "description": "An http or https address. One \
+                    without a scheme uses https, or http for localhost."},
+                "new_tab": {"type": "boolean", "description": "Open it in a new tab rather \
+                    than the selected one. Defaults to false."},
+            }),
+            &["url"],
+            false,
+        ),
+        tool(
+            BROWSER_TOOLS[1].0,
+            "Go back, forward or reload",
+            "Go back or forward in the selected tab's history, or reload its page. Returns a \
+                snapshot of the page.",
+            json!({"direction": {"type": "string", "enum": ["back", "forward", "reload"]}}),
+            &["direction"],
+            false,
+        ),
+        tool(
+            BROWSER_TOOLS[2].0,
+            "Read the page",
+            "Read the selected tab's page as text: its address, title, headings, text, and \
+                each link, button, field and other control with a ref, such as [e12], to pass \
+                to browser_click or browser_type. Refs last until the next snapshot.",
+            json!({}),
+            &[],
+            true,
+        ),
+        tool(
+            BROWSER_TOOLS[3].0,
+            "Click an element",
+            "Scroll an element of the page into view and click it with the mouse. Returns a \
+                snapshot of the page after the click.",
+            json!({
+                "ref": element,
+                "double": {"type": "boolean", "description": "Double-click. Defaults to false."},
+            }),
+            &["ref"],
+            false,
+        ),
+        tool(
+            BROWSER_TOOLS[4].0,
+            "Type into a field",
+            "Focus a text field, replace its text with the given text as if typed, and \
+                optionally press Enter. Returns a snapshot of the page.",
+            json!({
+                "ref": element,
+                "text": {"type": "string"},
+                "append": {"type": "boolean", "description": "Keep the field's text and type \
+                    after it. Defaults to false."},
+                "submit": {"type": "boolean", "description": "Press Enter after typing. \
+                    Defaults to false."},
+            }),
+            &["ref", "text"],
+            false,
+        ),
+        tool(
+            BROWSER_TOOLS[5].0,
+            "Press a key",
+            "Press a key in the page, on whatever has focus. Returns a snapshot of the page.",
+            json!({"key": {"type": "string", "description": "A key name such as Enter, \
+                Escape, Tab, Backspace, ArrowDown or PageDown, or a single character."}}),
+            &["key"],
+            false,
+        ),
+        tool(
+            BROWSER_TOOLS[6].0,
+            "Run JavaScript",
+            "Evaluate a JavaScript expression in the selected tab's page and return its value \
+                as JSON. A promise it gives is awaited; for await, wrap the code in an async \
+                function, as in (async () => { ... })(). Use it to read what a snapshot leaves \
+                out, or to scroll, such as window.scrollBy(0, 800).",
+            json!({"expression": {"type": "string"}}),
+            &["expression"],
+            false,
+        ),
+        tool(
+            BROWSER_TOOLS[7].0,
+            "Take a screenshot",
+            "Take a picture of the selected tab's page as the user would see it.",
+            json!({"full_page": {"type": "boolean", "description": "Take the whole page \
+                rather than what fits in the view. Defaults to false."}}),
+            &[],
+            true,
+        ),
+    ]
 }
 
 /// Answers one MCP message, or `None` for a notification. `ask` sends the
@@ -313,7 +474,11 @@ pub fn answer_mcp(
                 Some(LIST) => reply(Ok(list(arguments, ask))),
                 Some(MESSAGE) => reply(Ok(message_agent(arguments, ask))),
                 Some(STOP) => reply(Ok(stop(arguments, ask))),
-                _ => reply(Err((-32602, "No such tool."))),
+                Some(name) => match BROWSER_TOOLS.iter().find(|(tool, _)| *tool == name) {
+                    Some((_, action)) => reply(Ok(browser(action, arguments, ask))),
+                    None => reply(Err((-32602, "No such tool."))),
+                },
+                None => reply(Err((-32602, "No such tool."))),
             }
         }
         _ => reply(Err((-32601, "Method not found."))),
@@ -488,6 +653,49 @@ fn stop(arguments: &Value, ask: impl FnOnce(Value) -> Result<Value, String>) -> 
     })
 }
 
+/// Hands a browser tool's call to the desktop, through the daemon. The
+/// arguments go as they are; the desktop checks them, since it knows the page.
+fn browser(
+    action: &str,
+    arguments: &Value,
+    ask: impl FnOnce(Value) -> Result<Value, String>,
+) -> Value {
+    let mut command = match arguments {
+        Value::Object(arguments) => Value::Object(arguments.clone()),
+        _ => json!({}),
+    };
+    command["action"] = json!(action);
+    // The server never closes only its sending side, so its connection
+    // ending means the agent is gone and the command can stop.
+    match ask(json!({"op": "browser", "command": command, "cancel_on_close": true})) {
+        Ok(answer) if answer.get("ok").and_then(Value::as_bool) == Some(true) => {
+            let result = &answer["result"];
+            let mut content = Vec::new();
+            if let Some(text) = result.get("text").and_then(Value::as_str) {
+                content.push(json!({"type": "text", "text": text}));
+            }
+            if let (Some(data), Some(mime)) = (
+                result["image"].get("data").and_then(Value::as_str),
+                result["image"].get("mime_type").and_then(Value::as_str),
+            ) {
+                content.push(json!({"type": "image", "data": data, "mimeType": mime}));
+            }
+            if content.is_empty() {
+                content.push(json!({"type": "text", "text": "Done."}));
+            }
+            json!({"content": content, "isError": false})
+        }
+        Ok(answer) => tool_result(
+            answer
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("The browser command failed."),
+            true,
+        ),
+        Err(error) => tool_result(&format!("xd could not be reached: {error}"), true),
+    }
+}
+
 fn tool_result(text: &str, error: bool) -> Value {
     json!({"content": [{"type": "text", "text": text}], "isError": error})
 }
@@ -630,7 +838,10 @@ mod tests {
             [
                 "--allowedTools",
                 "mcp__xd__link_pull_requests,mcp__xd__start_agent,mcp__xd__list_agents,\
-                 mcp__xd__message_agent,mcp__xd__stop_agent"
+                 mcp__xd__message_agent,mcp__xd__stop_agent,mcp__xd__browser_navigate,\
+                 mcp__xd__browser_history,mcp__xd__browser_snapshot,mcp__xd__browser_click,\
+                 mcp__xd__browser_type,mcp__xd__browser_press_key,mcp__xd__browser_evaluate,\
+                 mcp__xd__browser_screenshot"
             ]
         );
         let (added, codex) = arguments("codex");
@@ -739,6 +950,51 @@ mod tests {
             json!({"op": "stop-agent", "agent": "child"})
         );
         assert_eq!(stopped["content"][0]["text"], "Threw the agent away.");
+    }
+
+    #[test]
+    fn browser_tools_hand_their_action_to_the_desktop_and_return_its_picture() {
+        let (asked, result) = call(
+            "browser_click",
+            json!({"ref": "e3", "chat": "someone-else"}),
+            json!({"ok": true, "result": {"text": "Clicked."}}),
+        );
+        // The chat is the server's own, set over this one by `mcp::ask`.
+        assert_eq!(
+            asked.unwrap(),
+            json!({"op": "browser", "command": {"action": "click", "ref": "e3",
+                "chat": "someone-else"}, "cancel_on_close": true})
+        );
+        assert_eq!(
+            result,
+            json!({"content": [{"type": "text", "text": "Clicked."}], "isError": false})
+        );
+        let (_, picture) = call(
+            "browser_screenshot",
+            json!({}),
+            json!({"ok": true, "result": {"text": "1280×800",
+                "image": {"data": "AAAA", "mime_type": "image/jpeg"}}}),
+        );
+        assert_eq!(
+            picture["content"][1],
+            json!({"type": "image", "data": "AAAA", "mimeType": "image/jpeg"})
+        );
+        let (_, failed) = call(
+            "browser_navigate",
+            json!({"url": "javascript:alert(1)"}),
+            json!({"ok": false, "error": "This browser supports HTTP and HTTPS URLs."}),
+        );
+        assert_eq!(failed["isError"], true);
+        assert_eq!(
+            failed["content"][0]["text"],
+            "This browser supports HTTP and HTTPS URLs."
+        );
+        let unknown = answer_mcp(
+            &json!({"id": 1, "method": "tools/call", "params": {"name": "browser_fly"}}),
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(unknown["error"]["code"], -32602);
     }
 
     #[test]

@@ -41,9 +41,23 @@ use crate::input::{ComposerEvent, ComposerInput};
 /// side tool's own controls, beside the chat tabs. One rule closes both columns.
 pub const SESSION_HEADER_HEIGHT: f32 = 48.0;
 pub const TAB_BAR_HEIGHT: f32 = 43.0;
+/// Told to an agent whose command made the page open a tab.
+#[cfg(target_os = "linux")]
+const NEW_TAB_NOTE: &str = "The page opened a new tab, which is now the selected one, so later \
+commands act on it. What follows is the page before; take a browser_snapshot to read the new tab.";
+/// How long an answer waits for the pane to open a tab the page asked for.
+#[cfg(target_os = "linux")]
+const POPUP_WAIT: Duration = Duration::from_secs(2);
+/// The same, after a command that failed.
+#[cfg(target_os = "linux")]
+const NEW_TAB_AFTER_ERROR: &str = "The page also opened a new tab, which is now the selected one, \
+so later commands act on it; take a browser_snapshot to read it.";
+
 /// Page tabs keep one width so a loading title does not move its neighbours.
 const BROWSER_TAB_WIDTH: f32 = 148.0;
 
+#[cfg(any(target_os = "linux", test))]
+mod agent;
 #[cfg(target_os = "linux")]
 mod chromium;
 #[cfg(target_os = "linux")]
@@ -98,7 +112,11 @@ impl Default for BrowserSession {
 enum TabEvent {
     Navigated(String),
     Updated,
-    Open(String),
+    /// A page asked for a new tab; see [`NativeEvent::Open`].
+    Open {
+        url: String,
+        by_agent: bool,
+    },
     /// The page closed itself, which closes its tab.
     #[cfg(target_os = "linux")]
     Closed,
@@ -117,7 +135,12 @@ enum NativeEvent {
     Shown {
         generation: u64,
     },
-    Open(String),
+    /// A page asked for a new tab, as an agent's command made it do when
+    /// `by_agent`. Such a tab leaves the keyboard where it is.
+    Open {
+        url: String,
+        by_agent: bool,
+    },
     Error(String),
     #[cfg(target_os = "linux")]
     HistoryGesture(bool),
@@ -447,6 +470,115 @@ impl BrowserPane {
         }
     }
 
+    /// Runs an agent's browser command on the selected page, and passes
+    /// `reply` what happened. Commands wait on the page, so they run on a
+    /// thread of their own. Opening a page shows it, in a new tab if asked.
+    pub fn run_agent_command(
+        &mut self,
+        mut command: serde_json::Value,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        reply: impl FnOnce(Result<serde_json::Value, String>) + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return reply(Err("The command was stopped.".into()));
+        }
+        if command["action"] == "navigate" {
+            match command["url"].as_str().map(normalize_url) {
+                Some(Ok(url)) => command["url"] = serde_json::Value::String(url),
+                Some(Err(error)) => return reply(Err(error)),
+                None => return reply(Err("Pass url, the address to open.".into())),
+            }
+            if command["new_tab"] == true {
+                // The user may be typing elsewhere; an agent's tab leaves the
+                // keyboard where it is.
+                self.open_tab(None, false, window, cx);
+            } else if self.auxiliary.is_some() {
+                self.select_auxiliary(None, cx);
+            }
+        }
+        let tab = &self.tabs[self.session.active_tab];
+        let native = tab.display.native().filter(|native| !native.is_disposed());
+        let Some(native) = native else {
+            let error = tab.entity.read(cx).error.clone();
+            return reply(Err(
+                error.unwrap_or_else(|| "The browser has not started.".into())
+            ));
+        };
+        #[cfg(target_os = "linux")]
+        let deadline = std::time::Instant::now() + agent::COMMAND_TIME;
+        // The worker hands its outcome back here, and the agent is answered
+        // once the tab has opened every tab its page asked for meanwhile,
+        // so the agent's next command finds the one now selected.
+        #[cfg(target_os = "linux")]
+        let (finished, outcome) =
+            async_channel::bounded::<(Result<serde_json::Value, String>, u64)>(1);
+        #[cfg(target_os = "linux")]
+        {
+            let tab = tab.entity.downgrade();
+            cx.spawn(async move |_, cx| {
+                let Ok((outcome, popups)) = outcome.recv().await else {
+                    return;
+                };
+                let asked = std::time::Instant::now();
+                while asked.elapsed() < POPUP_WAIT
+                    && tab
+                        .update(cx, |tab, _| tab.popups_handled < popups)
+                        .unwrap_or(false)
+                {
+                    Timer::after(Duration::from_millis(20)).await;
+                }
+                reply(outcome);
+            })
+            .detach();
+        }
+        #[cfg(target_os = "linux")]
+        native.with_view(move |view| {
+            let page = view.devtools().stopped_by(cancelled.clone());
+            let spawned = std::thread::Builder::new()
+                .name("xd-browser-agent".into())
+                .spawn(move || {
+                    let turns = page.turns();
+                    let outcome =
+                        agent::take_turn(&turns, deadline, &cancelled).and_then(|_turn| {
+                            let left =
+                                deadline.saturating_duration_since(std::time::Instant::now());
+                            page.wait_until_started(left.min(Duration::from_secs(10)))?;
+                            let popups = page.popups();
+                            page.wake();
+                            let outcome = agent::run(&page, &command, deadline, &cancelled);
+                            page.sleep();
+                            // The pane selects the tab, and later commands
+                            // act on it, not the page this one describes,
+                            // even when the command then failed.
+                            if page.popups() == popups {
+                                return outcome;
+                            }
+                            match outcome {
+                                Ok(mut outcome) => {
+                                    outcome.text = format!("{NEW_TAB_NOTE}\n\n{}", outcome.text);
+                                    Ok(outcome)
+                                }
+                                Err(error) => Err(format!("{error}\n\n{NEW_TAB_AFTER_ERROR}")),
+                            }
+                        });
+                    let _ = finished
+                        .send_blocking((outcome.map(agent::Outcome::into_value), page.popups()));
+                });
+            if let Err(error) = spawned {
+                eprintln!("xd: could not run a browser command: {error}");
+            }
+        });
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (native, command, cancelled);
+            reply(Err(
+                "Agents can use xd's browser only on Linux, where it is Chromium.".into(),
+            ));
+        }
+    }
+
     /// Links from a chat reuse an existing matching tab or the current blank tab.
     pub fn open_url(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
         let url = match normalize_url(address) {
@@ -501,7 +633,9 @@ impl BrowserPane {
                     }
                 }
                 TabEvent::Updated => {}
-                TabEvent::Open(url) => pane.add_tab(Some(url.clone()), window, cx),
+                TabEvent::Open { url, by_agent } => {
+                    pane.open_tab(Some(url.clone()), !by_agent, window, cx);
+                }
                 #[cfg(target_os = "linux")]
                 TabEvent::Closed => pane.close_tab(index, window, cx),
             }
@@ -516,12 +650,25 @@ impl BrowserPane {
     }
 
     fn add_tab(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tab(url, true, window, cx);
+    }
+
+    /// Adds a tab and selects it, giving it the keyboard when `focus`.
+    fn open_tab(
+        &mut self,
+        url: Option<String>,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.select_auxiliary(None, cx);
         self.insert_tab(url, window, cx);
         self.session.active_tab = self.tabs.len() - 1;
         self.tab_scroll.scroll_to_item(self.active_tab_index());
         self.update_visibility();
-        self.focus_active_tab(window, cx);
+        if focus {
+            self.focus_active_tab(window, cx);
+        }
         cx.emit(BrowserEvent::SessionChanged(self.session()));
         cx.notify();
     }
@@ -804,6 +951,8 @@ struct BrowserTab {
     colors: ThemeColors,
     #[cfg(target_os = "linux")]
     last_history_gesture: Option<std::time::Instant>,
+    /// Tabs this tab's pages asked for that the pane has opened.
+    popups_handled: u64,
 }
 
 impl EventEmitter<TabEvent> for BrowserTab {}
@@ -867,6 +1016,7 @@ impl BrowserTab {
             colors,
             #[cfg(target_os = "linux")]
             last_history_gesture: None,
+            popups_handled: 0,
         };
         cx.subscribe_in(&address, window, |pane, _, event, _, cx| match event {
             ComposerEvent::Changed(text) => {
@@ -1045,7 +1195,10 @@ impl BrowserTab {
                     return;
                 }
             }
-            NativeEvent::Open(url) => cx.emit(TabEvent::Open(url)),
+            NativeEvent::Open { url, by_agent } => {
+                self.popups_handled += 1;
+                cx.emit(TabEvent::Open { url, by_agent });
+            }
             #[cfg(target_os = "linux")]
             NativeEvent::HistoryGesture(back) => {
                 // Keep momentum from continuing through a second document,
@@ -2003,7 +2156,10 @@ fn create_native(parent: NativeParent, events: NativeEvents) -> Result<NativeEnt
         })
         .with_new_window_req_handler(move |url, _| {
             if is_browser_url(&url) {
-                popup_events.send(NativeEvent::Open(url));
+                popup_events.send(NativeEvent::Open {
+                    url,
+                    by_agent: false,
+                });
             }
             NewWindowResponse::Deny
         })
@@ -2378,6 +2534,110 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_stopped_agent_command_opens_no_tab(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                Some("https://example.com/".into()),
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let (answer, answered) = std::sync::mpsc::channel();
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.run_agent_command(
+                    serde_json::json!({"action": "navigate", "url": "localhost:3000",
+                        "new_tab": true}),
+                    Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                    move |outcome| answer.send(outcome).unwrap(),
+                    window,
+                    cx,
+                );
+            });
+        });
+        assert_eq!(
+            answered.try_recv().unwrap(),
+            Err("The command was stopped.".into())
+        );
+        cx.update(|_, cx| assert_eq!(pane.read(cx).session().tabs.len(), 1));
+    }
+
+    #[gpui::test]
+    fn an_agents_new_tab_leaves_the_keyboard_where_it_is(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                Some("https://example.com/".into()),
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let (answer, answered) = std::sync::mpsc::channel();
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.run_agent_command(
+                    serde_json::json!({"action": "navigate", "url": "localhost:3000",
+                        "new_tab": true}),
+                    Arc::default(),
+                    move |outcome| answer.send(outcome).unwrap(),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        // A test window has no engine to run the command in.
+        assert!(answered.try_recv().unwrap().is_err());
+        cx.update(|window, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.session().active_tab, 1);
+            let tab = pane.tabs[1].entity.read(cx);
+            assert!(!tab.address.read(cx).focus_handle(cx).is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn a_tab_a_page_opens_for_an_agent_leaves_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                None,
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let open_popup = |by_agent: bool, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                // Where the user is typing.
+                let typing = pane.read(cx).tabs[0].entity.read(cx).address.clone();
+                typing.read(cx).focus_handle(cx).focus(window);
+                let first = pane.read(cx).tabs[0].entity.clone();
+                first.update(cx, |_, cx| {
+                    cx.emit(TabEvent::Open {
+                        url: "https://example.com/popup".into(),
+                        by_agent,
+                    })
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let typing = pane.read(cx).tabs[0].entity.read(cx).address.clone();
+                typing.read(cx).focus_handle(cx).is_focused(window)
+            })
+        };
+        // As when an agent's click or script opens a popup.
+        assert!(open_popup(true, cx));
+        cx.update(|_, cx| assert_eq!(pane.read(cx).session().active_tab, 1));
+        // The user's own popup takes the keyboard to its tab, as before.
+        assert!(!open_popup(false, cx));
+        cx.update(|_, cx| assert_eq!(pane.read(cx).session().active_tab, 2));
+    }
+
+    #[gpui::test]
     fn tabs_preserve_address_drafts_and_close_independently(cx: &mut gpui::TestAppContext) {
         let (pane, cx) = cx.add_window_view(|window, cx| {
             BrowserPane::new(
@@ -2462,7 +2722,13 @@ mod tests {
                     }
                 );
                 pane.tabs[0].entity.update(cx, |tab, cx| {
-                    tab.native_event(NativeEvent::Open("https://example.com/popup".into()), cx);
+                    tab.native_event(
+                        NativeEvent::Open {
+                            url: "https://example.com/popup".into(),
+                            by_agent: false,
+                        },
+                        cx,
+                    );
                 });
             });
         });
@@ -2724,7 +2990,10 @@ mod tests {
             events.title_changed(format!("Page update {index}"));
         }
         events.send(NativeEvent::Finished("https://example.com/".into()));
-        events.send(NativeEvent::Open("https://example.com/popup".into()));
+        events.send(NativeEvent::Open {
+            url: "https://example.com/popup".into(),
+            by_agent: false,
+        });
         events.send(NativeEvent::Error("Connection closed".into()));
         assert_eq!(receiver.len(), 5);
         assert!(matches!(
@@ -2740,7 +3009,10 @@ mod tests {
             receiver.try_recv().unwrap(),
             NativeEvent::Finished(_)
         ));
-        assert!(matches!(receiver.try_recv().unwrap(), NativeEvent::Open(_)));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::Open { .. }
+        ));
         assert!(matches!(
             receiver.try_recv().unwrap(),
             NativeEvent::Error(_)

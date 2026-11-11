@@ -7,10 +7,11 @@
 //! applied once it exists.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering},
         mpsc,
     },
     time::Duration,
@@ -316,6 +317,36 @@ struct SharedBrowser(Browser);
 // SAFETY: see above; the wrapper only exposes CEF's thread-safe calls.
 unsafe impl Send for SharedBrowser {}
 
+/// Keeps the DevTools observer registered; dropping it removes the observer.
+/// Only created and dropped on CEF's UI thread or with the browser closing.
+struct SharedRegistration(#[allow(dead_code)] Registration);
+// SAFETY: CEF's registration is reference counted atomically and has no calls.
+unsafe impl Send for SharedRegistration {}
+
+/// DevTools protocol calls sent and not yet answered, by message id.
+#[derive(Default)]
+struct DevToolsCalls {
+    next: AtomicI32,
+    waiting: Mutex<HashMap<i32, mpsc::Sender<Result<serde_json::Value, String>>>>,
+}
+
+impl DevToolsCalls {
+    fn take(&self, id: i32) -> Option<mpsc::Sender<Result<serde_json::Value, String>>> {
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id)
+    }
+
+    /// Fails every waiting call, as when the page has gone.
+    fn fail_all(&self) {
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     /// GPUI's window, which takes the keyboard back from the page.
@@ -337,6 +368,31 @@ struct Shared {
     /// A close gave up waiting for CEF; release the windows once it finishes.
     release_pending: bool,
     released: bool,
+    /// Agent commands running on this page. While any is, a page off screen
+    /// still paints, so a screenshot or a page that waits for a frame works.
+    awake: usize,
+    /// When the last agent command here ended. A popup it caused can be
+    /// asked for a moment after.
+    agent_finished: Option<std::time::Instant>,
+    /// Tabs this page has asked for, so a command can tell it opened one.
+    popups: u64,
+    devtools: Arc<DevToolsCalls>,
+    devtools_observer: Option<SharedRegistration>,
+    /// Held by the agent command running on this page; see `agent::take_turn`.
+    turns: Arc<Mutex<()>>,
+}
+
+/// How long after an agent command a popup still counts as the agent's.
+const AGENT_POPUP_GRACE: Duration = Duration::from_secs(1);
+
+impl Shared {
+    /// Whether an agent's command is running on the page, or just ended.
+    fn agent_active(&self) -> bool {
+        self.awake > 0
+            || self
+                .agent_finished
+                .is_some_and(|finished| finished.elapsed() < AGENT_POPUP_GRACE)
+    }
 }
 
 type SharedState = Arc<Mutex<Shared>>;
@@ -400,7 +456,7 @@ fn apply_window_state(shared: &Shared) {
         intern(connection, b"_NET_WM_STATE"),
         intern(connection, b"_NET_WM_STATE_HIDDEN"),
     ) {
-        if shared.visible {
+        if shared.visible || shared.awake > 0 {
             let _ = connection.delete_property(window, state);
         } else {
             let _ = connection.change_property32(
@@ -559,7 +615,14 @@ wrap_life_span_handler! {
             if let Some(url) = target_url.map(ToString::to_string)
                 && is_browser_url(&url)
             {
-                self.events.send(NativeEvent::Open(url));
+                // Decided now, while the command that made the page ask may
+                // still run, rather than when GPUI gets to the event.
+                let by_agent = {
+                    let mut shared = lock(&self.shared);
+                    shared.popups += 1;
+                    shared.agent_active()
+                };
+                self.events.send(NativeEvent::Open { url, by_agent });
             }
             1
         }
@@ -569,6 +632,8 @@ wrap_life_span_handler! {
             let mut shared = lock(&self.shared);
             shared.browser = None;
             shared.browser_gone = true;
+            shared.devtools_observer = None;
+            shared.devtools.fail_all();
             match shared.closed.take() {
                 Some(closed) => {
                     let _ = closed.send(());
@@ -929,6 +994,330 @@ fn history_gesture(url: &str) -> Option<bool> {
     }
 }
 
+wrap_dev_tools_message_observer! {
+    struct DevToolsAnswers {
+        calls: Arc<DevToolsCalls>,
+    }
+
+    impl DevToolsMessageObserver {
+        fn on_dev_tools_method_result(
+            &self,
+            _browser: Option<&mut Browser>,
+            message_id: ::std::os::raw::c_int,
+            success: ::std::os::raw::c_int,
+            result: Option<&[u8]>,
+        ) {
+            let Some(answer) = self.calls.take(message_id) else {
+                return;
+            };
+            let value = result
+                .and_then(|result| serde_json::from_slice::<serde_json::Value>(result).ok())
+                .unwrap_or_default();
+            let _ = answer.send(if success != 0 {
+                Ok(value)
+            } else {
+                Err(value
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("The page refused the command.")
+                    .to_owned())
+            });
+        }
+    }
+}
+
+/// Where a DevTools call is: waiting for CEF's UI thread, sent to the page,
+/// or given up on by its caller before it was sent, so never to be sent.
+const CALL_WAITING: u8 = 0;
+const CALL_SENT: u8 = 1;
+const CALL_ABANDONED: u8 = 2;
+
+// Sends one DevTools message, which CEF accepts only on its UI thread.
+wrap_task! {
+    struct SendDevToolsMessage {
+        shared: SharedState,
+        id: i32,
+        message: Vec<u8>,
+        state: Arc<AtomicU8>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            // A command stopped while this waited for the UI thread does no
+            // more, even of what it had already asked for.
+            if self.cancelled.load(Ordering::Acquire)
+                && self
+                    .state
+                    .compare_exchange(
+                        CALL_WAITING,
+                        CALL_ABANDONED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                let calls = lock(&self.shared).devtools.clone();
+                if let Some(answer) = calls.take(self.id) {
+                    let _ = answer.send(Err("The command was stopped.".into()));
+                }
+                return;
+            }
+            // A caller that stopped waiting has reported the call as failed.
+            if self
+                .state
+                .compare_exchange(CALL_WAITING, CALL_SENT, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return;
+            }
+            let (host, calls, observed) = {
+                let shared = lock(&self.shared);
+                (
+                    shared.browser.as_ref().and_then(|browser| browser.0.host()),
+                    shared.devtools.clone(),
+                    shared.devtools_observer.is_some(),
+                )
+            };
+            let Some(host) = host else {
+                if let Some(answer) = calls.take(self.id) {
+                    let _ = answer.send(Err("The page has closed.".into()));
+                }
+                return;
+            };
+            if !observed {
+                let mut observer = DevToolsAnswers::new(calls.clone());
+                let registration = host.add_dev_tools_message_observer(Some(&mut observer));
+                let mut shared = lock(&self.shared);
+                if shared.devtools_observer.is_none() && !shared.browser_gone {
+                    shared.devtools_observer = registration.map(SharedRegistration);
+                }
+            }
+            if host.send_dev_tools_message(Some(&self.message)) != 1
+                && let Some(answer) = calls.take(self.id)
+            {
+                let _ = answer.send(Err("The page did not take the command.".into()));
+            }
+        }
+    }
+}
+
+/// A DevTools protocol connection to one page, for agents driving it. Its
+/// calls block, so make them off GPUI's thread and the browser thread.
+#[derive(Clone)]
+pub struct DevTools {
+    shared: SharedState,
+    /// Set once the command these calls are for is stopped.
+    cancelled: Arc<AtomicBool>,
+    /// Calls are sent however long CEF takes, even after their caller has
+    /// stopped waiting, as letting go of a pressed key must be.
+    deliver: bool,
+    /// Whether the last call reached the page, or may have.
+    last_sent: Arc<AtomicBool>,
+}
+
+impl DevTools {
+    /// The same page, for a command `cancelled` stops: calls still waiting
+    /// for CEF's UI thread when it is set are never sent.
+    pub fn stopped_by(self, cancelled: Arc<AtomicBool>) -> Self {
+        Self { cancelled, ..self }
+    }
+
+    /// The same page, for calls nothing stops and that are always sent, such
+    /// as letting go of a key.
+    pub fn unstoppable(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+            cancelled: Arc::default(),
+            deliver: true,
+            last_sent: Arc::default(),
+        }
+    }
+
+    /// Whether the last call reached the page, or may have. One refused,
+    /// given up on or stopped before CEF sent it did not.
+    pub fn last_call_sent(&self) -> bool {
+        self.last_sent.load(Ordering::Acquire)
+    }
+
+    /// Calls `method` and waits up to `timeout` for its result.
+    pub fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let state = Arc::new(AtomicU8::new(CALL_WAITING));
+        let result = self.send(method, params, timeout, &state);
+        self.last_sent.store(
+            state.load(Ordering::Acquire) == CALL_SENT,
+            Ordering::Release,
+        );
+        result
+    }
+
+    fn send(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+        state: &Arc<AtomicU8>,
+    ) -> Result<serde_json::Value, String> {
+        let calls = {
+            let shared = lock(&self.shared);
+            if shared.browser.is_none() {
+                return Err(if shared.browser_gone {
+                    "The page has closed.".into()
+                } else {
+                    "The browser is still starting.".into()
+                });
+            }
+            shared.devtools.clone()
+        };
+        // Ids only need to be unique among this page's waiting calls.
+        let id = calls.next.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let (answer, answered) = mpsc::channel();
+        calls
+            .waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, answer);
+        let message =
+            serde_json::to_vec(&serde_json::json!({"id": id, "method": method, "params": params}))
+                .map_err(|error| error.to_string())?;
+        let mut task = SendDevToolsMessage::new(
+            self.shared.clone(),
+            id,
+            message,
+            state.clone(),
+            self.cancelled.clone(),
+        );
+        if post_task(ThreadId::UI, Some(&mut task)) != 1 {
+            calls.take(id);
+            return Err("The browser has shut down.".into());
+        }
+        // Waited for in short spells, so a stopped command lets the page go.
+        let started = std::time::Instant::now();
+        let result = loop {
+            let left = timeout.saturating_sub(started.elapsed());
+            match answered.recv_timeout(left.min(Duration::from_millis(100))) {
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if !left.is_zero() && !self.cancelled.load(Ordering::Acquire) => {}
+                result => break result,
+            }
+        };
+        calls.take(id);
+        match result {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) if self.cancelled.load(Ordering::Acquire) => {
+                let abandoned = state
+                    .compare_exchange(
+                        CALL_WAITING,
+                        CALL_ABANDONED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok();
+                Err(if abandoned {
+                    "The command was stopped.".into()
+                } else {
+                    format!("The command was stopped; the page may still finish {method}.")
+                })
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if self.deliver => Err(format!(
+                "The page did not answer {method} within {} seconds; it still gets it.",
+                timeout.as_secs()
+            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let abandoned = state
+                    .compare_exchange(
+                        CALL_WAITING,
+                        CALL_ABANDONED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok();
+                Err(if abandoned {
+                    format!("The browser was too busy to run {method}, so it did not.")
+                } else {
+                    format!(
+                        "The page took {method} but did not answer within {} seconds, so it \
+                         may have happened.",
+                        timeout.as_secs()
+                    )
+                })
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("The page has closed.".into()),
+        }
+    }
+
+    /// How many tabs this page has asked for.
+    pub fn popups(&self) -> u64 {
+        lock(&self.shared).popups
+    }
+
+    /// What an agent command holds while it runs on this page.
+    pub fn turns(&self) -> Arc<Mutex<()>> {
+        lock(&self.shared).turns.clone()
+    }
+
+    /// Whether the page is loading, from the moment a navigation starts,
+    /// before any of the new document arrives.
+    pub fn is_loading(&self) -> bool {
+        lock(&self.shared)
+            .browser
+            .as_ref()
+            .is_some_and(|browser| browser.0.is_loading() != 0)
+    }
+
+    /// Waits for CEF to create the page, which a new tab asks for and gets
+    /// later.
+    pub fn wait_until_started(&self, timeout: Duration) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        loop {
+            {
+                let shared = lock(&self.shared);
+                if shared.browser.is_some() {
+                    return Ok(());
+                }
+                if shared.browser_gone || shared.closed.is_some() {
+                    return Err("The page has closed.".into());
+                }
+            }
+            if self.cancelled.load(Ordering::Acquire) {
+                return Err("The command was stopped.".into());
+            }
+            if started.elapsed() >= timeout {
+                return Err("The browser did not start in time.".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Keeps the page painting while it is off screen, until [`Self::sleep`].
+    /// A page never shown gets a size to lay itself out in.
+    pub fn wake(&self) {
+        let mut shared = lock(&self.shared);
+        shared.awake += 1;
+        if shared.bounds.is_none() {
+            shared.bounds = Some((0, 0, UNSHOWN_WIDTH, UNSHOWN_HEIGHT));
+        }
+        apply_window_state(&shared);
+    }
+
+    pub fn sleep(&self) {
+        let mut shared = lock(&self.shared);
+        shared.awake = shared.awake.saturating_sub(1);
+        shared.agent_finished = Some(std::time::Instant::now());
+        apply_window_state(&shared);
+    }
+}
+
+/// The size, in physical pixels, of a page an agent uses before the user has
+/// ever shown it.
+const UNSHOWN_WIDTH: u32 = 1280;
+const UNSHOWN_HEIGHT: u32 = 800;
+
 wrap_client! {
     struct ViewClient {
         shared: SharedState,
@@ -1060,6 +1449,16 @@ impl ChromiumView {
             .ok_or_else(|| "The page is not available.".to_string())?;
         frame.load_url(Some(&CefString::from(url)));
         Ok(())
+    }
+
+    /// A DevTools connection to this page, for an agent's commands.
+    pub fn devtools(&self) -> DevTools {
+        DevTools {
+            shared: self.shared.clone(),
+            cancelled: Arc::default(),
+            deliver: false,
+            last_sent: Arc::default(),
+        }
     }
 
     pub fn url(&self) -> Result<String, String> {

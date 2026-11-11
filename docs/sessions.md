@@ -19,6 +19,13 @@ Both panes can stay open together, and hiding them keeps their content.
 The integrated browser keeps separate tabs for each chat and shares site data
 between them. Swipe horizontally on a supported touchpad to go back or forward.
 
+Claude and Codex agents can use their chat's browser through xd's browser tools:
+open a page, read it, click, type, press keys, run JavaScript, and take
+screenshots. They act on the selected tab, and the chat's side pane opens so you
+can watch; an agent whose chat is not on screen keeps working without its page
+covering the chat you are in. The pages share your site data and sign-ins. This
+needs the Linux desktop app, where the browser is Chromium, to be open.
+
 ## Linked pull requests
 
 A chat can link up to 32 pull requests. The chat's branch PR, PRs opened from xd,
