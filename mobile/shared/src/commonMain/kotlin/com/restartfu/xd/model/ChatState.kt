@@ -79,6 +79,11 @@ public data class ChatState(
     val interactionEpoch: String = "",
     val pendingUser: TranscriptItem? = null,
     val transcriptLoaded: Boolean = false,
+    /**
+     * The chat's own reply has been applied, so [draft] is the host's draft
+     * rather than the empty default. Messages alone do not set it.
+     */
+    val draftLoaded: Boolean = false,
     val loading: Boolean = false,
     val loadingOlder: Boolean = false,
     val hasOlderMessages: Boolean = false,

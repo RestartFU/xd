@@ -43,6 +43,21 @@ class TranscriptMachineTest {
         assertTrue(withOlder.hasOlderMessages)
     }
 
+    /** Only the chat's own reply says what its draft is; a page of messages does not. */
+    @Test
+    fun theDraftIsKnownOnlyOnceTheChatReplyIsApplied() {
+        val initial = ChatState("chat")
+        assertFalse(initial.draftLoaded)
+        val paged = reduce(initial, TranscriptInput.MessagesLoaded(messages(MessageReply("user", "hi", 1)))).state
+        assertFalse(paged.draftLoaded)
+        val loaded = reduce(
+            paged,
+            TranscriptInput.Loaded(chat().copy(draft = "Ship notes first", draftRevision = 3), messages(), nowMillis = 0),
+        ).state
+        assertTrue(loaded.draftLoaded)
+        assertEquals("Ship notes first", loaded.draft)
+    }
+
     @Test
     fun turnStartMarksWorkingClearsPendingAndRefetchesMessages() {
         val state = reduce(

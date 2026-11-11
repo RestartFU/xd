@@ -266,6 +266,66 @@ class AskSectionScreenshotTest {
         }
     }
 
+    /**
+     * Words waiting for an empty composer never replace the host's draft:
+     * back in the chat, nothing is restored until the chat's own reply says
+     * what its draft is, and with a draft there the words keep waiting.
+     */
+    @Test fun waitingWordsNeverReplaceTheHostsDraft() {
+        socket = ScriptedSocket(Scene(DRY_RUN, interactions = QUESTIONS, holdAnswers = true, refuseFirstAnswer = true))
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val client = XdClient({ socket }, NoCredentials, scope)
+        runBlocking { client.connect(connection) }
+        try {
+            val store = ViewModelStore()
+            val first = ViewModelProvider(store, ChatViewModel.Factory(client, "chat"))[ChatViewModel::class.java]
+            awaitThat { first.state.value.interactions.isNotEmpty() }
+            val request = first.state.value.interactions.single()
+            first.answerQuestion(request, "rollout", "Start with a small pilot")
+            first.updateDraft("Friday morning")
+            first.answerWithDraft(request, "when")
+            await("respond")
+            store.clear()
+            // The chat's own handle goes once its last draft is saved.
+            awaitThat { socket.sent("set-draft").isNotEmpty() }
+            repeat(10) {
+                ShadowLooper.idleMainLooper()
+                Thread.sleep(20)
+            }
+            socket.releaseAnswers()
+            val answers = InteractionAnswers.of(client)
+            awaitThat { answers.submittingNow("chat").isEmpty() && answers.givenBackNow("chat") != null }
+
+            // Meanwhile another device left a draft, and the chat's reply is slow.
+            socket.draft = "Ship the notes first"
+            socket.holdChat()
+            val chats = socket.sent("chat").size
+            val second = ViewModelProvider(ViewModelStore(), ChatViewModel.Factory(client, "chat"))[ChatViewModel::class.java]
+            awaitThat { socket.sent("chat").size > chats }
+            repeat(10) {
+                ShadowLooper.idleMainLooper()
+                Thread.sleep(20)
+            }
+            check(!second.state.value.draftLoaded)
+            check(second.draft.value.isEmpty()) { "Restored ${second.draft.value} before the host's draft" }
+            check(answers.givenBackNow("chat") == "Friday morning")
+
+            socket.releaseChat()
+            awaitThat { second.state.value.draftLoaded }
+            repeat(10) {
+                ShadowLooper.idleMainLooper()
+                Thread.sleep(20)
+            }
+            check(second.draft.value == "Ship the notes first") { "The draft became ${second.draft.value}" }
+            check(answers.givenBackNow("chat") == "Friday morning") { "Waiting ${answers.givenBackNow("chat")}" }
+            check(socket.sent("set-draft").none { it["text"]?.jsonPrimitive?.content == "Friday morning" }) {
+                "Saved the words over the host's draft"
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
+
     @Test fun allowOnceApproves() = shoot(null, Scene(DRY_RUN, interactions = APPROVALS)) {
         click("Allow once")
         val request = await("respond")
@@ -432,6 +492,20 @@ class AskSectionScreenshotTest {
 
         fun releaseAnswers() = answersHeld.countDown()
 
+        /** The chat's draft as the host has it now. */
+        @Volatile var draft: String = scene.draft
+
+        @Volatile private var chatHeld: java.util.concurrent.CountDownLatch? = null
+
+        /** Holds chat replies from now until [releaseChat]. */
+        fun holdChat() {
+            chatHeld = java.util.concurrent.CountDownLatch(1)
+        }
+
+        fun releaseChat() {
+            chatHeld?.countDown()
+        }
+
         /** An event from the host. */
         fun push(line: String) {
             listener?.onBytes((line + "\n").encodeToByteArray())
@@ -449,11 +523,13 @@ class AskSectionScreenshotTest {
                 val id = request["_xd_request"]?.jsonPrimitive?.longOrNull
                 val op = request["op"]?.jsonPrimitive?.content
                 val held = scene.holdAnswers && op == "respond"
+                val chatGate = if (op == "chat") chatHeld else null
                 val refused = scene.refuseFirstAnswer && op == "respond" && sent("respond").size == 1
                 val body = (if (refused) """{"ok":false,"error":"The agent stopped listening"}""" else reply(op))
                     .removeSuffix("}") + (if (id != null) ""","_xd_request":$id}""" else "}")
                 Thread {
                     if (held) answersHeld.await()
+                    chatGate?.await()
                     Thread.sleep(5)
                     listener?.onBytes((body + "\n").encodeToByteArray())
                 }.start()
@@ -468,7 +544,7 @@ class AskSectionScreenshotTest {
                 """"backend":"claude","working":false,"quota_reached":${scene.quotaReached}}]}"""
             "chat" -> """{"ok":true,"title":"Ship the 2.4 release","backend":"claude","commands":[],"plan":false,""" +
                 """"queue":[],"working":false,"items":[],"new_worktree":false,"has_messages":true,""" +
-                """"model":"claude-opus-5-5","effort":"high","draft":${JsonPrimitive(scene.draft)},"draft_revision":1""" +
+                """"model":"claude-opus-5-5","effort":"high","draft":${JsonPrimitive(draft)},"draft_revision":1""" +
                 (if (scene.interactions.isNotEmpty()) ""","interactions":${scene.interactions}""" else "") +
                 (if (scene.quotaReached) ""","quota_reached":true,"quota":{"percent":10,"used":12.2,"own":false}""" else "") + "}"
             "messages" -> """{"ok":true,"total_messages":${scene.messages.size},"last_message_id":${scene.messages.size},"messages":[""" +

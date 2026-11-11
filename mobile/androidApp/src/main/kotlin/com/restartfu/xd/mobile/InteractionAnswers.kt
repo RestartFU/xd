@@ -48,6 +48,8 @@ class InteractionAnswers internal constructor() {
 
     fun givenBack(chatId: String): Flow<String?> = givenBack.map { it[chatId] }.distinctUntilChanged()
 
+    fun givenBackNow(chatId: String): String? = givenBack.value[chatId]
+
     /**
      * Answers one of [request]'s questions. The last answer sends them all,
      * as the agent asked for them together. [typed] is the words as the

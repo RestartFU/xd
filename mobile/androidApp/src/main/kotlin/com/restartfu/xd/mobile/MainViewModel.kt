@@ -1158,7 +1158,10 @@ class ChatViewModel(
     val submittingAnswers: StateFlow<Set<String>> =
         answerStore.submitting(chatId).stateIn(viewModelScope, SharingStarted.Eagerly, answerStore.submittingNow(chatId))
 
-    /** The chat's own draft has arrived from the host, so an empty composer is really empty. */
+    /**
+     * The chat's own reply, with the host's draft, has arrived and been taken
+     * into the composer. Until then an empty composer says nothing.
+     */
     private val draftKnown = MutableStateFlow(false)
 
     init {
@@ -1178,6 +1181,9 @@ class ChatViewModel(
             // A refused answer's words come back to an empty composer: now if
             // this chat is open, otherwise when it is next opened. Text typed
             // meanwhile is never replaced; the words wait for the next visit.
+            // Only once the chat's own reply has put the host's draft in the
+            // composer: restoring before it arrived would make the words a
+            // local edit that then replaces that draft.
             combine(answerStore.givenBack(chatId), draftKnown) { words, known -> words.takeIf { known } }
                 .collect { words ->
                     if (words != null && _draft.value.isEmpty() && answerStore.takeGivenBack(chatId, words)) {
@@ -1187,8 +1193,10 @@ class ChatViewModel(
         }
         viewModelScope.launch {
             state.collect { synced ->
+                // The host's draft goes into the composer first, so an empty
+                // composer below means the chat really has no draft.
                 syncDraft(synced)
-                if (synced.transcriptLoaded) draftKnown.value = true
+                if (synced.draftLoaded) draftKnown.value = true
             }
         }
     }
