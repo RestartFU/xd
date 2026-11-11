@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Engine, error_reply, required_string,
-    runtime::SettledTurn,
+    runtime::{SettledTurn, TurnNews},
     storage::{AgentOrigin, ChildAgent, ReportDelivery},
 };
 
@@ -265,27 +265,30 @@ impl Engine {
         let Some(runtime) = self.runtime.as_ref() else {
             return;
         };
-        let (sender, receiver) = mpsc::channel::<SettledTurn>();
+        let (sender, receiver) = mpsc::channel::<TurnNews>();
         // Weak, since the engine owns the runtime that holds the sender.
         let engine = Arc::downgrade(self);
         // Off the turns' threads: sending takes the parent's own locks.
         let spawned = thread::Builder::new()
             .name("xd-agent-reports".into())
             .spawn(move || {
-                for settled in receiver {
+                for news in receiver {
                     let Some(engine) = engine.upgrade() else {
                         return;
                     };
-                    engine.report_to_parent(&settled);
+                    match news {
+                        TurnNews::Settled(settled) => engine.report_to_parent(&settled),
+                        TurnNews::Unheld(agent) => engine.release_held_report(&agent),
+                    }
                 }
             });
         if spawned.is_err() {
             return;
         }
         let sender = Mutex::new(sender);
-        runtime.set_turn_settled_handler(Box::new(move |settled| {
+        runtime.set_turn_settled_handler(Box::new(move |news| {
             if let Ok(sender) = sender.lock() {
-                let _ = sender.send(settled);
+                let _ = sender.send(news);
             }
         }));
     }
@@ -476,16 +479,40 @@ impl Engine {
 
     /// Lets reports agents held back go to their chats when no turn of the
     /// agent's will replace them: the agent is free, the user is not being
-    /// asked whether it resumes, and this host holds no turn of its back, as
-    /// after a restart that ended its background work.
+    /// asked whether it resumes, and the runtime holds no turn of its back,
+    /// as after a restart that ended its background work. The runtime says
+    /// so in order with the news of the agent's turns, which the reporting
+    /// thread handles one at a time: see [`Self::release_held_report`].
     pub(crate) fn release_stale_held_reports(&self) {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return;
         };
-        for (agent, _) in store.idle_agents_holding_reports().unwrap_or_default() {
-            if !runtime.holds_turn(&agent) {
-                let _ = store.release_held_report(&agent);
-            }
+        let agents = store
+            .idle_agents_holding_reports()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(agent, _)| agent)
+            .collect::<Vec<_>>();
+        runtime.tell_unheld(&agents);
+    }
+
+    /// Lets the report agent `agent` held back wait for its chat, and hands
+    /// it over if the chat is free. On the reporting thread: any later turn
+    /// of the agent's is told of after this, and replaces nothing then.
+    fn release_held_report(&self, agent: &str) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let Ok(Some((parent, _))) = store.chat_parent(agent) else {
+            return;
+        };
+        let _answer = self
+            .restart_answer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _ = store.release_held_report(agent);
+        if let Err(error) = self.start_waiting_reports(&parent, false) {
+            eprintln!("xd-host: cannot hand chat {parent} its agents' reports: {error}");
         }
     }
 

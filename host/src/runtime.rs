@@ -106,7 +106,17 @@ pub(crate) type AccountSwitchHandler = Box<dyn Fn(String, i64) + Send + Sync>;
 
 /// Hears that a chat's turn ended for good, and how. Called with the chat's
 /// succession held, so it must only hand the news on, never wait.
-pub(crate) type TurnSettledHandler = Box<dyn Fn(SettledTurn) + Send + Sync>;
+pub(crate) type TurnSettledHandler = Box<dyn Fn(TurnNews) + Send + Sync>;
+
+/// What [`TurnSettledHandler`] hears, in the order it happened.
+#[derive(Debug, Clone)]
+pub(crate) enum TurnNews {
+    /// A chat's turn ended for good.
+    Settled(SettledTurn),
+    /// No turn of this chat's is held, settling or running, so none will
+    /// replace a report it held back that a restart left stored.
+    Unheld(String),
+}
 
 /// Hears that a chat's turn started or ended, with its assistant and the
 /// account and login it runs as.
@@ -3354,19 +3364,35 @@ impl TurnRuntime {
     }
 
     fn tell_settled(&self, settled: SettledTurn) {
+        self.tell(TurnNews::Settled(settled));
+    }
+
+    fn tell(&self, news: TurnNews) {
         if let Ok(handler) = self.inner.on_turn_settled.lock()
             && let Some(handler) = handler.as_ref()
         {
-            handler(settled);
+            handler(news);
         }
     }
 
-    /// Whether this runtime holds a turn of `chat_id`'s back.
-    pub(crate) fn holds_turn(&self, chat_id: &str) -> bool {
-        self.inner
-            .held_turns
-            .lock()
-            .is_ok_and(|held| held.turns.contains_key(chat_id))
+    /// Tells, of each of `chats`, that no turn of it is held, settling or
+    /// running, when that is so. Decided and told with the held turns
+    /// locked, where every turn's news is told, so news of a turn that
+    /// settled before this comes first, and one held since is not told of.
+    pub(crate) fn tell_unheld(&self, chats: &[String]) {
+        let Ok(held) = self.inner.held_turns.lock() else {
+            return;
+        };
+        for chat_id in chats {
+            let running = self
+                .inner
+                .active
+                .lock()
+                .map_or(true, |active| active.contains_key(chat_id));
+            if !running && !held.turns.contains_key(chat_id) && !held.settling.contains(chat_id) {
+                self.tell(TurnNews::Unheld(chat_id.clone()));
+            }
+        }
     }
 
     /// Tells of a chat's held turn as finished once the agent will not take
@@ -4152,6 +4178,45 @@ mod tests {
     }
 
     #[test]
+    fn only_a_chat_with_no_turn_held_or_settling_is_told_of_as_unheld() {
+        let root = std::env::temp_dir().join(format!("xd-unheld-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let runtime = TurnRuntime::new(
+            store,
+            Arc::new(EventBus::default()),
+            Arc::new(SecretsStore::new(None)),
+        );
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let sink = heard.clone();
+        runtime.set_turn_settled_handler(Box::new(move |news| {
+            if let TurnNews::Unheld(chat) = news {
+                sink.lock().unwrap().push(chat);
+            }
+        }));
+        {
+            let mut held = runtime.inner.held_turns.lock().unwrap();
+            let turn = SettledTurn {
+                chat_id: "held".into(),
+                reply: "Waiting.".into(),
+                error: None,
+                waiting: false,
+                stopped: false,
+                quiet: false,
+                background: true,
+                released: false,
+            };
+            held.turns.insert("held".into(), (turn, None));
+            held.settling.insert("settling".into());
+        }
+        runtime.tell_unheld(&["held".into(), "settling".into(), "free".into()]);
+        assert_eq!(*heard.lock().unwrap(), ["free"]);
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_failed_start_is_told_of_after_the_turn_still_ending() {
         let root =
             std::env::temp_dir().join(format!("xd-start-failure-order-{}", std::process::id()));
@@ -4166,8 +4231,10 @@ mod tests {
         ));
         let (told, heard) = std::sync::mpsc::channel();
         let told = Mutex::new(told);
-        runtime.set_turn_settled_handler(Box::new(move |settled| {
-            let _ = told.lock().unwrap().send(settled.error.is_some());
+        runtime.set_turn_settled_handler(Box::new(move |news| {
+            if let TurnNews::Settled(settled) = news {
+                let _ = told.lock().unwrap().send(settled.error.is_some());
+            }
         }));
         // A turn ending holds the chat's succession until it has been told of.
         let succession = runtime.succession("chat");
@@ -5693,8 +5760,10 @@ read next"#,
     fn settled_turns(runtime: &TurnRuntime) -> Arc<Mutex<Vec<SettledTurn>>> {
         let told = Arc::new(Mutex::new(Vec::new()));
         let sink = told.clone();
-        runtime.set_turn_settled_handler(Box::new(move |settled| {
-            sink.lock().unwrap().push(settled);
+        runtime.set_turn_settled_handler(Box::new(move |news| {
+            if let TurnNews::Settled(settled) = news {
+                sink.lock().unwrap().push(settled);
+            }
         }));
         told
     }
