@@ -494,9 +494,10 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                 const box = element.getBoundingClientRect();
                 const x = box.left + box.width / 2, y = box.top + box.height / 2;
                 if (box.width === 0 || box.height === 0) return {{hidden: true}};
-                // Through shadow roots, which hide their insides from the page.
+                // Through shadow roots, which hide their insides from the page,
+                // and from slotted content to the slot that shows it.
                 const within = (outer, node) => {{
-                    for (let at = node; at; at = at.parentNode || at.host) if (at === outer) return true;
+                    for (let at = node; at; at = at.assignedSlot || at.parentNode || at.host) if (at === outer) return true;
                     return false;
                 }};
                 let top = document.elementFromPoint(x, y);
@@ -512,7 +513,7 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                 // it, such as a link, which takes the click for itself. Looked
                 // for through shadow roots, as `within` looks.
                 const controlAt = node => {{
-                    for (let at = node; at; at = at.parentNode || at.host)
+                    for (let at = node; at; at = at.assignedSlot || at.parentNode || at.host)
                         if (at.nodeType === 1 && (at.isContentEditable || at.matches(
                             'a[href], button, input, select, textarea, summary, '
                             + ['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
@@ -622,7 +623,7 @@ fn type_text(page: &impl Page, number: &str, text: &str, append: bool) -> Result
                 while (active && active.shadowRoot && active.shadowRoot.activeElement)
                     active = active.shadowRoot.activeElement;
                 const within = (outer, node) => {{
-                    for (let at = node; at; at = at.parentNode || at.host) if (at === outer) return true;
+                    for (let at = node; at; at = at.assignedSlot || at.parentNode || at.host) if (at === outer) return true;
                     return false;
                 }};
                 if (!active || !within(element, active)) return 'unfocusable';
@@ -861,7 +862,10 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
   const labelled = element => {
     const ids = element.getAttribute('aria-labelledby');
     if (ids) {
-      const label = ids.split(/\s+/).map(id => document.getElementById(id))
+      // Ids name elements in the element's own tree, which a shadow root is.
+      const root = element.getRootNode();
+      const byId = id => (root.getElementById ? root.getElementById(id) : null);
+      const label = ids.split(/\s+/).map(byId)
         .filter(Boolean).map(node => node.innerText || node.textContent).join(' ');
       if (squash(label)) return label;
     }
