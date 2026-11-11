@@ -324,7 +324,11 @@ impl Engine {
             None => ("completed", Some(clip_start(&settled.reply, SUMMARY_CHARS))),
         };
         self.write_agent_record(child, status, summary.as_deref());
-        if !reports || settled.quiet || settled.stopped || settled.background {
+        // A later turn of the agent's replaces a report it held back.
+        if !settled.background {
+            let _ = store.drop_held_report(child);
+        }
+        if !reports || settled.quiet || settled.stopped {
             return;
         }
         let title = store
@@ -334,6 +338,14 @@ impl Engine {
             .map(|agent| agent.title)
             .unwrap_or_default();
         let text = report(child, &title, settled);
+        // Kept, so a restart that cuts the agent short, whose next turn then
+        // never comes, does not lose it.
+        if settled.background {
+            if let Err(error) = store.hold_agent_report(&parent, child, &text) {
+                eprintln!("xd-host: cannot keep agent {child}'s report: {error}");
+            }
+            return;
+        }
         if let Err(error) = self.deliver_report(&parent, child, &text) {
             eprintln!("xd-host: cannot report agent {child} to chat {parent}: {error}");
         }
@@ -453,6 +465,21 @@ impl Engine {
         started
     }
 
+    /// Lets reports agents held back go to their chats when no turn of the
+    /// agent's will replace them: the agent is free, the user is not being
+    /// asked whether it resumes, and this host holds no turn of its back, as
+    /// after a restart that ended its background work.
+    pub(crate) fn release_stale_held_reports(&self) {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return;
+        };
+        for (agent, _) in store.idle_agents_holding_reports().unwrap_or_default() {
+            if !runtime.holds_turn(&agent) {
+                let _ = store.release_held_report(&agent);
+            }
+        }
+    }
+
     /// Hands every free chat the agent reports left waiting for it, such as
     /// those a restart left behind. Off the startup path, since a turn can
     /// take a while to start.
@@ -471,6 +498,7 @@ impl Engine {
                     .restart_answer
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
+                engine.release_stale_held_reports();
                 for chat_id in store.chats_with_waiting_reports().unwrap_or_default() {
                     if let Err(error) = engine.start_waiting_reports(&chat_id, false) {
                         eprintln!(

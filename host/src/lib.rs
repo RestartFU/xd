@@ -743,6 +743,9 @@ impl Engine {
         // now, those not offered for resuming too. One that resumed gets them
         // once that turn ends.
         if let Some(store) = self.store.as_ref() {
+            // An agent the restart cut off and the user did not resume will
+            // take no turn to replace the report it held back.
+            self.release_stale_held_reports();
             for chat_id in store.chats_with_waiting_reports().unwrap_or_default() {
                 if let Err(error) = self.start_waiting_reports(&chat_id, false) {
                     eprintln!("xd-host: cannot hand chat {chat_id} its agents' reports: {error}");

@@ -3850,13 +3850,74 @@ impl StateStore {
         let mut statement = database.prepare(
             "SELECT DISTINCT chats.id FROM agent_reports \
              JOIN chats ON chats.id = agent_reports.chat_id \
-             WHERE agent_reports.state != 'handed' AND chats.host_working = 0 AND chats.paused = 0 \
+             WHERE agent_reports.state IN ('waiting', 'returned') AND chats.host_working = 0 AND chats.paused = 0 \
                AND chats.resume_after_restart = 0 ORDER BY chats.id",
         )?;
         let chats = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(chats)
+    }
+
+    /// Keeps `text` as the report agent `agent_id` holds back from `chat_id`
+    /// while its own background work goes on, in place of any it held.
+    pub fn hold_agent_report(
+        &self,
+        chat_id: &str,
+        agent_id: &str,
+        text: &str,
+    ) -> Result<(), StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        transaction.execute(
+            "DELETE FROM agent_reports WHERE agent_id = ? AND state = 'held'",
+            [agent_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO agent_reports (chat_id, agent_id, text, created_at, state) \
+             VALUES (?, ?, ?, ?, 'held')",
+            params![chat_id, agent_id, text, now_seconds()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Drops the report agent `agent_id` held back, now that a later turn of
+    /// its own says how it went.
+    pub fn drop_held_report(&self, agent_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "DELETE FROM agent_reports WHERE agent_id = ? AND state = 'held'",
+            [agent_id],
+        )?;
+        Ok(())
+    }
+
+    /// Agents with a report held back that are free and not waiting on the
+    /// user's answer about resuming them, each with the chat it reports to.
+    pub fn idle_agents_holding_reports(&self) -> Result<Vec<(String, String)>, StorageError> {
+        let database = self.reader()?;
+        let mut statement = database.prepare(
+            "SELECT agent_reports.agent_id, agent_reports.chat_id FROM agent_reports \
+             JOIN chats ON chats.id = agent_reports.agent_id \
+             WHERE agent_reports.state = 'held' AND chats.host_working = 0 \
+               AND chats.resume_after_restart = 0 ORDER BY agent_reports.id",
+        )?;
+        let agents = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(agents)
+    }
+
+    /// Lets the report agent `agent_id` held back wait for its chat like any
+    /// other: no turn of the agent's will replace it.
+    pub fn release_held_report(&self, agent_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE agent_reports SET state = 'waiting' WHERE agent_id = ? AND state = 'held'",
+            [agent_id],
+        )?;
+        Ok(())
     }
 
     /// Whether a report waits for `chat_id` that no turn has failed to
@@ -3874,7 +3935,7 @@ impl StateStore {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         Ok(database.query_row(
             "SELECT COALESCE(MAX(id), 0) FROM agent_reports \
-             WHERE chat_id = ? AND agent_id = ? AND state != 'handed'",
+             WHERE chat_id = ? AND agent_id = ? AND state IN ('waiting', 'returned')",
             params![chat_id, agent_id],
             |row| row.get(0),
         )?)
@@ -3892,7 +3953,7 @@ impl StateStore {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         Ok(database.execute(
             "DELETE FROM agent_reports \
-             WHERE chat_id = ? AND agent_id = ? AND id <= ? AND state != 'handed'",
+             WHERE chat_id = ? AND agent_id = ? AND id <= ? AND state IN ('waiting', 'returned')",
             params![chat_id, agent_id, through],
         )?)
     }
@@ -11746,8 +11807,11 @@ fn ensure_chat_pull_requests(database: &Connection) -> Result<(), StorageError> 
 /// Reports from the agents a chat started, waiting for the chat to be free to
 /// read them: they are the host's, not the user's, so they never join the
 /// chat's queue. Each goes with either chat. `state` is `waiting`, `handed`
-/// to a turn that has not ended yet, or `returned` by a turn that could not
-/// start, which waits like the rest but does not retry by itself.
+/// to a turn that has not ended yet, `returned` by a turn that could not
+/// start, which waits like the rest but does not retry by itself, or `held`:
+/// the agent's turn ended while background work of its own went on, and its
+/// next turn replaces this report. Held reports are kept here so one a
+/// restart cut short, whose next turn never comes, can still be handed over.
 /// `queue_first` counts the messages at the front of the queue the user
 /// steered, which go before any report.
 ///
@@ -11790,7 +11854,7 @@ fn take_agent_reports(
 ) -> Result<Option<TurnSpec>, StorageError> {
     let reports = transaction
         .prepare(
-            "SELECT text FROM agent_reports WHERE chat_id = ? AND state != 'handed' ORDER BY id",
+            "SELECT text FROM agent_reports WHERE chat_id = ? AND state IN ('waiting', 'returned') ORDER BY id",
         )?
         .query_map([chat_id], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -11799,7 +11863,7 @@ fn take_agent_reports(
     }
     // Kept until the turn ends, so one that cannot start gives them back.
     transaction.execute(
-        "UPDATE agent_reports SET state = 'handed' WHERE chat_id = ? AND state != 'handed'",
+        "UPDATE agent_reports SET state = 'handed' WHERE chat_id = ? AND state IN ('waiting', 'returned')",
         [chat_id],
     )?;
     let prompt = reports.join("\n\n");
@@ -11866,7 +11930,7 @@ fn steered_front(database: &Connection, chat_id: &str) -> Result<Option<String>,
 
 fn has_agent_reports(database: &Connection, chat_id: &str) -> Result<bool, StorageError> {
     Ok(database.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_reports WHERE chat_id = ? AND state != 'handed')",
+        "SELECT EXISTS(SELECT 1 FROM agent_reports WHERE chat_id = ? AND state IN ('waiting', 'returned'))",
         [chat_id],
         |row| row.get(0),
     )?)
@@ -17026,6 +17090,44 @@ mod tests {
         assert_eq!(next(&store), None);
         assert_eq!(store.chat("lead").unwrap()["working"], false);
         assert!(store.has_fresh_reports("lead").unwrap());
+    }
+
+    #[test]
+    fn a_held_report_waits_for_the_agents_next_turn_or_its_release() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .hold_agent_report("lead", "a", "[xd] waiting on tests")
+            .unwrap();
+        store
+            .hold_agent_report("lead", "a", "[xd] still waiting")
+            .unwrap();
+        // Held, it is not handed over...
+        assert!(store.chats_with_waiting_reports().unwrap().is_empty());
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::Held
+        ));
+        assert_eq!(
+            store.idle_agents_holding_reports().unwrap(),
+            [("a".to_owned(), "lead".to_owned())]
+        );
+        // ...until no turn of the agent's will replace it, and only the last.
+        store.release_held_report("a").unwrap();
+        let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {
+            panic!("a released report should go");
+        };
+        assert_eq!(turn.prompt, "[xd] still waiting");
+        // A later turn of the agent's drops it instead.
+        store.hold_agent_report("lead", "a", "[xd] again").unwrap();
+        store.drop_held_report("a").unwrap();
+        assert!(store.idle_agents_holding_reports().unwrap().is_empty());
     }
 
     #[test]

@@ -3354,6 +3354,14 @@ impl TurnRuntime {
         }
     }
 
+    /// Whether this runtime holds a turn of `chat_id`'s back.
+    pub(crate) fn holds_turn(&self, chat_id: &str) -> bool {
+        self.inner
+            .held_turns
+            .lock()
+            .is_ok_and(|held| held.turns.contains_key(chat_id))
+    }
+
     /// Tells of a chat's held turn as finished once the agent will not take
     /// another to report on its background work: the process running that
     /// work is gone, being no longer the chat's or the one `exited` names, or
