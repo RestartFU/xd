@@ -1837,26 +1837,26 @@ impl Engine {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
         };
-        // Under the chat's gate, so the meter cannot stop the chat between
-        // the new quota and the turn it continues, at the old count.
-        let reached = {
-            let gate = match self.chat_execution_gate(chat_id) {
-                Ok(gate) => gate,
-                Err(error) => return error_reply(error),
-            };
-            let Ok(_execution) = gate.lock() else {
-                return error_reply("This session's agent state is unavailable.");
-            };
-            match store.set_chat_quota(request) {
-                Ok(reached) => reached,
-                Err(error) => return error_reply(error),
-            }
+        // The new quota and the turn it continues are one step under the
+        // chat's gate: the meter cannot stop the chat at the old count between
+        // them, and a pause-all either comes first and is undone by this
+        // explicit choice, or comes after and stops what it started.
+        let gate = match self.chat_execution_gate(chat_id) {
+            Ok(gate) => gate,
+            Err(error) => return error_reply(error),
+        };
+        let Ok(_execution) = gate.lock() else {
+            return error_reply("This session's agent state is unavailable.");
+        };
+        let reached = match store.set_chat_quota(request) {
+            Ok(reached) => reached,
+            Err(error) => return error_reply(error),
         };
         self.events
             .publish(json!({"event": "changed", "chat": chat_id}));
         self.events.publish(json!({"event": "tree"}));
+        let resumed = reached && self.resume_paused_chat(chat_id, &|_| true, true);
         self.wake_quota_meter();
-        let resumed = reached && self.resume_paused_chat(chat_id, &|_| true);
         json!({"ok": true, "resumed": resumed})
     }
 
@@ -2266,6 +2266,16 @@ impl Engine {
             Ok(execution) => execution,
             Err(_) => return error_reply("This session's agent state is unavailable."),
         };
+        self.send_message_gated(request, continues)
+    }
+
+    /// [`Self::send_message_inner`] for a caller that holds the chat's
+    /// execution gate.
+    fn send_message_gated(&self, request: &Value, continues: Option<Continuation>) -> Value {
+        let chat_id = match required_string(request, "chat", "send needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return error_reply("Rust host state storage is not configured.");
         };
@@ -2513,7 +2523,8 @@ impl Engine {
             if !in_scope(store, &chat_id, folder) {
                 continue;
             }
-            if self.resume_paused_chat(&chat_id, &|chat_id| in_scope(store, chat_id, folder)) {
+            if self.resume_paused_chat(&chat_id, &|chat_id| in_scope(store, chat_id, folder), false)
+            {
                 resumed.push(chat_id);
             }
         }
@@ -2524,17 +2535,26 @@ impl Engine {
     /// after which its queue runs as usual. `in_scope` is asked again under
     /// the chat's gate before the chat is let go without a turn. True when
     /// the chat went on.
-    fn resume_paused_chat(&self, chat_id: &str, in_scope: &dyn Fn(&str) -> bool) -> bool {
+    /// `gated` when the caller holds the chat's execution gate throughout.
+    fn resume_paused_chat(
+        &self,
+        chat_id: &str,
+        in_scope: &dyn Fn(&str) -> bool,
+        gated: bool,
+    ) -> bool {
         let Some(store) = self.store.as_ref() else {
             return false;
         };
         let chat_id = chat_id.to_owned();
         {
             let before = store.latest_user_message(&chat_id).ok();
-            let reply = self.send_message_inner(
-                &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
-                Some(Continuation::Resume),
-            );
+            let continuation =
+                json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT});
+            let reply = if gated {
+                self.send_message_gated(&continuation, Some(Continuation::Resume))
+            } else {
+                self.send_message_inner(&continuation, Some(Continuation::Resume))
+            };
             if reply["ok"] != true {
                 // A continuation that was stored got as far as starting its
                 // turn, which failed and left the chat paused for another try.
@@ -2550,11 +2570,20 @@ impl Engine {
                 // hands the queue on itself; an idle chat starts it here. All
                 // under the gate, so a pause-all since is either seen here or
                 // stops what this starts.
-                let Ok(gate) = self.chat_execution_gate(&chat_id) else {
-                    return false;
+                let gate = if gated {
+                    None
+                } else {
+                    match self.chat_execution_gate(&chat_id) {
+                        Ok(gate) => Some(gate),
+                        Err(_) => return false,
+                    }
                 };
-                let Ok(_execution) = gate.lock() else {
-                    return false;
+                let _execution = match &gate {
+                    Some(gate) => match gate.lock() {
+                        Ok(execution) => Some(execution),
+                        Err(_) => return false,
+                    },
+                    None => None,
                 };
                 if !in_scope(&chat_id) || !store.unpause_chat(&chat_id).unwrap_or(false) {
                     return false;

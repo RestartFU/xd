@@ -88,6 +88,8 @@ struct AccountLedger {
     /// shells go on between turns, as the runtime reported them.
     turns: HashSet<String>,
     background: HashSet<String>,
+    /// When the runtime last reported each chat in `turns` or `background`.
+    reported_at: HashMap<String, Instant>,
     /// When every turn here last ended, while none has begun since.
     idle_since: Option<Instant>,
     /// Since `last`, every turn here ended and one began again more than
@@ -194,14 +196,31 @@ impl Ledger {
 
     /// Takes in who works on the account now: a chat whose background work
     /// has ended since its turn did no longer keeps the account busy.
-    fn settle_running(&mut self, provider: &str, account: &str, here: &[String], now: Instant) {
+    /// `here` is what the runtime answered when asked at `asked_at`; a chat
+    /// reported since is newer than that answer and stays.
+    fn settle_running(
+        &mut self,
+        provider: &str,
+        account: &str,
+        here: &[String],
+        asked_at: Instant,
+        now: Instant,
+    ) {
         if let Some(entry) = self
             .accounts
             .get_mut(&(provider.to_owned(), account.to_owned()))
         {
             let was_busy = entry.busy();
-            entry.turns.retain(|chat_id| here.contains(chat_id));
-            entry.background.retain(|chat_id| here.contains(chat_id));
+            let reported_at = &entry.reported_at;
+            let stays = |chat_id: &String| {
+                here.contains(chat_id) || reported_at.get(chat_id).is_some_and(|at| *at >= asked_at)
+            };
+            entry.turns.retain(stays);
+            entry.background.retain(stays);
+            let (turns, background) = (&entry.turns, &entry.background);
+            entry
+                .reported_at
+                .retain(|chat_id, _| turns.contains(chat_id) || background.contains(chat_id));
             if was_busy && !entry.busy() && entry.idle_since.is_none() {
                 entry.idle_since = Some(now);
             }
@@ -235,6 +254,7 @@ impl Ledger {
         else {
             return;
         };
+        entry.reported_at.insert(chat_id.to_owned(), now);
         match activity {
             AgentActivity::TurnStarted => {
                 entry.turns.insert(chat_id.to_owned());
@@ -593,6 +613,7 @@ impl Pass {
         // Filed by account: turns on one account share its every rise, even
         // if some began before its login was known. The logins they ran as
         // decide below whether a reading is theirs at all.
+        let asked_at = Instant::now();
         let tagged = self.runtime.working_accounts();
         if let Ok(mut ledger) = self.ledger.lock() {
             self.take_activity(&mut ledger);
@@ -646,7 +667,7 @@ impl Pass {
                 .map(|(chat_id, _, _)| chat_id.clone())
                 .collect::<Vec<_>>();
             if let Ok(mut ledger) = self.ledger.lock() {
-                ledger.settle_running(&provider, &account, &here, now);
+                ledger.settle_running(&provider, &account, &here, asked_at, now);
             }
             let mut involved = sharers.iter().chain(&here).collect::<HashSet<_>>();
             involved.retain(|chat_id| limited(chat_id));
@@ -1022,6 +1043,35 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_reported_after_the_runtime_answered_is_not_settled_away() {
+        let mut ledger = Ledger::default();
+        let asked = Instant::now();
+        ledger.apply_at("claude", "default", "a", AgentActivity::TurnStarted, asked);
+        // B starts after the runtime answered with only A.
+        let later = asked + Duration::from_millis(1);
+        ledger.apply_at("claude", "default", "b", AgentActivity::TurnStarted, later);
+        ledger.settle_running("claude", "default", &chats(&["a"]), asked, later);
+        // A ends while B works on: no idle gap for C to start after.
+        ledger.apply_at(
+            "claude",
+            "default",
+            "a",
+            AgentActivity::TurnEnded { background: false },
+            later,
+        );
+        ledger.apply_at(
+            "claude",
+            "default",
+            "c",
+            AgentActivity::TurnStarted,
+            later + IDLE_GAP,
+        );
+        let entry = &ledger.accounts[&("claude".to_owned(), "default".to_owned())];
+        assert!(!entry.restarted_after_idle);
+        assert!(entry.turns.contains("b"));
+    }
+
+    #[test]
     fn reports_newer_than_the_runtimes_answer_correct_it() {
         let mut ledger = Ledger::default();
         let asked = Instant::now();
@@ -1177,14 +1227,20 @@ mod tests {
         ledger.turn_at("claude", "default", "a", false, now);
         ledger.turn_at("claude", "default", "c", true, now);
         ledger.turn_at("claude", "default", "c", true, now + IDLE_GAP);
-        ledger.settle_running("claude", "default", &chats(&["c"]), now + IDLE_GAP);
+        ledger.settle_running(
+            "claude",
+            "default",
+            &chats(&["c"]),
+            now + IDLE_GAP,
+            now + IDLE_GAP,
+        );
         ledger.turn_at("claude", "default", "a", true, now + IDLE_GAP * 2);
         let ac = chats(&["a", "c"]);
         let shares = record_in(&mut ledger, "claude", "default", reading(33.0, 1), &ac, now);
         assert_eq!(shares, vec![("a".to_owned(), 2.0), ("c".to_owned(), 2.0)]);
         // Once that work is gone, the account is idle from then on.
         ledger.turn_at("claude", "default", "a", false, now);
-        ledger.settle_running("claude", "default", &[], now);
+        ledger.settle_running("claude", "default", &[], now + IDLE_GAP * 3, now);
         ledger.turn_at("claude", "default", "a", true, now + IDLE_GAP);
         assert!(record_in(&mut ledger, "claude", "default", reading(40.0, 1), &a, now).is_empty());
     }
