@@ -1265,10 +1265,28 @@ chat can have at most 10 agents at work at once.
 
 With `notify` left true, each turn of the new chat that ends for good, neither
 stopped nor moving to another account, sends the parent a message beginning
-`[xd] Agent` with the reply or error. A parent at work gets it queued; a paused
-parent gets it in its queue without resuming. Statuses in `list-agents` are
-`working`, `paused`, `waiting for an answer`, `stopped with an error`,
-`finished` and `idle`.
+`[xd] Agent` with the reply or error. A turn that ends without a question or an
+error while the agent's own background agents or shells go on sends nothing:
+the agent takes another turn once they end, and that one reports. If its
+process ends first, the held turn is reported then.
+
+Reports are the host's, not the user's, so they never join the parent's
+`queue`: clients never show them as queued, and nobody can edit, steer or drop
+them. A free parent gets a report at once, in a turn of its own that leaves its
+draft alone. A parent at work, paused or stopped at its quota holds it until
+it is free: when its turn ends it gets every report waiting, oldest first, in
+one turn, ahead of its queue, unless the user steered the message at the front
+of the queue, which goes first. Each report is its own `user` row in that
+turn; the agent reads them as one message. A turn that cannot start gives its
+reports back to wait in their places; they go with the next report or turn
+end rather than retrying by themselves. A paused parent gets them when it
+resumes. Reports waiting across a restart go to a free parent when the daemon
+starts, and to a chat the restart cut off once the client answers
+`resume-interrupted`. A `list-agents` call naming one agent that is not at work
+drops the reports from it still waiting, since the parent has just read its
+reply. Statuses in `list-agents` are `working` (also while the agent waits on
+background work of its own), `paused`, `waiting for an answer`, `stopped with
+an error`, `finished` and `idle`.
 
 `stop-agent` is for an agent the parent needs nothing more from. It deletes the
 agent's chat exactly as `delete-chat` does: a turn at work stops, the chat leaves
@@ -1283,7 +1301,8 @@ The parent's transcript also gets one card per agent: a `tool` row holding a
 agent's first turn starts, removes it if that start fails, and rewrites it in
 place, with a `record` event, whenever a turn ends: `status` is `completed` or
 `failed`, with `summary` the start of the reply or the error (a message that
-could not start a turn is a failure too), or `stopped` for a turn that was
+could not start a turn is a failure too), `running` with the reply for a turn
+held while the agent's background work goes on, or `stopped` for a turn that was
 stopped. The card says only how the last turn went; clients
 show what the tree says of the chat now (`working`, `paused`,
 `question_waiting`) over it, and open the chat when the card is clicked. Older

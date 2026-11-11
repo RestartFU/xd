@@ -200,6 +200,11 @@ pub struct Engine {
     terminals: TerminalManager,
     chat_execution: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     session_resources: Arc<Mutex<()>>,
+    /// Held while the answer to `resume-interrupted` is carried out, and by
+    /// anything handing chats their agents' reports, which waits for it:
+    /// the answer clears every chat's restart mark before it resumes them
+    /// one by one, and a report must not start a chat in between.
+    restart_answer: Mutex<()>,
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
     chat_titles: ChatTitleService,
@@ -261,6 +266,7 @@ impl Engine {
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
             session_resources: Arc::new(Mutex::new(())),
+            restart_answer: Mutex::new(()),
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
             chat_titles: ChatTitleService::new(None, events.clone()),
@@ -333,6 +339,7 @@ impl Engine {
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
             session_resources,
+            restart_answer: Mutex::new(()),
             secrets,
             git_drafts,
             chat_titles,
@@ -701,6 +708,10 @@ impl Engine {
     /// client reconnecting later, or turning the setting on later, does not
     /// restart work from an old interruption.
     fn resume_interrupted(&self, request: &Value) -> Value {
+        let _answer = self
+            .restart_answer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let chats = self
             .store
             .as_ref()
@@ -725,6 +736,19 @@ impl Engine {
                     resumed.push(chat_id);
                 } else {
                     eprintln!("xd-host: not resuming chat {chat_id}: {reply}");
+                }
+            }
+        }
+        // The chats the restart cut off held their agents' reports until
+        // now, those not offered for resuming too. One that resumed gets them
+        // once that turn ends.
+        if let Some(store) = self.store.as_ref() {
+            // An agent the restart cut off and the user did not resume will
+            // take no turn to replace the report it held back.
+            self.release_stale_held_reports();
+            for chat_id in store.chats_with_waiting_reports().unwrap_or_default() {
+                if let Err(error) = self.start_waiting_reports(&chat_id, false) {
+                    eprintln!("xd-host: cannot hand chat {chat_id} its agents' reports: {error}");
                 }
             }
         }
@@ -2712,15 +2736,28 @@ impl Engine {
                     return false;
                 }
                 self.events.publish(json!({"event": "tree"}));
-                let queued = store
-                    .chat(&chat_id)
-                    .ok()
-                    .and_then(|chat| chat["queue"][0].as_str().map(str::to_owned));
-                if let Some(text) = queued
-                    && let Err(error) = self.start_queued_if_idle(&chat_id, &text, true, true)
-                {
-                    eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
-                    return false;
+                // Reports its agents sent while it was paused go first, as
+                // they would when a turn ends; the queue follows them.
+                match self.start_waiting_reports(&chat_id, true) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let queued = store
+                            .chat(&chat_id)
+                            .ok()
+                            .and_then(|chat| chat["queue"][0].as_str().map(str::to_owned));
+                        if let Some(text) = queued
+                            && let Err(error) =
+                                self.start_queued_if_idle(&chat_id, &text, true, true)
+                        {
+                            eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
+                            return false;
+                        }
+                    }
+                    Err(error) => {
+                        self.keep_paused_after_failed_start(&chat_id, true);
+                        eprintln!("xd-host: cannot resume chat {chat_id}'s reports: {error}");
+                        return false;
+                    }
                 }
             }
         }

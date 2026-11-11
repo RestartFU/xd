@@ -354,6 +354,21 @@ pub(crate) struct ChatTitleSpec {
     pub model: String,
 }
 
+/// What became of a report from one of a chat's agents.
+#[allow(clippy::large_enum_variant)]
+pub enum ReportDelivery {
+    /// The chat is busy, paused, stopped at its quota or cut off by a
+    /// restart the user has not answered yet, so the report waits for it,
+    /// out of the user's queue.
+    Held,
+    /// The chat was free: this turn hands it the report.
+    Start(TurnSpec),
+    /// The chat is free, but the message the user steered to the front of
+    /// its queue goes first, and nothing has started it: the caller starts
+    /// that message, this text, and the reports follow its turn.
+    SteeredFirst(String),
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum SendDisposition {
     Queued { reply: Value, event: Value },
@@ -2079,6 +2094,7 @@ impl StateStore {
             &message.prompt,
             worktree_name,
             premade.as_ref(),
+            None,
         )?;
         if let Some(user_message_at) = user_message_at {
             transaction.execute(
@@ -2942,17 +2958,42 @@ impl StateStore {
                 params![chat_id, error, now_seconds()],
             )?;
         }
-        let (stored, paused) = transaction
+        // The reports this turn was handed have been read.
+        transaction.execute(
+            "DELETE FROM agent_reports WHERE chat_id = ? AND state = 'handed'",
+            [chat_id],
+        )?;
+        let (stored, paused, steered) = transaction
             .query_row(
-                "SELECT COALESCE(queued, ''), paused FROM chats WHERE id = ?",
+                "SELECT COALESCE(queued, ''), paused, queue_first FROM chats WHERE id = ?",
                 [chat_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
         let mut queue = queue_from_column(Some(&stored));
-        // A paused chat keeps its queue for when it resumes.
-        let next_text = if paused || queue.is_empty() {
+        // As for a message: a chat that has used its quota stops here, its
+        // queue and reports waiting for a new one.
+        let mut paused = paused;
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        if !paused && !quota.reached && quota.spent() {
+            transaction.execute(
+                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                [chat_id],
+            )?;
+            paused = true;
+        }
+        // Reports from the chat's agents go first, as news the next message
+        // may depend on, unless the user steered the message at the front.
+        // A paused chat keeps both for when it resumes.
+        let reports = !paused && has_agent_reports(&transaction, chat_id)?;
+        let next_text = if paused || queue.is_empty() || (reports && steered == 0) {
             None
         } else {
             Some(queue.remove(0))
@@ -2964,8 +3005,15 @@ impl StateStore {
         };
         transaction.execute(
             "UPDATE chats SET queued = ?, host_working = ?, partial_reply = '', \
-             partial_reply_label = NULL, unrecorded_request = NULL, updated_at = ? WHERE id = ?",
-            params![encoded, next_text.is_some(), now_seconds(), chat_id],
+             partial_reply_label = NULL, unrecorded_request = NULL, \
+             queue_first = MAX(queue_first - ?, 0), updated_at = ? WHERE id = ?",
+            params![
+                encoded,
+                next_text.is_some(),
+                i64::from(next_text.is_some()),
+                now_seconds(),
+                chat_id
+            ],
         )?;
         let revision = if next_text.is_some() {
             Some(bump_queue_revision(&transaction, chat_id)?)
@@ -2977,19 +3025,34 @@ impl StateStore {
             [chat_id],
             |row| row.get(0),
         )?;
-        let next = next_text
-            .as_deref()
-            .map(|text| {
-                prepare_turn(
-                    &transaction,
-                    &self.workspace_root,
-                    chat_id,
-                    text,
-                    None,
-                    None,
-                )
-            })
-            .transpose()?;
+        let next = match next_text.as_deref() {
+            Some(text) => Some(prepare_turn(
+                &transaction,
+                &self.workspace_root,
+                chat_id,
+                text,
+                None,
+                None,
+                None,
+            )?),
+            // A turn that cannot be prepared for them leaves them waiting,
+            // and this turn's end recorded all the same.
+            None if reports => {
+                transaction.execute_batch("SAVEPOINT reports")?;
+                match take_agent_reports(&transaction, &self.workspace_root, chat_id) {
+                    Ok(turn) => {
+                        transaction.execute_batch("RELEASE reports")?;
+                        turn
+                    }
+                    Err(error) => {
+                        transaction.execute_batch("ROLLBACK TO reports; RELEASE reports")?;
+                        eprintln!("xd: cannot hand chat {chat_id} its agents' reports: {error}");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
         transaction.commit()?;
         Ok(TurnFinish {
             last_message_id,
@@ -3084,6 +3147,14 @@ impl StateStore {
                 mark_waiting_chat_to_resume(&transaction, &chat_id)?;
             }
         }
+        // No turn runs now. Reports handed to one wait again: a restart may
+        // have come before its agent read them, and an older host, which
+        // knows nothing of them, may have ended it. Read twice is better
+        // than never read.
+        transaction.execute(
+            "UPDATE agent_reports SET state = 'returned' WHERE state = 'handed'",
+            [],
+        )?;
         transaction.commit()?;
         Ok(interrupted)
     }
@@ -3646,6 +3717,11 @@ impl StateStore {
         if !working {
             return Ok(false);
         }
+        // Stopped by the user, the turn is done with its reports.
+        transaction.execute(
+            "DELETE FROM agent_reports WHERE chat_id = ? AND state = 'handed'",
+            [chat_id],
+        )?;
         end_interrupted_turn(&transaction, chat_id)?;
         transaction.commit()?;
         Ok(true)
@@ -3679,9 +3755,264 @@ impl StateStore {
         Ok(changed > 0)
     }
 
+    /// Gives `chat_id` a report from its agent `agent_id`: at once in a turn
+    /// of its own when the chat is free, otherwise once its turn ends or it
+    /// resumes. Unlike a message the user sends, it never joins the queue, so
+    /// the user cannot edit, steer or drop it, and it leaves the draft alone.
+    ///
+    /// It replaces any report the agent held back. `released` when it is the
+    /// held report itself, told again as final: it goes only if the held one
+    /// is still there, so it is never handed over twice.
+    pub fn deliver_agent_report(
+        &self,
+        chat_id: &str,
+        agent_id: &str,
+        text: &str,
+        released: bool,
+    ) -> Result<ReportDelivery, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        // A chat a restart cut off waits for the user's answer on resuming it.
+        let (working, mut paused, cut_off) = transaction
+            .query_row(
+                "SELECT host_working, paused, resume_after_restart != 0 FROM chats WHERE id = ?",
+                [chat_id],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        // As for a message: a chat that has used its quota stops first.
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        if !quota.reached && quota.spent() && !working {
+            transaction.execute(
+                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                [chat_id],
+            )?;
+            paused = true;
+        }
+        let replaced = transaction.execute(
+            "DELETE FROM agent_reports WHERE agent_id = ? AND state = 'held'",
+            [agent_id],
+        )?;
+        if released && replaced == 0 {
+            transaction.commit()?;
+            return Ok(ReportDelivery::Held);
+        }
+        transaction.execute(
+            "INSERT INTO agent_reports (chat_id, agent_id, text, created_at) VALUES (?, ?, ?, ?)",
+            params![chat_id, agent_id, text, now_seconds()],
+        )?;
+        // Kept whatever happens next: a turn that cannot be prepared for it,
+        // such as on an assistant xd no longer runs, leaves it waiting.
+        transaction.commit()?;
+        drop(database);
+        if working || paused || cut_off {
+            return Ok(ReportDelivery::Held);
+        }
+        self.start_agent_reports(chat_id)
+    }
+
+    #[cfg(test)]
+    fn deliver_agent_report_for_test(
+        &self,
+        chat_id: &str,
+        agent_id: &str,
+        text: &str,
+    ) -> Result<ReportDelivery, StorageError> {
+        self.deliver_agent_report(chat_id, agent_id, text, false)
+    }
+
+    /// Starts the turn that hands a free chat the reports waiting for it:
+    /// [`ReportDelivery::Held`] when it is busy or paused or has none, and
+    /// [`ReportDelivery::SteeredFirst`] when a message the user steered waits
+    /// at the front of its queue.
+    pub fn start_agent_reports(&self, chat_id: &str) -> Result<ReportDelivery, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let mut free = transaction
+            .query_row(
+                "SELECT host_working = 0 AND paused = 0 AND resume_after_restart = 0 \
+                 FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        // As for a message: a chat that has used its quota stops first.
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        if free && !quota.reached && quota.spent() {
+            transaction.execute(
+                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                [chat_id],
+            )?;
+            free = false;
+        }
+        let delivery = if !free || !has_agent_reports(&transaction, chat_id)? {
+            ReportDelivery::Held
+        } else if let Some(front) = steered_front(&transaction, chat_id)? {
+            ReportDelivery::SteeredFirst(front)
+        } else {
+            take_agent_reports(&transaction, &self.workspace_root, chat_id)?
+                .map_or(ReportDelivery::Held, ReportDelivery::Start)
+        };
+        transaction.commit()?;
+        Ok(delivery)
+    }
+
+    /// Free chats with agent reports waiting, which no turn ending will hand
+    /// over, such as after a restart. One a restart cut off is left until the
+    /// user decides whether it resumes.
+    pub fn chats_with_waiting_reports(&self) -> Result<Vec<String>, StorageError> {
+        let database = self.reader()?;
+        let mut statement = database.prepare(
+            "SELECT DISTINCT chats.id FROM agent_reports \
+             JOIN chats ON chats.id = agent_reports.chat_id \
+             WHERE agent_reports.state IN ('waiting', 'returned') AND chats.host_working = 0 AND chats.paused = 0 \
+               AND chats.resume_after_restart = 0 ORDER BY chats.id",
+        )?;
+        let chats = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(chats)
+    }
+
+    /// Keeps `text` as the report agent `agent_id` holds back from `chat_id`
+    /// while its own background work goes on, in place of any it held.
+    pub fn hold_agent_report(
+        &self,
+        chat_id: &str,
+        agent_id: &str,
+        text: &str,
+    ) -> Result<(), StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        transaction.execute(
+            "DELETE FROM agent_reports WHERE agent_id = ? AND state = 'held'",
+            [agent_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO agent_reports (chat_id, agent_id, text, created_at, state) \
+             VALUES (?, ?, ?, ?, 'held')",
+            params![chat_id, agent_id, text, now_seconds()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Drops the report agent `agent_id` held back, now that a later turn of
+    /// its own says how it went.
+    pub fn drop_held_report(&self, agent_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "DELETE FROM agent_reports WHERE agent_id = ? AND state = 'held'",
+            [agent_id],
+        )?;
+        Ok(())
+    }
+
+    /// Agents with a report held back that are free and not waiting on the
+    /// user's answer about resuming them, each with the chat it reports to.
+    pub fn idle_agents_holding_reports(&self) -> Result<Vec<(String, String)>, StorageError> {
+        let database = self.reader()?;
+        let mut statement = database.prepare(
+            "SELECT agent_reports.agent_id, agent_reports.chat_id FROM agent_reports \
+             JOIN chats ON chats.id = agent_reports.agent_id \
+             WHERE agent_reports.state = 'held' AND chats.host_working = 0 \
+               AND chats.resume_after_restart = 0 ORDER BY agent_reports.id",
+        )?;
+        let agents = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(agents)
+    }
+
+    /// Whether agent `agent_id` holds a report back while free and not
+    /// waiting on the user's answer about resuming it.
+    pub fn holds_idle_report(&self, agent_id: &str) -> Result<bool, StorageError> {
+        Ok(self.reader()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_reports JOIN chats \
+               ON chats.id = agent_reports.agent_id \
+             WHERE agent_reports.agent_id = ? AND agent_reports.state = 'held' \
+               AND chats.host_working = 0 AND chats.resume_after_restart = 0)",
+            [agent_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Lets the report agent `agent_id` held back wait for its chat like any
+    /// other: no turn of the agent's will replace it.
+    pub fn release_held_report(&self, agent_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE agent_reports SET state = 'waiting' WHERE agent_id = ? AND state = 'held'",
+            [agent_id],
+        )?;
+        Ok(())
+    }
+
+    /// Whether a report waits for `chat_id` that no turn has failed to
+    /// start with yet.
+    pub fn has_fresh_reports(&self, chat_id: &str) -> Result<bool, StorageError> {
+        Ok(self.reader()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_reports WHERE chat_id = ? AND state = 'waiting')",
+            [chat_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The newest report from `agent_id` waiting for `chat_id`, or 0.
+    pub fn latest_agent_report(&self, chat_id: &str, agent_id: &str) -> Result<i64, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM agent_reports \
+             WHERE chat_id = ? AND agent_id = ? AND state IN ('waiting', 'returned')",
+            params![chat_id, agent_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Drops the reports from `agent_id` waiting for `chat_id`, up to and
+    /// including `through`: the chat's agent has read the agent's state for
+    /// itself since they were written.
+    pub fn drop_agent_reports(
+        &self,
+        chat_id: &str,
+        agent_id: &str,
+        through: i64,
+    ) -> Result<usize, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database.execute(
+            "DELETE FROM agent_reports \
+             WHERE chat_id = ? AND agent_id = ? AND id <= ? AND state IN ('waiting', 'returned')",
+            params![chat_id, agent_id, through],
+        )?)
+    }
+
+    /// Gives back the reports handed to `chat_id`'s turn, which ends without
+    /// its agent having read them, to wait again in their places.
+    pub fn return_handed_reports(&self, chat_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE agent_reports SET state = 'returned' WHERE chat_id = ? AND state = 'handed'",
+            [chat_id],
+        )?;
+        Ok(())
+    }
+
     pub fn abort_turn_start(&self, chat_id: &str, error: &str) -> Result<(), StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
+        // Reports it was to hand over wait again, in their places.
+        transaction.execute(
+            "UPDATE agent_reports SET state = 'returned' WHERE chat_id = ? AND state = 'handed'",
+            [chat_id],
+        )?;
         transaction.execute(
             "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'error', ?, ?)",
             params![chat_id, error, now_seconds()],
@@ -6367,11 +6698,14 @@ impl StateStore {
         earlier: &[&str],
         text: &str,
     ) -> Result<Value, StorageError> {
-        let (_, event) = self.mutate_queue(chat_id, |queue| {
+        // Put back because it was steered, so it goes before any agent report.
+        let inserted = std::cell::Cell::new(None);
+        let (_, event) = self.mutate_queue_with(chat_id, None, Some(&inserted), |queue| {
             let index = earlier.iter().fold(0, |index, message| {
                 index + usize::from(queue.get(index).map(String::as_str) == Some(*message))
             });
             queue.insert(index, text.to_owned());
+            inserted.set(Some(index));
             Ok(true)
         })?;
         Ok(event)
@@ -6402,13 +6736,32 @@ impl StateStore {
         expected: Option<i64>,
         mutate: impl FnOnce(&mut Vec<String>) -> Result<bool, StorageError>,
     ) -> Result<(Value, Value), StorageError> {
+        self.mutate_queue_with(chat_id, expected, None, mutate)
+    }
+
+    /// [`Self::mutate_queue_at`], counting the message `mutate` puts at the
+    /// index it sets in `steered` among those the user steered, which run
+    /// before any agent report.
+    fn mutate_queue_with(
+        &self,
+        chat_id: &str,
+        expected: Option<i64>,
+        steered: Option<&std::cell::Cell<Option<usize>>>,
+        mutate: impl FnOnce(&mut Vec<String>) -> Result<bool, StorageError>,
+    ) -> Result<(Value, Value), StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let (stored, mut revision) = transaction
+        let (stored, mut revision, leading) = transaction
             .query_row(
-                "SELECT COALESCE(queued, ''), queue_revision FROM chats WHERE id = ?",
+                "SELECT COALESCE(queued, ''), queue_revision, queue_first FROM chats WHERE id = ?",
                 [chat_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
@@ -6418,7 +6771,21 @@ impl StateStore {
             ));
         }
         let mut queue = queue_from_column(Some(&stored));
+        let leading = usize::try_from(leading).unwrap_or(0).min(queue.len());
+        let old = queue.clone();
+        let marked = queue[..leading].to_vec();
         if mutate(&mut queue)? {
+            // The marks are the steered messages' own: they follow those
+            // messages, and end where another message comes before them.
+            let steered = match steered.and_then(std::cell::Cell::get) {
+                Some(index) => {
+                    let mut others = queue.clone();
+                    others.remove(index);
+                    let kept = steered_prefix(&old, &marked, &others);
+                    if index <= kept { kept + 1 } else { index + 1 }
+                }
+                None => steered_prefix(&old, &marked, &queue),
+            };
             let encoded = if queue.is_empty() {
                 None
             } else {
@@ -6427,8 +6794,8 @@ impl StateStore {
                 })?)
             };
             let changed = transaction.execute(
-                "UPDATE chats SET queued = ?, updated_at = ? WHERE id = ?",
-                params![encoded, now_seconds(), chat_id],
+                "UPDATE chats SET queued = ?, queue_first = ?, updated_at = ? WHERE id = ?",
+                params![encoded, steered as i64, now_seconds(), chat_id],
             )?;
             if changed != 1 {
                 return Err(StorageError::NoChat(chat_id.into()));
@@ -6571,6 +6938,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             retire_jcode_defaults(database)?;
             ensure_draft_chunks(database)?;
             ensure_chat_pull_requests(database)?;
+            ensure_agent_reports(database)?;
             return Ok(());
         }
     }
@@ -6668,6 +7036,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     retire_jcode_defaults(database)?;
     ensure_draft_chunks(database)?;
     ensure_chat_pull_requests(database)?;
+    ensure_agent_reports(database)?;
     Ok(())
 }
 
@@ -10719,6 +11088,7 @@ fn prepare_turn(
     text: &str,
     worktree_name: Option<&str>,
     premade: Option<&MadeWorktree>,
+    shown: Option<&[String]>,
 ) -> Result<TurnSpec, StorageError> {
     // Any turn picks a paused chat back up, and one stopped at its quota.
     transaction.execute(
@@ -10821,10 +11191,15 @@ fn prepare_turn(
         .map(|instructions| format!("{instructions}\n\n{ui_instructions}"))
         .or(Some(ui_instructions));
     let now = now_seconds();
-    transaction.execute(
-        "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
-        params![chat_id, text, now],
-    )?;
+    // The transcript can show the message as several rows, such as one for
+    // each agent report the turn hands over.
+    let single = [text.to_owned()];
+    for row in shown.unwrap_or(&single) {
+        transaction.execute(
+            "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
+            params![chat_id, row, now],
+        )?;
+    }
     transaction.execute(
         "UPDATE chats SET updated_at = ?, last_user_message_at = ? WHERE id = ?",
         params![now, now_microseconds(), chat_id],
@@ -11517,6 +11892,138 @@ fn ensure_chat_pull_requests(database: &Connection) -> Result<(), StorageError> 
          UPDATE meta SET value = '27' WHERE key = 'schema_version';",
     )?;
     Ok(())
+}
+
+/// Reports from the agents a chat started, waiting for the chat to be free to
+/// read them: they are the host's, not the user's, so they never join the
+/// chat's queue. Each goes with either chat. `state` is `waiting`, `handed`
+/// to a turn that has not ended yet, `returned` by a turn that could not
+/// start, which waits like the rest but does not retry by itself, or `held`:
+/// the agent's turn ended while background work of its own went on, and its
+/// next turn replaces this report. Held reports are kept here so one a
+/// restart cut short, whose next turn never comes, can still be handed over.
+/// `queue_first` counts the messages at the front of the queue the user
+/// steered, which go before any report.
+///
+/// No schema version: older hosts ignore the table and the column, and a
+/// report they leave waiting is delivered once this host runs again.
+fn ensure_agent_reports(database: &Connection) -> Result<(), StorageError> {
+    let transaction = database.unchecked_transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            text TEXT NOT NULL, created_at INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'waiting');
+         CREATE INDEX IF NOT EXISTS agent_reports_chat ON agent_reports (chat_id, id);
+         CREATE INDEX IF NOT EXISTS agent_reports_agent ON agent_reports (agent_id);",
+    )?;
+    let columns = transaction
+        .prepare("PRAGMA table_info(chats)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    if !columns.contains("queue_first") {
+        transaction.execute(
+            "ALTER TABLE chats ADD COLUMN queue_first INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Starts the turn that hands a chat every report waiting for it, oldest
+/// first, as one message: each report is a row of its own in the transcript,
+/// and the agent reads them together. `None` when none is waiting. The caller
+/// has checked that the chat is free to start a turn.
+fn take_agent_reports(
+    transaction: &rusqlite::Transaction<'_>,
+    workspace_root: &Path,
+    chat_id: &str,
+) -> Result<Option<TurnSpec>, StorageError> {
+    let reports = transaction
+        .prepare(
+            "SELECT text FROM agent_reports WHERE chat_id = ? AND state IN ('waiting', 'returned') ORDER BY id",
+        )?
+        .query_map([chat_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if reports.is_empty() {
+        return Ok(None);
+    }
+    // Kept until the turn ends, so one that cannot start gives them back.
+    transaction.execute(
+        "UPDATE agent_reports SET state = 'handed' WHERE chat_id = ? AND state IN ('waiting', 'returned')",
+        [chat_id],
+    )?;
+    let prompt = reports.join("\n\n");
+    let turn = prepare_turn(
+        transaction,
+        workspace_root,
+        chat_id,
+        &prompt,
+        None,
+        None,
+        Some(&reports),
+    )?;
+    transaction.execute(
+        "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ?",
+        params![now_seconds(), chat_id],
+    )?;
+    Ok(Some(turn))
+}
+
+/// How many of `queue`'s first messages are, in order, among `marked`, the
+/// steered messages that led `old`, the queue before it changed. Messages are
+/// told apart only by their text, so a message that left the queue is taken
+/// to be a steered one when another has the same text: an ordinary message
+/// never inherits a steered one's place before the reports.
+fn steered_prefix(old: &[String], marked: &[String], queue: &[String]) -> usize {
+    let mut gone = HashMap::<&str, usize>::new();
+    for message in old {
+        *gone.entry(message).or_default() += 1;
+    }
+    for message in queue {
+        if let Some(count) = gone.get_mut(message.as_str()) {
+            *count = count.saturating_sub(1);
+        }
+    }
+    let still = marked
+        .iter()
+        .filter(|message| match gone.get_mut(message.as_str()) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                false
+            }
+            _ => true,
+        })
+        .collect::<Vec<_>>();
+    let mut rest = still.into_iter();
+    queue
+        .iter()
+        .take_while(|message| rest.any(|marked| marked == *message))
+        .count()
+}
+
+/// The message at the front of the chat's queue when the user steered it
+/// there, which goes before any report.
+fn steered_front(database: &Connection, chat_id: &str) -> Result<Option<String>, StorageError> {
+    let (stored, steered) = database.query_row(
+        "SELECT COALESCE(queued, ''), queue_first FROM chats WHERE id = ?",
+        [chat_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    Ok((steered > 0)
+        .then(|| queue_from_column(Some(&stored)).into_iter().next())
+        .flatten())
+}
+
+fn has_agent_reports(database: &Connection, chat_id: &str) -> Result<bool, StorageError> {
+    Ok(database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_reports WHERE chat_id = ? AND state IN ('waiting', 'returned'))",
+        [chat_id],
+        |row| row.get(0),
+    )?)
 }
 
 /// Must run in the same transaction as the chats row update.
@@ -16281,6 +16788,516 @@ mod tests {
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_some());
         assert!(!store.unpause_chat("chat").unwrap());
+    }
+
+    #[test]
+    fn agent_reports_wait_out_of_the_queue_and_go_first_unless_a_message_was_steered() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        fixture.insert_chat(&database, "b", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let rows = |chat: &str| {
+            store.messages(&json!({"chat": chat})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["role"] == "user")
+                .map(|row| row["content"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        store
+            .set_draft(&json!({"chat": "lead", "text": "half a thought"}))
+            .unwrap();
+
+        // A free chat takes a report at once, in a turn of its own that
+        // leaves the user's draft alone.
+        let ReportDelivery::Start(turn) = store
+            .deliver_agent_report_for_test(
+                "lead",
+                "a",
+                "[xd] Agent \"A\" (a) is done with its turn.",
+            )
+            .unwrap()
+        else {
+            panic!("a free chat should take the report now");
+        };
+        assert_eq!(turn.prompt, "[xd] Agent \"A\" (a) is done with its turn.");
+        let chat = store.chat("lead").unwrap();
+        assert_eq!(chat["working"], true);
+        assert_eq!(chat["draft"], "half a thought");
+        assert_eq!(chat["queue"], json!([]));
+
+        // A busy one holds reports out of its queue, where the user's own
+        // messages wait as before.
+        assert!(matches!(
+            store
+                .prepare_send(&json!({"chat": "lead", "text": "mine"}))
+                .unwrap(),
+            SendDisposition::Queued { .. }
+        ));
+        for (agent, text) in [("a", "[xd] from a"), ("b", "[xd] from b")] {
+            assert!(matches!(
+                store
+                    .deliver_agent_report_for_test("lead", agent, text)
+                    .unwrap(),
+                ReportDelivery::Held
+            ));
+        }
+        assert_eq!(store.chat("lead").unwrap()["queue"], json!(["mine"]));
+        assert!(store.chats_with_waiting_reports().unwrap().is_empty());
+
+        // The turn ending hands them over together, ahead of the queue: one
+        // prompt for the agent, a row each in the transcript.
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        let next = finish.next.expect("the reports' turn");
+        assert_eq!(next.prompt, "[xd] from a\n\n[xd] from b");
+        assert!(finish.queue_event.is_none());
+        assert_eq!(
+            rows("lead"),
+            [
+                "[xd] Agent \"A\" (a) is done with its turn.",
+                "[xd] from a",
+                "[xd] from b"
+            ]
+        );
+        assert_eq!(store.chat("lead").unwrap()["queue"], json!(["mine"]));
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert_eq!(finish.next.expect("the queued turn").prompt, "mine");
+
+        // A message the user steered goes before a report that came first.
+        store
+            .deliver_agent_report_for_test("lead", "a", "[xd] again from a")
+            .unwrap();
+        store.requeue_front("lead", "steered").unwrap();
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert_eq!(finish.next.expect("the steered turn").prompt, "steered");
+        assert_eq!(store.chat("lead").unwrap()["queue"], json!([]));
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert_eq!(finish.next.expect("the report").prompt, "[xd] again from a");
+        assert!(
+            store
+                .finish_turn("lead", true, None, 1, false)
+                .unwrap()
+                .next
+                .is_none()
+        );
+
+        // A paused chat keeps them, and they go once it is free again.
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "work"}))
+            .unwrap();
+        assert!(store.pause_chat("lead", false).unwrap());
+        assert!(
+            store
+                .finish_turn("lead", true, None, 1, false)
+                .unwrap()
+                .next
+                .is_none()
+        );
+        assert!(matches!(
+            store
+                .deliver_agent_report_for_test("lead", "b", "[xd] later from b")
+                .unwrap(),
+            ReportDelivery::Held
+        ));
+        assert!(store.chat_is_paused("lead").unwrap());
+        assert!(store.chats_with_waiting_reports().unwrap().is_empty());
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::Held
+        ));
+        assert!(store.unpause_chat("lead").unwrap());
+        assert_eq!(store.chats_with_waiting_reports().unwrap(), ["lead"]);
+        let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {
+            panic!("a free chat should take its reports");
+        };
+        assert_eq!(turn.prompt, "[xd] later from b");
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::Held
+        ));
+
+        // Reports the chat's agent has read for itself are dropped, newer
+        // ones kept; one from an agent goes with its chat.
+        store
+            .deliver_agent_report_for_test("lead", "a", "[xd] read")
+            .unwrap();
+        let through = store.latest_agent_report("lead", "a").unwrap();
+        store
+            .deliver_agent_report_for_test("lead", "a", "[xd] unread")
+            .unwrap();
+        store
+            .deliver_agent_report_for_test("lead", "b", "[xd] from b, gone")
+            .unwrap();
+        assert_eq!(store.drop_agent_reports("lead", "a", through).unwrap(), 1);
+        store.delete_chat(&json!({"chat": "b"})).unwrap();
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert_eq!(
+            finish.next.expect("the unread report").prompt,
+            "[xd] unread"
+        );
+
+        // A free chat whose queue waits behind a message the user steered,
+        // as a crash can leave one, has that message started first; the
+        // reports follow its turn, still ahead of the rest of the queue.
+        assert!(
+            store
+                .finish_turn("lead", true, None, 1, false)
+                .unwrap()
+                .next
+                .is_none()
+        );
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "busy"}))
+            .unwrap();
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "ordinary"}))
+            .unwrap();
+        store.requeue_front("lead", "steered").unwrap();
+        store.abort_turn_start("lead", "crashed").unwrap();
+        assert_eq!(
+            store.chat("lead").unwrap()["queue"],
+            json!(["steered", "ordinary"])
+        );
+        assert!(matches!(
+            store
+                .deliver_agent_report_for_test("lead", "a", "[xd] behind it")
+                .unwrap(),
+            ReportDelivery::SteeredFirst(front) if front == "steered"
+        ));
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::SteeredFirst(front) if front == "steered"
+        ));
+        // As the engine starts it: taken from the queue, then sent.
+        store
+            .take_queued(&json!({"chat": "lead", "index": 0, "text": "steered"}))
+            .unwrap();
+        let SendDisposition::Start { .. } = store
+            .prepare_send(&json!({"chat": "lead", "text": "steered"}))
+            .unwrap()
+        else {
+            panic!("the steered message should start");
+        };
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert_eq!(finish.next.expect("the report").prompt, "[xd] behind it");
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert_eq!(finish.next.expect("the queue").prompt, "ordinary");
+    }
+
+    #[test]
+    fn a_report_whose_turn_cannot_be_prepared_keeps_waiting() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        database
+            .execute("UPDATE chats SET backend = 'jcode' WHERE id = 'lead'", [])
+            .unwrap();
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert!(
+            store
+                .deliver_agent_report_for_test("lead", "a", "[xd] done")
+                .is_err()
+        );
+        assert!(store.has_fresh_reports("lead").unwrap());
+        assert_eq!(store.chat("lead").unwrap()["working"], false);
+    }
+
+    #[test]
+    fn reports_a_turn_could_not_start_with_wait_again_in_their_places() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "work"}))
+            .unwrap();
+        store
+            .deliver_agent_report_for_test("lead", "a", "[xd] first")
+            .unwrap();
+        store
+            .deliver_agent_report_for_test("lead", "a", "[xd] second")
+            .unwrap();
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert!(finish.next.is_some());
+        // Handed to a turn, they are no longer waiting...
+        assert!(!store.has_fresh_reports("lead").unwrap());
+        assert_eq!(store.latest_agent_report("lead", "a").unwrap(), 0);
+        // ...until it cannot start, which gives them back, though not as
+        // reports to retry by themselves.
+        store.abort_turn_start("lead", "cannot start").unwrap();
+        assert!(!store.has_fresh_reports("lead").unwrap());
+        assert_eq!(store.chats_with_waiting_reports().unwrap(), ["lead"]);
+        // The next report takes them along, in their places.
+        let ReportDelivery::Start(turn) = store
+            .deliver_agent_report_for_test("lead", "a", "[xd] third")
+            .unwrap()
+        else {
+            panic!("the returned reports should go again");
+        };
+        assert_eq!(turn.prompt, "[xd] first\n\n[xd] second\n\n[xd] third");
+        // One that started but ended before its agent read them gives them
+        // back too.
+        store.return_handed_reports("lead").unwrap();
+        let finish = store
+            .finish_turn("lead", false, Some("broke"), 1, false)
+            .unwrap();
+        assert_eq!(
+            finish.next.expect("the given-back reports").prompt,
+            "[xd] first\n\n[xd] second\n\n[xd] third"
+        );
+        // A turn that ran has read them.
+        store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert!(store.chats_with_waiting_reports().unwrap().is_empty());
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::Held
+        ));
+    }
+
+    #[test]
+    fn reports_handed_to_a_turn_an_older_host_ended_go_again() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let ReportDelivery::Start(_) = store
+            .deliver_agent_report_for_test("lead", "a", "[xd] done")
+            .unwrap()
+        else {
+            panic!("a free chat should take the report");
+        };
+        drop(store);
+        // An older host ended that turn, knowing nothing of the reports.
+        Connection::open(&fixture.database)
+            .unwrap()
+            .execute("UPDATE chats SET host_working = 0 WHERE id = 'lead'", [])
+            .unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store.recover_interrupted_turns().unwrap();
+        // Read twice rather than never: it goes again.
+        assert_eq!(store.chats_with_waiting_reports().unwrap(), ["lead"]);
+        let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {
+            panic!("the report should go again");
+        };
+        assert_eq!(turn.prompt, "[xd] done");
+    }
+
+    #[test]
+    fn reports_handed_to_a_turn_a_restart_cut_off_go_again() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let ReportDelivery::Start(_) = store
+            .deliver_agent_report_for_test("lead", "a", "[xd] done")
+            .unwrap()
+        else {
+            panic!("a free chat should take the report");
+        };
+        // The host went down before the turn could start, or while it ran.
+        drop(store);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(store.recover_interrupted_turns().unwrap(), ["lead"]);
+        // Held while the user decides on resuming, then handed over again.
+        assert!(store.chats_with_waiting_reports().unwrap().is_empty());
+        assert_eq!(store.take_chats_to_resume().unwrap().len(), 1);
+        let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {
+            panic!("the report should go again");
+        };
+        assert_eq!(turn.prompt, "[xd] done");
+    }
+
+    #[test]
+    fn every_steered_message_goes_before_reports_and_a_failed_hand_over_ends_the_turn() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let next = |store: &StateStore| {
+            store
+                .finish_turn("lead", true, None, 1, false)
+                .unwrap()
+                .next
+                .map(|turn| turn.prompt)
+        };
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "work"}))
+            .unwrap();
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "ordinary"}))
+            .unwrap();
+        store
+            .deliver_agent_report_for_test("lead", "a", "[xd] news")
+            .unwrap();
+        // Two steered messages come back, the second behind the first.
+        store.requeue_front("lead", "steered A").unwrap();
+        store
+            .requeue_after("lead", &["steered A"], "steered B")
+            .unwrap();
+        assert_eq!(
+            store.chat("lead").unwrap()["queue"],
+            json!(["steered A", "steered B", "ordinary"])
+        );
+        assert_eq!(next(&store).as_deref(), Some("steered A"));
+        assert_eq!(next(&store).as_deref(), Some("steered B"));
+        assert_eq!(next(&store).as_deref(), Some("[xd] news"));
+        assert_eq!(next(&store).as_deref(), Some("ordinary"));
+
+        // A steered message that leaves the queue does not hand its place to
+        // an ordinary one with the same text.
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "same"}))
+            .unwrap();
+        store.requeue_front("lead", "same").unwrap();
+        store
+            .deliver_agent_report_for_test("lead", "a", "[xd] ahead")
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": "lead", "index": 0, "text": "same"}))
+            .unwrap();
+        assert_eq!(next(&store).as_deref(), Some("[xd] ahead"));
+        assert_eq!(next(&store).as_deref(), Some("same"));
+
+        // A turn that cannot be prepared for the reports still ends the one
+        // before it; the reports wait.
+        store
+            .deliver_agent_report_for_test("lead", "a", "[xd] later")
+            .unwrap();
+        Connection::open(&fixture.database)
+            .unwrap()
+            .execute("UPDATE chats SET backend = 'jcode' WHERE id = 'lead'", [])
+            .unwrap();
+        assert_eq!(next(&store), None);
+        assert_eq!(store.chat("lead").unwrap()["working"], false);
+        assert!(store.has_fresh_reports("lead").unwrap());
+    }
+
+    #[test]
+    fn a_held_report_waits_for_the_agents_next_turn_or_its_release() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .hold_agent_report("lead", "a", "[xd] waiting on tests")
+            .unwrap();
+        store
+            .hold_agent_report("lead", "a", "[xd] still waiting")
+            .unwrap();
+        // Held, it is not handed over...
+        assert!(store.chats_with_waiting_reports().unwrap().is_empty());
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::Held
+        ));
+        assert_eq!(
+            store.idle_agents_holding_reports().unwrap(),
+            [("a".to_owned(), "lead".to_owned())]
+        );
+        assert!(store.holds_idle_report("a").unwrap());
+        // ...until no turn of the agent's will replace it, and only the last.
+        store.release_held_report("a").unwrap();
+        let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {
+            panic!("a released report should go");
+        };
+        assert_eq!(turn.prompt, "[xd] still waiting");
+        // A later turn of the agent's drops it instead.
+        store.hold_agent_report("lead", "a", "[xd] again").unwrap();
+        store.drop_held_report("a").unwrap();
+        assert!(store.idle_agents_holding_reports().unwrap().is_empty());
+
+        // Told again as final, a held report replaces itself, in one go...
+        store.finish_turn("lead", true, None, 1, false).unwrap();
+        store.hold_agent_report("lead", "a", "[xd] held").unwrap();
+        let ReportDelivery::Start(turn) = store
+            .deliver_agent_report("lead", "a", "[xd] held", true)
+            .unwrap()
+        else {
+            panic!("the released report should go");
+        };
+        assert_eq!(turn.prompt, "[xd] held");
+        assert!(store.idle_agents_holding_reports().unwrap().is_empty());
+        // ...and not again once recovery has handed it over.
+        store.finish_turn("lead", true, None, 1, false).unwrap();
+        store.hold_agent_report("lead", "a", "[xd] once").unwrap();
+        store.release_held_report("a").unwrap();
+        store.start_agent_reports("lead").unwrap();
+        assert!(matches!(
+            store
+                .deliver_agent_report("lead", "a", "[xd] once", true)
+                .unwrap(),
+            ReportDelivery::Held
+        ));
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert!(finish.next.is_none());
+    }
+
+    #[test]
+    fn a_chat_a_restart_cut_off_holds_reports_until_the_user_answers() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "work"}))
+            .unwrap();
+        // The host went down mid-turn.
+        drop(store);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(store.recover_interrupted_turns().unwrap(), ["lead"]);
+        assert_eq!(store.chat("lead").unwrap()["working"], false);
+        assert!(matches!(
+            store
+                .deliver_agent_report_for_test("lead", "a", "[xd] done")
+                .unwrap(),
+            ReportDelivery::Held
+        ));
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::Held
+        ));
+        assert!(store.chats_with_waiting_reports().unwrap().is_empty());
+        // Answered, without resuming: the reports go.
+        assert_eq!(store.take_chats_to_resume().unwrap().len(), 1);
+        assert_eq!(store.chats_with_waiting_reports().unwrap(), ["lead"]);
+        let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {
+            panic!("the answered chat should take its reports");
+        };
+        assert_eq!(turn.prompt, "[xd] done");
     }
 
     #[test]

@@ -80,6 +80,12 @@ struct RuntimeInner {
     /// Told when a turn ends for good: not stopped, and not going on under
     /// another account.
     on_turn_settled: Mutex<Option<TurnSettledHandler>>,
+    /// The last turn of each chat that ended with background work of its own
+    /// still going, told of again as finished if the agent never takes
+    /// another (see [`TurnRuntime::release_held_turn`]), and the chats whose
+    /// turn is settling.
+    /// Each with the process the turn ran in, whose background work it waits on.
+    held_turns: Mutex<HeldTurns>,
     /// Told whenever a turn starts or ends, with the chat, assistant, and
     /// account; see [`crate::quota`].
     on_activity: Mutex<Option<ActivityHandler>>,
@@ -100,7 +106,17 @@ pub(crate) type AccountSwitchHandler = Box<dyn Fn(String, i64) + Send + Sync>;
 
 /// Hears that a chat's turn ended for good, and how. Called with the chat's
 /// succession held, so it must only hand the news on, never wait.
-pub(crate) type TurnSettledHandler = Box<dyn Fn(SettledTurn) + Send + Sync>;
+pub(crate) type TurnSettledHandler = Box<dyn Fn(TurnNews) + Send + Sync>;
+
+/// What [`TurnSettledHandler`] hears, in the order it happened.
+#[derive(Debug, Clone)]
+pub(crate) enum TurnNews {
+    /// A chat's turn ended for good.
+    Settled(SettledTurn),
+    /// No turn of this chat's is held, settling or running, so none will
+    /// replace a report it held back that a restart left stored.
+    Unheld(String),
+}
 
 /// Hears that a chat's turn started or ended, with its assistant and the
 /// account and login it runs as.
@@ -120,6 +136,19 @@ pub(crate) enum AgentActivity {
     BackgroundEnded,
 }
 
+/// A turn held while its agent's background work goes on, and the router of
+/// the process running that work.
+type HeldTurn = (SettledTurn, Option<std::sync::Weak<Mutex<Router>>>);
+
+/// See [`RuntimeInner::held_turns`].
+#[derive(Default)]
+struct HeldTurns {
+    turns: HashMap<String, HeldTurn>,
+    /// Chats whose turn has left the active turns but not yet been told of.
+    /// Their held turn waits: the turn settling may replace it.
+    settling: HashSet<String>,
+}
+
 /// A turn that ended for good: neither stopped nor going on elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SettledTurn {
@@ -135,6 +164,13 @@ pub(crate) struct SettledTurn {
     /// Whoever asked for the turn already knows how it went, so only the
     /// agent's card needs to change.
     pub(crate) quiet: bool,
+    /// It ended without a question or an error while background agents or
+    /// shells of its own go on, so the agent is not done: it takes another
+    /// turn once they end, and that one says how the work went.
+    pub(crate) background: bool,
+    /// It was held for its background work and is told of again as finished,
+    /// because the agent will take no turn to report on that work.
+    pub(crate) released: bool,
 }
 
 /// Marks a `tool` row that says a chat moved to another account. A client that
@@ -248,6 +284,8 @@ struct Router {
     /// A background task has finished, and the agent has not yet begun the turn
     /// in which it may report on it.
     report_due: bool,
+    /// Its process has ended, so no turn it owes will come.
+    ended: bool,
     /// It was stopped for being idle, so what it said last has nowhere to go.
     released: bool,
     /// Claude's tasks it has started and not yet reported finished, by task id:
@@ -591,6 +629,7 @@ impl TurnRuntime {
                 auth,
                 on_account_switch: Mutex::new(None),
                 on_turn_settled: Mutex::new(None),
+                held_turns: Mutex::new(HeldTurns::default()),
                 on_activity: Mutex::new(None),
                 explained_switches: Mutex::new(HashSet::new()),
                 account_gate: std::sync::RwLock::new(()),
@@ -1069,6 +1108,17 @@ impl TurnRuntime {
             .unwrap_or(0)
     }
 
+    /// Whether the chat's kept process still runs background work of its
+    /// own, or has finished some and owes a turn reporting on it, read under
+    /// one lock of its router.
+    fn waits_on_background(&self, chat_id: &str) -> bool {
+        self.router(chat_id).is_some_and(|router| {
+            router.lock().is_ok_and(|router| {
+                !router.ended && (!router.tasks.is_empty() || router.report_due)
+            })
+        })
+    }
+
     pub(crate) fn background_task_output(&self, chat_id: &str, task_id: Option<&str>) -> Value {
         let snapshot = self
             .inner
@@ -1119,27 +1169,35 @@ impl TurnRuntime {
                 "background_tasks": count,
             }));
         };
-        let Ok(sessions) = self.inner.sessions.lock() else {
-            return;
-        };
-        match sessions.get(chat_id) {
-            Some(session) => {
-                if let Ok(router) = session.router.lock() {
-                    publish(router.tasks.len());
-                    if router.tasks.is_empty() {
-                        self.note_activity(
-                            chat_id,
-                            &router.backend,
-                            &session.account,
-                            AgentActivity::BackgroundEnded,
-                        );
+        let ended = {
+            let Ok(sessions) = self.inner.sessions.lock() else {
+                return;
+            };
+            match sessions.get(chat_id) {
+                Some(session) => match session.router.lock() {
+                    Ok(router) => {
+                        publish(router.tasks.len());
+                        if router.tasks.is_empty() {
+                            self.note_activity(
+                                chat_id,
+                                &router.backend,
+                                &session.account,
+                                AgentActivity::BackgroundEnded,
+                            );
+                        }
+                        router.tasks.is_empty()
                     }
+                    Err(_) => false,
+                },
+                None => {
+                    publish(0);
+                    self.note_activity(chat_id, "", "", AgentActivity::BackgroundEnded);
+                    true
                 }
             }
-            None => {
-                publish(0);
-                self.note_activity(chat_id, "", "", AgentActivity::BackgroundEnded);
-            }
+        };
+        if ended {
+            self.release_held_turn(chat_id, None);
         }
     }
 
@@ -1880,6 +1938,7 @@ impl TurnRuntime {
                     // Whatever the process was running ended with it.
                     had_tasks = !router.tasks.is_empty();
                     router.tasks.clear();
+                    router.ended = true;
                     match router.sink.take() {
                         Some(sink) => {
                             let _ = sink.send(Feed::End);
@@ -1903,6 +1962,12 @@ impl TurnRuntime {
                     {
                         runtime.settle_orphaned_agents(&chat_id);
                     }
+                }
+                // No report on its background work can come from it now. A
+                // turn still holding its output is told of after this, and
+                // finds the router ended.
+                if let Some(inner) = inner.upgrade() {
+                    TurnRuntime { inner }.release_held_turn(&chat_id, Some(&router));
                 }
             });
     }
@@ -2039,6 +2104,10 @@ impl TurnRuntime {
 
     /// Releases running and idle resources when a conversation is deleted.
     pub(crate) fn discard_chat(&self, chat_id: &str) {
+        // A chat thrown away has nothing more to tell of.
+        if let Ok(mut held) = self.inner.held_turns.lock() {
+            held.turns.remove(chat_id);
+        }
         self.cancel(chat_id);
         self.drop_session(chat_id);
         if let Ok(mut commands) = self.inner.commands.lock() {
@@ -2208,6 +2277,7 @@ impl TurnRuntime {
             quiet_since: Instant::now(),
             wakes_itself: false,
             report_due: false,
+            ended: false,
             released: false,
             tasks: crate::background_tasks::Tasks::default(),
         }));
@@ -2266,6 +2336,7 @@ impl TurnRuntime {
             let _ = child.wait();
         }
         self.settle_orphaned_agents(chat_id);
+        self.release_held_turn(chat_id, None);
     }
 
     /// Stops the kept processes nobody is using, so an idle chat costs no memory.
@@ -2318,7 +2389,12 @@ impl TurnRuntime {
         };
         due.iter()
             .filter(|(chat_id, quiet_since)| {
-                self.release_agent(chat_id, *quiet_since, &accompanied)
+                let released = self.release_agent(chat_id, *quiet_since, &accompanied);
+                // No report on background work can come from it now.
+                if released {
+                    self.release_held_turn(chat_id, None);
+                }
+                released
             })
             .count()
     }
@@ -2447,7 +2523,17 @@ impl TurnRuntime {
                     waiting: false,
                     stopped: false,
                     quiet: false,
+                    background: false,
+                    released: false,
                 };
+                // Its agent never read the reports it was handed: they wait
+                // again, in their places, rather than end with it.
+                if let Err(error) = self.inner.store.return_handed_reports(&turn.chat_id) {
+                    eprintln!(
+                        "xd: cannot give back chat {}'s reports: {error}",
+                        turn.chat_id
+                    );
+                }
                 let next = self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
                 self.settled(settled);
                 if let Some(next) = next {
@@ -2988,6 +3074,11 @@ impl TurnRuntime {
         // account-switch continuation below, which takes the chat's gate.
         let succession = self.succession(&turn.chat_id);
         let succession = succession.lock().unwrap_or_else(|error| error.into_inner());
+        // From leaving the active turns until it is told of, this turn may
+        // replace the chat's held one, which waits for it meanwhile.
+        if let Ok(mut held) = self.inner.held_turns.lock() {
+            held.settling.insert(turn.chat_id.clone());
+        }
         if let Ok(mut active) = self.inner.active.lock()
             && active
                 .get(&turn.chat_id)
@@ -2997,6 +3088,8 @@ impl TurnRuntime {
         }
         // Still working if background agents or shells of its own go on.
         let background = self.background_tasks(&turn.chat_id) > 0;
+        // Not done either if one ended and the agent owes a turn on it.
+        let waits_on_background = self.waits_on_background(&turn.chat_id);
         self.note_activity(
             &turn.chat_id,
             &turn.backend,
@@ -3044,6 +3137,8 @@ impl TurnRuntime {
             waiting: asked.is_some(),
             stopped: false,
             quiet: false,
+            background: (background || waits_on_background) && success && asked.is_none(),
+            released: false,
         };
         let next_failed = self.finish(
             turn,
@@ -3071,6 +3166,17 @@ impl TurnRuntime {
         if let Some(next_failed) = next_failed {
             self.settled(next_failed);
         }
+        if let Ok(mut held) = self.inner.held_turns.lock() {
+            held.settling.remove(&chat_id);
+            // Going on under another account, it is still the agent's report
+            // under way, and says how it went when it ends there; so does
+            // whatever turn takes the chat instead if it cannot go on.
+            if moves_on {
+                held.turns.remove(&chat_id);
+            }
+        }
+        // Whatever tried to release the held turn meanwhile waited for this.
+        self.release_held_turn(&chat_id, None);
         drop(succession);
         if let Some((outcome, message)) = limited {
             self.continue_after_limit(&chat_id, outcome, message);
@@ -3208,6 +3314,8 @@ impl TurnRuntime {
                 waiting: false,
                 stopped: false,
                 quiet: false,
+                background: false,
+                released: false,
             });
         }
         None
@@ -3226,16 +3334,131 @@ impl TurnRuntime {
             waiting: false,
             stopped: false,
             quiet,
+            background: false,
+            released: false,
         });
     }
 
     /// Tells whoever listens that a turn ended for good. A turn that ran is
     /// told of with the chat's succession held, so in the order turns ended.
     fn settled(&self, settled: SettledTurn) {
+        let chat_id = settled.chat_id.clone();
+        let background = settled.background;
+        // Its background work runs in the chat's current process.
+        let process = background
+            .then(|| self.router(&chat_id))
+            .flatten()
+            .map(|router| Arc::downgrade(&router));
+        // A turn's news replaces any the chat's last turn left held, and is
+        // told under the same lock, so a release in between can neither take
+        // this turn for the last one nor tell of the last one after it.
+        match self.inner.held_turns.lock() {
+            Ok(mut held) => {
+                if background {
+                    held.turns
+                        .insert(chat_id.clone(), (settled.clone(), process));
+                } else {
+                    held.turns.remove(&chat_id);
+                }
+                self.tell_settled(settled);
+            }
+            Err(_) => self.tell_settled(settled),
+        }
+        // The work it waited on may have ended since the turn looked, with
+        // nothing left to release it.
+        if background {
+            self.release_held_turn(&chat_id, None);
+        }
+    }
+
+    fn tell_settled(&self, settled: SettledTurn) {
+        self.tell(TurnNews::Settled(settled));
+    }
+
+    fn tell(&self, news: TurnNews) {
         if let Ok(handler) = self.inner.on_turn_settled.lock()
             && let Some(handler) = handler.as_ref()
         {
-            handler(settled);
+            handler(news);
+        }
+    }
+
+    /// Tells, of each of `chats`, that no turn of it is held, settling or
+    /// running, when that is so. Decided and told with the held turns
+    /// locked, where every turn's news is told, so news of a turn that
+    /// settled before this comes first, and one held since is not told of.
+    pub(crate) fn tell_unheld(&self, chats: &[String]) {
+        let Ok(held) = self.inner.held_turns.lock() else {
+            return;
+        };
+        for chat_id in chats {
+            let running = self
+                .inner
+                .active
+                .lock()
+                .map_or(true, |active| active.contains_key(chat_id));
+            if !running && !held.turns.contains_key(chat_id) && !held.settling.contains(chat_id) {
+                self.tell(TurnNews::Unheld(chat_id.clone()));
+            }
+        }
+    }
+
+    /// Tells of a chat's held turn as finished once the agent will not take
+    /// another to report on its background work: the process running that
+    /// work is gone, being no longer the chat's or the one `exited` names, or
+    /// it is still the chat's, its work ended and no report is owed.
+    ///
+    /// Decided and told with the held turns locked, as [`Self::settled`]
+    /// records and tells, so a turn that settles meanwhile is either seen
+    /// first, replacing the held one, or told of after it. Under that lock it
+    /// takes the sessions, then the chat's router, and under that the active
+    /// turns, the order a turn starting from the router takes them in;
+    /// nothing takes the held turns while holding any of them.
+    fn release_held_turn(&self, chat_id: &str, exited: Option<&Arc<Mutex<Router>>>) {
+        let Ok(mut held) = self.inner.held_turns.lock() else {
+            return;
+        };
+        if held.settling.contains(chat_id) {
+            return;
+        }
+        let Some((_, process)) = held.turns.get(chat_id) else {
+            return;
+        };
+        let current = self.router(chat_id);
+        let is = |router: &Arc<Mutex<Router>>| {
+            process
+                .as_ref()
+                .is_some_and(|process| std::ptr::eq(process.as_ptr(), Arc::as_ptr(router)))
+        };
+        let gone = exited.is_some_and(is) || !current.as_ref().is_some_and(is);
+        // Held while the active turns are read: Claude's own report turn
+        // starts with the router held, so it is either running by then or
+        // has not begun, and then nothing is owed.
+        let router = match current.as_ref().map(|router| router.lock()) {
+            Some(Ok(router)) => Some(router),
+            Some(Err(_)) => return,
+            None => None,
+        };
+        let running = self
+            .inner
+            .active
+            .lock()
+            .map_or(true, |active| active.contains_key(chat_id));
+        if running {
+            return;
+        }
+        let owed = router
+            .as_ref()
+            .is_none_or(|router| !router.ended && (!router.tasks.is_empty() || router.report_due));
+        if !gone && owed {
+            return;
+        }
+        if let Some((turn, _)) = held.turns.remove(chat_id) {
+            self.tell_settled(SettledTurn {
+                background: false,
+                released: true,
+                ..turn
+            });
         }
     }
 
@@ -3963,6 +4186,45 @@ mod tests {
     }
 
     #[test]
+    fn only_a_chat_with_no_turn_held_or_settling_is_told_of_as_unheld() {
+        let root = std::env::temp_dir().join(format!("xd-unheld-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let runtime = TurnRuntime::new(
+            store,
+            Arc::new(EventBus::default()),
+            Arc::new(SecretsStore::new(None)),
+        );
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let sink = heard.clone();
+        runtime.set_turn_settled_handler(Box::new(move |news| {
+            if let TurnNews::Unheld(chat) = news {
+                sink.lock().unwrap().push(chat);
+            }
+        }));
+        {
+            let mut held = runtime.inner.held_turns.lock().unwrap();
+            let turn = SettledTurn {
+                chat_id: "held".into(),
+                reply: "Waiting.".into(),
+                error: None,
+                waiting: false,
+                stopped: false,
+                quiet: false,
+                background: true,
+                released: false,
+            };
+            held.turns.insert("held".into(), (turn, None));
+            held.settling.insert("settling".into());
+        }
+        runtime.tell_unheld(&["held".into(), "settling".into(), "free".into()]);
+        assert_eq!(*heard.lock().unwrap(), ["free"]);
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_failed_start_is_told_of_after_the_turn_still_ending() {
         let root =
             std::env::temp_dir().join(format!("xd-start-failure-order-{}", std::process::id()));
@@ -3977,8 +4239,10 @@ mod tests {
         ));
         let (told, heard) = std::sync::mpsc::channel();
         let told = Mutex::new(told);
-        runtime.set_turn_settled_handler(Box::new(move |settled| {
-            let _ = told.lock().unwrap().send(settled.error.is_some());
+        runtime.set_turn_settled_handler(Box::new(move |news| {
+            if let TurnNews::Settled(settled) = news {
+                let _ = told.lock().unwrap().send(settled.error.is_some());
+            }
         }));
         // A turn ending holds the chat's succession until it has been told of.
         let succession = runtime.succession("chat");
@@ -3995,6 +4259,8 @@ mod tests {
             waiting: false,
             stopped: false,
             quiet: false,
+            background: false,
+            released: false,
         });
         drop(ending);
         reporter.join().unwrap();
@@ -5495,6 +5761,165 @@ read next"#,
         wait_for("the idle agent to be stopped", || {
             agent.release_any_quiet() == 1
         });
+    }
+
+    /// Collects every settled turn the runtime tells of.
+    #[cfg(unix)]
+    fn settled_turns(runtime: &TurnRuntime) -> Arc<Mutex<Vec<SettledTurn>>> {
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let sink = told.clone();
+        runtime.set_turn_settled_handler(Box::new(move |news| {
+            if let TurnNews::Settled(settled) = news {
+                sink.lock().unwrap().push(settled);
+            }
+        }));
+        told
+    }
+
+    /// A turn that ends while the agent's own background work goes on is not
+    /// its last word: the turn it takes once that work ends replaces it.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_left_waiting_on_background_work_gives_way_to_the_report_after_it() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Waiting for the tests."}}]}}}}'
+echo '{{"type":"result","subtype":"success","result":"Waiting for the tests."}}'
+read poke
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_shell","status":"completed"}}'
+{}
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Tests pass."}}]}}}}'
+echo '{{"type":"result","subtype":"success","result":"Tests pass."}}'
+read next"#,
+            KeptAgent::INIT,
+            KeptAgent::INIT,
+        ));
+        let told = settled_turns(&agent.runtime);
+        agent.send_and_finish("run the tests");
+        wait_for("the first turn to be told of", || {
+            !told.lock().unwrap().is_empty()
+        });
+        {
+            let told = told.lock().unwrap();
+            assert!(told[0].background, "{told:?}");
+            assert_eq!(told[0].reply, "Waiting for the tests.");
+        }
+
+        agent.poke();
+        wait_for("the report on the tests", || {
+            told.lock().unwrap().len() == 2
+        });
+        agent.wait_for_turn_end();
+        // Only the report says the agent is done; the held turn is not told
+        // of again once its work ends.
+        std::thread::sleep(Duration::from_millis(200));
+        let told = told.lock().unwrap();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert!(!told[1].background);
+        assert_eq!(told[1].reply, "Tests pass.");
+    }
+
+    /// A task that ends just before the turn does still owes the report turn
+    /// Claude takes on it, so the turn is held all the same.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_whose_task_ended_just_before_it_waits_for_the_report_on_it() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_shell","status":"completed"}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Waiting for the tests."}}]}}}}'
+echo '{{"type":"result","subtype":"success","result":"Waiting for the tests."}}'
+read poke
+{}
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Tests pass."}}]}}}}'
+echo '{{"type":"result","subtype":"success","result":"Tests pass."}}'
+read next"#,
+            KeptAgent::INIT,
+            KeptAgent::INIT,
+        ));
+        let told = settled_turns(&agent.runtime);
+        agent.send_and_finish("run the tests");
+        wait_for("the first turn to be told of", || {
+            !told.lock().unwrap().is_empty()
+        });
+        assert!(told.lock().unwrap()[0].background, "{told:?}");
+
+        agent.poke();
+        wait_for("the report on the tests", || {
+            told.lock().unwrap().len() == 2
+        });
+        agent.wait_for_turn_end();
+        std::thread::sleep(Duration::from_millis(200));
+        let told = told.lock().unwrap();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert!(!told[1].background);
+        assert_eq!(told[1].reply, "Tests pass.");
+    }
+
+    /// A process that ends with its turn, while it owed a report on a task,
+    /// will never take that turn: the turn is told of as finished.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_whose_process_ends_with_it_is_not_left_held() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_shell","status":"completed"}}'
+{}"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        let told = settled_turns(&agent.runtime);
+        agent.send("first");
+        wait_for("the turn to be told of as finished", || {
+            told.lock()
+                .unwrap()
+                .last()
+                .is_some_and(|turn| !turn.background)
+        });
+        let told = told.lock().unwrap();
+        assert_eq!(told.last().unwrap().reply, "Answer.", "{told:?}");
+        assert_eq!(
+            told.iter().filter(|turn| !turn.background).count(),
+            1,
+            "{told:?}"
+        );
+    }
+
+    /// When the process goes with its background work, no turn will report
+    /// on it, so the held turn is told of as the agent's last.
+    #[cfg(unix)]
+    #[test]
+    fn a_held_turn_is_told_of_as_finished_once_its_process_ends() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+{}
+read poke"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        let told = settled_turns(&agent.runtime);
+        agent.send_and_finish("first");
+        wait_for("the turn to be told of", || {
+            !told.lock().unwrap().is_empty()
+        });
+        assert!(told.lock().unwrap()[0].background);
+
+        agent.poke();
+        wait_for("the held turn to be told of again", || {
+            told.lock().unwrap().len() == 2
+        });
+        let told = told.lock().unwrap();
+        assert!(!told[1].background, "{told:?}");
+        assert_eq!(told[1].reply, "Answer.");
+        assert_eq!(told[1].chat_id, agent.chat);
     }
 
     /// An update restart stops every kept process, so a background task that
