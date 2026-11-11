@@ -309,8 +309,14 @@ internal fun ChatScreen(
         (if (state.hasOlderMessages) 1 else 0) + (if (state.error != null) 1 else 0)
     // The working row sits below the last message, so it is what "the bottom"
     // means while a turn runs.
-    // Between turns, the same place says what the agent still runs in the background.
-    val waitingOn = if (state.working) 0 else backgroundTasks
+    // The chat's agent chats at work or waiting on the user, for the tray.
+    val trayWorkers = remember(agentChats) {
+        agentChats.values.filter { it.working || com.restartfu.xd.model.AgentsTray.needsYou(it) }
+    }
+    // Between turns, the same place says what the agent still runs in the
+    // background, unless the agents tray already lists it.
+    val trayShown = runningAgents.isNotEmpty() || trayWorkers.isNotEmpty()
+    val waitingOn = com.restartfu.xd.model.backgroundRowCount(state.working, trayShown, backgroundTasks)
     val trailingItemCount = if (state.working || waitingOn > 0) 1 else 0
     val lastTranscriptIndex = leadingItemCount + rows.lastIndex + trailingItemCount
     // Whether new output keeps the end in view. Only the reader's own drags
@@ -548,7 +554,7 @@ internal fun ChatScreen(
                         compact = sessionChats != null,
                         // The chat's agent chats as the tree has them now: their
                         // rows may be far up the chat, or not loaded at all.
-                        workers = agentChats.values.filter { it.working || com.restartfu.xd.model.AgentsTray.needsYou(it) },
+                        workers = trayWorkers,
                         onOpenChat = openChat,
                     )
                     state.interactions.firstOrNull()?.let { request -> InteractionCard(request, model) }

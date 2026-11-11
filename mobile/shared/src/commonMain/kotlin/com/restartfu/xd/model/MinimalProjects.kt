@@ -64,6 +64,14 @@ public data class MinimalSession(
 public fun backgroundTasksLabel(count: Int): String =
     "Waiting on $count background task${if (count == 1) "" else "s"}"
 
+/**
+ * How many background tasks the row below the chat names: between turns, the
+ * background agents and shells still running, unless the agents tray already
+ * lists what runs, which the row would only repeat. As on the desktop.
+ */
+public fun backgroundRowCount(working: Boolean, trayShown: Boolean, waitingOn: Int): Int =
+    if (working || trayShown) 0 else waitingOn
+
 /** A settled session on the shelf, with the project it belongs to. */
 public data class SettledSession(
     val project: MinimalProject,
