@@ -27850,6 +27850,7 @@ Binary files /dev/null and b/image.png differ\n";
             settled_at: None,
             auto_settle_disabled: false,
             paused: false,
+            quota_reached: false,
             pull_requests: Vec::new(),
         };
         let command = |request: u64, chat: &str| {
