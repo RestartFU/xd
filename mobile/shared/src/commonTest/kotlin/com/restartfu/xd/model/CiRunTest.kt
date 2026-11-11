@@ -48,6 +48,14 @@ class CiRunTest {
         )!!
         assertEquals("Waiting for GitHub to show abc1234.", waiting.summary)
         assertNull(CiRun.parse("ci_run\nnot json"))
+        // A list cut short: the host's counts cover every check.
+        val long = CiRun.parse(
+            "ci_run\n" + """{"url":"https://github.com/o/r/pull/7","status":"running",""" +
+                """"counts":{"failed":0,"pending":1,"passed":60,"skipped":0},""" +
+                """"checks":[{"name":"slow","state":"pending"},{"name":"a","state":"passed"}]}""",
+        )!!
+        assertEquals(59, long.unlisted)
+        assertEquals("1 of 61 checks running", long.summary)
         assertNull(CiRun.parse("ci_run\n" + """{"url":"http://x","status":"running"}"""))
     }
 }

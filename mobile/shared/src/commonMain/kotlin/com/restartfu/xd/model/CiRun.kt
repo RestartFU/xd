@@ -35,7 +35,15 @@ public data class CiRun(
     val note: String?,
     val startedAt: Long?,
     val finishedAt: Long?,
+    /** Every check by state, counted by the host: the list may be cut short. */
+    val counts: Map<CiState, Int> = emptyMap(),
 ) {
+    private fun count(state: CiState): Int = counts[state] ?: checks.count { it.state == state }
+
+    /** Checks the host left off the list. */
+    val unlisted: Int
+        get() = (CiState.entries.sumOf { count(it) } - checks.size).coerceAtLeast(0)
+
     /** The pull request's checks page, which the card opens. */
     val checksUrl: String get() = "$url/checks"
 
@@ -44,11 +52,12 @@ public data class CiRun(
         get() {
             note?.let { return it }
             if (checks.isEmpty()) return "Waiting for checks to start."
-            val running = checks.count { it.state == CiState.RUNNING }
-            val failed = checks.count { it.state == CiState.FAILED }
-            val passed = checks.count { it.state == CiState.PASSED }
+            val running = count(CiState.RUNNING)
+            val failed = count(CiState.FAILED)
+            val passed = count(CiState.PASSED)
+            val total = checks.size + unlisted
             return when {
-                running > 0 -> "$running of ${checks.size} checks running"
+                running > 0 -> "$running of $total checks running"
                 failed > 0 -> "$failed failed, $passed passed"
                 else -> "$passed passed"
             }
@@ -95,6 +104,16 @@ public data class CiRun(
                     ?: waiting.takeIf(String::isNotBlank)?.let { "Waiting for GitHub to show $it." },
                 startedAt = (record["started_at"] as? JsonPrimitive)?.longOrNull,
                 finishedAt = (record["finished_at"] as? JsonPrimitive)?.longOrNull,
+                counts = (record["counts"] as? JsonObject)?.let { counts ->
+                    listOf(
+                        "pending" to CiState.RUNNING,
+                        "passed" to CiState.PASSED,
+                        "failed" to CiState.FAILED,
+                        "skipped" to CiState.SKIPPED,
+                    ).mapNotNull { (key, state) ->
+                        (counts[key] as? JsonPrimitive)?.longOrNull?.let { state to it.toInt() }
+                    }.toMap()
+                }.orEmpty(),
             )
         }
     }

@@ -1326,9 +1326,10 @@ checks without a `gh run watch` or polling loop in its shell. It sends
 Without `pull_request`, the daemon watches the pull request of the branch
 checked out in the chat's workdir. It reads the pull request with
 `gh pr view --json …,statusCheckRollup`, so it needs the GitHub CLI signed in.
-When every check on the head has already finished, each with a completion
-time at least two minutes old, it answers `"finished":true` with `report`, the
-message below, and keeps no watch. Otherwise it records the watch, which a
+When the chat has no watch of it yet and every check on the head has already
+finished, each with a completion time at least two minutes old, it answers
+`"finished":true` with `report`, the message below, adds a finished card and
+keeps no watch. Otherwise it records the watch, which a
 restarted daemon resumes, and asks GitHub every 15 seconds. The watch follows
 the pull request's head. When the chat's branch tracks the pull request's head
 branch in its head repository, and that upstream holds a commit newer than the
@@ -1340,9 +1341,9 @@ still for a minute: by their completion times, or, when a check gives none, by
 the watch having seen the same finished checks for that long. Before the
 report goes out, the daemon reads the pull request once more and goes on
 watching if anything changed, or if the chat's checkout pushed again since the
-poll that decided. A report is final for the head it names: a change made on
-GitHub alone in the moment it is stored is not followed, so an agent that
-pushes again calls `watch_ci` again. A chat watches at most 8 pull requests at
+poll that decided. A report is final for the head it names: a change in the
+moment it is stored, whether a push from the checkout or a change on GitHub
+alone, is not followed, so an agent that pushes again calls `watch_ci` again. A chat watches at most 8 pull requests at
 once, and asking again for the same one starts its watch over. Deleting the
 chat ends its watches without a report.
 
@@ -1363,7 +1364,10 @@ changes:
 
 `status` is `running`, `passed`, `failed` or `stopped`; each check's `state` is
 `pending`, `passed`, `failed` (with GitHub's `conclusion` in words) or
-`skipped`. A running card waiting for GitHub to show a pushed commit has
+`skipped`. `counts` gives how many checks are `failed`, `pending`, `passed` and
+`skipped`; `checks` lists failed ones first, then pending, then the rest, at
+most 50, so clients show how many more there are. A running card waiting for
+GitHub to show a pushed commit has
 `waiting_for`, its short hash. A finished or stopped card has `finished_at`,
 and a stopped one `reason`. Asking again for the same pull request stops the
 earlier card with the reason "Watched again below." and starts a new one; an

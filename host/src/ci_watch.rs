@@ -186,9 +186,27 @@ fn card(url: &str, status: Option<&Status>, phase: Phase<'_>, started_at: i64) -
         if !status.title.is_empty() {
             record["title"] = json!(status.title);
         }
-        record["checks"] = status
-            .checks
-            .iter()
+        // Failed and running checks first, so a long list cut short keeps the
+        // ones worth seeing; the counts cover them all.
+        let rank = |check: &&Check| -> u8 {
+            match check.outcome {
+                Outcome::Failed(_) => 0,
+                Outcome::Pending => 1,
+                Outcome::Passed => 2,
+                Outcome::Skipped => 3,
+            }
+        };
+        let mut checks = status.checks.iter().collect::<Vec<_>>();
+        checks.sort_by_key(rank);
+        let count = |wanted: u8| checks.iter().filter(|check| rank(check) == wanted).count();
+        record["counts"] = json!({
+            "failed": count(0),
+            "pending": count(1),
+            "passed": count(2),
+            "skipped": count(3),
+        });
+        record["checks"] = checks
+            .into_iter()
             .take(CARD_CHECKS)
             .map(|check| {
                 let (state, conclusion) = match &check.outcome {
@@ -351,7 +369,10 @@ impl Engine {
                     && !head_contains(store, &workdir, &status.head, commit)
             });
         let mut status = status;
-        if expected.is_none() && status.complete() && settled_long_ago(&status) {
+        // Only with no watch of it already: one that exists has promised a
+        // report, which only its own end, stored with the report, may keep.
+        if earlier.is_none() && expected.is_none() && status.complete() && settled_long_ago(&status)
+        {
             let text = report(&Ending::Finished(status.clone()), store, &workdir);
             // Answered at once only if nothing moved while the report was
             // written, and no other request changed the watch meanwhile:

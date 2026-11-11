@@ -119,6 +119,14 @@ internal fun CiCard(run: CiRun, openLink: (String) -> Unit) {
                         )
                     }
                 }
+                if (run.unlisted > 0) {
+                    Text(
+                        "${run.unlisted} more",
+                        modifier = Modifier.padding(start = 14.dp),
+                        color = MaterialTheme.colorScheme.outline,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {

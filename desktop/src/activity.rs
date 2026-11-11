@@ -667,12 +667,32 @@ fn parse_ci_run(content: &str, now: i64) -> Option<ActivityCard> {
             })
         })
         .collect::<Vec<_>>();
-    let count = |kind: ActivityKind| items.iter().filter(|item| item.kind == kind).count();
-    let (running, failed, passed) = (
-        count(ActivityKind::Running),
-        count(ActivityKind::Failure),
-        count(ActivityKind::Success),
+    // The host counts every check; the list may be cut short.
+    let listed = |kind: ActivityKind| items.iter().filter(|item| item.kind == kind).count();
+    let counted = |key: &str, kind: ActivityKind| {
+        record
+            .get("counts")
+            .and_then(|counts| counts.get(key))
+            .and_then(Value::as_u64)
+            .map_or_else(|| listed(kind), |count| count as usize)
+    };
+    let (running, failed, passed, skipped) = (
+        counted("pending", ActivityKind::Running),
+        counted("failed", ActivityKind::Failure),
+        counted("passed", ActivityKind::Success),
+        counted("skipped", ActivityKind::Finished),
     );
+    let total = running + failed + passed + skipped;
+    let mut items = items;
+    if total > items.len() {
+        items.push(ActivityItem {
+            kind: ActivityKind::Finished,
+            name: format!("{} more", total - items.len()),
+            status: String::new(),
+            elapsed: None,
+            detail: None,
+        });
+    }
     let detail = if let Some(reason) = record.get("reason").and_then(Value::as_str) {
         reason.to_owned()
     } else if let Some(commit) = record.get("waiting_for").and_then(Value::as_str) {
@@ -680,7 +700,7 @@ fn parse_ci_run(content: &str, now: i64) -> Option<ActivityCard> {
     } else if items.is_empty() {
         "Waiting for checks to start.".into()
     } else if running > 0 {
-        format!("{running} of {} checks running", items.len())
+        format!("{running} of {total} checks running")
     } else if failed > 0 {
         format!("{failed} failed, {passed} passed")
     } else {
@@ -1236,5 +1256,15 @@ mod tests {
         );
         assert_eq!(card.name, "Pull request");
         assert!(parse_ci_run("ci_run\nnot json", 0).is_none());
+        // A list cut short says how many more there are; the counts cover all.
+        let long = json!({"url": "https://github.com/o/r/pull/7", "status": "running",
+            "counts": {"failed": 0, "pending": 1, "passed": 60, "skipped": 0},
+            "checks": [{"name": "slow", "state": "pending"}, {"name": "a", "state": "passed"}]});
+        let card = ActivityCard::parse(&format!("ci_run\n{long}"));
+        assert_eq!(card.detail, "1 of 61 checks running");
+        assert_eq!(
+            card.items.last().map(|item| item.name.as_str()),
+            Some("59 more")
+        );
     }
 }
