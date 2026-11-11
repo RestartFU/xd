@@ -12926,6 +12926,16 @@ mod tests {
             .find(|entry| entry["id"] == chat)
             .map(|entry| entry["folder"].as_str().unwrap().to_owned())
             .unwrap_or_else(|| panic!("chat missing from tree: {folder}"));
+        // The tree reads a plain checkout's branch from its files, and finds
+        // no repository at all without asking Git unless the walk up from a
+        // temporary directory crosses a mount. A repository whose config
+        // includes another file is always left to Git, wherever it lives.
+        let workdir = PathBuf::from(store.chat(&chat).unwrap()["workdir"].as_str().unwrap());
+        let (status, _, error) = run_git(&workdir, &["init", "-q", "-b", "main"]).unwrap();
+        assert!(status.success(), "{}", String::from_utf8_lossy(&error));
+        let (status, _, error) =
+            run_git(&workdir, &["config", "include.path", "absent.inc"]).unwrap();
+        assert!(status.success(), "{}", String::from_utf8_lossy(&error));
         let lent = std::sync::Arc::new(Mutex::new(Vec::new()));
         let (hook_store, hook_lent) = (store.clone(), lent.clone());
         BEFORE_GIT_WORKTREES.set(Some(Box::new(move || {
