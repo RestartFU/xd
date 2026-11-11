@@ -3314,14 +3314,30 @@ impl TurnRuntime {
     /// Decided and told with the held turns locked, as [`Self::settled`]
     /// records and tells, so a turn that settles meanwhile is either seen
     /// first, replacing the held one, or told of after it. Under that lock it
-    /// takes the active turns, and then the sessions and a router, one at a
-    /// time; nothing takes the held turns while holding any of them.
+    /// takes the sessions, then the chat's router, and under that the active
+    /// turns, the order a turn starting from the router takes them in;
+    /// nothing takes the held turns while holding any of them.
     fn release_held_turn(&self, chat_id: &str, exited: Option<&Arc<Mutex<Router>>>) {
         let Ok(mut held) = self.inner.held_turns.lock() else {
             return;
         };
         let Some((_, process)) = held.get(chat_id) else {
             return;
+        };
+        let current = self.router(chat_id);
+        let is = |router: &Arc<Mutex<Router>>| {
+            process
+                .as_ref()
+                .is_some_and(|process| std::ptr::eq(process.as_ptr(), Arc::as_ptr(router)))
+        };
+        let gone = exited.is_some_and(is) || !current.as_ref().is_some_and(is);
+        // Held while the active turns are read: Claude's own report turn
+        // starts with the router held, so it is either running by then or
+        // has not begun, and then nothing is owed.
+        let router = match current.as_ref().map(|router| router.lock()) {
+            Some(Ok(router)) => Some(router),
+            Some(Err(_)) => return,
+            None => None,
         };
         let running = self
             .inner
@@ -3331,22 +3347,11 @@ impl TurnRuntime {
         if running {
             return;
         }
-        let current = self.router(chat_id);
-        let is = |router: &Arc<Mutex<Router>>| {
-            process
-                .as_ref()
-                .is_some_and(|process| std::ptr::eq(process.as_ptr(), Arc::as_ptr(router)))
-        };
-        let gone = exited.is_some_and(is) || !current.as_ref().is_some_and(is);
-        if !gone {
-            let owed = current.is_none_or(|router| {
-                router
-                    .lock()
-                    .map_or(true, |router| !router.tasks.is_empty() || router.report_due)
-            });
-            if owed {
-                return;
-            }
+        let owed = router
+            .as_ref()
+            .is_none_or(|router| !router.tasks.is_empty() || router.report_due);
+        if !gone && owed {
+            return;
         }
         if let Some((turn, _)) = held.remove(chat_id) {
             self.tell_settled(SettledTurn {

@@ -200,6 +200,11 @@ pub struct Engine {
     terminals: TerminalManager,
     chat_execution: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     session_resources: Arc<Mutex<()>>,
+    /// Held while the answer to `resume-interrupted` is carried out, and by
+    /// anything handing chats their agents' reports, which waits for it:
+    /// the answer clears every chat's restart mark before it resumes them
+    /// one by one, and a report must not start a chat in between.
+    restart_answer: Mutex<()>,
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
     chat_titles: ChatTitleService,
@@ -261,6 +266,7 @@ impl Engine {
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
             session_resources: Arc::new(Mutex::new(())),
+            restart_answer: Mutex::new(()),
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
             chat_titles: ChatTitleService::new(None, events.clone()),
@@ -333,6 +339,7 @@ impl Engine {
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
             session_resources,
+            restart_answer: Mutex::new(()),
             secrets,
             git_drafts,
             chat_titles,
@@ -701,6 +708,10 @@ impl Engine {
     /// client reconnecting later, or turning the setting on later, does not
     /// restart work from an old interruption.
     fn resume_interrupted(&self, request: &Value) -> Value {
+        let _answer = self
+            .restart_answer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let chats = self
             .store
             .as_ref()

@@ -333,6 +333,10 @@ impl Engine {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return Err("Rust host state storage is not configured.".into());
         };
+        let _answer = self
+            .restart_answer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let gate = self.chat_execution_gate(parent)?;
         let _execution = gate
             .lock()
@@ -434,6 +438,10 @@ impl Engine {
                 let Some(store) = engine.store.as_ref() else {
                     return;
                 };
+                let _answer = engine
+                    .restart_answer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 for chat_id in store.chats_with_waiting_reports().unwrap_or_default() {
                     if let Err(error) = engine.start_waiting_reports(&chat_id, false) {
                         eprintln!(
