@@ -119,6 +119,17 @@ class MinimalProjectsTest {
     }
 
     @Test
+    fun backgroundRowStaysAwayWhileTheTrayListsTheWork() {
+        assertEquals(2, backgroundRowCount(working = false, listed = 0, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = false, listed = 2, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = false, listed = 3, waitingOn = 2))
+        // One task the transcript does not show is still worth the row.
+        assertEquals(2, backgroundRowCount(working = false, listed = 1, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = true, listed = 0, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = false, listed = 0, waitingOn = 0))
+    }
+
+    @Test
     fun deletingOriginalChatKeepsSessionAndSharedTerminalIdentity() {
         val snapshot = TreeSnapshot(
             chats = listOf(chat("sibling", "project", "Review", "claude").copy(sessionId = "session")),
