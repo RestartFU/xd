@@ -29,7 +29,10 @@ class HostIdentityTest {
     @Test
     fun sshHostsUseTheirPinnedKeyOrElseWhereTheyAreReached() {
         val pinned = connection(SshAuthentication.Password("x"), SshHostKey("ssh-ed25519", byteArrayOf(1), "SHA256:ccc"))
-        assertEquals("key:SHA256:ccc", hostIdentity(pinned))
+        assertEquals("key:SHA256:ccc:xd:8765", hostIdentity(pinned))
+        // Two accounts on one machine share its key but run their own daemons.
+        assertNotEquals(hostIdentity(pinned), hostIdentity(pinned.copy(username = "bob")))
+        assertNotEquals(hostIdentity(pinned), hostIdentity(pinned.copy(port = 22)))
         assertEquals("ssh:xd@192.168.1.20:8765", hostIdentity(connection(SshAuthentication.Password("x"))))
     }
 }
