@@ -44,6 +44,8 @@ pub const TAB_BAR_HEIGHT: f32 = 43.0;
 /// Page tabs keep one width so a loading title does not move its neighbours.
 const BROWSER_TAB_WIDTH: f32 = 148.0;
 
+#[cfg(any(target_os = "linux", test))]
+mod agent;
 #[cfg(target_os = "linux")]
 mod chromium;
 #[cfg(target_os = "linux")]
@@ -444,6 +446,65 @@ impl BrowserPane {
         self.visible = false;
         for tab in &self.tabs {
             tab.display.shutdown();
+        }
+    }
+
+    /// Runs an agent's browser command on the selected page, and passes
+    /// `reply` what happened. Commands wait on the page, so they run on a
+    /// thread of their own. Opening a page shows it, in a new tab if asked.
+    pub fn run_agent_command(
+        &mut self,
+        mut command: serde_json::Value,
+        reply: impl FnOnce(Result<serde_json::Value, String>) + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if command["action"] == "navigate" {
+            match command["url"].as_str().map(normalize_url) {
+                Some(Ok(url)) => command["url"] = serde_json::Value::String(url),
+                Some(Err(error)) => return reply(Err(error)),
+                None => return reply(Err("Pass url, the address to open.".into())),
+            }
+            if command["new_tab"] == true {
+                self.add_tab(None, window, cx);
+            } else if self.auxiliary.is_some() {
+                self.select_auxiliary(None, cx);
+            }
+        }
+        let tab = &self.tabs[self.session.active_tab];
+        let native = tab.display.native().filter(|native| !native.is_disposed());
+        let Some(native) = native else {
+            let error = tab.entity.read(cx).error.clone();
+            return reply(Err(
+                error.unwrap_or_else(|| "The browser has not started.".into())
+            ));
+        };
+        #[cfg(target_os = "linux")]
+        native.with_view(move |view| {
+            let page = view.devtools();
+            let spawned = std::thread::Builder::new()
+                .name("xd-browser-agent".into())
+                .spawn(move || {
+                    let outcome = page
+                        .wait_until_started(Duration::from_secs(10))
+                        .and_then(|()| {
+                            page.wake();
+                            let outcome = agent::run(&page, &command);
+                            page.sleep();
+                            outcome
+                        });
+                    reply(outcome.map(agent::Outcome::into_value));
+                });
+            if let Err(error) = spawned {
+                eprintln!("xd: could not run a browser command: {error}");
+            }
+        });
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (native, command);
+            reply(Err(
+                "Agents can use xd's browser only on Linux, where it is Chromium.".into(),
+            ));
         }
     }
 

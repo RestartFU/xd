@@ -1305,6 +1305,52 @@ an error instead. A host that honors this field adds a top-level
 `"folder_reorder":true` to `tree`; older hosts ignore the field and would move the
 folder, so don't offer reordering without it.
 
+
+### The chat's browser
+
+The same server gives an agent tools for its chat's integrated browser. The
+desktop runs them, so the daemon relays each one:
+
+| Tool | `action` | Does |
+| --- | --- | --- |
+| `browser_navigate` | `navigate` | Opens `url` (`http`/`https`; no scheme means https, or http for localhost), in a new tab with `new_tab`, and waits for it to load. |
+| `browser_history` | `history` | Goes `back` or `forward`, or `reload`s, as `direction` says. |
+| `browser_snapshot` | `snapshot` | Reads the page as text, numbering its controls as refs such as `e12`. |
+| `browser_click` | `click` | Clicks the middle of `ref`, twice with `double`. |
+| `browser_type` | `type` | Replaces `ref`'s text with `text`, or adds to it with `append`, and presses Enter with `submit`. |
+| `browser_press_key` | `press_key` | Presses `key`, a key name such as `Enter` or one character. |
+| `browser_evaluate` | `evaluate` | Runs `expression` in the page and returns its value as JSON. |
+| `browser_screenshot` | `screenshot` | Returns a JPEG of the view, or of the page up to 6000 CSS pixels tall with `full_page`. |
+
+All but `evaluate` and `screenshot` answer with a snapshot of the page
+afterwards. The server sends the tool's arguments, with `action`, as `command`:
+
+```json
+{"op":"browser","chat":"lead","command":{"action":"click","ref":"e3"}}
+{"ok":true,"result":{"text":"Page: Shop\nAddress: http://localhost:3000/\n\n…"}}
+```
+
+Only local connections may send `browser`. A desktop offers its browser with
+`browser-provider` once connected; the daemon sends each command to the desktop
+that offered last and is still connected, as a `browser-command` event for that
+connection only, and waits up to two minutes:
+
+```json
+{"event":"browser-command","request":4,"chat":"lead","command":{"action":"click","ref":"e3"}}
+{"op":"browser-result","request":4,"result":{"text":"…","image":{"data":"<base64>","mime_type":"image/jpeg"}}}
+```
+
+`browser-result` carries `result` or `error`, and only the connection that was
+asked can answer. Both are answered as soon as they are read. With no desktop
+offering, `browser` fails at once, and it fails as soon as the desktop that was
+asked disconnects. The MCP server turns `result.text` and `result.image` into
+text and image content.
+
+The desktop runs the command on the selected tab of the chat's browser pane,
+opening the pane for that chat; a chat not on screen keeps its pane hidden while
+its page still loads and paints. It drives the page through Chromium's DevTools
+protocol, so only the Linux desktop offers its browser. A remote host's agents
+are told that a localhost page is on the user's computer.
 ## Events
 
 Chat-scoped events carry a `chat` member; ignore those for other chats.

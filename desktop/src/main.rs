@@ -2613,6 +2613,8 @@ struct XdDesktop {
     diff_panel: Option<DiffPanel>,
     terminal_panel: Option<TerminalPanel>,
     browser_panes: HashMap<String, Entity<BrowserPane>>,
+    /// The window, for work that arrives without one, such as agents' browser commands.
+    window_handle: gpui::AnyWindowHandle,
     browser_drag: Option<(f32, u16)>,
     /// Drag origin and starting width while resizing the catalog sidebar.
     catalog_drag: Option<(f32, u16)>,
@@ -2685,6 +2687,33 @@ struct XdDesktop {
     /// restarts the clock instead of inheriting the old one's.
     expiring_error: Option<String>,
     error_generation: u64,
+}
+
+/// Told to a remote host's agent whose page is on a local address.
+const REMOTE_LOCALHOST_NOTE: &str = "Note: this browser runs on the user's computer, not on the \
+machine you run on, so a localhost address here reaches the user's computer.";
+
+/// Whether the page a browser result describes, by its `Address:` line, is on
+/// the computer showing it.
+fn browser_page_is_local(text: &str) -> bool {
+    text.lines()
+        .find_map(|line| line.strip_prefix("Address: "))
+        .and_then(|address| url::Url::parse(address).ok())
+        .is_some_and(|url| match url.host() {
+            Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+            Some(url::Host::Ipv4(host)) => host.is_loopback(),
+            Some(url::Host::Ipv6(host)) => host.is_loopback(),
+            None => false,
+        })
+}
+
+/// Lets the host's agents use the integrated browser where it is Chromium,
+/// which they drive through the DevTools protocol: on Linux.
+fn offer_browser(host: &HostHandle) {
+    #[cfg(target_os = "linux")]
+    let _ = host.offer_browser();
+    #[cfg(not(target_os = "linux"))]
+    let _ = host;
 }
 
 impl XdDesktop {
@@ -3327,6 +3356,7 @@ impl XdDesktop {
             diff_panel: None,
             terminal_panel: None,
             browser_panes: HashMap::new(),
+            window_handle: browser_window,
             browser_drag: None,
             catalog_drag: None,
             browser_restore_focus: false,
@@ -3858,6 +3888,7 @@ impl XdDesktop {
                 this.connection_in_flight = false;
                 match result {
                     Ok((host, updates, started_host)) => {
+                        offer_browser(&host);
                         this.host = Some(host);
                         this._started_host = Some(started_host);
                         this.reconnect_attempt = 0;
@@ -3974,6 +4005,7 @@ impl XdDesktop {
             return;
         }
         let (host, updates, bridge) = session.into_parts();
+        offer_browser(&host);
         self.remote_host = Some(host);
         self.remote_bridge = Some(bridge);
         self.remote_state = RemoteState::Connected;
@@ -4040,7 +4072,9 @@ impl XdDesktop {
         generation: u64,
         cx: &mut Context<Self>,
     ) {
-        if self.usage_host_update(ChatEndpoint::Remote, &update, cx) {
+        if self.usage_host_update(ChatEndpoint::Remote, &update, cx)
+            || self.browser_host_update(ChatEndpoint::Remote, &update, cx)
+        {
             return;
         }
         let quiet = matches!(
@@ -4305,7 +4339,9 @@ impl XdDesktop {
         if generation != self.connection_generation {
             return;
         }
-        if self.usage_host_update(ChatEndpoint::Local, &update, cx) {
+        if self.usage_host_update(ChatEndpoint::Local, &update, cx)
+            || self.browser_host_update(ChatEndpoint::Local, &update, cx)
+        {
             return;
         }
         let quiet = matches!(
@@ -8723,21 +8759,26 @@ impl XdDesktop {
     }
 
     fn browser_scope_key(&self) -> String {
-        let connection = self.current_connection_key();
         let chat_id = match &self.minimal_route {
             MinimalRoute::Cli { chat_id, .. } => Some(chat_id.as_str()),
             MinimalRoute::Terminal => None,
             _ => self.model.selected_chat.as_deref(),
         };
         match chat_id {
-            Some(chat_id) => self
-                .model
-                .session_for_chat(chat_id)
-                .filter(|session| session.terminal_chat.starts_with("session:"))
-                .map(|session| format!("{connection}/session/{}", session.id))
-                .unwrap_or_else(|| format!("{connection}/chat/{chat_id}")),
-            None => format!("{connection}/browser"),
+            Some(chat_id) => self.chat_browser_scope_key(self.active_endpoint, chat_id),
+            None => format!("{}/browser", self.current_connection_key()),
         }
+    }
+
+    /// The browser pane `chat_id` on `endpoint` shows: its session's, when
+    /// the chat is a tab of one, or its own.
+    fn chat_browser_scope_key(&self, endpoint: ChatEndpoint, chat_id: &str) -> String {
+        let connection = self.connection_key(endpoint);
+        self.endpoint_model(endpoint)
+            .session_for_chat(chat_id)
+            .filter(|session| session.terminal_chat.starts_with("session:"))
+            .map(|session| format!("{connection}/session/{}", session.id))
+            .unwrap_or_else(|| format!("{connection}/chat/{chat_id}"))
     }
 
     fn browser_is_open(&self) -> bool {
@@ -8748,9 +8789,14 @@ impl XdDesktop {
     }
 
     fn set_browser_open(&mut self, open: bool) {
-        let key = self.browser_scope_key();
+        self.set_scope_browser_open(self.browser_scope_key(), open);
+    }
+
+    /// Returns whether the scope's browser was the other way before.
+    fn set_scope_browser_open(&mut self, key: String, open: bool) -> bool {
         let initial_url = self.settings.browser_urls.get(&key).cloned();
-        self.settings
+        let state = self
+            .settings
             .browser_sessions
             .entry(key)
             .or_insert_with(|| BrowserState {
@@ -8759,8 +8805,8 @@ impl XdDesktop {
                     tabs: vec![initial_url],
                     active_tab: 0,
                 },
-            })
-            .open = open;
+            });
+        std::mem::replace(&mut state.open, open) != open
     }
 
     fn close_browser(&mut self, cx: &mut Context<Self>) {
@@ -8847,61 +8893,7 @@ impl XdDesktop {
             return None;
         }
         let colors = self.settings.theme.colors();
-        let pane = if let Some(pane) = self.browser_panes.get(&key) {
-            pane.clone()
-        } else {
-            let session = self
-                .settings
-                .browser_sessions
-                .get(&key)
-                .map(|state| state.session.clone())
-                .unwrap_or_else(|| BrowserSession {
-                    tabs: vec![self.settings.browser_urls.get(&key).cloned()],
-                    active_tab: 0,
-                });
-            let pane = cx.new(|cx| BrowserPane::with_session(session, colors, window, cx));
-            let scope = key.clone();
-            cx.subscribe(&pane, move |this, _, event, cx| match event {
-                BrowserEvent::SessionChanged(session) => {
-                    if let Some(state) = this.settings.browser_sessions.get_mut(&scope)
-                        && state.session != *session
-                    {
-                        state.session = session.clone();
-                        let _ = this.settings.save();
-                    }
-                }
-                BrowserEvent::Close => this.close_browser(cx),
-                BrowserEvent::AuxiliaryClosed(tab) => {
-                    if scope == this.browser_scope_key() && this.native_side_tools_enabled() {
-                        this.close_side_tool(
-                            match tab {
-                                SideTab::Files => NativePane::Files,
-                                SideTab::Changes => NativePane::Diff,
-                            },
-                            cx,
-                        );
-                    }
-                }
-                BrowserEvent::AuxiliarySelected(tab) => {
-                    if scope != this.browser_scope_key()
-                        || (tab.is_some() && !this.native_side_tools_enabled())
-                    {
-                        return;
-                    }
-                    this.select_side_tool(
-                        match tab {
-                            Some(SideTab::Files) => NativePane::Files,
-                            Some(SideTab::Changes) => NativePane::Diff,
-                            None => NativePane::Chat,
-                        },
-                        cx,
-                    );
-                }
-            })
-            .detach();
-            self.browser_panes.insert(key, pane.clone());
-            pane
-        };
+        let pane = self.browser_pane(key, window, cx);
         let side_tab = match self.native_pane {
             NativePane::Files => Some(SideTab::Files),
             NativePane::Diff => Some(SideTab::Changes),
@@ -8915,6 +8907,167 @@ impl XdDesktop {
             pane.set_visible(open);
         });
         Some(pane)
+    }
+
+    /// The browser pane for scope `key`, made the first time it is asked for.
+    fn browser_pane(
+        &mut self,
+        key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<BrowserPane> {
+        if let Some(pane) = self.browser_panes.get(&key) {
+            return pane.clone();
+        }
+        let colors = self.settings.theme.colors();
+        let session = self
+            .settings
+            .browser_sessions
+            .get(&key)
+            .map(|state| state.session.clone())
+            .unwrap_or_else(|| BrowserSession {
+                tabs: vec![self.settings.browser_urls.get(&key).cloned()],
+                active_tab: 0,
+            });
+        let pane = cx.new(|cx| BrowserPane::with_session(session, colors, window, cx));
+        let scope = key.clone();
+        cx.subscribe(&pane, move |this, _, event, cx| match event {
+            BrowserEvent::SessionChanged(session) => {
+                if let Some(state) = this.settings.browser_sessions.get_mut(&scope)
+                    && state.session != *session
+                {
+                    state.session = session.clone();
+                    let _ = this.settings.save();
+                }
+            }
+            BrowserEvent::Close => this.close_browser(cx),
+            BrowserEvent::AuxiliaryClosed(tab) => {
+                if scope == this.browser_scope_key() && this.native_side_tools_enabled() {
+                    this.close_side_tool(
+                        match tab {
+                            SideTab::Files => NativePane::Files,
+                            SideTab::Changes => NativePane::Diff,
+                        },
+                        cx,
+                    );
+                }
+            }
+            BrowserEvent::AuxiliarySelected(tab) => {
+                if scope != this.browser_scope_key()
+                    || (tab.is_some() && !this.native_side_tools_enabled())
+                {
+                    return;
+                }
+                this.select_side_tool(
+                    match tab {
+                        Some(SideTab::Files) => NativePane::Files,
+                        Some(SideTab::Changes) => NativePane::Diff,
+                        None => NativePane::Chat,
+                    },
+                    cx,
+                );
+            }
+        })
+        .detach();
+        self.browser_panes.insert(key, pane.clone());
+        pane
+    }
+
+    /// Takes the browser's part of a host update: an agent's command for its
+    /// chat's browser, and the host's acknowledgements. Returns whether the
+    /// update was one of those.
+    fn browser_host_update(
+        &mut self,
+        endpoint: ChatEndpoint,
+        update: &HostUpdate,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match update {
+            HostUpdate::Reply {
+                kind: RequestKind::BrowserProvider | RequestKind::BrowserResult,
+                ..
+            } => true,
+            HostUpdate::Event { name, body, .. } if name == "browser-command" => {
+                self.receive_browser_command(endpoint, body, cx);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn receive_browser_command(
+        &mut self,
+        endpoint: ChatEndpoint,
+        body: &serde_json::Map<String, Value>,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(request), Some(host)) = (
+            body.get("request").and_then(Value::as_u64),
+            self.endpoint_host(endpoint).cloned(),
+        ) else {
+            return;
+        };
+        let reply = move |outcome: Result<Value, String>| {
+            let _ = host.browser_result(request, outcome);
+        };
+        let Some(chat_id) = body.get("chat").and_then(Value::as_str).map(str::to_owned) else {
+            reply(Err("The command named no chat.".into()));
+            return;
+        };
+        let command = body.get("command").cloned().unwrap_or_default();
+        let window = self.window_handle;
+        let desktop = cx.weak_entity();
+        // Updating the window needs it free, which it is not during this update.
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                let _ = desktop.update(cx, |desktop, cx| {
+                    desktop.run_browser_command(endpoint, &chat_id, command, reply, window, cx);
+                });
+            });
+        });
+    }
+
+    /// Runs an agent's browser command in its chat's browser, which it opens,
+    /// so the user sees what the agent does there whenever they look.
+    fn run_browser_command(
+        &mut self,
+        endpoint: ChatEndpoint,
+        chat_id: &str,
+        command: Value,
+        reply: impl FnOnce(Result<Value, String>) + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = self.chat_browser_scope_key(endpoint, chat_id);
+        let shown = endpoint == self.active_endpoint && key == self.browser_scope_key();
+        if self.set_scope_browser_open(key.clone(), true) {
+            let _ = self.settings.save();
+        }
+        // A remote host's agent runs on another computer than this browser.
+        let elsewhere = endpoint == ChatEndpoint::Remote;
+        let reply = move |outcome: Result<Value, String>| {
+            reply(outcome.map(|mut result| {
+                if elsewhere
+                    && let Some(text) = result["text"].as_str()
+                    && browser_page_is_local(text)
+                {
+                    result["text"] = Value::String(format!("{REMOTE_LOCALHOST_NOTE}\n\n{text}"));
+                }
+                result
+            }))
+        };
+        let pane = self.browser_pane(key, window, cx);
+        pane.update(cx, |pane, cx| {
+            // A pane made here starts out shown; only the chat on screen shows its pane.
+            if !shown {
+                pane.set_visible(false);
+            }
+            pane.run_agent_command(command, reply, window, cx);
+        });
+        if shown {
+            self.sync_browser_pane(window, cx);
+        }
+        cx.notify();
     }
 
     fn minimal_workspace_width(&self, window: &Window) -> f32 {
@@ -27528,6 +27681,104 @@ Binary files /dev/null and b/image.png differ\n";
             assert!(desktop.browser_panes.contains_key(&remote_key));
             assert!(desktop.settings.browser_sessions.contains_key(&remote_key));
         });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn an_agents_browser_command_opens_its_chats_browser_and_is_answered(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::io::BufRead;
+
+        let (host, mut requests) = socket_host("browser-command-test");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        let chat = |id: &str| ChatSummary {
+            id: id.into(),
+            folder: "project".into(),
+            title: None,
+            backend: "claude".into(),
+            branch: None,
+            working: false,
+            terminal_working: false,
+            background_tasks: 0,
+            settled_at: None,
+            auto_settle_disabled: false,
+            paused: false,
+            pull_requests: Vec::new(),
+        };
+        let command = |request: u64, chat: &str| {
+            HostUpdate::Event {
+            name: "browser-command".into(),
+            body: serde_json::json!({"request": request, "chat": chat, "command": {"action": "snapshot"}})
+                .as_object()
+                .unwrap()
+                .clone(),
+            attachments: None,
+        }
+        };
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.browser_sessions.clear();
+            desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.host = Some(host.clone());
+            desktop.model.chats = vec![chat("agent"), chat("watched")];
+            desktop.model.selected_chat = Some("watched".into());
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "project".into(),
+                chat_id: "watched".into(),
+                agent: AgentCli::Claude,
+            };
+            let generation = desktop.connection_generation;
+            desktop.handle_host_update(command(7, "agent"), generation, cx);
+        });
+        cx.run_until_parked();
+        let answer = |requests: &mut std::io::BufReader<std::os::unix::net::UnixStream>| {
+            let mut line = String::new();
+            requests.read_line(&mut line).unwrap();
+            serde_json::from_str::<Value>(&line).unwrap()
+        };
+        // A test window has no engine, so the page cannot run it; the agent
+        // is still answered, with why.
+        let reply = answer(&mut requests);
+        assert_eq!(reply["op"], "browser-result");
+        assert_eq!(reply["request"], 7);
+        assert_eq!(reply["error"], "The browser has not started.");
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            // The agent's chat now shows its browser, without it covering the
+            // chat on screen.
+            let pane = desktop.browser_panes["local/chat/agent"].clone();
+            assert!(!pane.read(cx).is_visible());
+            assert!(desktop.settings.browser_sessions["local/chat/agent"].open);
+            assert!(!desktop.browser_is_open());
+            assert!(desktop.sync_browser_pane(window, cx).is_none());
+
+            let generation = desktop.connection_generation;
+            desktop.handle_host_update(command(8, "watched"), generation, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(answer(&mut requests)["request"], 8);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert!(desktop.browser_is_open());
+            assert!(
+                desktop.browser_panes["local/chat/watched"]
+                    .read(cx)
+                    .is_visible()
+            );
+            assert!(
+                !desktop.browser_panes["local/chat/agent"]
+                    .read(cx)
+                    .is_visible()
+            );
+        });
+    }
+
+    #[test]
+    fn a_remote_agent_is_told_a_local_page_is_on_the_users_computer() {
+        assert!(browser_page_is_local(
+            "Page: Shop\nAddress: http://localhost:3000/\n\n# Shop"
+        ));
+        assert!(browser_page_is_local("Address: http://127.0.0.1:8080/x"));
+        assert!(!browser_page_is_local("Address: https://example.com/"));
+        assert!(!browser_page_is_local("Screenshot of http://localhost/."));
     }
 
     fn ready_message_image(drawn: u64) -> MessageImageState {

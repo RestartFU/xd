@@ -7,10 +7,11 @@
 //! applied once it exists.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
         mpsc,
     },
     time::Duration,
@@ -316,6 +317,36 @@ struct SharedBrowser(Browser);
 // SAFETY: see above; the wrapper only exposes CEF's thread-safe calls.
 unsafe impl Send for SharedBrowser {}
 
+/// Keeps the DevTools observer registered; dropping it removes the observer.
+/// Only created and dropped on CEF's UI thread or with the browser closing.
+struct SharedRegistration(#[allow(dead_code)] Registration);
+// SAFETY: CEF's registration is reference counted atomically and has no calls.
+unsafe impl Send for SharedRegistration {}
+
+/// DevTools protocol calls sent and not yet answered, by message id.
+#[derive(Default)]
+struct DevToolsCalls {
+    next: AtomicI32,
+    waiting: Mutex<HashMap<i32, mpsc::Sender<Result<serde_json::Value, String>>>>,
+}
+
+impl DevToolsCalls {
+    fn take(&self, id: i32) -> Option<mpsc::Sender<Result<serde_json::Value, String>>> {
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id)
+    }
+
+    /// Fails every waiting call, as when the page has gone.
+    fn fail_all(&self) {
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     /// GPUI's window, which takes the keyboard back from the page.
@@ -337,6 +368,11 @@ struct Shared {
     /// A close gave up waiting for CEF; release the windows once it finishes.
     release_pending: bool,
     released: bool,
+    /// Agent commands running on this page. While any is, a page off screen
+    /// still paints, so a screenshot or a page that waits for a frame works.
+    awake: usize,
+    devtools: Arc<DevToolsCalls>,
+    devtools_observer: Option<SharedRegistration>,
 }
 
 type SharedState = Arc<Mutex<Shared>>;
@@ -400,7 +436,7 @@ fn apply_window_state(shared: &Shared) {
         intern(connection, b"_NET_WM_STATE"),
         intern(connection, b"_NET_WM_STATE_HIDDEN"),
     ) {
-        if shared.visible {
+        if shared.visible || shared.awake > 0 {
             let _ = connection.delete_property(window, state);
         } else {
             let _ = connection.change_property32(
@@ -569,6 +605,8 @@ wrap_life_span_handler! {
             let mut shared = lock(&self.shared);
             shared.browser = None;
             shared.browser_gone = true;
+            shared.devtools_observer = None;
+            shared.devtools.fail_all();
             match shared.closed.take() {
                 Some(closed) => {
                     let _ = closed.send(());
@@ -929,6 +967,177 @@ fn history_gesture(url: &str) -> Option<bool> {
     }
 }
 
+wrap_dev_tools_message_observer! {
+    struct DevToolsAnswers {
+        calls: Arc<DevToolsCalls>,
+    }
+
+    impl DevToolsMessageObserver {
+        fn on_dev_tools_method_result(
+            &self,
+            _browser: Option<&mut Browser>,
+            message_id: ::std::os::raw::c_int,
+            success: ::std::os::raw::c_int,
+            result: Option<&[u8]>,
+        ) {
+            let Some(answer) = self.calls.take(message_id) else {
+                return;
+            };
+            let value = result
+                .and_then(|result| serde_json::from_slice::<serde_json::Value>(result).ok())
+                .unwrap_or_default();
+            let _ = answer.send(if success != 0 {
+                Ok(value)
+            } else {
+                Err(value
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("The page refused the command.")
+                    .to_owned())
+            });
+        }
+    }
+}
+
+// Sends one DevTools message, which CEF accepts only on its UI thread.
+wrap_task! {
+    struct SendDevToolsMessage {
+        shared: SharedState,
+        id: i32,
+        message: Vec<u8>,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            let (host, calls, observed) = {
+                let shared = lock(&self.shared);
+                (
+                    shared.browser.as_ref().and_then(|browser| browser.0.host()),
+                    shared.devtools.clone(),
+                    shared.devtools_observer.is_some(),
+                )
+            };
+            let Some(host) = host else {
+                if let Some(answer) = calls.take(self.id) {
+                    let _ = answer.send(Err("The page has closed.".into()));
+                }
+                return;
+            };
+            if !observed {
+                let mut observer = DevToolsAnswers::new(calls.clone());
+                let registration = host.add_dev_tools_message_observer(Some(&mut observer));
+                let mut shared = lock(&self.shared);
+                if shared.devtools_observer.is_none() && !shared.browser_gone {
+                    shared.devtools_observer = registration.map(SharedRegistration);
+                }
+            }
+            if host.send_dev_tools_message(Some(&self.message)) != 1
+                && let Some(answer) = calls.take(self.id)
+            {
+                let _ = answer.send(Err("The page did not take the command.".into()));
+            }
+        }
+    }
+}
+
+/// A DevTools protocol connection to one page, for agents driving it. Its
+/// calls block, so make them off GPUI's thread and the browser thread.
+#[derive(Clone)]
+pub struct DevTools {
+    shared: SharedState,
+}
+
+impl DevTools {
+    /// Calls `method` and waits up to `timeout` for its result.
+    pub fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let calls = {
+            let shared = lock(&self.shared);
+            if shared.browser.is_none() {
+                return Err(if shared.browser_gone {
+                    "The page has closed.".into()
+                } else {
+                    "The browser is still starting.".into()
+                });
+            }
+            shared.devtools.clone()
+        };
+        // Ids only need to be unique among this page's waiting calls.
+        let id = calls.next.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let (answer, answered) = mpsc::channel();
+        calls
+            .waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, answer);
+        let message =
+            serde_json::to_vec(&serde_json::json!({"id": id, "method": method, "params": params}))
+                .map_err(|error| error.to_string())?;
+        let mut task = SendDevToolsMessage::new(self.shared.clone(), id, message);
+        if post_task(ThreadId::UI, Some(&mut task)) != 1 {
+            calls.take(id);
+            return Err("The browser has shut down.".into());
+        }
+        let result = answered.recv_timeout(timeout);
+        calls.take(id);
+        match result {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+                "The page did not answer {method} within {} seconds.",
+                timeout.as_secs()
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("The page has closed.".into()),
+        }
+    }
+
+    /// Waits for CEF to create the page, which a new tab asks for and gets
+    /// later.
+    pub fn wait_until_started(&self, timeout: Duration) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        loop {
+            {
+                let shared = lock(&self.shared);
+                if shared.browser.is_some() {
+                    return Ok(());
+                }
+                if shared.browser_gone || shared.closed.is_some() {
+                    return Err("The page has closed.".into());
+                }
+            }
+            if started.elapsed() >= timeout {
+                return Err("The browser did not start in time.".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Keeps the page painting while it is off screen, until [`Self::sleep`].
+    /// A page never shown gets a size to lay itself out in.
+    pub fn wake(&self) {
+        let mut shared = lock(&self.shared);
+        shared.awake += 1;
+        if shared.bounds.is_none() {
+            shared.bounds = Some((0, 0, UNSHOWN_WIDTH, UNSHOWN_HEIGHT));
+        }
+        apply_window_state(&shared);
+    }
+
+    pub fn sleep(&self) {
+        let mut shared = lock(&self.shared);
+        shared.awake = shared.awake.saturating_sub(1);
+        apply_window_state(&shared);
+    }
+}
+
+/// The size, in physical pixels, of a page an agent uses before the user has
+/// ever shown it.
+const UNSHOWN_WIDTH: u32 = 1280;
+const UNSHOWN_HEIGHT: u32 = 800;
+
 wrap_client! {
     struct ViewClient {
         shared: SharedState,
@@ -1060,6 +1269,13 @@ impl ChromiumView {
             .ok_or_else(|| "The page is not available.".to_string())?;
         frame.load_url(Some(&CefString::from(url)));
         Ok(())
+    }
+
+    /// A DevTools connection to this page, for an agent's commands.
+    pub fn devtools(&self) -> DevTools {
+        DevTools {
+            shared: self.shared.clone(),
+        }
     }
 
     pub fn url(&self) -> Result<String, String> {
