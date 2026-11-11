@@ -507,32 +507,21 @@ fn locate(page: &impl Page, number: &str, scroll: bool) -> Result<(f64, f64), St
                     if (!inner || inner === top) break;
                     top = inner;
                 }}
-                // Only the element, what it holds, or its label take its
-                // click; one that lets clicks through to its container does
-                // not get it.
-                // Through a label, unless the point is on another control in
-                // it, such as a link, which takes the click for itself. Looked
-                // for through shadow roots, as `within` looks.
+                // The control nearest the point: what the snapshots took for
+                // controls, the ones agents are given refs for, so the two
+                // agree. Looked for through shadow roots, as `within` looks.
+                const controls = new Set(refs.values());
                 const controlAt = node => {{
                     for (let at = node; at; at = at.assignedSlot || at.parentNode || at.host)
-                        // An editable area counts by its editing host, not by
-                        // each paragraph in it; links by href in any namespace,
-                        // as an SVG link's xlink:href is.
-                        if (at.nodeType === 1 && ((at.isContentEditable
-                            && !(at.parentElement && at.parentElement.isContentEditable))
-                            || at.matches(
-                            'a[href], a[*|href], button, input, select, textarea, summary, '
-                            + ['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
-                               'menuitemcheckbox', 'menuitemradio', 'option', 'combobox', 'textbox',
-                               'searchbox', 'slider', 'spinbutton', 'treeitem']
-                                .map(role => `[role=${{role}}]`).join(', '))))
-                            return at;
+                        if (controls.has(at)) return at;
                     return null;
                 }};
                 const control = top && controlAt(top);
-                // Inside the element, or its label, unless the point is on
-                // another control in there, such as a nested tree item or a
-                // label's link, which takes the click for itself.
+                // Only the element, what it holds, or its label take its
+                // click, unless the point is on another control in there, such
+                // as a nested tree item or a label's link, which takes the
+                // click for itself. One that lets clicks through to its
+                // container does not get it.
                 const own = holder => within(holder, top)
                     && (!control || control === element || !within(holder, control));
                 const reaches = top && (own(element)
