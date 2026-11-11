@@ -3145,6 +3145,12 @@ impl TurnRuntime {
         }
         if let Ok(mut held) = self.inner.held_turns.lock() {
             held.settling.remove(&chat_id);
+            // Going on under another account, it is still the agent's report
+            // under way, and says how it went when it ends there; so does
+            // whatever turn takes the chat instead if it cannot go on.
+            if moves_on {
+                held.turns.remove(&chat_id);
+            }
         }
         // Whatever tried to release the held turn meanwhile waited for this.
         self.release_held_turn(&chat_id, None);
