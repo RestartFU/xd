@@ -320,6 +320,41 @@ impl Ledger {
     }
 }
 
+/// Corrects who the runtime said works on one account with the reports that
+/// came from when it was asked: they are newer than its answer, and win.
+fn apply_reports(
+    ledger: &Ledger,
+    provider: &str,
+    account: &str,
+    asked_at: Instant,
+    working: &mut Vec<(String, String)>,
+    reports: Vec<Activity>,
+) {
+    for (chat_id, p, tag, what, at) in reports {
+        let here = p == provider && crate::accounts::tag_account(&tag) == account;
+        // A process gone is reported without where it worked.
+        if at < asked_at || !(here || p.is_empty()) {
+            continue;
+        }
+        let still = match what {
+            AgentActivity::TurnStarted | AgentActivity::TurnEnded { background: true } => true,
+            AgentActivity::TurnEnded { background: false } => false,
+            // Background work ending leaves a turn that still runs at work.
+            AgentActivity::BackgroundEnded => ledger
+                .accounts
+                .get(&(provider.to_owned(), account.to_owned()))
+                .is_some_and(|entry| entry.turns.contains(&chat_id)),
+        };
+        if still && here {
+            if !working.iter().any(|(id, _)| *id == chat_id) {
+                working.push((chat_id, tag));
+            }
+        } else if !still {
+            working.retain(|(id, _)| *id != chat_id);
+        }
+    }
+}
+
 /// Who works where, with each turn's login dropped from its account.
 fn by_account(working: Vec<(String, String, String)>) -> Vec<(String, String, String)> {
     working
@@ -535,24 +570,8 @@ impl Pass {
     fn workers(&self, ledger: &mut Ledger, provider: &str, account: &str) -> Vec<(String, String)> {
         let asked_at = Instant::now();
         let mut working = self.working_on(provider, account);
-        for (chat_id, p, tag, what, at) in self.take_activity(ledger) {
-            let here = p == provider && crate::accounts::tag_account(&tag) == account;
-            // A process gone is reported without where it worked.
-            if at < asked_at || !(here || p.is_empty()) {
-                continue;
-            }
-            let still = matches!(
-                what,
-                AgentActivity::TurnStarted | AgentActivity::TurnEnded { background: true }
-            );
-            if still && here {
-                if !working.iter().any(|(id, _)| *id == chat_id) {
-                    working.push((chat_id, tag));
-                }
-            } else if !still {
-                working.retain(|(id, _)| *id != chat_id);
-            }
-        }
+        let reports = self.take_activity(ledger);
+        apply_reports(ledger, provider, account, asked_at, &mut working, reports);
         working
     }
 
@@ -1000,6 +1019,85 @@ mod tests {
             now + IDLE_GAP,
         );
         assert!(record_in(&mut ledger, "claude", "default", reading(25.0, 1), &a, now).is_empty());
+    }
+
+    #[test]
+    fn reports_newer_than_the_runtimes_answer_correct_it() {
+        let mut ledger = Ledger::default();
+        let asked = Instant::now();
+        let later = asked + Duration::from_millis(1);
+        let report = |chat: &str, provider: &str, tag: &str, what, at| -> Activity {
+            (
+                chat.to_owned(),
+                provider.to_owned(),
+                tag.to_owned(),
+                what,
+                at,
+            )
+        };
+        ledger.turn_tagged(
+            "claude",
+            "default#x",
+            "a",
+            AgentActivity::TurnStarted,
+            asked,
+        );
+        let mut working = vec![("a".to_owned(), "default#x".to_owned())];
+        // Background work ending while its turn runs leaves it at work.
+        apply_reports(
+            &ledger,
+            "claude",
+            "default",
+            asked,
+            &mut working,
+            vec![report(
+                "a",
+                "claude",
+                "default#x",
+                AgentActivity::BackgroundEnded,
+                later,
+            )],
+        );
+        assert_eq!(working.len(), 1);
+        // A turn that ended with nothing left running leaves; one that started
+        // joins; reports from before the answer change nothing.
+        let ended = AgentActivity::TurnEnded { background: false };
+        apply_reports(
+            &ledger,
+            "claude",
+            "default",
+            asked,
+            &mut working,
+            vec![
+                report("a", "claude", "default#x", ended, later),
+                report(
+                    "b",
+                    "claude",
+                    "default#x",
+                    AgentActivity::TurnStarted,
+                    later,
+                ),
+                report(
+                    "c",
+                    "claude",
+                    "default#x",
+                    AgentActivity::TurnStarted,
+                    asked - Duration::from_millis(1),
+                ),
+                report("d", "codex", "default#x", AgentActivity::TurnStarted, later),
+            ],
+        );
+        assert_eq!(working, vec![("b".to_owned(), "default#x".to_owned())]);
+        // A process gone, reported without where it worked, takes its chat.
+        apply_reports(
+            &ledger,
+            "claude",
+            "default",
+            asked,
+            &mut working,
+            vec![report("b", "", "", AgentActivity::BackgroundEnded, later)],
+        );
+        assert!(working.is_empty());
     }
 
     #[test]
