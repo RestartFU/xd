@@ -26,7 +26,9 @@ pub(super) fn serve(options: HostOptions, chat: &str) -> Result<(), String> {
     // Messages are read on their own thread, so the agent leaving is noticed
     // even while a call waits on the daemon: the server then exits, closing
     // its daemon connection, which stops what the call started.
-    let (messages, received) = mpsc::sync_channel::<Vec<u8>>(16);
+    // Unbounded, so the reader never waits behind a call and always sees
+    // the end; an agent sends one message per call it waits on.
+    let (messages, received) = mpsc::channel::<Vec<u8>>();
     thread::spawn(move || {
         let mut input = io::stdin().lock();
         loop {

@@ -67,7 +67,11 @@ impl<P: Page> Page for Bounded<'_, P> {
         self.page.is_loading()
     }
 
+    /// None once the command is stopped, which ends its waits too.
     fn time_left(&self) -> Duration {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Duration::ZERO;
+        }
         self.deadline.saturating_duration_since(Instant::now())
     }
 }
@@ -360,7 +364,7 @@ fn settle(page: &impl Page, mark: &str, quiet: Duration) -> bool {
             }
             _ => {}
         }
-        if Instant::now() >= end {
+        if Instant::now() >= end || page.time_left().is_zero() {
             return true;
         }
         thread::sleep(Duration::from_millis(100));
@@ -385,7 +389,7 @@ fn settled_snapshot(page: &impl Page, loading: bool) -> Result<Outcome, String> 
 fn wait_for_load(page: &impl Page, timeout: Duration) -> Result<bool, String> {
     let started = Instant::now();
     let timeout = timeout.min(page.time_left());
-    while started.elapsed() < timeout {
+    while started.elapsed() < timeout && !page.time_left().is_zero() {
         if !page.is_loading()
             && evaluate(page, "document.readyState").ok() == Some(json!("complete"))
         {
@@ -721,6 +725,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
     if (line) add(line);
   };
   const skipped = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'META', 'LINK']);
+  const controls = 'a[href], button, input, select, textarea, summary, [role], [contenteditable]';
   const roles = new Set(['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
     'menuitemcheckbox', 'menuitemradio', 'option', 'combobox', 'textbox', 'searchbox', 'slider',
     'spinbutton', 'treeitem']);
@@ -845,8 +850,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
         // A control's own text is its name; a clickable area may hold more
         // controls.
         if (role !== 'clickable' && tag !== 'SUMMARY') return;
-        if (role === 'clickable' && !element.querySelector(
-          'a[href], button, input, select, textarea, summary, [role], [contenteditable]')) return;
+        if (role === 'clickable' && !element.querySelector(controls)) return;
       }
     }
     const heading = /^H([1-6])$/.exec(tag);
@@ -854,6 +858,12 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
       flush();
       const title = short(element.innerText, 300);
       if (title) add('#'.repeat(Number(heading[1])) + ' ' + title);
+      // A heading's links, as in a list of articles, are still controls.
+      if (element.querySelector(controls)) {
+        naming += 1;
+        for (const child of children(element)) walk(child);
+        naming -= 1;
+      }
       return;
     }
     const block = !style.display.startsWith('inline') && style.display !== 'contents';
@@ -1197,6 +1207,36 @@ mod tests {
             Err(CANCELLED.into())
         );
         assert!(script.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_command_stopped_while_it_waits_lets_go_at_once() {
+        let mut script = Script::new(vec![
+            ("Runtime.evaluate", value(json!(null))),
+            ("Input.dispatchKeyEvent", Ok(json!({}))),
+            ("Input.dispatchKeyEvent", Ok(json!({}))),
+        ]);
+        script.fallback = Some(json!([true, "complete"]));
+        // The page keeps loading, so the wait would run its full time.
+        *script.loading.borrow_mut() = [true; 1000].into();
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = {
+            let cancelled = cancelled.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(300));
+                cancelled.store(true, Ordering::Release);
+            })
+        };
+        let started = Instant::now();
+        let outcome = super::run(
+            &script,
+            &json!({"action": "press_key", "key": "Enter"}),
+            started + COMMAND_TIME,
+            &cancelled,
+        );
+        stop.join().unwrap();
+        assert_eq!(outcome, Err(CANCELLED.into()));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

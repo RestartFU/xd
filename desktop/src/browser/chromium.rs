@@ -371,10 +371,26 @@ struct Shared {
     /// Agent commands running on this page. While any is, a page off screen
     /// still paints, so a screenshot or a page that waits for a frame works.
     awake: usize,
+    /// When the last agent command here ended. A popup it caused can be
+    /// asked for a moment after.
+    agent_finished: Option<std::time::Instant>,
     devtools: Arc<DevToolsCalls>,
     devtools_observer: Option<SharedRegistration>,
     /// Held by the agent command running on this page; see `agent::take_turn`.
     turns: Arc<Mutex<()>>,
+}
+
+/// How long after an agent command a popup still counts as the agent's.
+const AGENT_POPUP_GRACE: Duration = Duration::from_secs(1);
+
+impl Shared {
+    /// Whether an agent's command is running on the page, or just ended.
+    fn agent_active(&self) -> bool {
+        self.awake > 0
+            || self
+                .agent_finished
+                .is_some_and(|finished| finished.elapsed() < AGENT_POPUP_GRACE)
+    }
 }
 
 type SharedState = Arc<Mutex<Shared>>;
@@ -597,7 +613,10 @@ wrap_life_span_handler! {
             if let Some(url) = target_url.map(ToString::to_string)
                 && is_browser_url(&url)
             {
-                self.events.send(NativeEvent::Open(url));
+                // Decided now, while the command that made the page ask may
+                // still run, rather than when GPUI gets to the event.
+                let by_agent = lock(&self.shared).agent_active();
+                self.events.send(NativeEvent::Open { url, by_agent });
             }
             1
         }
@@ -1210,6 +1229,7 @@ impl DevTools {
     pub fn sleep(&self) {
         let mut shared = lock(&self.shared);
         shared.awake = shared.awake.saturating_sub(1);
+        shared.agent_finished = Some(std::time::Instant::now());
         apply_window_state(&shared);
     }
 }

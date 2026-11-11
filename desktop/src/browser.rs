@@ -100,7 +100,11 @@ impl Default for BrowserSession {
 enum TabEvent {
     Navigated(String),
     Updated,
-    Open(String),
+    /// A page asked for a new tab; see [`NativeEvent::Open`].
+    Open {
+        url: String,
+        by_agent: bool,
+    },
     /// The page closed itself, which closes its tab.
     #[cfg(target_os = "linux")]
     Closed,
@@ -119,7 +123,12 @@ enum NativeEvent {
     Shown {
         generation: u64,
     },
-    Open(String),
+    /// A page asked for a new tab, as an agent's command made it do when
+    /// `by_agent`. Such a tab leaves the keyboard where it is.
+    Open {
+        url: String,
+        by_agent: bool,
+    },
     Error(String),
     #[cfg(target_os = "linux")]
     HistoryGesture(bool),
@@ -287,18 +296,6 @@ pub struct BrowserPane {
     auxiliary: Option<SideTab>,
     auxiliary_tabs: Vec<SideTab>,
     tools_enabled: bool,
-    /// Agent commands running on this pane's pages. Tabs their pages open
-    /// leave the keyboard where it is, as the agent's own do.
-    agent_commands: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-/// Counts an agent command as running until dropped.
-struct AgentCommandRunning(Arc<std::sync::atomic::AtomicUsize>);
-
-impl Drop for AgentCommandRunning {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-    }
 }
 
 impl EventEmitter<BrowserEvent> for BrowserPane {}
@@ -343,7 +340,6 @@ impl BrowserPane {
             auxiliary: None,
             auxiliary_tabs: Vec::new(),
             tools_enabled: false,
-            agent_commands: Arc::default(),
         };
         for url in session.tabs {
             pane.insert_tab(url, window, cx);
@@ -473,13 +469,6 @@ impl BrowserPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.agent_commands
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let running = AgentCommandRunning(self.agent_commands.clone());
-        let reply = move |outcome| {
-            let _running = running;
-            reply(outcome);
-        };
         if command["action"] == "navigate" {
             match command["url"].as_str().map(normalize_url) {
                 Some(Ok(url)) => command["url"] = serde_json::Value::String(url),
@@ -590,12 +579,8 @@ impl BrowserPane {
                     }
                 }
                 TabEvent::Updated => {}
-                TabEvent::Open(url) => {
-                    let agent = pane
-                        .agent_commands
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        > 0;
-                    pane.open_tab(Some(url.clone()), !agent, window, cx);
+                TabEvent::Open { url, by_agent } => {
+                    pane.open_tab(Some(url.clone()), !by_agent, window, cx);
                 }
                 #[cfg(target_os = "linux")]
                 TabEvent::Closed => pane.close_tab(index, window, cx),
@@ -1153,7 +1138,7 @@ impl BrowserTab {
                     return;
                 }
             }
-            NativeEvent::Open(url) => cx.emit(TabEvent::Open(url)),
+            NativeEvent::Open { url, by_agent } => cx.emit(TabEvent::Open { url, by_agent }),
             #[cfg(target_os = "linux")]
             NativeEvent::HistoryGesture(back) => {
                 // Keep momentum from continuing through a second document,
@@ -2111,7 +2096,10 @@ fn create_native(parent: NativeParent, events: NativeEvents) -> Result<NativeEnt
         })
         .with_new_window_req_handler(move |url, _| {
             if is_browser_url(&url) {
-                popup_events.send(NativeEvent::Open(url));
+                popup_events.send(NativeEvent::Open {
+                    url,
+                    by_agent: false,
+                });
             }
             NewWindowResponse::Deny
         })
@@ -2521,9 +2509,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_tab_a_page_opens_during_an_agents_command_leaves_the_keyboard(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_tab_a_page_opens_for_an_agent_leaves_the_keyboard(cx: &mut gpui::TestAppContext) {
         let (pane, cx) = cx.add_window_view(|window, cx| {
             BrowserPane::new(
                 None,
@@ -2533,14 +2519,17 @@ mod tests {
             )
         });
         cx.run_until_parked();
-        let open_popup = |cx: &mut gpui::VisualTestContext| {
+        let open_popup = |by_agent: bool, cx: &mut gpui::VisualTestContext| {
             cx.update(|window, cx| {
                 // Where the user is typing.
                 let typing = pane.read(cx).tabs[0].entity.read(cx).address.clone();
                 typing.read(cx).focus_handle(cx).focus(window);
                 let first = pane.read(cx).tabs[0].entity.clone();
                 first.update(cx, |_, cx| {
-                    cx.emit(TabEvent::Open("https://example.com/popup".into()))
+                    cx.emit(TabEvent::Open {
+                        url: "https://example.com/popup".into(),
+                        by_agent,
+                    })
                 });
             });
             cx.run_until_parked();
@@ -2549,17 +2538,11 @@ mod tests {
                 typing.read(cx).focus_handle(cx).is_focused(window)
             })
         };
-        // While an agent's command runs, as when its click opens a popup.
-        let running = AgentCommandRunning({
-            let commands = cx.update(|_, cx| pane.read(cx).agent_commands.clone());
-            commands.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            commands
-        });
-        assert!(open_popup(cx));
+        // As when an agent's click or script opens a popup.
+        assert!(open_popup(true, cx));
         cx.update(|_, cx| assert_eq!(pane.read(cx).session().active_tab, 1));
         // The user's own popup takes the keyboard to its tab, as before.
-        drop(running);
-        assert!(!open_popup(cx));
+        assert!(!open_popup(false, cx));
         cx.update(|_, cx| assert_eq!(pane.read(cx).session().active_tab, 2));
     }
 
@@ -2648,7 +2631,13 @@ mod tests {
                     }
                 );
                 pane.tabs[0].entity.update(cx, |tab, cx| {
-                    tab.native_event(NativeEvent::Open("https://example.com/popup".into()), cx);
+                    tab.native_event(
+                        NativeEvent::Open {
+                            url: "https://example.com/popup".into(),
+                            by_agent: false,
+                        },
+                        cx,
+                    );
                 });
             });
         });
@@ -2910,7 +2899,10 @@ mod tests {
             events.title_changed(format!("Page update {index}"));
         }
         events.send(NativeEvent::Finished("https://example.com/".into()));
-        events.send(NativeEvent::Open("https://example.com/popup".into()));
+        events.send(NativeEvent::Open {
+            url: "https://example.com/popup".into(),
+            by_agent: false,
+        });
         events.send(NativeEvent::Error("Connection closed".into()));
         assert_eq!(receiver.len(), 5);
         assert!(matches!(
@@ -2926,7 +2918,10 @@ mod tests {
             receiver.try_recv().unwrap(),
             NativeEvent::Finished(_)
         ));
-        assert!(matches!(receiver.try_recv().unwrap(), NativeEvent::Open(_)));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::Open { .. }
+        ));
         assert!(matches!(
             receiver.try_recv().unwrap(),
             NativeEvent::Error(_)
