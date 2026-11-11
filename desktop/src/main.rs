@@ -19100,7 +19100,11 @@ impl XdDesktop {
     ) {
         let open = self.host_identity(self.active_endpoint) == host
             && self.model.selected_chat.as_deref() == Some(chat_id.as_str());
-        if open && self.composer.trim().is_empty() {
+        // Until the open chat's first state arrives, an empty composer only
+        // means its draft is not known yet; the words wait for it, as they
+        // do for a chat opened later.
+        let draft_known = !self.model.backend.is_empty();
+        if open && draft_known && self.composer.trim().is_empty() {
             self.restore_composer_words(words, cx);
             return;
         }
@@ -26187,6 +26191,37 @@ Binary files /dev/null and b/image.png differ\n";
         chat_state_arrives(&desktop, "implementation", "Newer words", 7, vec![], cx);
         cx.update_window_entity(&desktop, |desktop, _, _| {
             assert_eq!(desktop.composer, "Newer words");
+            assert!(!desktop.answer_restores.is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn words_refused_while_their_chat_reopens_wait_for_its_draft(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx, mut requests, updates) = docked_ask_fixture(cx);
+        answer_with_words(&desktop, one_question_request("ask-1"), "Staging only", cx);
+        open_chat(&desktop, "review", cx);
+        // Back in the chat, whose state is still on its way, when the
+        // refusal arrives.
+        go_to_chat(&desktop, "implementation", cx);
+        reply_to_respond(
+            &desktop,
+            &mut requests,
+            &updates,
+            serde_json::json!({"ok": false, "error": "Refused."}),
+            cx,
+        );
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(
+                desktop.composer.is_empty(),
+                "not put in before the draft is known"
+            );
+            assert!(!desktop.draft_dirty);
+        });
+        // The chat's draft, typed on another device, wins; the words wait.
+        chat_state_arrives(&desktop, "implementation", "From my phone", 4, vec![], cx);
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(desktop.composer, "From my phone");
             assert!(!desktop.answer_restores.is_empty());
         });
     }
