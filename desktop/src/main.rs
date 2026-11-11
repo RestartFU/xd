@@ -16852,6 +16852,161 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    /// The card of a CI watch an agent asked for with xd's watch_ci tool: the
+    /// pull request, how its checks stand overall, and each check, always
+    /// shown, since following them is what the card is for. It opens the
+    /// pull request's checks.
+    fn render_ci_card(colors: ThemeColors, card: ActivityCard, index: usize) -> gpui::AnyElement {
+        let tone = |kind: ActivityKind| match kind {
+            ActivityKind::Running => colors.working,
+            ActivityKind::Success => colors.done,
+            ActivityKind::Failure => colors.danger,
+            ActivityKind::Finished => colors.faint,
+        };
+        let failed = card.kind == ActivityKind::Failure;
+        let url = card.url.clone();
+        let checks = card
+            .items
+            .into_iter()
+            .enumerate()
+            .map(|(check, item)| {
+                div()
+                    .id(("ci-card-check", check))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(rgb(tone(item.kind)))
+                            .when(item.kind == ActivityKind::Running, |dot| {
+                                dot.opacity(pulse_opacity())
+                            }),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .font_family(MONO)
+                            .text_size(px(12.0))
+                            .line_height(px(20.0))
+                            .text_color(rgb(if item.kind == ActivityKind::Failure {
+                                colors.danger
+                            } else {
+                                colors.text
+                            }))
+                            .child(item.name),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.5))
+                            .text_color(rgb(tone(item.kind)))
+                            .child(item.status),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        div()
+            .id(("ci-card", index))
+            .w_full()
+            .max_w(px(780.0))
+            .my(px(4.0))
+            .px(px(14.0))
+            .py(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(rgb(if failed { colors.danger } else { colors.border }))
+            .bg(rgb(colors.surface))
+            .child(
+                div()
+                    .id(("ci-card-head", index))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when_some(url, |head, url| {
+                        head.cursor_pointer()
+                            .on_click(move |_, window, cx| open_clicked_link(&url, window, cx))
+                    })
+                    .child(
+                        div()
+                            .size(px(8.0))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(rgb(tone(card.kind)))
+                            .when(card.kind == ActivityKind::Running, |dot| {
+                                dot.opacity(pulse_opacity())
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(colors.text))
+                            .child(card.title),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.muted))
+                            .child(card.name),
+                    )
+                    .when_some(card.elapsed, |head, elapsed| {
+                        head.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.5))
+                                .text_color(rgb(colors.faint))
+                                .child(elapsed),
+                        )
+                    })
+                    .child(if failed {
+                        stamp(card.status, colors.danger)
+                    } else {
+                        div()
+                            .flex_none()
+                            .text_size(px(12.0))
+                            .text_color(rgb(tone(card.kind)))
+                            .child(card.status)
+                            .into_any_element()
+                    }),
+            )
+            .when(!checks.is_empty(), |frame| {
+                frame.child(
+                    div()
+                        .w_full()
+                        .pl(px(16.0))
+                        .flex()
+                        .flex_col()
+                        .children(checks),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(11.5))
+                    .text_color(rgb(colors.faint))
+                    .child(div().min_w_0().flex_1().truncate().child(card.detail))
+                    .when_some(card.footer, |row, footer| {
+                        row.child(div().flex_none().font_family(MONO).child(footer))
+                    }),
+            )
+            .into_any_element()
+    }
+
     /// What the tray says is at work. A backgrounded shell command shares the
     /// agents' cards but is no agent, so it is counted as what it is. This
     /// chat's agent chats at work count as agents working, and those waiting
@@ -19632,6 +19787,9 @@ impl XdDesktop {
                             index,
                         ))
                     }
+                    _ if message.role == "tool" && activity::is_ci_run(&message.content) => Some(
+                        Self::render_ci_card(colors, ActivityCard::parse(&message.content), index),
+                    ),
                     _ if message.role == "user" => activity::agent_report(&message.content)
                         .map(|report| {
                             let live = agent_chats.get(&report.chat);
