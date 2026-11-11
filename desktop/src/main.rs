@@ -1715,10 +1715,12 @@ enum Answered {
     Sent,
 }
 
-/// One request for input: the host it came through, its chat, and its id.
+/// One request for input: the host it came from, its chat, and its id. The
+/// host is named as `XdDesktop::host_identity` does, so a request on one host
+/// is never taken for another's with the same ids.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct InteractionKey {
-    endpoint: ChatEndpoint,
+    host: String,
     chat_id: String,
     request_id: String,
 }
@@ -2745,7 +2747,7 @@ struct XdDesktop {
     interaction_answers: HashMap<InteractionKey, RequestAnswers>,
     /// Words of answers that did not go through, by endpoint and chat,
     /// waiting for that chat to open with an empty composer.
-    answer_restores: HashMap<(ChatEndpoint, String), String>,
+    answer_restores: HashMap<(String, String), String>,
     /// The docked ask's choice the arrow keys moved to, by the question it
     /// belongs to, so it does not carry over to the next one.
     ask_focus: Option<(String, usize)>,
@@ -8892,6 +8894,30 @@ impl XdDesktop {
 
     fn current_connection_key(&self) -> String {
         self.connection_key(self.active_endpoint)
+    }
+
+    /// The host an endpoint reaches, as answers given there are kept: a
+    /// paired host by the key it was pinned to, which stays with it across
+    /// address changes and tells apart two hosts at one address; one over
+    /// SSH by its destination; this machine's own host as itself.
+    fn host_identity(&self, endpoint: ChatEndpoint) -> String {
+        match endpoint {
+            ChatEndpoint::Local => "local".into(),
+            ChatEndpoint::Remote => {
+                if let Some(credentials) = &self.settings.remote_credentials {
+                    format!("remote/key/{}", credentials.fingerprint)
+                } else {
+                    self.settings
+                        .remote_ssh_command
+                        .as_deref()
+                        .and_then(|command| SshCommand::parse(command).ok())
+                        .map_or_else(
+                            || "remote".into(),
+                            |command| format!("remote/ssh/{}", command.destination()),
+                        )
+                }
+            }
+        }
     }
 
     fn prune_browser_panes(&mut self, endpoint: ChatEndpoint, cx: &mut Context<Self>) {
@@ -18941,7 +18967,7 @@ impl XdDesktop {
     /// The open chat's request with this id, as its answers are kept.
     fn interaction_key(&self, request_id: &str) -> Option<InteractionKey> {
         Some(InteractionKey {
-            endpoint: self.active_endpoint,
+            host: self.host_identity(self.active_endpoint),
             chat_id: self.model.selected_chat.clone()?,
             request_id: request_id.to_owned(),
         })
@@ -18979,7 +19005,7 @@ impl XdDesktop {
     /// resolved, if that has not happened already.
     fn interaction_accepted(&mut self, chat_id: &str, request_id: &str) {
         let key = InteractionKey {
-            endpoint: self.active_endpoint,
+            host: self.host_identity(self.active_endpoint),
             chat_id: chat_id.to_owned(),
             request_id: request_id.to_owned(),
         };
@@ -18998,9 +19024,9 @@ impl XdDesktop {
     /// response is still on its way waits for the reply, which can still
     /// give the words back.
     fn interaction_resolved(&mut self, chat_id: &str, request_id: Option<&str>) {
-        let endpoint = self.active_endpoint;
+        let host = self.host_identity(self.active_endpoint);
         self.interaction_answers.retain(|key, request| {
-            let resolved = key.endpoint == endpoint
+            let resolved = key.host == host
                 && key.chat_id == chat_id
                 && request_id.is_none_or(|request_id| key.request_id == request_id);
             if !resolved {
@@ -19017,7 +19043,7 @@ impl XdDesktop {
     /// kept for its other questions stay.
     fn interaction_refused(&mut self, chat_id: &str, request_id: &str, cx: &mut Context<Self>) {
         let key = InteractionKey {
-            endpoint: self.active_endpoint,
+            host: self.host_identity(self.active_endpoint),
             chat_id: chat_id.to_owned(),
             request_id: request_id.to_owned(),
         };
@@ -19029,7 +19055,7 @@ impl XdDesktop {
             self.interaction_answers.remove(&key);
         }
         if let Some(typed) = typed {
-            self.give_back_answer(key.endpoint, key.chat_id, typed, cx);
+            self.give_back_answer(key.host, key.chat_id, typed, cx);
         }
     }
 
@@ -19044,20 +19070,21 @@ impl XdDesktop {
         endpoint: Option<ChatEndpoint>,
         cx: &mut Context<Self>,
     ) {
+        let host = endpoint.map(|endpoint| self.host_identity(endpoint));
         let mut given_back = Vec::new();
         self.interaction_answers.retain(|key, request| {
-            if endpoint.is_some_and(|endpoint| key.endpoint != endpoint) {
+            if host.as_ref().is_some_and(|host| key.host != *host) {
                 return true;
             }
             if let Some(typed) = request.submit.take().and_then(|submit| submit.typed) {
-                given_back.push((key.endpoint, key.chat_id.clone(), typed));
+                given_back.push((key.host.clone(), key.chat_id.clone(), typed));
             }
             // Nothing is left of one already resolved or taken, and one taken
             // asks again if the host still lists it after reconnecting.
             !request.resolved && !request.accepted && !request.answers.is_empty()
         });
-        for (endpoint, chat_id, typed) in given_back {
-            self.give_back_answer(endpoint, chat_id, typed, cx);
+        for (host, chat_id, typed) in given_back {
+            self.give_back_answer(host, chat_id, typed, cx);
         }
     }
 
@@ -19066,19 +19093,19 @@ impl XdDesktop {
     /// chat to open with an empty composer. Typed text is never replaced.
     fn give_back_answer(
         &mut self,
-        endpoint: ChatEndpoint,
+        host: String,
         chat_id: String,
         words: String,
         cx: &mut Context<Self>,
     ) {
-        let open = self.active_endpoint == endpoint
+        let open = self.host_identity(self.active_endpoint) == host
             && self.model.selected_chat.as_deref() == Some(chat_id.as_str());
         if open && self.composer.trim().is_empty() {
             self.restore_composer_words(words, cx);
             return;
         }
         self.answer_restores
-            .entry((endpoint, chat_id))
+            .entry((host, chat_id))
             .and_modify(|waiting| {
                 waiting.push('\n');
                 waiting.push_str(&words);
@@ -19097,7 +19124,7 @@ impl XdDesktop {
         }
         if let Some(words) = self
             .answer_restores
-            .remove(&(self.active_endpoint, chat_id))
+            .remove(&(self.host_identity(self.active_endpoint), chat_id))
         {
             self.restore_composer_words(words, cx);
         }
@@ -25866,7 +25893,7 @@ Binary files /dev/null and b/image.png differ\n";
             type_secret(desktop, cx);
             desktop.secret_owner = Some((
                 InteractionKey {
-                    endpoint: ChatEndpoint::Remote,
+                    host: "remote/key/another-host".into(),
                     chat_id: "implementation".into(),
                     request_id: "ask-1".into(),
                 },
@@ -26238,7 +26265,10 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(
                 desktop
                     .answer_restores
-                    .get(&(desktop.active_endpoint, "implementation".to_owned()))
+                    .get(&(
+                        desktop.host_identity(desktop.active_endpoint),
+                        "implementation".to_owned(),
+                    ))
                     .map(String::as_str),
                 Some("Staging only")
             );
@@ -26309,6 +26339,58 @@ Binary files /dev/null and b/image.png differ\n";
             );
             let (_, question, ..) = desktop.pending_input_question().unwrap();
             assert_eq!(question["id"], "q1");
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn answers_kept_on_one_host_never_reach_another_with_the_same_ids(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx, _requests, _updates) = docked_ask_fixture(cx);
+        let paired_to = |fingerprint: &str| xd_transport::RemoteCredentials {
+            host: "192.168.1.20".into(),
+            port: 7878,
+            fingerprint: fingerprint.into(),
+            token: "token".into(),
+        };
+        // Answering on a paired host, A.
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            desktop.active_endpoint = ChatEndpoint::Remote;
+            desktop.remote_host = desktop.host.clone();
+            desktop.settings.remote_credentials = Some(paired_to("host-a"));
+        });
+        let request = serde_json::json!({
+            "request_id": "ask-1",
+            "method": "item/tool/requestUserInput",
+            "params": {"questions": [
+                {"id": "q0", "question": "Which region?", "options": []},
+                {"id": "q1", "question": "Which database?", "options": []},
+            ]},
+        });
+        answer_with_words(&desktop, request, "Staging only", cx);
+        let host_a = cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert_eq!(desktop.kept_answer("ask-1", "q0"), Some("Staging only"));
+            let host_a = desktop.host_identity(ChatEndpoint::Remote);
+            // Host B at the same address, with a copy of A's chats and the
+            // same request waiting.
+            desktop.forget_interaction_answers(None, cx);
+            desktop.settings.remote_credentials = Some(paired_to("host-b"));
+            assert!(desktop.kept_answer("ask-1", "q0").is_none());
+            let (_, question, ..) = desktop.pending_input_question().unwrap();
+            assert_eq!(question["id"], "q0", "B asks from the start");
+            // Words given back for A wait for A, not B's composer.
+            desktop.give_back_answer(host_a.clone(), "implementation".into(), "For A".into(), cx);
+            assert!(desktop.composer.is_empty());
+            host_a
+        });
+        // Back on A, its answer and words are there.
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.settings.remote_credentials = Some(paired_to("host-a"));
+            assert_eq!(desktop.host_identity(ChatEndpoint::Remote), host_a);
+            assert_eq!(desktop.kept_answer("ask-1", "q0"), Some("Staging only"));
+            desktop.apply_answer_restore(cx);
+            assert_eq!(desktop.composer, "For A");
         });
     }
 
