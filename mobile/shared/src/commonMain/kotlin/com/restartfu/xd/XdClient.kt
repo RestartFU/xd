@@ -2,6 +2,7 @@ package com.restartfu.xd
 
 import com.restartfu.xd.credentials.CredentialStore
 import com.restartfu.xd.credentials.SshConnection
+import com.restartfu.xd.model.ChatQuotaSettings
 import com.restartfu.xd.model.TreeSnapshot
 import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.Link
@@ -233,6 +234,71 @@ public class XdClient(
      */
     public val autoSettleInFlight: StateFlow<Int> = _autoSettleInFlight.asStateFlow()
 
+    private val _chatQuotaSettings = MutableStateFlow<ChatQuotaSettings?>(null)
+
+    /**
+     * The host's default chat quota. Null until read, and again after
+     * forgetting the host.
+     *
+     * Each change is broadcast with the new value, and broadcasts arrive in
+     * the order the host made the changes, so a broadcast is applied as it
+     * comes. A reply can reach the socket before or after a broadcast sent
+     * while it was out (see the protocol's ordering caveat), so it is kept
+     * only when no broadcast arrived in the meantime.
+     */
+    public val chatQuotaSettings: StateFlow<ChatQuotaSettings?> = _chatQuotaSettings.asStateFlow()
+    private val chatQuotaLock = Mutex()
+    private var chatQuotaBroadcasts = 0L
+    private var chatQuotaCalls = 0L
+    private var chatQuotaApplied = 0L
+    /** Something has asked for the default on this host, so a reconnect reads it again. */
+    private var chatQuotaWanted = false
+
+    /** Reads the host's default chat quota into [chatQuotaSettings]. */
+    public suspend fun loadChatQuotaSettings(): ChatQuotaSettings =
+        chatQuotaCall(Ops.chatQuotaSettings(), requested = ChatQuotaSettings(null))
+
+    /** Sets the host's default chat quota; null limits no chat. */
+    public suspend fun setChatQuotaSettings(percent: Int?): ChatQuotaSettings =
+        chatQuotaCall(Ops.setChatQuotaSettings(percent), requested = ChatQuotaSettings(percent))
+
+    /**
+     * [requested] stands in for a reply that does not name the default: the
+     * value a change asked for, or no limit for a read.
+     */
+    private suspend fun chatQuotaCall(
+        request: kotlinx.serialization.json.JsonObject,
+        requested: ChatQuotaSettings,
+    ): ChatQuotaSettings {
+        val generation = _sessionGeneration.value
+        val (call, broadcasts) = chatQuotaLock.withLock {
+            chatQuotaWanted = true
+            ++chatQuotaCalls to chatQuotaBroadcasts
+        }
+        val settings = ChatQuotaSettings.parse(actor.call(request)) ?: requested
+        chatQuotaLock.withLock {
+            if (generation == _sessionGeneration.value && broadcasts == chatQuotaBroadcasts && call > chatQuotaApplied) {
+                _chatQuotaSettings.value = settings
+                chatQuotaApplied = call
+            }
+        }
+        return settings
+    }
+
+    private suspend fun chatQuotaBroadcast(event: kotlinx.serialization.json.JsonObject) {
+        val settings = ChatQuotaSettings.parse(event)
+        chatQuotaLock.withLock {
+            chatQuotaBroadcasts++
+            if (settings != null) _chatQuotaSettings.value = settings
+        }
+        // One that does not say what changed is read again.
+        if (settings == null) rereadChatQuota()
+    }
+
+    private fun rereadChatQuota() {
+        scope.launch { runCatching { loadChatQuotaSettings() } }
+    }
+
     private fun rereadAutoSettle() {
         // Counted before launching, so there is no moment the read is due but not counted.
         _autoSettleInFlight.update { it + 1 }
@@ -344,6 +410,7 @@ public class XdClient(
                     requestOwnerIcons(treeStore.state.value)
                     // Broadcasts sent while disconnected were missed.
                     if (autoSettleWanted.value) rereadAutoSettle()
+                    if (chatQuotaLock.withLock { chatQuotaWanted }) rereadChatQuota()
                     // A failure is not dropped: what is shown may be out of
                     // date, and the next read that lands clears the mark.
                     if (agentAuthWanted.value) {
@@ -372,6 +439,11 @@ public class XdClient(
                 if (eventName == "auto-settle-settings") {
                     autoSettleLock.withLock { autoSettleBroadcasts.update { it + 1 } }
                     rereadAutoSettle()
+                }
+                if (eventName == "chat-quota-settings") {
+                    chatQuotaBroadcast(event.value)
+                    // Open chats that follow the default have a new quota too.
+                    reloadSessions()
                 }
                 if (eventName == "owner-icon") {
                     (event.value["owner"] as? JsonPrimitive)?.contentOrNull?.let { owner ->
@@ -447,6 +519,11 @@ public class XdClient(
             autoSettleWriteFailed = 0
             autoSettleWriteSucceeded = 0
             _autoSettleWriteError.value = null
+        }
+        chatQuotaLock.withLock {
+            _chatQuotaSettings.value = null
+            chatQuotaWanted = false
+            chatQuotaApplied = chatQuotaCalls
         }
         agentAuthStates.clear()
         agentCliStates.clear()

@@ -737,7 +737,8 @@ impl StateStore {
         let mut statement = database.prepare(
             "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir, session_mode, workspace_session_id, \
              (SELECT CASE WHEN role = 'assistant' THEN content END FROM messages \
-              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1), paused, \
+              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1), \
+             CASE WHEN quota_reached != 0 THEN 2 WHEN paused != 0 THEN 1 ELSE 0 END, \
              parent_chat_id FROM chats \
              ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
@@ -754,7 +755,7 @@ impl StateStore {
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
                     row.get::<_, Option<String>>(9)?,
-                    row.get::<_, bool>(10)?,
+                    row.get::<_, i64>(10)?,
                     row.get::<_, Option<String>>(11)?,
                 ))
             })?
@@ -873,8 +874,12 @@ impl StateStore {
             if let Some(branch) = branch {
                 chat["branch"] = Value::String(branch);
             }
-            if paused {
-                chat["paused"] = Value::Bool(true);
+            // A chat stopped at its quota is held like a paused one, but only
+            // a new quota picks it up, so clients see the one and not the other.
+            match paused {
+                1 => chat["paused"] = Value::Bool(true),
+                2 => chat["quota_reached"] = Value::Bool(true),
+                _ => {}
             }
             // Only a parent still shown, so a chat whose parent was deleted
             // stands on its own again.
@@ -948,6 +953,8 @@ impl StateStore {
             // for one folder's.
             "pause_all": true,
             "pause_folders": true,
+            // Chats can be held to a share of their account's usage limit.
+            "chat_quotas": true,
             // The host keeps folders of projects; older hosts ignore `group`
             // and `owner` and would make a project instead.
             "folder_groups": true,
@@ -1100,6 +1107,17 @@ impl StateStore {
         if let Some((_, used, window)) = context_usage {
             response["context_used"] = Value::Number(used.into());
             response["context_window"] = Value::Number(window.into());
+        }
+        let quota = read_chat_quota(&database, chat_id)?;
+        if let Some(percent) = quota.percent {
+            response["quota"] = json!({
+                "percent": percent,
+                "used": (quota.used * 10.0).round() / 10.0,
+                "own": quota.own,
+            });
+        }
+        if quota.reached {
+            response["quota_reached"] = Value::Bool(true);
         }
         if let Some(first) = response["queue"].as_array().and_then(|queue| queue.first()) {
             response["queued"] = first.clone();
@@ -1851,7 +1869,7 @@ impl StateStore {
             let chat = database
                 .query_row(
                     "SELECT folder_id, workdir, original_workdir, new_worktree, host_working, \
-                     paused FROM chats WHERE id = ?",
+                     paused, quota_reached FROM chats WHERE id = ?",
                     [chat_id],
                     |row| {
                         Ok((
@@ -1861,16 +1879,20 @@ impl StateStore {
                             row.get::<_, bool>(3)?,
                             row.get::<_, bool>(4)?,
                             row.get::<_, bool>(5)?,
+                            row.get::<_, bool>(6)?,
                         ))
                     },
                 )
                 .optional();
-            let Ok(Some((folder, workdir, original, new_worktree, working, paused))) = chat else {
+            let Ok(Some((folder, workdir, original, new_worktree, working, paused, quota_reached))) =
+                chat
+            else {
                 return Ok(None);
             };
+            // A chat stopped at its quota queues the message instead.
             if !new_worktree
                 || working
-                || (paused && keep_paused)
+                || (paused && (keep_paused || quota_reached))
                 || !workspace_is_unused(&database, chat_id).unwrap_or(false)
             {
                 return Ok(None);
@@ -1933,6 +1955,17 @@ impl StateStore {
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
         // Not even queued: no turn on a retired assistant would ever take it.
         validate_backend(&backend)?;
+        // A chat that has used its quota, such as one the default was lowered
+        // under, is stopped before it starts anything more.
+        let mut paused = paused;
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        if !quota.reached && quota.spent() && !working {
+            transaction.execute(
+                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                [chat_id],
+            )?;
+            paused = true;
+        }
         match continues {
             Some(Continuation::AfterRestart(last_message)) => {
                 let latest = transaction.query_row(
@@ -1961,11 +1994,14 @@ impl StateStore {
                 }
             }
             Some(Continuation::Resume) => {
-                let resumable = transaction.query_row(
-                    "SELECT turn_resumable FROM chats WHERE id = ?",
+                let (resumable, quota_reached) = transaction.query_row(
+                    "SELECT turn_resumable, quota_reached FROM chats WHERE id = ?",
                     [chat_id],
-                    |row| row.get::<_, bool>(0),
+                    |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
                 )?;
+                if quota_reached {
+                    return Err(StorageError::InvalidRequest(QUOTA_REACHED_MESSAGE.into()));
+                }
                 if working || !resumable {
                     return Err(StorageError::InvalidRequest(
                         "This chat can no longer be resumed.".into(),
@@ -1976,7 +2012,14 @@ impl StateStore {
         }
         // The host's own messages, such as an agent's report to the chat
         // that started it, wait in a paused chat's queue instead of resuming it.
-        let keep_paused = paused && keep_paused;
+        // So does anything sent to a chat stopped at its quota: only a new
+        // quota lets it go on.
+        let quota_reached = transaction.query_row(
+            "SELECT quota_reached FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let keep_paused = paused && (quota_reached || keep_paused);
         if working || keep_paused {
             let stored = transaction.query_row(
                 "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
@@ -3098,6 +3141,180 @@ impl StateStore {
         Ok(changed == 1)
     }
 
+    /// The host's default chat quota, a percentage of a usage limit, or
+    /// `None` while no chat is limited.
+    pub fn chat_quota_settings(&self) -> Result<Option<i64>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        read_default_quota(&database)
+    }
+
+    /// Changes the default chat quota. `percent: null` turns it off, and a
+    /// request without `percent` leaves it as it is.
+    pub fn set_chat_quota_settings(&self, request: &Value) -> Result<Option<i64>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let Some(percent) = request.get("percent") else {
+            return read_default_quota(&database);
+        };
+        let percent = quota_percent(percent)?;
+        let mut database = database;
+        let transaction = database.transaction()?;
+        let before = read_default_quota(&transaction)?;
+        transaction.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![
+                CHAT_QUOTA_META_KEY,
+                percent.map_or_else(|| "null".to_owned(), |percent| percent.to_string())
+            ],
+        )?;
+        // Turning the default on starts the count of every chat that follows
+        // it, so nothing they used while unlimited counts against it.
+        if before.is_none() && percent.is_some() {
+            transaction.execute(
+                "UPDATE chats SET quota_used = 0, quota_since_ms = ? \
+                 WHERE quota_own = 0 AND quota_reached = 0",
+                [crate::accounts::now_ms()],
+            )?;
+        } else if let Some(percent) = percent {
+            // A lower default applies at once: an idle chat that has used it
+            // already waits for a new quota. The meter stops one at work.
+            transaction.execute(
+                "UPDATE chats SET quota_reached = 1, paused = 1 \
+                 WHERE quota_own = 0 AND quota_reached = 0 AND host_working = 0 \
+                 AND quota_used + 1e-9 >= ?",
+                [percent as f64],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(percent)
+    }
+
+    /// The quota that applies to a chat and how much of it the chat has used.
+    pub fn chat_quota(&self, chat_id: &str) -> Result<ChatQuota, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        read_chat_quota(&database, chat_id)
+    }
+
+    /// Counts `amount` percentage points of a usage limit, used since
+    /// `since_ms`, against the chat's quota. Nothing is counted for a chat
+    /// without a quota, one already stopped at it, or one whose count started
+    /// again after `since_ms`, which that use belongs before. Returns the
+    /// quota as it now stands when it counted.
+    pub fn add_quota_use(
+        &self,
+        chat_id: &str,
+        amount: f64,
+        since_ms: i64,
+    ) -> Result<Option<ChatQuota>, StorageError> {
+        if !amount.is_finite() || amount <= 0.0 {
+            return Ok(None);
+        }
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        let counted_from = transaction.query_row(
+            "SELECT quota_since_ms FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if quota.percent.is_none() || quota.reached || counted_from > since_ms {
+            return Ok(None);
+        }
+        transaction.execute(
+            "UPDATE chats SET quota_used = quota_used + ? WHERE id = ?",
+            params![amount, chat_id],
+        )?;
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        transaction.commit()?;
+        Ok(Some(quota))
+    }
+
+    /// Gives a chat its own quota, `percent: null` for none, or with
+    /// `inherit: true` hands it back to the host's default. Either way its
+    /// count starts again. Returns whether the chat had stopped at its quota,
+    /// in which case it is left paused for the caller to continue.
+    pub fn set_chat_quota(&self, request: &Value) -> Result<bool, StorageError> {
+        let chat_id = required_string(request, "chat", "set-chat-quota needs a chat id")?;
+        let (own, percent) = if request.get("inherit").and_then(Value::as_bool) == Some(true) {
+            (false, None)
+        } else {
+            let percent = request.get("percent").ok_or_else(|| {
+                StorageError::InvalidRequest(
+                    "A chat quota needs a percent, null for none, or inherit.".into(),
+                )
+            })?;
+            (true, quota_percent(percent)?)
+        };
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let reached = transaction
+            .query_row(
+                "SELECT quota_reached FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        transaction.execute(
+            "UPDATE chats SET quota_own = ?, quota_percent = ?, quota_used = 0, \
+             quota_reached = 0, quota_since_ms = ? WHERE id = ?",
+            params![own, percent, crate::accounts::now_ms(), chat_id],
+        )?;
+        transaction.commit()?;
+        Ok(reached)
+    }
+
+    /// Marks a chat stopped at its quota, which holds it like a paused chat.
+    /// A chat at work, or whose agent still runs something between turns
+    /// (`background`), can resume the turn the quota cuts short. True when
+    /// the chat is at its quota, marked now or before, so whatever still runs
+    /// in it should stop; false when its quota allows more.
+    pub fn stop_for_quota(&self, chat_id: &str, background: bool) -> Result<bool, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        // Asked as it is marked: a quota raised or lifted since the meter
+        // decided, by a new default or the chat's own, lets the chat go on.
+        let quota = read_chat_quota(&transaction, chat_id)?;
+        if !quota.reached && !quota.spent() {
+            return Ok(false);
+        }
+        transaction.execute(
+            "UPDATE chats SET quota_reached = 1, paused = 1, \
+             turn_resumable = CASE WHEN host_working = 1 OR ? THEN 1 ELSE turn_resumable END \
+             WHERE id = ?",
+            params![background, chat_id],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Marks every chat past its quota that is not marked yet, as the host
+    /// starts and nothing runs. Returns the chats it marked.
+    pub fn mark_spent_quotas(&self) -> Result<Vec<String>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let candidates = {
+            let mut statement = transaction.prepare(
+                "SELECT id FROM chats WHERE quota_reached = 0 AND quota_used > 0 ORDER BY id",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut marked = Vec::new();
+        for chat_id in candidates {
+            if read_chat_quota(&transaction, &chat_id)?.spent() {
+                transaction.execute(
+                    "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                    [&chat_id],
+                )?;
+                marked.push(chat_id);
+            }
+        }
+        transaction.commit()?;
+        Ok(marked)
+    }
+
     /// What a chat's agent needs to start another: where it works and on what.
     pub fn agent_origin(&self, chat_id: &str) -> Result<AgentOrigin, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
@@ -3345,8 +3562,8 @@ impl StateStore {
 
     pub fn paused_chats(&self) -> Result<Vec<String>, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        let mut statement =
-            database.prepare("SELECT id FROM chats WHERE paused = 1 ORDER BY id")?;
+        let mut statement = database
+            .prepare("SELECT id FROM chats WHERE paused = 1 AND quota_reached = 0 ORDER BY id")?;
         let chats = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -3370,7 +3587,7 @@ impl StateStore {
     pub fn unpause_chat(&self, chat_id: &str) -> Result<bool, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let changed = database.execute(
-            "UPDATE chats SET paused = 0 WHERE id = ? AND paused = 1",
+            "UPDATE chats SET paused = 0 WHERE id = ? AND paused = 1 AND quota_reached = 0",
             [chat_id],
         )?;
         Ok(changed == 1)
@@ -6793,6 +7010,38 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
             [],
         )?;
     }
+    // A chat's own quota: `quota_own` set means `quota_percent` decides, and
+    // a null there means no limit. Otherwise the host's default applies.
+    if !columns.contains("quota_own") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN quota_own INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.contains("quota_percent") {
+        database.execute("ALTER TABLE chats ADD COLUMN quota_percent INTEGER", [])?;
+    }
+    // When the chat's count last started again, in milliseconds.
+    if !columns.contains("quota_since_ms") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN quota_since_ms INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.contains("quota_used") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN quota_used REAL NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    // Stopped at its quota. Such a chat is also `paused`, which keeps the
+    // host from continuing it, but only a new quota picks it back up.
+    if !columns.contains("quota_reached") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN quota_reached INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     // The chat whose agent started this one through xd's start_agent tool.
     if !columns.contains("parent_chat_id") {
         database.execute("ALTER TABLE chats ADD COLUMN parent_chat_id TEXT", [])?;
@@ -7109,6 +7358,88 @@ fn reorder_chat(
     }
     transaction.commit()?;
     Ok(())
+}
+
+const CHAT_QUOTA_META_KEY: &str = "chat_quota";
+/// Why a chat stopped at its quota cannot simply be resumed.
+pub(crate) const QUOTA_REACHED_MESSAGE: &str =
+    "This chat used its quota. Give it a new quota to go on.";
+
+/// The quota that applies to a chat, in percentage points of a usage limit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatQuota {
+    /// `None` when no quota applies.
+    pub percent: Option<i64>,
+    pub used: f64,
+    /// The chat has its own quota rather than the host's default.
+    pub own: bool,
+    pub reached: bool,
+}
+
+impl ChatQuota {
+    /// The chat has used all of its quota.
+    pub fn spent(&self) -> bool {
+        self.percent
+            .is_some_and(|percent| self.used + 1e-9 >= percent as f64)
+    }
+}
+
+/// A quota as a request gives it: a whole number from 1 to 100, or `null`.
+fn quota_percent(value: &Value) -> Result<Option<i64>, StorageError> {
+    match value {
+        Value::Null => Ok(None),
+        value => value
+            .as_i64()
+            .filter(|percent| (1..=100).contains(percent))
+            .map(Some)
+            .ok_or_else(|| {
+                StorageError::InvalidRequest(
+                    "A chat quota needs a whole number of percent from 1 to 100.".into(),
+                )
+            }),
+    }
+}
+
+fn read_default_quota(database: &Connection) -> Result<Option<i64>, StorageError> {
+    let stored = database
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?",
+            [CHAT_QUOTA_META_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(stored
+        .and_then(|stored| stored.parse::<i64>().ok())
+        .filter(|percent| (1..=100).contains(percent)))
+}
+
+fn read_chat_quota(database: &Connection, chat_id: &str) -> Result<ChatQuota, StorageError> {
+    let (own, percent, used, reached) = database
+        .query_row(
+            "SELECT quota_own, quota_percent, quota_used, quota_reached FROM chats WHERE id = ?",
+            [chat_id],
+            |row| {
+                Ok((
+                    row.get::<_, bool>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+    let percent = if own {
+        percent
+    } else {
+        read_default_quota(database)?
+    };
+    Ok(ChatQuota {
+        percent,
+        used,
+        own,
+        reached,
+    })
 }
 
 const AUTO_SETTLE_META_KEY: &str = "auto_settle";
@@ -10346,9 +10677,9 @@ fn prepare_turn(
     worktree_name: Option<&str>,
     premade: Option<&MadeWorktree>,
 ) -> Result<TurnSpec, StorageError> {
-    // Any turn picks a paused chat back up.
+    // Any turn picks a paused chat back up, and one stopped at its quota.
     transaction.execute(
-        "UPDATE chats SET turn_resumable = 0, paused = 0 WHERE id = ?",
+        "UPDATE chats SET turn_resumable = 0, paused = 0, quota_reached = 0 WHERE id = ?",
         [chat_id],
     )?;
     let chat = transaction
@@ -15897,6 +16228,225 @@ mod tests {
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_some());
         assert!(!store.unpause_chat("chat").unwrap());
+    }
+
+    #[test]
+    fn turning_the_default_quota_on_starts_each_following_chats_count() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let set = |percent: Value| {
+            store
+                .set_chat_quota_settings(&json!({ "percent": percent }))
+                .unwrap()
+        };
+        set(json!(10));
+        store.add_quota_use("chat", 4.0, i64::MAX).unwrap();
+        // Changing the number keeps the count.
+        set(json!(20));
+        assert_eq!(store.chat_quota("chat").unwrap().used, 4.0);
+        // Off and on again starts it afresh, and use read from before then
+        // is not counted.
+        set(Value::Null);
+        set(json!(10));
+        assert_eq!(store.chat_quota("chat").unwrap().used, 0.0);
+        assert_eq!(store.add_quota_use("chat", 5.0, 0).unwrap(), None);
+        // A lower default applies at once to an idle chat already past it,
+        // and what is sent to it then waits.
+        store.add_quota_use("chat", 8.0, i64::MAX).unwrap();
+        set(json!(5));
+        assert!(store.chat_quota("chat").unwrap().reached);
+        assert!(matches!(
+            store
+                .prepare_send(&json!({"chat": "chat", "text": "more"}))
+                .unwrap(),
+            SendDisposition::Queued { .. }
+        ));
+    }
+
+    #[test]
+    fn chats_left_past_their_quota_are_marked_as_the_host_starts() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "spent", "folder");
+        fixture.insert_chat(&database, "within", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        for chat in ["spent", "within"] {
+            store
+                .set_chat_quota(&json!({"chat": chat, "percent": 5}))
+                .unwrap();
+        }
+        store.add_quota_use("spent", 6.0, i64::MAX).unwrap();
+        store.add_quota_use("within", 2.0, i64::MAX).unwrap();
+        assert_eq!(store.mark_spent_quotas().unwrap(), ["spent"]);
+        assert!(store.chat_quota("spent").unwrap().reached);
+        assert!(!store.chat_quota("within").unwrap().reached);
+        assert!(store.mark_spent_quotas().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_send_to_a_chat_past_its_quota_waits() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .set_chat_quota(&json!({"chat": "chat", "percent": 5}))
+            .unwrap();
+        store.add_quota_use("chat", 6.0, i64::MAX).unwrap();
+        // Not yet marked, as when the meter has not stopped it: the send
+        // marks it and waits rather than starting a turn.
+        assert!(!store.chat_quota("chat").unwrap().reached);
+        assert!(matches!(
+            store
+                .prepare_send(&json!({"chat": "chat", "text": "go"}))
+                .unwrap(),
+            SendDisposition::Queued { .. }
+        ));
+        assert!(store.chat_quota("chat").unwrap().reached);
+    }
+
+    #[test]
+    fn a_chat_stopped_at_its_quota_waits_for_a_new_one() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let send = |text: &str| {
+            store
+                .prepare_send(&json!({"chat": "chat", "text": text}))
+                .unwrap()
+        };
+
+        // No quota until one is chosen; nothing counts against none.
+        assert_eq!(store.chat_quota_settings().unwrap(), None);
+        assert!(store.chat("chat").unwrap().get("quota").is_none());
+        assert_eq!(store.add_quota_use("chat", 5.0, i64::MAX).unwrap(), None);
+        assert!(
+            store
+                .set_chat_quota_settings(&json!({"percent": 0}))
+                .is_err()
+        );
+        assert!(
+            store
+                .set_chat_quota_settings(&json!({"percent": 101}))
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .set_chat_quota_settings(&json!({"percent": 10}))
+                .unwrap(),
+            Some(10)
+        );
+        assert_eq!(store.set_chat_quota_settings(&json!({})).unwrap(), Some(10));
+        assert_eq!(store.tree().unwrap()["chat_quotas"], true);
+
+        send("first");
+        let quota = store
+            .add_quota_use("chat", 4.04, i64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(quota.percent, Some(10));
+        assert!(!quota.spent());
+        assert_eq!(
+            store.chat("chat").unwrap()["quota"],
+            json!({"percent": 10, "used": 4.0, "own": false})
+        );
+        // A stop decided before the quota allows more does not hold.
+        assert!(!store.stop_for_quota("chat", false).unwrap());
+        assert!(
+            store
+                .add_quota_use("chat", 6.0, i64::MAX)
+                .unwrap()
+                .unwrap()
+                .spent()
+        );
+        assert!(store.stop_for_quota("chat", false).unwrap());
+        // Still at its quota, so anything still running there is stopped too.
+        assert!(store.stop_for_quota("chat", false).unwrap());
+        // Nothing more counts once it stopped.
+        assert_eq!(store.add_quota_use("chat", 1.0, i64::MAX).unwrap(), None);
+        let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
+        assert!(finish.next.is_none());
+
+        let chat = store.chat("chat").unwrap();
+        assert_eq!(chat["quota_reached"], true);
+        assert_eq!(chat["resumable"], true);
+        let tree = store.tree().unwrap();
+        assert_eq!(tree["chats"][0]["quota_reached"], true);
+        assert!(tree["chats"][0].get("paused").is_none());
+        // Neither the host, `resume-all`, nor resuming picks it up,
+        // and what the user sends waits in its queue.
+        assert!(store.paused_chats().unwrap().is_empty());
+        assert!(!store.unpause_chat("chat").unwrap());
+        assert!(!store.begin_background_turn("chat").unwrap());
+        let resume = json!({"chat": "chat", "text": CONTINUE_PROMPT});
+        assert!(store.prepare_resume(&resume).is_err());
+        assert!(matches!(send("later"), SendDisposition::Queued { .. }));
+        assert_eq!(store.chat("chat").unwrap()["queue"], json!(["later"]));
+        assert_eq!(store.chat("chat").unwrap()["quota_reached"], true);
+
+        // A new quota of its own starts the count again and lets it resume.
+        assert!(
+            store
+                .set_chat_quota(&json!({"chat": "chat", "percent": 0}))
+                .is_err()
+        );
+        assert!(
+            store
+                .set_chat_quota(&json!({"chat": "chat", "percent": 20}))
+                .unwrap()
+        );
+        let chat = store.chat("chat").unwrap();
+        assert!(chat.get("quota_reached").is_none());
+        assert_eq!(
+            chat["quota"],
+            json!({"percent": 20, "used": 0.0, "own": true})
+        );
+        // Use read before the new count began is not counted against it.
+        assert_eq!(store.add_quota_use("chat", 30.0, 0).unwrap(), None);
+        store.prepare_resume(&resume).unwrap();
+        assert!(!store.chat_is_paused("chat").unwrap());
+
+        // No limit for this chat, then the host's default again.
+        assert!(
+            !store
+                .set_chat_quota(&json!({"chat": "chat", "percent": null}))
+                .unwrap()
+        );
+        assert!(store.chat("chat").unwrap().get("quota").is_none());
+        assert_eq!(store.add_quota_use("chat", 50.0, i64::MAX).unwrap(), None);
+        store
+            .set_chat_quota(&json!({"chat": "chat", "inherit": true}))
+            .unwrap();
+        assert_eq!(
+            store.chat("chat").unwrap()["quota"],
+            json!({"percent": 10, "used": 0.0, "own": false})
+        );
+        // An idle chat that reaches its quota as its turn ends is marked too,
+        // with nothing to resume.
+        // The resumed turn hands over to the message queued meanwhile.
+        let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
+        assert!(finish.next.is_some());
+        store.finish_turn("chat", true, None, 1, false).unwrap();
+        assert_eq!(store.chat("chat").unwrap()["working"], false);
+        store.add_quota_use("chat", 10.0, i64::MAX).unwrap();
+        assert!(store.stop_for_quota("chat", false).unwrap());
+        assert_eq!(store.chat("chat").unwrap()["resumable"], false);
+        assert_eq!(store.chat("chat").unwrap()["quota_reached"], true);
     }
 
     /// Sessions from before accounts were kept are filed once, under the login

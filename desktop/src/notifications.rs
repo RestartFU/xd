@@ -85,7 +85,7 @@ impl<T: Send + 'static> Notifier<T> {
         )
     }
 
-    /// `body` is notification markup; see [`turn_finished_body`].
+    /// `body` is notification markup; see [`chat_ended_body`].
     ///
     /// Connects on first use, and again after a connection has been lost.
     pub(crate) fn show(&mut self, body: String, target: T, executor: &BackgroundExecutor) {
@@ -407,8 +407,10 @@ impl<T> Tracker<T> {
     }
 }
 
-/// Notification bodies are markup, and chat titles are not.
-pub(crate) fn turn_finished_body(title: &str) -> String {
+/// "{title} {ending}", such as "Fix the build finished" or "Fix the build
+/// stopped at its quota". Notification bodies are markup, and chat titles
+/// are not.
+pub(crate) fn chat_ended_body(title: &str, ending: &str) -> String {
     let title = title
         .chars()
         .filter(|character| !character.is_control())
@@ -417,7 +419,7 @@ pub(crate) fn turn_finished_body(title: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;");
-    format!("{title} finished")
+    format!("{title} {ending}")
 }
 
 /// Brings the window to the front on behalf of a notification click.
@@ -1139,7 +1141,7 @@ mod tests {
     #[test]
     fn chat_titles_cannot_inject_markup() {
         assert_eq!(
-            turn_finished_body("a <b>&\nc"),
+            chat_ended_body("a <b>&\nc", "finished"),
             "a &lt;b&gt;&amp;c finished"
         );
     }

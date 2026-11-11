@@ -695,7 +695,8 @@ private fun MinimalProjectsHome(
     val unread by model.client.unreadChats.collectAsStateWithLifecycle()
     val signalOf = { session: MinimalSession ->
         when {
-            session.chatIds.any { it in waiting } -> SessionSignal.WAITING
+            // A chat stopped at its quota waits on the user's answer too.
+            session.quotaReached || session.chatIds.any { it in waiting } -> SessionSignal.WAITING
             session.working -> SessionSignal.WORKING
             session.backgroundTasks > 0 -> SessionSignal.BACKGROUND
             session.paused -> SessionSignal.PAUSED
@@ -2549,6 +2550,7 @@ private fun MinimalSettingsDialog(
                 }
                 ChatTitleSettings(model)
                 if (tree.settlement) AutoSettleSettings(model)
+                if (tree.chatQuotas) ChatQuotaSection(model)
                 SettingAction(
                     title = "Assistant accounts",
                     detail = "Manage sign-in and the installed assistant CLIs.",

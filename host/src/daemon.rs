@@ -207,6 +207,7 @@ fn run_inner(options: HostOptions, stop_with_app: bool) -> io::Result<()> {
     let engine = Arc::new(Engine::with_store_and_data(store, Some(paths.data.clone())));
     engine.start_auto_settle();
     engine.start_account_switching();
+    engine.start_chat_quotas();
     engine.start_reporting_agents();
     #[cfg(target_os = "linux")]
     engine.start_memory_guard();

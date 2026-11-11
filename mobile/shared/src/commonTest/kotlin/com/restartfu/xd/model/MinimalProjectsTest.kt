@@ -225,6 +225,10 @@ class MinimalProjectsTest {
         assertEquals(PauseAllAction.RESUME, paused.pauseActionFor("site"))
         assertEquals(PauseAllAction.PAUSE, paused.pauseActionFor("inner"))
         assertEquals(listOf(false, true), paused.minimalSessions("site").map { it.paused })
+        // A chat stopped at its quota marks its session, which is not paused.
+        val stopped = working.copy(chats = working.chats + chat("five", "site", "Spent", "claude").copy(quotaReached = true))
+        assertEquals(listOf(false, true), stopped.minimalSessions("site").map { it.quotaReached })
+        assertEquals(listOf(false, false), stopped.minimalSessions("site").map { it.paused })
     }
 
     @Test

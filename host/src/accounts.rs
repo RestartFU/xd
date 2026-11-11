@@ -489,6 +489,15 @@ impl Accounts {
         .flatten()
     }
 
+    /// The account's limits as last read, and when that was.
+    pub(crate) fn limits(&self, provider: &str, id: &str) -> Option<(Vec<Headroom>, i64)> {
+        self.with(provider, |state| {
+            let account = state.account(id)?;
+            Some((account.live.windows.clone(), account.live.checked_at_ms?))
+        })
+        .flatten()
+    }
+
     /// Takes in a login read on its own, without limits.
     #[cfg(test)]
     pub(crate) fn record_login(

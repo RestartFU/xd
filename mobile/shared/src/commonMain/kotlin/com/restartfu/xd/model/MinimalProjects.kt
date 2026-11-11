@@ -43,6 +43,8 @@ public data class MinimalSession(
     val backend: String = agent?.wire.orEmpty(),
     /** One of its chats was stopped by pausing every chat and has not resumed. */
     val paused: Boolean = false,
+    /** One of its chats stopped at its quota and waits for the user to give it a new one. */
+    val quotaReached: Boolean = false,
     /** The session whose agent started this one through xd's start_agent tool. */
     val parentId: String? = null,
     /**
@@ -125,6 +127,7 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
             autoSettleDisabled = workspace?.autoSettleDisabled ?: false,
             backend = first.backend,
             paused = grouped.any(ChatSummary::paused),
+            quotaReached = grouped.any(ChatSummary::quotaReached),
             parentId = workspace?.parentId,
         )
     }

@@ -52,9 +52,10 @@ use xd_desktop::{
     },
     markdown,
     model::{
-        AppModel, Attachment, AutoDeleteRules, AutoSettleRules, BackgroundTaskOutput, ChatSummary,
-        Folder, LinkedPullRequest, MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage,
-        MessagePageDirection, PauseAllAction, PullRequestState, SentFrom, ToolView, Worktree,
+        AppModel, Attachment, AutoDeleteRules, AutoSettleRules, BackgroundTaskOutput, ChatQuota,
+        ChatQuotaSettings, ChatSummary, Folder, LinkedPullRequest, MAX_MESSAGE_IMAGE_BYTES,
+        Message, MessageImage, MessagePageDirection, PauseAllAction, PullRequestState, SentFrom,
+        ToolView, Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -67,6 +68,7 @@ use xd_desktop::{
 
 mod accounts_view;
 mod browser;
+mod chat_quota;
 mod composer;
 mod editor;
 mod files;
@@ -2282,6 +2284,9 @@ enum RemoteState {
     Offline,
 }
 
+/// How a notification ends the chat's title when its quota stopped it.
+const QUOTA_STOP_ENDING: &str = "stopped at its quota";
+
 /// Where clicking a "turn finished" notification should lead.
 #[cfg(target_os = "linux")]
 struct TurnNotificationTarget {
@@ -2491,6 +2496,9 @@ struct XdDesktop {
     question_input: Entity<ComposerInput>,
     secret_question_input: Entity<ComposerInput>,
     source_build_input: Entity<ComposerInput>,
+    /// The new quota a chat that stopped at its quota goes on with.
+    quota_input: Entity<ComposerInput>,
+    quota_card: chat_quota::QuotaCard,
     composer: String,
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
@@ -2505,6 +2513,17 @@ struct XdDesktop {
     settled_visible: usize,
     auto_settle: Option<AutoSettleRules>,
     auto_delete: Option<AutoDeleteRules>,
+    /// The host's default chat quota, once a host with `chat_quotas` says it.
+    chat_quota: Option<ChatQuotaSettings>,
+    /// How many `chat-quota-settings` broadcasts have arrived; each request
+    /// about the default carries the count from when it was sent.
+    chat_quota_broadcasts: u64,
+    /// Chats on the active host the tree showed stopped at their quota, from
+    /// the first tree on; `None` until then, so chats already stopped when
+    /// xd connects do not notify.
+    quota_stops_seen: Option<HashSet<String>>,
+    /// Stops already notified through their turn's end.
+    quota_stops_announced: HashSet<String>,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
@@ -3055,6 +3074,7 @@ impl XdDesktop {
         source_build_input.update(cx, |input, cx| {
             input.set_text(settings.build_source.clone(), cx)
         });
+        let quota_input = chat_quota::new_quota_input(cx);
         let source_build_panel = SourceBuildPanel {
             text: settings.build_source.clone(),
             target: source_build::parse_target(&settings.build_source),
@@ -3222,6 +3242,8 @@ impl XdDesktop {
             question_input,
             secret_question_input,
             source_build_input,
+            quota_input,
+            quota_card: chat_quota::QuotaCard::default(),
             composer: String::new(),
             queue_edit: None,
             sidebar_edit: None,
@@ -3233,6 +3255,10 @@ impl XdDesktop {
             settled_visible: SETTLED_INITIAL_ROWS,
             auto_settle: None,
             auto_delete: None,
+            chat_quota: None,
+            chat_quota_broadcasts: 0,
+            quota_stops_seen: None,
+            quota_stops_announced: HashSet::new(),
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
             sidebar_move: None,
@@ -3646,6 +3672,9 @@ impl XdDesktop {
                 | RequestKind::SetAutoSettleSettings
                 | RequestKind::AutoDeleteSettings
                 | RequestKind::SetAutoDeleteSettings
+                | RequestKind::ChatQuotaSettings { .. }
+                | RequestKind::SetChatQuotaSettings { .. }
+                | RequestKind::SetChatQuota { .. }
                 | RequestKind::RenameFolder { .. }
                 | RequestKind::MoveFolder { .. }
                 | RequestKind::TrashFolder { .. }
@@ -3675,6 +3704,7 @@ impl XdDesktop {
                 | "owner-icon"
                 | "auto-settle-settings"
                 | "auto-delete-settings"
+                | "chat-quota-settings"
                 | "terminal-opened"
                 | "terminal-activity"
                 | "background-tasks"
@@ -3727,9 +3757,14 @@ impl XdDesktop {
         self.settle_advances.clear();
         self.auto_settle = None;
         self.auto_delete = None;
+        self.chat_quota = None;
+        self.quota_card = chat_quota::QuotaCard::default();
+        self.quota_stops_seen = None;
+        self.quota_stops_announced.clear();
         if self.minimal_theme_open {
             self.request_auto_settle_settings();
             self.request_auto_delete_settings();
+            self.request_chat_quota_settings();
         }
         self.model.selected_chat = None;
         self.invalidate_live_render();
@@ -3779,6 +3814,11 @@ impl XdDesktop {
         self.chat_title_model_menu = None;
         self.chat_title_settings = None;
         self.request_chat_title_settings();
+        self.chat_quota = None;
+        self.quota_card = chat_quota::QuotaCard::default();
+        self.quota_stops_seen = None;
+        self.quota_stops_announced.clear();
+        self.request_chat_quota_settings();
         true
     }
 
@@ -3955,6 +3995,10 @@ impl XdDesktop {
         {
             self.remote_error = Some(error);
         }
+        // Broadcasts sent while away were missed.
+        if self.active_endpoint == ChatEndpoint::Remote {
+            self.request_chat_quota_settings();
+        }
         if let Some(host) = &self.remote_host {
             let _ = host.agent_catalog();
             // A host without a desktop of its own has nobody else to answer. An
@@ -4032,6 +4076,7 @@ impl XdDesktop {
                     self.new_chat_submitted_attachments.clear();
                     self.sending = false;
                     self.pause_all_pending = false;
+                    self.quota_card.pending = None;
                     self.transcript_loading = false;
                     self.transcript_page_loading = false;
                     self.transcript_refresh_pending = false;
@@ -4382,6 +4427,8 @@ impl XdDesktop {
                 self.model.connection_error = None;
                 self.request_tree();
                 self.request_agent_catalog();
+                // Broadcasts sent while away were missed.
+                self.request_chat_quota_settings();
                 if let Some(host) = &self.host {
                     self.request_local_host_state(host);
                 }
@@ -4398,6 +4445,7 @@ impl XdDesktop {
                 self.background_reading = false;
                 self.sending = false;
                 self.pause_all_pending = false;
+                self.quota_card.pending = None;
                 self.transcript_loading = false;
                 self.transcript_page_loading = false;
                 self.transcript_refresh_pending = false;
@@ -4575,6 +4623,7 @@ impl XdDesktop {
                     | RequestKind::SetChatTitleSettings
                     | RequestKind::AutoSettleSettings
                     | RequestKind::AutoDeleteSettings
+                    | RequestKind::ChatQuotaSettings { .. }
             ) {
                 self.model.connection_error = Some(
                     value
@@ -4598,6 +4647,10 @@ impl XdDesktop {
                 RequestKind::PauseAll { .. } => self.pause_all_pending = false,
                 RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
                 RequestKind::SetAutoDeleteSettings => self.request_auto_delete_settings(),
+                RequestKind::ChatQuotaSettings { .. } => self.chat_quota = None,
+                // The switch moved ahead of the host, so take back its answer.
+                RequestKind::SetChatQuotaSettings { .. } => self.request_chat_quota_settings(),
+                RequestKind::SetChatQuota { chat_id } => self.chat_quota_set(chat_id),
                 RequestKind::Send { chat_id, .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
@@ -5103,9 +5156,15 @@ impl XdDesktop {
         match kind {
             RequestKind::Tree => {
                 let selected_before = self.model.selected_chat.clone();
+                let chat_quotas_before = self.model.chat_quotas_supported;
                 if let Err(error) = self.model.apply_tree(&value) {
                     self.model.connection_error = Some(format!("Invalid tree response: {error}"));
                     return;
+                }
+                self.notify_new_quota_stops(cx);
+                if self.model.chat_quotas_supported != chat_quotas_before {
+                    self.chat_quota = None;
+                    self.request_chat_quota_settings();
                 }
                 if selected_before.is_some() && self.model.selected_chat.is_none() {
                     self.invalidate_live_render();
@@ -5935,6 +5994,15 @@ impl XdDesktop {
             RequestKind::AutoDeleteSettings | RequestKind::SetAutoDeleteSettings => {
                 self.auto_delete = AutoDeleteRules::from_value(&value);
             }
+            RequestKind::ChatQuotaSettings { broadcasts }
+            | RequestKind::SetChatQuotaSettings { broadcasts } => {
+                // A broadcast since the request was sent is newer than its
+                // reply, since the host broadcasts each change before it answers.
+                if self.chat_quota_broadcasts == broadcasts {
+                    self.chat_quota = ChatQuotaSettings::from_value(&value);
+                }
+            }
+            RequestKind::SetChatQuota { chat_id } => self.chat_quota_set(&chat_id),
             RequestKind::RenameFolder { .. } => self.request_tree(),
             RequestKind::MoveFolder { .. } => self.request_tree(),
             RequestKind::TrashFolder { .. } => self.request_tree(),
@@ -5954,6 +6022,7 @@ impl XdDesktop {
                     .attachments_dirty
                     .then(|| self.model.draft_attachments.clone());
                 self.model.apply_chat(&value);
+                self.sync_quota_input(cx);
                 self.sync_active_auth_state();
                 self.transcript_snapshot.sync_live_items(&self.model);
                 self.transcript_snapshot.sync_live_text(&self.model);
@@ -6632,18 +6701,21 @@ impl XdDesktop {
                 .unwrap_or("Background chat")
                 .to_owned();
             self.model.apply_event(name, &body);
-            if self.settings.notifications {
-                #[cfg(target_os = "linux")]
-                self.turn_notifier.show(
-                    notifications::turn_finished_body(&title),
-                    TurnNotificationTarget {
-                        endpoint: self.active_endpoint,
-                        chat_id: chat_id.map(str::to_owned),
-                    },
-                    cx.background_executor(),
-                );
-                #[cfg(not(target_os = "linux"))]
-                notify_turn_finished(&title);
+            let chat_id = chat_id.map(str::to_owned);
+            // A turn its quota stopped is no finished turn: say why it ended.
+            let quota_stop = body.get("quota_reached").and_then(Value::as_bool) == Some(true);
+            // A stop the tree already announced is not announced again.
+            let fresh = !quota_stop
+                || chat_id
+                    .as_ref()
+                    .is_none_or(|chat_id| self.quota_stops_announced.insert(chat_id.clone()));
+            if fresh {
+                let ending = if quota_stop {
+                    QUOTA_STOP_ENDING
+                } else {
+                    "finished"
+                };
+                self.notify_chat_ended(chat_id, &title, ending, cx);
             }
             self.request_tree();
         }
@@ -6679,6 +6751,14 @@ impl XdDesktop {
             }
             "auto-delete-settings" => {
                 self.auto_delete = AutoDeleteRules::from_value(&body);
+            }
+            "chat-quota-settings" => {
+                self.chat_quota_broadcasts += 1;
+                self.chat_quota = ChatQuotaSettings::from_value(&body);
+                // An open chat that follows the default has a new quota too.
+                if let Some(chat_id) = self.model.selected_chat.clone() {
+                    self.request_chat(&chat_id);
+                }
             }
             "owner-icon" => {
                 if let Some(owner) = body.get("owner").and_then(Value::as_str).map(str::to_owned) {
@@ -7737,7 +7817,7 @@ impl XdDesktop {
                         colors,
                     ))
                     .child(truncating_label(title))
-                    .when(self.model.is_waiting(&chat.id), |tab| {
+                    .when(self.model.needs_user(&chat.id), |tab| {
                         tab.child(waiting_ring(colors))
                     })
                     .when(can_close, |tab| {
@@ -11048,7 +11128,9 @@ impl XdDesktop {
     }
 
     fn apply_optimistic_send(&mut self, text: &str) -> OptimisticSend {
-        if self.model.working {
+        // The host keeps what is sent to a chat stopped at its quota until the
+        // chat has a new one.
+        if self.model.working || self.model.quota_reached {
             self.model.queue.push(text.to_owned());
             return OptimisticSend::Queued;
         }
@@ -11230,6 +11312,8 @@ impl XdDesktop {
     fn shows_resume(&self) -> bool {
         self.model.resumable
             && !self.model.working
+            // A chat stopped at its quota goes on from its quota card.
+            && !self.model.quota_reached
             && self.open_question.is_none()
             && self.queue_edit.is_none()
             && self.composer.trim().is_empty()
@@ -12576,6 +12660,7 @@ impl XdDesktop {
             self.request_chat_title_settings();
             self.request_auto_settle_settings();
             self.request_auto_delete_settings();
+            self.request_chat_quota_settings();
             self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         } else {
             self.restore_minimal_popup_focus(window);
@@ -13180,7 +13265,7 @@ impl XdDesktop {
             .map(|chat| {
                 SessionSignal::of(
                     chat.working || chat.terminal_working,
-                    self.model.is_waiting(&chat.id) || !self.model.interactions.is_empty(),
+                    self.model.needs_user(&chat.id) || !self.model.interactions.is_empty(),
                     false,
                     chat.waiting_on(),
                 )
@@ -13716,8 +13801,8 @@ impl XdDesktop {
         SessionSignal::of(
             session.working,
             members
-                .map(|ids| ids.iter().any(|id| self.model.is_waiting(id)))
-                .unwrap_or_else(|| self.model.is_waiting(&session.id)),
+                .map(|ids| ids.iter().any(|id| self.model.needs_user(id)))
+                .unwrap_or_else(|| self.model.needs_user(&session.id)),
             members
                 .map(|ids| ids.iter().any(|id| self.model.unread_chats.contains(id)))
                 .unwrap_or_else(|| self.model.unread_chats.contains(&session.id)),
@@ -18815,6 +18900,7 @@ impl XdDesktop {
         let agent = AgentCli::from_backend(&self.model.backend);
 
         let interaction = self.render_interaction(colors, cx);
+        let quota_card = self.render_quota_card(colors, window, cx);
         let agents_tray = Self::render_agents_tray(
             colors,
             &self.transcript_snapshot.running_agents,
@@ -18888,6 +18974,9 @@ impl XdDesktop {
                 .into_any_element()
         };
         let mut actions = Vec::new();
+        if let Some(meter) = self.render_quota_meter(colors) {
+            actions.push(meter);
+        }
         if let Some(meter) = context_meter {
             actions.push(meter.into_any_element());
         }
@@ -19053,6 +19142,10 @@ impl XdDesktop {
             )
             .when_some(interaction, |chat, card| {
                 chat.child(div().w_full().max_w(px(736.0)).mb_3().child(card))
+            })
+            // As wide as the transcript column, as the background row is.
+            .when_some(quota_card, |chat, card| {
+                chat.child(div().w(px(column.min(736.0))).mb_3().child(card))
             })
             .children(agents_tray)
             .when_some(
@@ -19947,6 +20040,7 @@ impl XdDesktop {
             self.question_input.clone(),
             self.secret_question_input.clone(),
             self.source_build_input.clone(),
+            self.quota_input.clone(),
         ] {
             input.update(cx, |input, cx| input.set_colors(colors, cx));
         }
@@ -22381,9 +22475,9 @@ fn workflow_row_indices(model: &AppModel, marker: &str) -> Vec<usize> {
 }
 
 #[cfg(target_os = "macos")]
-fn notify_turn_finished(title: &str) {
+fn notify_turn_finished(title: &str, ending: &str) {
     let body = format!(
-        "{} finished",
+        "{} {ending}",
         title
             .chars()
             .filter(|character| !character.is_control())
@@ -22413,7 +22507,7 @@ fn notify_turn_finished(title: &str) {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn notify_turn_finished(_: &str) {}
+fn notify_turn_finished(_: &str, _: &str) {}
 
 fn optional_trimmed(value: &str) -> Option<&str> {
     let value = value.trim();
@@ -24394,6 +24488,360 @@ Binary files /dev/null and b/image.png differ\n";
             );
             assert!(desktop.pending_send.is_none());
         });
+    }
+
+    /// Draws the window again, so its debug bounds follow the latest state.
+    #[cfg(unix)]
+    fn redraw(cx: &mut gpui::VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+
+    /// The next request the desktop sends with `op`, past any others.
+    #[cfg(unix)]
+    fn next_request_with_op(
+        requests: &mut std::io::BufReader<std::os::unix::net::UnixStream>,
+        op: &str,
+    ) -> Value {
+        use std::io::BufRead;
+        loop {
+            let mut line = String::new();
+            requests
+                .read_line(&mut line)
+                .unwrap_or_else(|_| panic!("a {op} request must be sent"));
+            let request: Value = serde_json::from_str(&line).unwrap();
+            if request["op"] == op {
+                return request;
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_chat_stopped_at_its_quota_offers_a_new_one_in_place_of_resume(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::os::unix::net::UnixStream;
+
+        let (client, server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (host, _updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            PathBuf::from("chat-quota-test"),
+        );
+        let mut requests = std::io::BufReader::new(server);
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1280.0), px(900.0)));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.model.connected = true;
+            desktop.model.chat_quotas_supported = true;
+            desktop.host = Some(host.clone());
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.set_composer_text(String::new(), cx);
+            window.blur();
+
+            // A chat with a quota it has not used up shows no card.
+            desktop.model.resumable = true;
+            desktop.model.quota = Some(ChatQuota {
+                percent: 10,
+                used: 4.0,
+                own: false,
+            });
+            desktop.sync_quota_input(cx);
+            assert!(desktop.shows_resume());
+            assert!(!desktop.quota_card_visible());
+
+            desktop.model.quota = Some(ChatQuota {
+                percent: 10,
+                used: 10.4,
+                own: false,
+            });
+            desktop.model.quota_reached = true;
+            desktop.sync_quota_input(cx);
+            assert!(
+                !desktop.shows_resume(),
+                "the card takes the resume button's place"
+            );
+            assert!(desktop.quota_card_visible());
+            assert_eq!(desktop.quota_card.text, "20", "double the last quota");
+
+            // What the user typed stays while the same stop is shown.
+            desktop
+                .quota_input
+                .update(cx, |input, cx| input.set_text("35", cx));
+            desktop.quota_card.text = "35".into();
+            desktop.sync_quota_input(cx);
+            assert_eq!(desktop.quota_card.text, "35");
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-quota-card").is_some());
+        assert!(cx.debug_bounds("native-quota-meter").is_none());
+        let continue_button = cx.debug_bounds("chat-quota-continue").unwrap();
+        cx.simulate_click(continue_button.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let request = next_request_with_op(&mut requests, "set-chat-quota");
+        assert_eq!(request["chat"], "implementation");
+        assert_eq!(request["percent"], 35);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert_eq!(
+                desktop.quota_card.pending.as_deref(),
+                Some("implementation")
+            );
+            // A second press while the first is on its way sends nothing.
+            desktop.continue_with_quota(None, cx);
+            desktop.handle_reply(
+                RequestKind::SetChatQuota {
+                    chat_id: "implementation".into(),
+                },
+                serde_json::json!({"ok": true, "resumed": true})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                None,
+                cx,
+            );
+            assert!(desktop.quota_card.pending.is_none());
+        });
+        assert_eq!(
+            next_request_with_op(&mut requests, "chat")["chat"],
+            "implementation",
+            "the chat's state says whether it went on"
+        );
+
+        redraw(cx);
+        let lift = cx.debug_bounds("chat-quota-lift").unwrap();
+        cx.simulate_click(lift.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let request = next_request_with_op(&mut requests, "set-chat-quota");
+        assert_eq!(request["chat"], "implementation");
+        assert!(request["percent"].is_null());
+        assert!(request.get("inherit").is_none());
+
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            // An invalid quota cannot be sent.
+            desktop.quota_card.pending = None;
+            desktop.quota_card.text = "0".into();
+            // A message sent meanwhile waits in the queue.
+            assert!(matches!(
+                desktop.apply_optimistic_send("Also check the footer"),
+                OptimisticSend::Queued
+            ));
+            assert_eq!(desktop.model.queue, vec!["Also check the footer"]);
+            assert!(!desktop.model.working);
+        });
+        redraw(cx);
+        assert!(
+            cx.debug_bounds("chat-quota-invalid").is_some(),
+            "an invalid quota says what it needs"
+        );
+        let continue_button = cx.debug_bounds("chat-quota-continue").unwrap();
+        cx.simulate_click(continue_button.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert!(desktop.quota_card.pending.is_none());
+            // Going on: the card leaves and the quota shows quietly.
+            desktop.model.quota_reached = false;
+            desktop.model.quota = Some(ChatQuota {
+                percent: 20,
+                used: 0.0,
+                own: true,
+            });
+            desktop.sync_quota_input(cx);
+            assert!(!desktop.quota_card_visible());
+        });
+        // Debug bounds outlive the elements that set them, so only what
+        // newly appears can be seen here; the card's state is checked above.
+        redraw(cx);
+        assert!(cx.debug_bounds("native-quota-meter").is_some());
+    }
+
+    #[gpui::test]
+    fn a_chat_newly_stopped_at_its_quota_is_announced_once(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.settings.notifications = false;
+            desktop.model = grouped_workspace_fixture();
+            let stop = |desktop: &mut XdDesktop, id: &str| {
+                if let Some(chat) = desktop.model.chats.iter_mut().find(|chat| chat.id == id) {
+                    chat.quota_reached = true;
+                }
+            };
+            // Chats already stopped when xd first sees the tree stay quiet.
+            let first = desktop.model.chats[0].id.clone();
+            stop(desktop, &first);
+            desktop.notify_new_quota_stops(cx);
+            assert!(desktop.quota_stops_announced.is_empty());
+
+            // One that stops later is announced, once.
+            let second = desktop.model.chats[1].id.clone();
+            stop(desktop, &second);
+            desktop.notify_new_quota_stops(cx);
+            assert!(desktop.quota_stops_announced.contains(&second));
+            assert!(!desktop.quota_stops_announced.contains(&first));
+            desktop.notify_new_quota_stops(cx);
+            assert_eq!(desktop.quota_stops_announced.len(), 1);
+
+            // Going on forgets it, so a later stop is announced again.
+            for chat in &mut desktop.model.chats {
+                chat.quota_reached = false;
+            }
+            desktop.notify_new_quota_stops(cx);
+            assert!(desktop.quota_stops_announced.is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_chat_quota_setting_shows_only_on_a_host_that_has_quotas(cx: &mut gpui::TestAppContext) {
+        use std::os::unix::net::UnixStream;
+
+        let (client, server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (host, _updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            PathBuf::from("chat-quota-settings-test"),
+        );
+        let mut requests = std::io::BufReader::new(server);
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            let colors = desktop.settings.theme.colors();
+            desktop.host = Some(host.clone());
+            desktop.model.connected = true;
+            desktop.minimal_theme_open = true;
+            // An older host is never asked.
+            desktop.request_chat_quota_settings();
+            desktop.chat_quota = Some(ChatQuotaSettings { percent: None });
+            assert!(desktop.chat_quota_rows(colors, cx).is_empty());
+
+            desktop.chat_quota = None;
+            let tree =
+                serde_json::json!({"ok": true, "folders": [], "chats": [], "chat_quotas": true});
+            desktop.handle_reply(
+                RequestKind::Tree,
+                tree.as_object().unwrap().clone(),
+                None,
+                cx,
+            );
+            assert!(desktop.model.chat_quotas_supported);
+            desktop.handle_reply(
+                RequestKind::ChatQuotaSettings { broadcasts: 0 },
+                serde_json::json!({"ok": true, "percent": null})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop.chat_quota,
+                Some(ChatQuotaSettings { percent: None })
+            );
+            assert_eq!(
+                desktop.chat_quota_rows(colors, cx).len(),
+                2,
+                "off: just the switch"
+            );
+
+            desktop.handle_event(
+                "chat-quota-settings",
+                serde_json::json!({"percent": 15}),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop.chat_quota,
+                Some(ChatQuotaSettings { percent: Some(15) })
+            );
+            assert_eq!(desktop.chat_quota_rows(colors, cx).len(), 3);
+
+            desktop.change_chat_quota_settings(ChatQuotaSettings { percent: None }, cx);
+            // Another client's change broadcast after this request is newer
+            // than the reply to it, which must not undo it.
+            desktop.handle_event(
+                "chat-quota-settings",
+                serde_json::json!({"percent": 30}),
+                None,
+                cx,
+            );
+            desktop.handle_reply(
+                RequestKind::SetChatQuotaSettings { broadcasts: 1 },
+                serde_json::json!({"ok": true, "percent": null})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop.chat_quota,
+                Some(ChatQuotaSettings { percent: Some(30) })
+            );
+            // Overlapping requests each keep their own place: an older one's
+            // reply arriving after a newer request was sent still loses to the
+            // broadcast between them, and the newer one's reply applies.
+            let reply = |percent: Value| {
+                serde_json::json!({"ok": true, "percent": percent})
+                    .as_object()
+                    .unwrap()
+                    .clone()
+            };
+            let older = desktop.chat_quota_broadcasts;
+            desktop.handle_event(
+                "chat-quota-settings",
+                serde_json::json!({"percent": 40}),
+                None,
+                cx,
+            );
+            let newer = desktop.chat_quota_broadcasts;
+            desktop.handle_reply(
+                RequestKind::ChatQuotaSettings { broadcasts: older },
+                reply(Value::Null),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop.chat_quota,
+                Some(ChatQuotaSettings { percent: Some(40) })
+            );
+            desktop.handle_reply(
+                RequestKind::ChatQuotaSettings { broadcasts: newer },
+                reply(serde_json::json!(40)),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop.chat_quota,
+                Some(ChatQuotaSettings { percent: Some(40) })
+            );
+        });
+        // The first request the desktop sent is the tree's ask, not one before it.
+        let mut first = String::new();
+        std::io::BufRead::read_line(&mut requests, &mut first).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&first).unwrap()["op"],
+            "chat-quota-settings"
+        );
+        let request = next_request_with_op(&mut requests, "set-chat-quota-settings");
+        assert!(request["percent"].is_null());
     }
 
     #[gpui::test]
@@ -26689,6 +27137,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: Some(index),
                     auto_settle_disabled: false,
                     paused: false,
+                    quota_reached: false,
                     pull_requests: Vec::new(),
                 })
                 .collect();
@@ -27039,6 +27488,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                quota_reached: false,
                 pull_requests: Vec::new(),
             }];
             for chat_id in ["kept", "removed"] {
@@ -27323,6 +27773,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    quota_reached: false,
                     pull_requests: Vec::new(),
                 },
                 ChatSummary {
@@ -27337,6 +27788,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    quota_reached: false,
                     pull_requests: Vec::new(),
                 },
             ];
@@ -27501,6 +27953,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                quota_reached: false,
                 pull_requests: Vec::new(),
             }];
 
@@ -27693,6 +28146,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                quota_reached: false,
                 pull_requests: Vec::new(),
             }];
 
@@ -28542,6 +28996,7 @@ Binary files /dev/null and b/image.png differ\n";
             settled_at: None,
             auto_settle_disabled: false,
             paused: false,
+            quota_reached: false,
             pull_requests: Vec::new(),
         };
         let mut chats = vec![
@@ -28623,6 +29078,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    quota_reached: false,
                     pull_requests: Vec::new(),
                 },
                 ChatSummary {
@@ -28637,6 +29093,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    quota_reached: false,
                     pull_requests: Vec::new(),
                 },
             ];
@@ -28679,6 +29136,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    quota_reached: false,
                     pull_requests: Vec::new(),
                 },
                 ChatSummary {
@@ -28693,6 +29151,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    quota_reached: false,
                     pull_requests: Vec::new(),
                 },
             ];
@@ -28786,6 +29245,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                quota_reached: false,
                 pull_requests: Vec::new(),
             }];
 
@@ -28841,6 +29301,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                quota_reached: false,
                 pull_requests: Vec::new(),
             }];
             let generation = desktop.remote_generation;
@@ -28905,6 +29366,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                quota_reached: false,
                 pull_requests: Vec::new(),
             }],
             ..Default::default()

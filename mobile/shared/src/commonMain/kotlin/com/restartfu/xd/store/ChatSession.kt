@@ -143,6 +143,16 @@ public class ChatSession internal constructor(
     /** Continues the chat's cut-short turn; see [Ops.resumeTurn]. */
     public suspend fun resumeTurn(): Unit = core.call(Ops.resumeTurn(core.chatId))
 
+    /**
+     * Gives the chat a new quota, or none, and starts its count again. A chat
+     * that stopped at its quota goes on; the answer says whether it did. The
+     * host then reports the chat changed, which reloads it.
+     */
+    public suspend fun setQuota(quota: Ops.ChatQuotaChoice): Boolean =
+        core.read(Ops.setChatQuota(core.chatId, quota)) {
+            it.decodeReply<com.restartfu.xd.protocol.SetChatQuotaReply>().resumed
+        }
+
     public suspend fun loadOlder(): Unit = core.loadOlder()
 
     /** The whole patch for [read], one of `working-all` or `branch-all`. */

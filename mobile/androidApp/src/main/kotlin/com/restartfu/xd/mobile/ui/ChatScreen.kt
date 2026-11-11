@@ -978,6 +978,19 @@ private fun Composer(
                 }
             }
         }
+        // In place of the resume button: a chat stopped at its quota goes on
+        // only with a new one. Messages sent meanwhile wait in its queue.
+        if (state.quotaReached && !state.working) {
+            val quotaBusy by model.quotaBusy.collectAsStateWithLifecycle()
+            val quotaError by model.quotaError.collectAsStateWithLifecycle()
+            Spacer(Modifier.height(6.dp))
+            QuotaReachedCard(
+                quota = state.quota,
+                busy = quotaBusy,
+                error = quotaError,
+                onContinue = model::continueWithQuota,
+            )
+        }
         Spacer(Modifier.height(6.dp))
         if (compact) {
             CompactComposerRow(state, composer, sending, cancelling, steering, model, attachments.size, onModel) {
@@ -1179,7 +1192,8 @@ private fun SendButton(
     model: ChatViewModel,
     size: androidx.compose.ui.unit.Dp,
 ) {
-    val resuming = !state.working && state.resumable && empty
+    // A chat stopped at its quota is continued from its quota card instead.
+    val resuming = !state.working && state.resumable && !state.quotaReached && empty
     FilledIconButton(
         onClick = {
             when {

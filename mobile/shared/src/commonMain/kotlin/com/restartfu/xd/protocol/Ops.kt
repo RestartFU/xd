@@ -323,6 +323,45 @@ public object Ops {
     /** Continues a cut-short turn; the host refuses if the chat moved on. */
     public fun resumeTurn(chatId: String): JsonObject = withChat("resume-turn", chatId)
 
+    /** The host's default chat quota, on hosts whose `tree` has `chat_quotas`. */
+    public fun chatQuotaSettings(): JsonObject = op("chat-quota-settings")
+
+    /** Sets the host's default chat quota, a whole percentage from 1 to 100; null limits no chat. */
+    public fun setChatQuotaSettings(percent: Int?): JsonObject = buildJsonObject {
+        put("op", "set-chat-quota-settings")
+        put("percent", percent?.let { JsonPrimitive(requirePercent(it)) } ?: JsonNull)
+    }
+
+    /**
+     * Gives one chat a quota of its own, no limit, or the host's default
+     * again. Its count starts again, and a chat that stopped at its quota
+     * goes on.
+     */
+    public fun setChatQuota(chatId: String, quota: ChatQuotaChoice): JsonObject = buildJsonObject {
+        put("op", "set-chat-quota")
+        put("chat", requireId(chatId, "Chat"))
+        when (quota) {
+            is ChatQuotaChoice.Percent -> put("percent", requirePercent(quota.percent))
+            ChatQuotaChoice.Unlimited -> put("percent", JsonNull)
+            ChatQuotaChoice.Inherit -> put("inherit", true)
+        }
+    }
+
+    /** What [setChatQuota] gives a chat. */
+    public sealed interface ChatQuotaChoice {
+        /** Its own quota, a whole percentage from 1 to 100. */
+        public data class Percent(val percent: Int) : ChatQuotaChoice
+        /** No limit at all. */
+        public data object Unlimited : ChatQuotaChoice
+        /** The host's default, following it as it changes. */
+        public data object Inherit : ChatQuotaChoice
+    }
+
+    private fun requirePercent(percent: Int): Int {
+        require(percent in 1..100) { "A chat quota is a whole percentage from 1 to 100" }
+        return percent
+    }
+
     /**
      * Stops every working chat in folder [folderId] and the folders inside it,
      * and every one waiting on background tasks, marking them paused.

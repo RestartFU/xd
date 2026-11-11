@@ -42,6 +42,7 @@ mod private_fs;
 mod process_delegation;
 mod process_tree;
 mod pull_requests;
+mod quota;
 mod reply_images;
 mod repository_monitor;
 mod runtime;
@@ -208,6 +209,10 @@ pub struct Engine {
     pairing: PairingService,
     peer_listener: Mutex<Option<PeerListener>>,
     auto_settler: Mutex<Option<AutoSettler>>,
+    quota_meter: Mutex<Option<quota::QuotaMeter>>,
+    /// Held from saving the default chat quota until it is broadcast, so the
+    /// last broadcast always carries the saved value.
+    quota_settings: Mutex<()>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -267,6 +272,8 @@ impl Engine {
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
             auto_settler: Mutex::new(None),
+            quota_meter: Mutex::new(None),
+            quota_settings: Mutex::new(()),
             events,
             runtime: None,
         }
@@ -332,6 +339,8 @@ impl Engine {
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
             auto_settler: Mutex::new(None),
+            quota_meter: Mutex::new(None),
+            quota_settings: Mutex::new(()),
             events,
         };
         engine.auth.refresh_all();
@@ -619,6 +628,13 @@ impl Engine {
                     .map(|settings| settings.reply())
             }),
             Some("set-auto-delete-settings") => self.set_auto_delete_settings(&request),
+            Some("chat-quota-settings") => self.read(|store| {
+                store
+                    .chat_quota_settings()
+                    .map(|percent| json!({"ok": true, "percent": percent}))
+            }),
+            Some("set-chat-quota-settings") => self.set_chat_quota_settings(&request),
+            Some("set-chat-quota") => self.set_chat_quota(&request),
             Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
             Some("move-chat") => self.tree_mutation(|store| store.move_chat(&request)),
             Some("delete-chat") => self.delete_chat(&request),
@@ -1807,6 +1823,186 @@ impl Engine {
         }
     }
 
+    fn set_chat_quota_settings(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let _settings = self
+            .quota_settings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match store.set_chat_quota_settings(request) {
+            Ok(percent) => {
+                self.events
+                    .publish(json!({"event": "chat-quota-settings", "percent": percent}));
+                // A lower default can have stopped idle chats.
+                self.events.publish(json!({"event": "tree"}));
+                self.wake_quota_meter();
+                json!({"ok": true, "percent": percent})
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    /// Gives a chat a quota of its own, or hands it back to the default, and
+    /// continues it if it had stopped at its quota.
+    fn set_chat_quota(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let chat_id = match required_string(request, "chat", "set-chat-quota needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        // The new quota and the turn it continues are one step under the
+        // chat's gate: the meter cannot stop the chat at the old count between
+        // them, and a pause-all either comes first and is undone by this
+        // explicit choice, or comes after and stops what it started.
+        let gate = match self.chat_execution_gate(chat_id) {
+            Ok(gate) => gate,
+            Err(error) => return error_reply(error),
+        };
+        let Ok(_execution) = gate.lock() else {
+            return error_reply("This session's agent state is unavailable.");
+        };
+        let reached = match store.set_chat_quota(request) {
+            Ok(reached) => reached,
+            Err(error) => return error_reply(error),
+        };
+        self.events
+            .publish(json!({"event": "changed", "chat": chat_id}));
+        self.events.publish(json!({"event": "tree"}));
+        let resumed = reached && self.resume_paused_chat(chat_id, &|_| true, true);
+        self.wake_quota_meter();
+        json!({"ok": true, "resumed": resumed})
+    }
+
+    fn wake_quota_meter(&self) {
+        if let Ok(meter) = self.quota_meter.lock()
+            && let Some(meter) = meter.as_ref()
+        {
+            meter.wake();
+        }
+    }
+
+    /// Stops a chat that has used its quota, as `pause-all` stops a chat,
+    /// and marks it so only a new quota picks it back up.
+    fn stop_for_quota(&self, chat_id: &str) {
+        let Ok(gate) = self.chat_execution_gate(chat_id) else {
+            return;
+        };
+        let Ok(_execution) = gate.lock() else {
+            return;
+        };
+        self.stop_for_quota_gated(chat_id);
+    }
+
+    /// [`Self::stop_for_quota`] for a caller that holds the chat's gate.
+    fn stop_for_quota_gated(&self, chat_id: &str) {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return;
+        };
+        // Asked again under the gate: a new quota may have come meanwhile.
+        if !store
+            .chat_quota(chat_id)
+            .is_ok_and(|quota| quota.reached || quota.spent())
+        {
+            return;
+        }
+        let stopped = runtime.stop_chat_if(chat_id, |background| {
+            store
+                .stop_for_quota(chat_id, background)
+                .unwrap_or_else(|error| {
+                    eprintln!("xd-host: cannot stop chat {chat_id} at its quota: {error}");
+                    false
+                })
+        });
+        match stopped {
+            None => return,
+            // As with stop: a turn that died with a previous host still ends.
+            Some(false) => {
+                let _ = store.clear_interrupted_turn(chat_id);
+            }
+            Some(true) => {}
+        }
+        self.events
+            .publish(json!({"event": "changed", "chat": chat_id}));
+        self.events.publish(json!({"event": "tree"}));
+    }
+
+    /// Holds chats to their quotas. Only the daemon does this, since it is
+    /// what outlives the clients.
+    pub fn start_chat_quotas(self: &Arc<Self>) {
+        let (Some(store), Some(runtime)) = (self.store.clone(), self.runtime.clone()) else {
+            return;
+        };
+        // A chat charged past its quota just before the host went down was
+        // not stopped yet; nothing runs as the host starts, so mark it now.
+        match store.mark_spent_quotas() {
+            Ok(marked) if !marked.is_empty() => self.events.publish(json!({"event": "tree"})),
+            Ok(_) => {}
+            Err(error) => eprintln!("xd-host: cannot check chat quotas: {error}"),
+        }
+        let auth = self.auth.clone();
+        let reader: quota::Reader = Box::new(move |provider, account| {
+            if !auth.signed_in(provider, account) {
+                return None;
+            }
+            let asked = accounts::now_ms();
+            usage::check_account(auth.accounts(), provider, account)?;
+            let (windows, checked_at) = auth.accounts().limits(provider, account)?;
+            // A reading from before this one says nothing of the turn.
+            if checked_at < asked {
+                return None;
+            }
+            // Which login was read, so the meter never measures one login's
+            // usage against another's.
+            let login = auth.accounts().session_tag(provider, account);
+            Some((quota::quota_window(&windows)?, login))
+        });
+        // Weak, since the engine owns the meter that holds this.
+        let engine = Arc::downgrade(self);
+        // Off the meter's thread: stopping waits for any message being sent
+        // to the chat, which must not hold up readings for other chats.
+        // One stop at a time per chat, however often the meter looks while
+        // a slow send holds the chat's gate.
+        let stopping = Arc::new(Mutex::new(HashSet::<String>::new()));
+        let stopper: quota::Stopper = Box::new(move |chat_id| {
+            let fresh = stopping
+                .lock()
+                .map(|mut stopping| stopping.insert(chat_id.to_owned()))
+                .unwrap_or(false);
+            if !fresh {
+                return;
+            }
+            let engine = engine.clone();
+            let stopping = stopping.clone();
+            let chat_id = chat_id.to_owned();
+            let spawned = thread::Builder::new().name("xd-quota-stop".into()).spawn({
+                let stopping = stopping.clone();
+                let chat_id = chat_id.clone();
+                move || {
+                    if let Some(engine) = engine.upgrade() {
+                        engine.stop_for_quota(&chat_id);
+                    }
+                    if let Ok(mut stopping) = stopping.lock() {
+                        stopping.remove(&chat_id);
+                    }
+                }
+            });
+            if spawned.is_err()
+                && let Ok(mut stopping) = stopping.lock()
+            {
+                stopping.remove(&chat_id);
+            }
+        });
+        if let Ok(mut meter) = self.quota_meter.lock() {
+            meter.get_or_insert_with(|| {
+                quota::QuotaMeter::start(store, runtime, self.events.clone(), reader, stopper)
+            });
+        }
+    }
+
     /// One pass of the deletion rule. A session waits while it has an approval
     /// or question open, and typing in or output from its terminal counts as
     /// activity, even after the terminal closes. Its terminals close only once its worktrees have passed their
@@ -2099,6 +2295,16 @@ impl Engine {
             Ok(execution) => execution,
             Err(_) => return error_reply("This session's agent state is unavailable."),
         };
+        self.send_message_gated(request, continues)
+    }
+
+    /// [`Self::send_message_inner`] for a caller that holds the chat's
+    /// execution gate.
+    fn send_message_gated(&self, request: &Value, continues: Option<Continuation>) -> Value {
+        let chat_id = match required_string(request, "chat", "send needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return error_reply("Rust host state storage is not configured.");
         };
@@ -2122,6 +2328,15 @@ impl Engine {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
         };
+        // A chat past its quota but not yet stopped, such as one the meter
+        // charged just before the host went down, stops now, for good, before
+        // anything is sent: whatever runs in it ends and the message waits.
+        if store
+            .chat_quota(chat_id)
+            .is_ok_and(|quota| !quota.reached && quota.spent())
+        {
+            self.stop_for_quota_gated(chat_id);
+        }
         let was_paused = store.chat_is_paused(chat_id).unwrap_or(false);
         let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false) || was_paused;
         let prepared = match continues {
@@ -2146,7 +2361,10 @@ impl Engine {
                     ))
                 });
                 self.events.publish(event);
+                // A chat stopped at its quota keeps the message queued.
+                let held = store.chat_quota(chat_id).is_ok_and(|quota| quota.reached);
                 if request.get("steer").and_then(Value::as_bool) == Some(true)
+                    && !held
                     && let Some((index, text)) = newest
                 {
                     let steer = self.steer_queued(
@@ -2343,11 +2561,38 @@ impl Engine {
             if !in_scope(store, &chat_id, folder) {
                 continue;
             }
+            if self.resume_paused_chat(&chat_id, &|chat_id| in_scope(store, chat_id, folder), false)
+            {
+                resumed.push(chat_id);
+            }
+        }
+        json!({"ok": true, "resumed": resumed})
+    }
+
+    /// Picks one paused chat back up: continues the turn pausing cut short,
+    /// after which its queue runs as usual. `in_scope` is asked again under
+    /// the chat's gate before the chat is let go without a turn. True when
+    /// the chat went on.
+    /// `gated` when the caller holds the chat's execution gate throughout.
+    fn resume_paused_chat(
+        &self,
+        chat_id: &str,
+        in_scope: &dyn Fn(&str) -> bool,
+        gated: bool,
+    ) -> bool {
+        let Some(store) = self.store.as_ref() else {
+            return false;
+        };
+        let chat_id = chat_id.to_owned();
+        {
             let before = store.latest_user_message(&chat_id).ok();
-            let reply = self.send_message_inner(
-                &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
-                Some(Continuation::Resume),
-            );
+            let continuation =
+                json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT});
+            let reply = if gated {
+                self.send_message_gated(&continuation, Some(Continuation::Resume))
+            } else {
+                self.send_message_inner(&continuation, Some(Continuation::Resume))
+            };
             if reply["ok"] != true {
                 // A continuation that was stored got as far as starting its
                 // turn, which failed and left the chat paused for another try.
@@ -2355,7 +2600,7 @@ impl Engine {
                 if store.latest_user_message(&chat_id).ok() != before
                     || !store.chat_is_paused(&chat_id).unwrap_or(false)
                 {
-                    continue;
+                    return false;
                 }
                 // Nothing to continue: the chat moved on, or its turn is still
                 // stopping. Let the queue go on, and leave the turn to resume
@@ -2363,16 +2608,23 @@ impl Engine {
                 // hands the queue on itself; an idle chat starts it here. All
                 // under the gate, so a pause-all since is either seen here or
                 // stops what this starts.
-                let Ok(gate) = self.chat_execution_gate(&chat_id) else {
-                    continue;
+                let gate = if gated {
+                    None
+                } else {
+                    match self.chat_execution_gate(&chat_id) {
+                        Ok(gate) => Some(gate),
+                        Err(_) => return false,
+                    }
                 };
-                let Ok(_execution) = gate.lock() else {
-                    continue;
+                let _execution = match &gate {
+                    Some(gate) => match gate.lock() {
+                        Ok(execution) => Some(execution),
+                        Err(_) => return false,
+                    },
+                    None => None,
                 };
-                if !in_scope(store, &chat_id, folder)
-                    || !store.unpause_chat(&chat_id).unwrap_or(false)
-                {
-                    continue;
+                if !in_scope(&chat_id) || !store.unpause_chat(&chat_id).unwrap_or(false) {
+                    return false;
                 }
                 self.events.publish(json!({"event": "tree"}));
                 let queued = store
@@ -2383,14 +2635,13 @@ impl Engine {
                     && let Err(error) = self.start_queued_if_idle(&chat_id, &text, true, true)
                 {
                     eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
-                    continue;
+                    return false;
                 }
             }
-            self.events
-                .publish(json!({"event": "changed", "chat": chat_id}));
-            resumed.push(chat_id);
         }
-        json!({"ok": true, "resumed": resumed})
+        self.events
+            .publish(json!({"event": "changed", "chat": chat_id}));
+        true
     }
 
     /// Redirects the running turn to a queued message: into the turn itself
@@ -2419,6 +2670,14 @@ impl Engine {
             },
             None => None,
         };
+        // A chat stopped at its quota keeps its queue as it is until the
+        // user gives it a new quota.
+        if store
+            .chat_quota(request["chat"].as_str().unwrap_or_default())
+            .is_ok_and(|quota| quota.reached)
+        {
+            return error_reply(storage::QUOTA_REACHED_MESSAGE);
+        }
         match store.take_queued(request) {
             Ok((mut reply, event)) => {
                 self.events.publish(event);

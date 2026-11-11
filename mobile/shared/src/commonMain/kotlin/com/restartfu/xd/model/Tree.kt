@@ -30,6 +30,8 @@ public data class ChatSummary(
     val parentId: String? = null,
     /** Its last reply ends on a question for whoever reads it. */
     val questionWaiting: Boolean = false,
+    /** Stopped at its usage quota, until the user gives it a new one. */
+    val quotaReached: Boolean = false,
 ) {
     /**
      * How many background tasks the chat is waiting on: none while a turn
@@ -106,6 +108,8 @@ public data class TreeSnapshot(
      * [ChatSummary.pullRequests] is the whole list and can be changed.
      */
     val linkedPullRequests: Boolean = false,
+    /** The connected host can limit chats to a share of their account's usage. */
+    val chatQuotas: Boolean = false,
 ) {
     /**
      * New folders can be made. A host that already lists one keeps them even

@@ -1,5 +1,6 @@
 package com.restartfu.xd.store
 
+import com.restartfu.xd.model.ChatQuota
 import com.restartfu.xd.model.ChatState
 import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
@@ -118,6 +119,7 @@ public object TranscriptMachine {
                 state.copy(
                     working = true,
                     resumable = false,
+                    quotaReached = false,
                     label = input.label,
                     turnId = input.turnId,
                     turnSequence = input.turnSequence ?: 0,
@@ -356,6 +358,8 @@ public object TranscriptMachine {
                     .map { PngAttachment(Base64.Default.decode(it.data)) },
                 working = chat.working,
                 resumable = chat.resumable,
+                quota = ChatQuota.parse(chat.quota),
+                quotaReached = chat.quotaReached,
                 label = chat.label,
                 turnEpoch = chat.turnEpoch,
                 turnId = if (chat.working) chat.turnId else null,

@@ -3,6 +3,7 @@ package com.restartfu.xd.protocol
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 
 @Serializable
 public data class FolderReply(
@@ -41,6 +42,9 @@ public data class ChatSummaryReply(
     /** Its last reply ends on a question for whoever reads it. */
     @SerialName("question_waiting")
     val questionWaiting: Boolean = false,
+    /** Stopped at its usage quota, until the user gives it a new one. */
+    @SerialName("quota_reached")
+    val quotaReached: Boolean = false,
 )
 
 /** One pull request linked to a chat; [state] is absent until the host has asked GitHub. */
@@ -97,6 +101,8 @@ public data class TreeReply(
     @SerialName("pause_folders") val pauseFolders: Boolean = false,
     /** True when the host keeps pull requests linked to chats and lists them per chat. */
     @SerialName("linked_pull_requests") val linkedPullRequests: Boolean = false,
+    /** True when the host can limit chats to a share of their account's usage. */
+    @SerialName("chat_quotas") val chatQuotas: Boolean = false,
 )
 
 /** A chat checkout's Git state, as `git-status` and `git-commit` answer. */
@@ -349,6 +355,13 @@ public data class AgentSecretsReply(
     val names: List<String> = emptyList(),
 )
 
+/** Whether `set-chat-quota` continued a chat that had stopped at its quota. */
+@Serializable
+public data class SetChatQuotaReply(
+    val ok: Boolean = true,
+    val resumed: Boolean = false,
+)
+
 /** The chats `pause-all` stopped. */
 @Serializable
 public data class PauseAllReply(
@@ -581,6 +594,15 @@ public data class ChatReply(
     val worktrees: List<WorktreeReply> = emptyList(),
     @SerialName("selected_worktree")
     val selectedWorktree: String? = null,
+    /**
+     * `{percent, used, own}` while a quota applies to the chat. Kept as raw
+     * JSON and read with [com.restartfu.xd.model.ChatQuota.parse], so an
+     * unexpected shape means no quota rather than an unreadable chat.
+     */
+    val quota: JsonElement? = null,
+    /** Stopped at its quota, until the user gives it a new one. */
+    @SerialName("quota_reached")
+    val quotaReached: Boolean = false,
 )
 
 @Serializable

@@ -68,9 +68,10 @@ fn settings_heading(title: &'static str, colors: ThemeColors) -> gpui::Div {
 fn settings_row(
     id: &'static str,
     title: &'static str,
-    description: &'static str,
+    description: impl Into<SharedString>,
     colors: ThemeColors,
 ) -> gpui::Stateful<gpui::Div> {
+    let description = description.into();
     div()
         .id(id)
         .w_full()
@@ -457,6 +458,93 @@ impl XdDesktop {
         rows
     }
 
+    /// The connected host's default chat quota, on a host that has quotas
+    /// and once it has said what the quota is.
+    pub(super) fn chat_quota_rows(
+        &mut self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(settings) = self.chat_quota.filter(|_| self.model.chat_quotas_supported) else {
+            return Vec::new();
+        };
+        let mut rows = vec![
+            settings_heading("Chat quota", colors).into_any_element(),
+            settings_row(
+                "workspace-settings-chat-quota",
+                "Limit each chat's usage",
+                match settings.percent {
+                    Some(percent) => format!(
+                        "Limit each chat to {percent}% of its account's 5-hour usage limit. A chat that reaches it stops and asks before going on."
+                    ),
+                    None => "Limit each chat to a share of its account's 5-hour usage limit. A chat that reaches it stops and asks before going on.".to_owned(),
+                },
+                colors,
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.change_chat_quota_settings(
+                    ChatQuotaSettings {
+                        percent: match settings.percent {
+                            Some(_) => None,
+                            None => Some(ChatQuotaSettings::DEFAULT_PERCENT),
+                        },
+                    },
+                    cx,
+                );
+            }))
+            .child(settings_switch(colors, settings.percent.is_some()))
+            .into_any_element(),
+        ];
+        let Some(percent) = settings.percent else {
+            return rows;
+        };
+        let step = |id: &'static str, label: &'static str, larger: bool, cx: &mut Context<Self>| {
+            let to = ChatQuotaSettings::step(percent, larger);
+            ui_button(id, ButtonKind::Secondary, colors)
+                .w(px(30.0))
+                .px_0()
+                .when(to.is_none(), |button| button.opacity(0.4))
+                .when_some(to, |button, to| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_chat_quota_settings(
+                            ChatQuotaSettings { percent: Some(to) },
+                            cx,
+                        );
+                    }))
+                })
+                .child(label)
+        };
+        rows.push(
+            settings_row(
+                "workspace-settings-chat-quota-percent",
+                "Quota per chat",
+                "A chat's own quota, chosen when it stops, takes the place of this one.",
+                colors,
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(step("chat-quota-smaller", "\u{2212}", false, cx))
+                    .child(
+                        div()
+                            .w(px(40.0))
+                            .flex()
+                            .justify_center()
+                            .text_size(px(13.0))
+                            .text_color(rgb(colors.text))
+                            .child(format!("{percent}%")),
+                    )
+                    .child(step("chat-quota-larger", "+", true, cx)),
+            )
+            .into_any_element(),
+        );
+        rows
+    }
+
     pub(super) fn render_workspace_settings(
         &mut self,
         colors: ThemeColors,
@@ -697,6 +785,7 @@ impl XdDesktop {
                     )
                     .children(self.auto_settle_rows(colors, cx))
                     .children(self.auto_delete_rows(colors, cx))
+                    .children(self.chat_quota_rows(colors, cx))
                     .child(settings_heading("Updates", colors));
                 let status = self
                     .self_update_panel

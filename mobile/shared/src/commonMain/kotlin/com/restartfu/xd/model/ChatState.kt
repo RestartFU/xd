@@ -57,6 +57,13 @@ public data class ChatState(
     val working: Boolean = false,
     /** The last turn was cut short, so the composer can offer to continue it. */
     val resumable: Boolean = false,
+    /** The quota that applies to this chat, while one does. */
+    val quota: ChatQuota? = null,
+    /**
+     * Stopped at its quota: it continues only once the user gives it a new
+     * one, so the composer offers that instead of resuming.
+     */
+    val quotaReached: Boolean = false,
     val label: String? = null,
     /** Live turn this state reflects, and how far into it we have applied. */
     val turnEpoch: String = "",
