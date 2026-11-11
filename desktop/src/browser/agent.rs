@@ -877,7 +877,8 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
   const kind = (element, tag, style) => {
     const role = (element.getAttribute('role') || '').toLowerCase();
     if (roles.has(role)) return role;
-    if (tag === 'A' && element.hasAttribute('href')) return 'link';
+    if (tag === 'A' && (element.hasAttribute('href') || element.hasAttribute('xlink:href')))
+      return 'link';
     if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
     if (tag === 'SELECT') return 'combobox';
     if (tag === 'TEXTAREA') return 'textbox';
@@ -903,12 +904,15 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
     if (!name && !['textbox', 'combobox', 'searchbox'].includes(role.split(' ')[0]))
       name = element.innerText;
     if (!name) name = element.getAttribute('title') || element.getAttribute('placeholder')
-      || element.getAttribute('alt') || (element.querySelector('img[alt]') || {}).alt || '';
+      || element.getAttribute('alt') || (element.querySelector('img[alt]') || {}).alt
+      // An icon's own name, as an icon-only button has.
+      || (element.querySelector('[aria-label]') || {getAttribute: () => ''}).getAttribute('aria-label')
+      || (element.querySelector('svg title') || {}).textContent || '';
     let line = `[e${next}] ${role}`;
     name = short(name, 120);
     if (name) line += ` "${name}"`;
     if (tag === 'A') {
-      const href = element.getAttribute('href') || '';
+      const href = element.getAttribute('href') || element.getAttribute('xlink:href') || '';
       if (href && !href.startsWith('javascript:')) line += ` → ${short(href, 120)}`;
     }
     if (tag === 'SELECT') {
@@ -956,7 +960,8 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     const element = node;
-    const tag = element.tagName;
+    // SVG's tag names are lower case.
+    const tag = element.tagName.toUpperCase();
     if (skipped.has(tag) || element.hidden || element.getAttribute('aria-hidden') === 'true') return;
     const style = getComputedStyle(element);
     if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse')
@@ -966,12 +971,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
       add(`frame ${short(element.getAttribute('title') || element.src, 120)} (not read; open its address to read it)`);
       return;
     }
-    if (tag === 'IMG') {
-      const alt = short(element.getAttribute('alt'), 120);
-      if (alt && !naming) text += ` [image: ${alt}]`;
-      return;
-    }
-    if (tag === 'svg' || tag === 'SVG') return;
+    // Images and drawings included, which can be buttons too.
     const role = kind(element, tag, style);
     if (role && next < first + most) {
       const box = element.getBoundingClientRect();
@@ -980,15 +980,26 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
         add(describe(element, tag, role));
         refs.set(next, element);
         next += 1;
-        // A control's own text is its name; a clickable area may hold more
-        // controls, which are found by walking it, shadow roots and slots
-        // included.
-        if (role !== 'clickable' && tag !== 'SUMMARY') return;
+        // A control's own text is its name, but it may hold more controls,
+        // as an expanded tree item or a clickable card does, which are found
+        // by walking it, shadow roots and slots included.
         naming += 1;
         for (const child of children(element)) walk(child);
         naming -= 1;
         return;
       }
+    }
+    if (tag === 'IMG') {
+      const alt = short(element.getAttribute('alt'), 120);
+      if (alt && !naming) text += ` [image: ${alt}]`;
+      return;
+    }
+    if (tag === 'SVG') {
+      // A drawing's text is not for reading, but it may hold links.
+      naming += 1;
+      for (const child of children(element)) walk(child);
+      naming -= 1;
+      return;
     }
     const heading = /^H([1-6])$/.exec(tag);
     if (heading) {
