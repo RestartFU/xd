@@ -370,9 +370,7 @@ impl Engine {
             .map_err(|error| error.to_string())?
         {
             ReportDelivery::Held => Ok(()),
-            ReportDelivery::SteeredFirst(front) => {
-                self.start_queued_if_idle(parent, &front, true, false)
-            }
+            ReportDelivery::SteeredFirst(front) => self.start_steered(parent, &front),
             ReportDelivery::Start(turn) => {
                 if settled {
                     self.events.publish(json!({"event": "tree"}));
@@ -427,9 +425,7 @@ impl Engine {
             ReportDelivery::Held => return Ok(false),
             // The message the user steered goes first; the reports follow.
             ReportDelivery::SteeredFirst(front) => {
-                return self
-                    .start_queued_if_idle(chat_id, &front, true, false)
-                    .map(|()| true);
+                return self.start_steered(chat_id, &front).map(|()| true);
             }
             ReportDelivery::Start(turn) => turn,
         };
@@ -441,6 +437,18 @@ impl Engine {
         self.events
             .publish(json!({"event": "changed", "chat": chat_id}));
         started.map(|()| true)
+    }
+
+    /// Starts the message the user steered to the front of chat `chat_id`'s
+    /// queue, which its waiting reports follow. A start that fails is told
+    /// of like any other, which hands the reports over after it. The caller
+    /// holds the chat's gate.
+    fn start_steered(&self, chat_id: &str, front: &str) -> Result<(), String> {
+        let started = self.start_queued_if_idle(chat_id, front, true, false);
+        if let (Err(error), Some(runtime)) = (&started, self.runtime.as_ref()) {
+            runtime.report_start_failure(chat_id, error, false);
+        }
+        started
     }
 
     /// Hands every free chat the agent reports left waiting for it, such as
