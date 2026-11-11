@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -230,6 +232,8 @@ internal fun MinimalMobileApp(
     var renamingProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var deletingProject by remember { mutableStateOf<MinimalProject?>(null) }
     val settledNotice by model.settledNotice.collectAsStateWithLifecycle()
+    // Held here, not in the projects list, so Back from a chat returns to the same place in it.
+    val projectsList = rememberLazyListState()
     val sessionActions = SessionActions(
         settlement = tree.settlement,
         settle = { model.settleSession(it.id, it.title) },
@@ -450,6 +454,7 @@ internal fun MinimalMobileApp(
                     }
                     else -> MinimalProjectsHome(
                         model, settings, link, projects, tree.loading, tree.error, showTerminal,
+                        listState = projectsList,
                         newSessionAboveBar = showBottomNavigation,
                         actions = sessionActions,
                         onRenameProject = { renamingProjectId = it.id },
@@ -626,6 +631,7 @@ private fun MinimalProjectsHome(
     loading: Boolean,
     treeError: String?,
     onTerminal: () -> Unit,
+    listState: LazyListState,
     newSessionAboveBar: Boolean,
     actions: SessionActions,
     onRenameProject: (MinimalProject) -> Unit,
@@ -737,6 +743,7 @@ private fun MinimalProjectsHome(
 
             else -> Box(Modifier.fillMaxSize()) { LazyColumn(
                 modifier = Modifier.fillMaxSize(),
+                state = listState,
                 contentPadding = PaddingValues(12.dp, 14.dp, 12.dp, if (newSessionAboveBar) NewSessionBottom + FloatingBarHeight + 12.dp else 96.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
