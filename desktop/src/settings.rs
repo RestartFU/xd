@@ -115,6 +115,9 @@ pub struct AppSettings {
     /// list below remains the fallback for the local host.
     pub collapsed_folder_sets: HashMap<String, Vec<String>>,
     pub collapsed_folders: Vec<String>,
+    /// Sessions folded over the sessions their agents started, per host
+    /// connection.
+    pub collapsed_session_sets: HashMap<String, Vec<String>>,
     /// Whether the sidebar's Settled shelf is open on this device.
     pub settled_shelf_expanded: bool,
     pub collapsed_diff_files: HashMap<String, Vec<String>>,
@@ -166,6 +169,7 @@ impl Default for AppSettings {
             last_chat: None,
             collapsed_folder_sets: HashMap::new(),
             collapsed_folders: Vec::new(),
+            collapsed_session_sets: HashMap::new(),
             settled_shelf_expanded: false,
             collapsed_diff_files: HashMap::new(),
             expanded_file_directories: HashMap::new(),
@@ -522,6 +526,10 @@ mod tests {
                 ),
             ]),
             collapsed_folders: vec!["folder-a".into(), "folder-b".into()],
+            collapsed_session_sets: HashMap::from([(
+                "local".into(),
+                vec!["session:lead".into()],
+            )]),
             settled_shelf_expanded: true,
             collapsed_diff_files: HashMap::from([(
                 "local/chat-restore/working".into(),
