@@ -359,6 +359,13 @@ impl Engine {
                 }
             },
         };
+        // Through the same gate as the watch's own thread, so requests and
+        // the thread never ask GitHub about this pull request at once.
+        let gate = self.ci_watches.gate(&(chat.to_owned(), url.clone()));
+        let _turn = gate.lock().unwrap_or_else(|error| error.into_inner());
+        // Taken before anything is read, so a push from here on, while logs
+        // are fetched for an answer given at once, holds that answer back.
+        let upstream = upstream_commit(store, &workdir);
         // Read before GitHub is, so what GitHub says is no older than it.
         let earlier = match store.ci_watch(chat, &url) {
             Ok(earlier) => earlier,
@@ -396,7 +403,6 @@ impl Engine {
             // written, and no other request changed the watch meanwhile:
             // asking again starts over, so the watch there was before ends.
             // A push by the time it has ended starts a watch afresh below.
-            let upstream = upstream_commit(store, &workdir);
             match read_status(store, &workdir, &url) {
                 Ok(now) if same_checks(store, &workdir, &status, &now) => {
                     match store.end_ci_watch_if(chat, &url, earlier.as_ref()) {
@@ -617,10 +623,14 @@ impl CiWatches {
         let mut live = self.live.lock().unwrap_or_else(|error| error.into_inner());
         if live.get(key).is_some_and(|live| live == token) {
             live.remove(key);
-            self.gates
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .remove(key);
+            // Kept while anyone else holds it, such as a request in its turn.
+            let mut gates = self.gates.lock().unwrap_or_else(|error| error.into_inner());
+            if gates
+                .get(key)
+                .is_some_and(|gate| Arc::strong_count(gate) == 1)
+            {
+                gates.remove(key);
+            }
         }
     }
 
