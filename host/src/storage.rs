@@ -6633,6 +6633,7 @@ impl StateStore {
         }
         let mut queue = queue_from_column(Some(&stored));
         let leading = usize::try_from(leading).unwrap_or(0).min(queue.len());
+        let old = queue.clone();
         let marked = queue[..leading].to_vec();
         if mutate(&mut queue)? {
             // The marks are the steered messages' own: they follow those
@@ -6641,10 +6642,10 @@ impl StateStore {
                 Some(index) => {
                     let mut others = queue.clone();
                     others.remove(index);
-                    let kept = steered_prefix(&marked, &others);
+                    let kept = steered_prefix(&old, &marked, &others);
                     if index <= kept { kept + 1 } else { index + 1 }
                 }
-                None => steered_prefix(&marked, &queue),
+                None => steered_prefix(&old, &marked, &queue),
             };
             let encoded = if queue.is_empty() {
                 None
@@ -11819,9 +11820,31 @@ fn take_agent_reports(
 }
 
 /// How many of `queue`'s first messages are, in order, among `marked`, the
-/// steered messages that led the queue before it changed.
-fn steered_prefix(marked: &[String], queue: &[String]) -> usize {
-    let mut rest = marked.iter();
+/// steered messages that led `old`, the queue before it changed. Messages are
+/// told apart only by their text, so a message that left the queue is taken
+/// to be a steered one when another has the same text: an ordinary message
+/// never inherits a steered one's place before the reports.
+fn steered_prefix(old: &[String], marked: &[String], queue: &[String]) -> usize {
+    let mut gone = HashMap::<&str, usize>::new();
+    for message in old {
+        *gone.entry(message).or_default() += 1;
+    }
+    for message in queue {
+        if let Some(count) = gone.get_mut(message.as_str()) {
+            *count = count.saturating_sub(1);
+        }
+    }
+    let still = marked
+        .iter()
+        .filter(|message| match gone.get_mut(message.as_str()) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                false
+            }
+            _ => true,
+        })
+        .collect::<Vec<_>>();
+    let mut rest = still.into_iter();
     queue
         .iter()
         .take_while(|message| rest.any(|marked| marked == *message))
@@ -16975,6 +16998,21 @@ mod tests {
         assert_eq!(next(&store).as_deref(), Some("steered B"));
         assert_eq!(next(&store).as_deref(), Some("[xd] news"));
         assert_eq!(next(&store).as_deref(), Some("ordinary"));
+
+        // A steered message that leaves the queue does not hand its place to
+        // an ordinary one with the same text.
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "same"}))
+            .unwrap();
+        store.requeue_front("lead", "same").unwrap();
+        store
+            .deliver_agent_report("lead", "a", "[xd] ahead")
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": "lead", "index": 0, "text": "same"}))
+            .unwrap();
+        assert_eq!(next(&store).as_deref(), Some("[xd] ahead"));
+        assert_eq!(next(&store).as_deref(), Some("same"));
 
         // A turn that cannot be prepared for the reports still ends the one
         // before it; the reports wait.
