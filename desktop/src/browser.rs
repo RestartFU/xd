@@ -45,6 +45,9 @@ pub const TAB_BAR_HEIGHT: f32 = 43.0;
 #[cfg(target_os = "linux")]
 const NEW_TAB_NOTE: &str = "The page opened a new tab, which is now the selected one, so later \
 commands act on it. What follows is the page before; take a browser_snapshot to read the new tab.";
+/// How long an answer waits for the pane to open a tab the page asked for.
+#[cfg(target_os = "linux")]
+const POPUP_WAIT: Duration = Duration::from_secs(2);
 /// The same, after a command that failed.
 #[cfg(target_os = "linux")]
 const NEW_TAB_AFTER_ERROR: &str = "The page also opened a new tab, which is now the selected one, \
@@ -505,6 +508,31 @@ impl BrowserPane {
         };
         #[cfg(target_os = "linux")]
         let deadline = std::time::Instant::now() + agent::COMMAND_TIME;
+        // The worker hands its outcome back here, and the agent is answered
+        // once the tab has opened every tab its page asked for meanwhile,
+        // so the agent's next command finds the one now selected.
+        #[cfg(target_os = "linux")]
+        let (finished, outcome) =
+            async_channel::bounded::<(Result<serde_json::Value, String>, u64)>(1);
+        #[cfg(target_os = "linux")]
+        {
+            let tab = tab.entity.downgrade();
+            cx.spawn(async move |_, cx| {
+                let Ok((outcome, popups)) = outcome.recv().await else {
+                    return;
+                };
+                let asked = std::time::Instant::now();
+                while asked.elapsed() < POPUP_WAIT
+                    && tab
+                        .update(cx, |tab, _| tab.popups_handled < popups)
+                        .unwrap_or(false)
+                {
+                    Timer::after(Duration::from_millis(20)).await;
+                }
+                reply(outcome);
+            })
+            .detach();
+        }
         #[cfg(target_os = "linux")]
         native.with_view(move |view| {
             let page = view.devtools().stopped_by(cancelled.clone());
@@ -535,7 +563,8 @@ impl BrowserPane {
                                 Err(error) => Err(format!("{error}\n\n{NEW_TAB_AFTER_ERROR}")),
                             }
                         });
-                    reply(outcome.map(agent::Outcome::into_value));
+                    let _ = finished
+                        .send_blocking((outcome.map(agent::Outcome::into_value), page.popups()));
                 });
             if let Err(error) = spawned {
                 eprintln!("xd: could not run a browser command: {error}");
@@ -922,6 +951,8 @@ struct BrowserTab {
     colors: ThemeColors,
     #[cfg(target_os = "linux")]
     last_history_gesture: Option<std::time::Instant>,
+    /// Tabs this tab's pages asked for that the pane has opened.
+    popups_handled: u64,
 }
 
 impl EventEmitter<TabEvent> for BrowserTab {}
@@ -985,6 +1016,7 @@ impl BrowserTab {
             colors,
             #[cfg(target_os = "linux")]
             last_history_gesture: None,
+            popups_handled: 0,
         };
         cx.subscribe_in(&address, window, |pane, _, event, _, cx| match event {
             ComposerEvent::Changed(text) => {
@@ -1163,7 +1195,10 @@ impl BrowserTab {
                     return;
                 }
             }
-            NativeEvent::Open { url, by_agent } => cx.emit(TabEvent::Open { url, by_agent }),
+            NativeEvent::Open { url, by_agent } => {
+                self.popups_handled += 1;
+                cx.emit(TabEvent::Open { url, by_agent });
+            }
             #[cfg(target_os = "linux")]
             NativeEvent::HistoryGesture(back) => {
                 // Keep momentum from continuing through a second document,

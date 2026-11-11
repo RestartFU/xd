@@ -513,13 +513,12 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                 // for through shadow roots, as `within` looks.
                 const controlAt = node => {{
                     for (let at = node; at; at = at.parentNode || at.host)
-                        if (at.nodeType === 1 && at.matches(
+                        if (at.nodeType === 1 && (at.isContentEditable || at.matches(
                             'a[href], button, input, select, textarea, summary, '
-                            + '[contenteditable]:not([contenteditable=false]), '
                             + ['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
                                'menuitemcheckbox', 'menuitemradio', 'option', 'combobox', 'textbox',
                                'searchbox', 'slider', 'spinbutton', 'treeitem']
-                                .map(role => `[role=${{role}}]`).join(', ')))
+                                .map(role => `[role=${{role}}]`).join(', '))))
                             return at;
                     return null;
                 }};
