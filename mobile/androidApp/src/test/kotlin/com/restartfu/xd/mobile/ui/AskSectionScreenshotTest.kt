@@ -28,6 +28,7 @@ import androidx.lifecycle.ViewModelStore
 import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.InteractionAnswers
 import com.restartfu.xd.model.ChatSummary
+import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.net.PlatformSocket
 import com.restartfu.xd.net.PlatformSocketListener
 import java.io.File
@@ -326,6 +327,50 @@ class AskSectionScreenshotTest {
         }
     }
 
+    /**
+     * One client is reused for another host, whose chat and request ids may
+     * be the same: answers kept on one host never show on the other, and are
+     * there again on going back.
+     */
+    @Test fun answersStayWithTheirHost() {
+        socket = ScriptedSocket(Scene(DRY_RUN, interactions = QUESTIONS))
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val client = XdClient({ socket }, NoCredentials, scope)
+        runBlocking { client.connect(connection) }
+        try {
+            val hostA = client.host.value
+            check(hostA != null)
+            fun open(): Pair<ViewModelStore, ChatViewModel> {
+                val store = ViewModelStore()
+                val chat = ViewModelProvider(store, ChatViewModel.Factory(client, "chat"))[ChatViewModel::class.java]
+                awaitThat { chat.state.value.interactions.isNotEmpty() }
+                return store to chat
+            }
+            val (onA, chatA) = open()
+            chatA.answerQuestion(chatA.state.value.interactions.single(), "rollout", "Start with a small pilot")
+            awaitThat { chatA.interactionAnswers.value["ask-1"] == mapOf("rollout" to "Start with a small pilot") }
+            onA.clear()
+
+            check(runBlocking { client.connect(otherHost) } is ConnectResult.Success)
+            check(client.host.value != hostA) { "Still on ${client.host.value}" }
+            val (onB, chatB) = open()
+            repeat(10) {
+                ShadowLooper.idleMainLooper()
+                Thread.sleep(20)
+            }
+            check(chatB.interactionAnswers.value.isEmpty()) { "Host A's answers showed on host B: ${chatB.interactionAnswers.value}" }
+            check(chatB.state.value.interactions.single().requestId == "ask-1")
+            onB.clear()
+
+            check(runBlocking { client.connect(connection) } is ConnectResult.Success)
+            check(client.host.value == hostA)
+            val (_, back) = open()
+            awaitThat { back.interactionAnswers.value["ask-1"] == mapOf("rollout" to "Start with a small pilot") }
+        } finally {
+            scope.cancel()
+        }
+    }
+
     @Test fun allowOnceApproves() = shoot(null, Scene(DRY_RUN, interactions = APPROVALS)) {
         click("Allow once")
         val request = await("respond")
@@ -479,6 +524,11 @@ class AskSectionScreenshotTest {
     private val connection = SshConnection(
         "host", 22, "dev", SshAuthentication.Password("x"),
         SshHostKey("ssh-ed25519", byteArrayOf(1), "SHA256:test"),
+    )
+
+    private val otherHost = SshConnection(
+        "other", 22, "dev", SshAuthentication.Password("x"),
+        SshHostKey("ssh-ed25519", byteArrayOf(2), "SHA256:other"),
     )
 
     /** Answers each request from a fixed script, echoing its request id, and keeps what was asked. */

@@ -15,6 +15,8 @@ import kotlinx.coroutines.launch
 
 /**
  * The reader's answers to the agents' questions on one host, for every chat.
+ * Kept per host, not per client: one client is reused for another host, and
+ * one host's chat and request ids mean nothing on another.
  *
  * Kept beside the client rather than in a chat's screen, which goes when the
  * reader leaves the chat: an answer on its way, and the words of a refused
@@ -117,10 +119,21 @@ class InteractionAnswers internal constructor() {
     }
 
     companion object {
-        private val stores = WeakHashMap<XdClient, InteractionAnswers>()
+        private val stores = WeakHashMap<XdClient, MutableMap<String, InteractionAnswers>>()
 
-        /** The answers kept for [client]'s host, held no longer than the client is. */
-        fun of(client: XdClient): InteractionAnswers =
-            synchronized(stores) { stores.getOrPut(client) { InteractionAnswers() } }
+        /**
+         * The answers kept for [host], by default the one [client] is for
+         * now, held no longer than the client is. Another host's are kept
+         * apart, and found again on going back to it.
+         */
+        fun of(client: XdClient, host: String? = client.host.value): InteractionAnswers =
+            synchronized(stores) {
+                stores.getOrPut(client) { mutableMapOf() }.getOrPut(host.orEmpty()) { InteractionAnswers() }
+            }
+
+        /** Drops what was kept for a host the reader forgot. */
+        fun forget(client: XdClient, host: String?) {
+            synchronized(stores) { stores[client]?.remove(host.orEmpty()) }
+        }
     }
 }

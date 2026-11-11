@@ -644,7 +644,9 @@ class MainViewModel @JvmOverloads constructor(
         _error.value = null
         viewModelScope.launch {
             try {
+                val host = client.host.value
                 client.forget()
+                InteractionAnswers.forget(client, host)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -1138,7 +1140,10 @@ class ChatViewModel(
     private var draftAttachmentsDirty = false
     private var draftRevision = -1L
 
-    /** The reader's answers to agents' questions, kept beside the client, not this screen. */
+    /**
+     * The reader's answers to agents' questions, kept beside the client, not
+     * this screen, under the host this chat is on.
+     */
     private val answerStore = InteractionAnswers.of(client)
 
     /**
