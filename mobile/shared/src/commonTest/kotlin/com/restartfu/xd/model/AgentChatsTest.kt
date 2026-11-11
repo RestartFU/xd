@@ -21,6 +21,24 @@ class AgentChatsTest {
     }
 
     @Test
+    fun aCiReportNamesItsPullRequestAndOutcome() {
+        assertEquals(
+            CiReport("https://github.com/o/r/pull/291", "291", CiOutcome.FAILED),
+            CiReport.parse("[xd] CI failed on https://github.com/o/r/pull/291 at 1e3d4a4.\n\n1 of 2 checks did not pass"),
+        )
+        assertEquals(CiOutcome.PASSED, CiReport.parse("[xd] CI passed on https://github.com/o/r/pull/7 at abc.")?.outcome)
+        assertEquals(
+            CiReport("https://github.com/o/r/pull/7", "7", CiOutcome.STOPPED),
+            CiReport.parse("[xd] Stopped watching CI on https://github.com/o/r/pull/7.\n\nMerged."),
+        )
+        assertNull(CiReport.parse("CI passed on https://github.com/o/r/pull/7 at abc."))
+        assertNull(CiReport.parse("[xd] CI passed on https://github.com/o/r/issues/7 at a."))
+        assertNull(CiReport.parse("[xd] CI passed on the moon."))
+        // An agent's report is not a CI report.
+        assertNull(CiReport.parse("[xd] Agent \"Q\" (c-3) is done with its turn."))
+    }
+
+    @Test
     fun theTrayCountsAgentChatsAtWorkAndThoseWaitingOnTheUser() {
         val working = ChatSummary("a", "p", "A", "claude", working = true)
         val asking = ChatSummary("b", "p", "B", "claude", working = false, questionWaiting = true)
