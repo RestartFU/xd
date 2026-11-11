@@ -830,7 +830,8 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
   let size = 0;
   let full = false;
   let text = '';
-  // Inside a label of a control, whose text is already the control's name.
+  // Inside something whose text is already a line's, such as a control's
+  // label, a clickable area or a heading: only the controls in it are added.
   let naming = 0;
   const squash = value => (value || '').replace(/\s+/g, ' ').trim();
   const short = (value, most) => {
@@ -853,16 +854,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
     if (line) add(line);
   };
   const skipped = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'META', 'LINK']);
-  const controls = 'a[href], button, input, select, textarea, summary, [role], [contenteditable]';
-  // Whether a control is anywhere inside, shadow roots included.
-  const holds = node => {
-    if (node.querySelector(controls)) return true;
-    for (const inner of node.querySelectorAll('*'))
-      if (inner.shadowRoot && holds(inner.shadowRoot)) return true;
-    return false;
-  };
-  const holdsControl = element => holds(element)
-    || Boolean(element.shadowRoot && holds(element.shadowRoot));
+
   const roles = new Set(['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
     'menuitemcheckbox', 'menuitemradio', 'option', 'combobox', 'textbox', 'searchbox', 'slider',
     'spinbutton', 'treeitem']);
@@ -972,7 +964,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
     }
     if (tag === 'IMG') {
       const alt = short(element.getAttribute('alt'), 120);
-      if (alt) text += ` [image: ${alt}]`;
+      if (alt && !naming) text += ` [image: ${alt}]`;
       return;
     }
     if (tag === 'svg' || tag === 'SVG') return;
@@ -985,27 +977,29 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
         refs.set(next, element);
         next += 1;
         // A control's own text is its name; a clickable area may hold more
-        // controls.
+        // controls, which are found by walking it, shadow roots and slots
+        // included.
         if (role !== 'clickable' && tag !== 'SUMMARY') return;
-        if (role === 'clickable' && !holdsControl(element)) return;
+        naming += 1;
+        for (const child of children(element)) walk(child);
+        naming -= 1;
+        return;
       }
     }
     const heading = /^H([1-6])$/.exec(tag);
     if (heading) {
       flush();
       const title = short(element.innerText, 300);
-      if (title) add('#'.repeat(Number(heading[1])) + ' ' + title);
+      if (title && !naming) add('#'.repeat(Number(heading[1])) + ' ' + title);
       // A heading's links, as in a list of articles, are still controls.
-      if (holdsControl(element)) {
-        naming += 1;
-        for (const child of children(element)) walk(child);
-        naming -= 1;
-      }
+      naming += 1;
+      for (const child of children(element)) walk(child);
+      naming -= 1;
       return;
     }
     const block = !style.display.startsWith('inline') && style.display !== 'contents';
     if (block || tag === 'BR') flush();
-    if (tag === 'LI') text += '- ';
+    if (tag === 'LI' && !naming) text += '- ';
     // A styled control often hides its input; then the label is what shows.
     const label = tag === 'LABEL' && element.control
       && element.control.getClientRects().length ? 1 : 0;
