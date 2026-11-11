@@ -150,6 +150,50 @@ pub fn agent_report(text: &str) -> Option<AgentReport> {
     })
 }
 
+/// How a CI watch xd ran for the chat's agent ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiOutcome {
+    Passed,
+    Failed,
+    Stopped,
+}
+
+/// The message xd sends a chat when a CI watch its agent asked for with xd's
+/// watch_ci tool ends: `[xd] CI passed on <url> at <head>.`, `[xd] CI failed
+/// on …`, or `[xd] Stopped watching CI on <url>.`, and the details after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CiReport {
+    pub url: String,
+    pub number: String,
+    pub outcome: CiOutcome,
+}
+
+/// The CI report `text` is, when xd sent it.
+pub fn ci_report(text: &str) -> Option<CiReport> {
+    let first = text.lines().next()?.strip_prefix("[xd] ")?;
+    let (outcome, rest) = if let Some(rest) = first.strip_prefix("CI passed on ") {
+        (CiOutcome::Passed, rest)
+    } else if let Some(rest) = first.strip_prefix("CI failed on ") {
+        (CiOutcome::Failed, rest)
+    } else {
+        (
+            CiOutcome::Stopped,
+            first.strip_prefix("Stopped watching CI on ")?,
+        )
+    };
+    let url = match outcome {
+        CiOutcome::Stopped => rest.strip_suffix('.')?,
+        _ => rest.split_once(" at ")?.0,
+    };
+    let number = url.strip_prefix("https://")?.rsplit_once("/pull/")?.1;
+    (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) && !url.contains(' '))
+        .then(|| CiReport {
+            url: url.to_owned(),
+            number: number.to_owned(),
+            outcome,
+        })
+}
+
 impl SubagentView {
     /// A backgrounded shell command, which Claude reports the same way as a
     /// delegated agent.
@@ -987,5 +1031,37 @@ mod tests {
             None
         );
         assert_eq!(agent_report("[xd] something else"), None);
+    }
+
+    #[test]
+    fn a_ci_report_names_its_pull_request_and_outcome() {
+        let report = |text: &str| ci_report(text).map(|report| (report.outcome, report.number));
+        assert_eq!(
+            ci_report(
+                "[xd] CI failed on https://github.com/o/r/pull/291 at 1e3d4a4.\n\n1 of 2 checks did not pass"
+            ),
+            Some(CiReport {
+                url: "https://github.com/o/r/pull/291".into(),
+                number: "291".into(),
+                outcome: CiOutcome::Failed,
+            })
+        );
+        assert_eq!(
+            report("[xd] CI passed on https://github.com/o/r/pull/7 at abc."),
+            Some((CiOutcome::Passed, "7".into()))
+        );
+        assert_eq!(
+            report("[xd] Stopped watching CI on https://github.com/o/r/pull/7.\n\nMerged."),
+            Some((CiOutcome::Stopped, "7".into()))
+        );
+        assert_eq!(
+            report("CI passed on https://github.com/o/r/pull/7 at abc."),
+            None
+        );
+        assert_eq!(
+            report("[xd] CI passed on https://github.com/o/r/issues/7 at a."),
+            None
+        );
+        assert_eq!(report("[xd] CI passed on the moon."), None);
     }
 }

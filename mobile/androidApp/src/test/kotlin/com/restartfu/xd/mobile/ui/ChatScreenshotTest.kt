@@ -78,16 +78,26 @@ class ChatScreenshotTest {
     @Test fun phoneBackgroundTasksInTheTray() =
         shoot("phone-background-tray-dark", MinimalThemePreset.DARK, backgroundTasks = 2, agents = true)
 
+    /** xd's report that the CI it watched failed reads as one line. */
+    @Test fun phoneCiReport() = shoot("phone-ci-report-dark", MinimalThemePreset.DARK, ci = true)
+
+    @Test fun phoneCiReportLight() = shoot("phone-ci-report-light", MinimalThemePreset.LIGHT, ci = true)
+
     private fun shoot(
         name: String,
         theme: MinimalThemePreset,
         backgroundTasks: Int = 0,
         expanded: Boolean = false,
         agents: Boolean = false,
+        ci: Boolean = false,
     ) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val working = backgroundTasks == 0
-        val messages = if (agents) MESSAGES + BACKGROUND_AGENTS else MESSAGES
+        val working = backgroundTasks == 0 && !ci
+        val messages = when {
+            ci -> CI_WATCH
+            agents -> MESSAGES + BACKGROUND_AGENTS
+            else -> MESSAGES
+        }
         val client = XdClient({ ScriptedSocket(working, messages) }, NoCredentials, scope)
         runBlocking { client.connect(connection) }
         val chat = ChatViewModel(client, "chat")
@@ -121,6 +131,10 @@ class ChatScreenshotTest {
             Thread.sleep(30)
         }
         check(chat.state.value.visibleItems.size >= 6)
+        if (ci) {
+            compose.onNodeWithText("CI failed on #300").assertIsDisplayed()
+            compose.onNodeWithText("1 of 4 checks did not pass", substring = true).assertDoesNotExist()
+        }
         if (agents) {
             compose.onNodeWithText("1 agent and 1 command running").assertIsDisplayed()
             compose.onNodeWithText("Waiting on 2 background tasks").assertDoesNotExist()
@@ -216,6 +230,17 @@ class ChatScreenshotTest {
                 """{"key":"toolu_ci","provider":"Claude","agent":"Shell","description":"Watch CI",""" +
                 """"status":"running","background":true,"started_at":$STARTED}""",
             "assistant" to "I started a reviewer and a CI watch in the background. I'll report back when they finish.",
+        )
+
+        /** What a host stored for a chat whose agent asked xd to watch CI. */
+        val CI_WATCH = listOf(
+            "user" to "Push the settings fix and wait for CI on #300.",
+            "assistant" to "I'll push the fix and have xd watch CI.",
+            "tool" to "\$ git push",
+            "tool" to "Watch CI  https://github.com/RestartFU/xd/pull/300",
+            "assistant" to "\n\nxd is watching CI on #300 and will tell me when the checks finish.",
+            "user" to "[xd] CI failed on https://github.com/restartfu/xd/pull/300 at 9f2c7b1.\n\n1 of 4 checks did not pass (3 passed):\n- pr / linux: failure (https://github.com/RestartFU/xd/actions/runs/43100/job/130600)\n\nThe end of pr / linux's failed steps:\n\n```\ntest settings::tests::saves_the_theme ... FAILED\nthread settings::tests::saves_the_theme panicked at desktop/src/settings.rs:212:9:\nassertion `left == right` failed\n  left: \"light\"\n right: \"dark\"\ntest result: FAILED. 460 passed; 1 failed\n```",
+            "assistant" to "CI failed on linux: `settings::tests::saves_the_theme` expects the dark theme but the settings file now defaults to light. I'll make the test write the theme it reads back.",
         )
 
         val MESSAGES = listOf(

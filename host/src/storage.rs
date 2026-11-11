@@ -398,6 +398,19 @@ pub struct AgentRecord {
     pub created: bool,
 }
 
+/// A pull request whose checks a chat's agent asked xd to watch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CiWatch {
+    pub chat: String,
+    pub url: String,
+    /// This watch's own, so a later watch of the same pull request, which
+    /// gets a new one, is told apart from it.
+    pub token: String,
+    pub created_at: i64,
+    /// A commit the chat pushed that GitHub did not show as the head yet.
+    pub expected_head: Option<String>,
+}
+
 /// A chat another chat's agent started, as [`StateStore::child_agents`] reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildAgent {
@@ -1968,6 +1981,24 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        // A CI watch's report ends its watch in the same transaction, so it
+        // is sent once, and never by a watch another has replaced.
+        if let Some(watch) = request.get("ci_watch") {
+            let (Some(url), Some(token)) = (watch["url"].as_str(), watch["token"].as_str()) else {
+                return Err(StorageError::InvalidRequest(
+                    "A CI report names its watch.".into(),
+                ));
+            };
+            let ended = transaction.execute(
+                "DELETE FROM ci_watches WHERE chat_id = ? AND url = ? AND token = ?",
+                params![chat_id, url, token],
+            )?;
+            if ended == 0 {
+                return Err(StorageError::InvalidRequest(
+                    "This CI watch was replaced or has ended.".into(),
+                ));
+            }
+        }
         // Not even queued: no turn on a retired assistant would ever take it.
         validate_backend(&backend)?;
         // A chat that has used its quota, such as one the default was lowered
@@ -4461,6 +4492,222 @@ impl StateStore {
     /// is none; a missing `url` means GitHub could not say, which is not the
     /// same as no. `None` outside a repository, on a detached HEAD, and when HEAD
     /// moved during the lookup.
+    /// The directory chat `chat_id`'s agent works in.
+    pub(crate) fn chat_workdir(&self, chat_id: &str) -> Result<PathBuf, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        resolve_chat_workdir(&database, &self.workspace_root, chat_id).map(PathBuf::from)
+    }
+
+    /// Runs the GitHub CLI in `workdir` with nothing to prompt for, under the
+    /// shared output and time bounds.
+    pub(crate) fn run_gh(
+        &self,
+        workdir: &Path,
+        arguments: &[&str],
+    ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
+        run_gh(workdir, arguments)
+    }
+
+    /// Runs Git in `workdir` with nothing to prompt for, under the shared
+    /// output and time bounds.
+    pub(crate) fn run_git(
+        &self,
+        workdir: &Path,
+        arguments: &[&str],
+    ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
+        run_git_noninteractive(workdir, arguments)
+    }
+
+    /// Records that chat `chat_id`'s agent waits on the checks of pull request
+    /// `url`, in place of any earlier watch of it, so a restarted daemon goes
+    /// on watching. `expected_head` is a commit the chat pushed that GitHub
+    /// did not show yet; without one, the earlier watch's is kept, since the
+    /// new watch drops it once GitHub shows it. `seen` is the watch as the
+    /// caller read it: when the commit waited for changed since, the stored
+    /// one is newer and wins. Answers `None` when the chat already has `limit`
+    /// other watches.
+    pub(crate) fn add_ci_watch(
+        &self,
+        chat_id: &str,
+        url: &str,
+        expected_head: Option<&str>,
+        seen: Option<&CiWatch>,
+        limit: usize,
+    ) -> Result<Option<CiWatch>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let exists = transaction
+            .query_row("SELECT 1 FROM chats WHERE id = ?", [chat_id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(StorageError::NoChat(chat_id.to_owned()));
+        }
+        let others: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM ci_watches WHERE chat_id = ? AND url != ?",
+            params![chat_id, url],
+            |row| row.get(0),
+        )?;
+        if others as usize >= limit {
+            return Ok(None);
+        }
+        let current = transaction
+            .query_row(
+                "SELECT token, expected_head FROM ci_watches WHERE chat_id = ? AND url = ?",
+                params![chat_id, url],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        // What the watch waits for changed since the caller read it, so it
+        // is newer than anything the caller read and is kept.
+        let changed = current.as_ref().is_some_and(|current| {
+            seen.map(|seen| (&seen.token, &seen.expected_head)) != Some((&current.0, &current.1))
+        });
+        let kept = current.and_then(|(_, expected)| expected);
+        let expected_head = if changed {
+            kept.or(expected_head.map(str::to_owned))
+        } else {
+            expected_head.map(str::to_owned).or(kept)
+        };
+        let watch = CiWatch {
+            chat: chat_id.to_owned(),
+            url: url.to_owned(),
+            token: Uuid::new_v4().to_string(),
+            created_at: now_seconds(),
+            expected_head,
+        };
+        transaction.execute(
+            "INSERT INTO ci_watches (chat_id, url, token, created_at, expected_head) \
+             VALUES (?, ?, ?, ?, ?) ON CONFLICT(chat_id, url) DO UPDATE SET \
+             token = excluded.token, created_at = excluded.created_at, \
+             expected_head = excluded.expected_head",
+            params![
+                watch.chat,
+                watch.url,
+                watch.token,
+                watch.created_at,
+                watch.expected_head
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(Some(watch))
+    }
+
+    /// Forgets the CI watch of `url` for `chat_id`: only the one holding
+    /// `token` when given, so a watch never removes the one that replaced it.
+    /// Answers whether there was one.
+    pub(crate) fn remove_ci_watch(
+        &self,
+        chat_id: &str,
+        url: &str,
+        token: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database.execute(
+            "DELETE FROM ci_watches WHERE chat_id = ? AND url = ? AND (?3 IS NULL OR token = ?3)",
+            params![chat_id, url, token],
+        )? > 0)
+    }
+
+    /// Chat `chat_id`'s watch of `url`, if it has one.
+    pub(crate) fn ci_watch(
+        &self,
+        chat_id: &str,
+        url: &str,
+    ) -> Result<Option<CiWatch>, StorageError> {
+        Ok(self
+            .ci_watches()?
+            .into_iter()
+            .find(|watch| watch.chat == chat_id && watch.url == url))
+    }
+
+    /// Ends chat `chat_id`'s watch of `url` if it is still exactly `earlier`,
+    /// with the same token and the same commit waited for, or there is none
+    /// when `earlier` is `None`. Answers whether it was, in which case no
+    /// watch of it is left.
+    pub(crate) fn end_ci_watch_if(
+        &self,
+        chat_id: &str,
+        url: &str,
+        earlier: Option<&CiWatch>,
+    ) -> Result<bool, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT token, expected_head FROM ci_watches WHERE chat_id = ? AND url = ?",
+                params![chat_id, url],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let earlier = earlier.map(|watch| (watch.token.clone(), watch.expected_head.clone()));
+        if current != earlier {
+            return Ok(false);
+        }
+        transaction.execute(
+            "DELETE FROM ci_watches WHERE chat_id = ? AND url = ?",
+            params![chat_id, url],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Whether the watch holding `token` is still chat `chat_id`'s watch of
+    /// `url`: neither replaced nor gone with its chat.
+    pub(crate) fn owns_ci_watch(
+        &self,
+        chat_id: &str,
+        url: &str,
+        token: &str,
+    ) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database
+            .query_row(
+                "SELECT 1 FROM ci_watches WHERE chat_id = ? AND url = ? AND token = ?",
+                params![chat_id, url, token],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Records the commit the watch holding `token` waits for GitHub to show.
+    pub(crate) fn set_ci_watch_expected(
+        &self,
+        chat_id: &str,
+        url: &str,
+        token: &str,
+        expected_head: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE ci_watches SET expected_head = ? WHERE chat_id = ? AND url = ? AND token = ?",
+            params![expected_head, chat_id, url, token],
+        )?;
+        Ok(())
+    }
+
+    /// Every recorded CI watch, oldest first.
+    pub(crate) fn ci_watches(&self) -> Result<Vec<CiWatch>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(
+            "SELECT chat_id, url, token, created_at, expected_head FROM ci_watches \
+             ORDER BY created_at, rowid",
+        )?;
+        let watches = statement
+            .query_map([], |row| {
+                Ok(CiWatch {
+                    chat: row.get(0)?,
+                    url: row.get(1)?,
+                    token: row.get(2)?,
+                    created_at: row.get(3)?,
+                    expected_head: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(watches)
+    }
+
     pub(crate) fn chat_pull_request(&self, chat_id: &str) -> Option<Value> {
         let workdir = {
             let database = self.database.lock().ok()?;
@@ -6897,6 +7144,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_draft_chunks(database)?;
             ensure_chat_pull_requests(database)?;
             ensure_agent_reports(database)?;
+            ensure_ci_watches(database)?;
             return Ok(());
         }
     }
@@ -6995,6 +7243,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_draft_chunks(database)?;
     ensure_chat_pull_requests(database)?;
     ensure_agent_reports(database)?;
+    ensure_ci_watches(database)?;
     Ok(())
 }
 
@@ -11970,6 +12219,19 @@ fn has_agent_reports(database: &Connection, chat_id: &str) -> Result<bool, Stora
         [chat_id],
         |row| row.get(0),
     )?)
+}
+
+/// Pull requests whose checks a chat's agent asked xd to watch; see
+/// `ci_watch`. Older hosts ignore the table, so the schema version stays.
+fn ensure_ci_watches(database: &Connection) -> Result<(), StorageError> {
+    database.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ci_watches (
+            chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            url TEXT NOT NULL, token TEXT NOT NULL, created_at INTEGER NOT NULL,
+            expected_head TEXT,
+            PRIMARY KEY(chat_id, url));",
+    )?;
+    Ok(())
 }
 
 /// Must run in the same transaction as the chats row update.

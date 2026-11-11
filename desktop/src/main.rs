@@ -17521,6 +17521,59 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    /// The message xd sent this chat when a CI watch its agent asked for
+    /// ended, as one quiet line like an agent's report. It opens the pull
+    /// request's checks; the details are for the agent, which answers them.
+    fn render_ci_report(
+        colors: ThemeColors,
+        report: activity::CiReport,
+        index: usize,
+    ) -> gpui::AnyElement {
+        let (label, tone) = match report.outcome {
+            activity::CiOutcome::Passed => ("CI passed", colors.done),
+            activity::CiOutcome::Failed => ("CI failed", colors.danger),
+            activity::CiOutcome::Stopped => ("Stopped watching CI", colors.faint),
+        };
+        let checks = format!("{}/checks", report.url);
+        div()
+            .id(("ci-report", index))
+            .w_full()
+            .my(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .child(div().h(px(1.0)).flex_1().bg(rgb(colors.border)))
+            .child(
+                div()
+                    .id(("ci-report-link", index))
+                    .flex_none()
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(11.5))
+                    .text_color(rgb(colors.faint))
+                    .cursor_pointer()
+                    .hover(|style| {
+                        style
+                            .bg(rgb(colors.surface_high))
+                            .text_color(rgb(colors.text))
+                    })
+                    .on_click(move |_, window, cx| open_clicked_link(&checks, window, cx))
+                    .child(div().size(px(6.0)).rounded_full().bg(rgb(tone)))
+                    .child(
+                        div()
+                            .max_w(px(320.0))
+                            .truncate()
+                            .child(format!("{label} on #{}", report.number)),
+                    ),
+            )
+            .child(div().h(px(1.0)).flex_1().bg(rgb(colors.border)))
+            .into_any_element()
+    }
+
     /// The one way back from an agent's chat to the chat that started it.
     fn render_started_by(colors: ThemeColors, parent: String, title: String) -> gpui::AnyElement {
         div()
@@ -19579,12 +19632,15 @@ impl XdDesktop {
                             index,
                         ))
                     }
-                    _ if message.role == "user" => {
-                        activity::agent_report(&message.content).map(|report| {
+                    _ if message.role == "user" => activity::agent_report(&message.content)
+                        .map(|report| {
                             let live = agent_chats.get(&report.chat);
                             Self::render_agent_report(colors, report, live, index)
                         })
-                    }
+                        .or_else(|| {
+                            activity::ci_report(&message.content)
+                                .map(|report| Self::render_ci_report(colors, report, index))
+                        }),
                     _ => None,
                 };
                 if let Some(row) = agent_row {

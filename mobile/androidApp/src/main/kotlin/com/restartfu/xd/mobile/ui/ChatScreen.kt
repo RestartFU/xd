@@ -685,13 +685,16 @@ internal fun ChatScreen(
             items(rows, key = { it.key }, contentType = ::rowContentType) { row ->
                 when (row) {
                     is TranscriptRow.Single -> {
-                        // xd's word that one of this chat's agents ended a turn.
-                        val report = row.item.takeIf { it.kind == com.restartfu.xd.model.TranscriptKind.USER }
-                            ?.let { com.restartfu.xd.model.AgentReport.parse(it.text) }
-                        if (report != null) {
-                            AgentReportLine(report, agentChats[report.chatId]) { openChat(report.chatId) }
-                        } else {
-                            TranscriptRow(row.item, model, answered[row.item.id])
+                        // xd's word that one of this chat's agents ended a
+                        // turn, or that a CI watch its agent asked for ended.
+                        val fromXd = row.item.takeIf { it.kind == com.restartfu.xd.model.TranscriptKind.USER }?.text
+                        val report = fromXd?.let { com.restartfu.xd.model.AgentReport.parse(it) }
+                        val ci = fromXd?.let { com.restartfu.xd.model.CiReport.parse(it) }
+                        when {
+                            report != null ->
+                                AgentReportLine(report, agentChats[report.chatId]) { openChat(report.chatId) }
+                            ci != null -> CiReportLine(ci, openLink)
+                            else -> TranscriptRow(row.item, model, answered[row.item.id])
                         }
                     }
                     is TranscriptRow.Tools -> ToolGroupRow(row)
