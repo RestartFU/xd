@@ -30,6 +30,17 @@ pub trait Page {
     fn time_left(&self) -> Duration {
         Duration::MAX
     }
+
+    /// Calls `method` even once the command is stopped or out of time: for
+    /// letting go of a button or key it pressed, which must not stay held.
+    fn call_regardless(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        self.call(method, params, timeout)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -40,6 +51,15 @@ impl Page for super::chromium::DevTools {
 
     fn is_loading(&self) -> bool {
         super::chromium::DevTools::is_loading(self)
+    }
+
+    fn call_regardless(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        self.unstoppable().call(method, params, timeout)
     }
 }
 
@@ -67,6 +87,15 @@ impl<P: Page> Page for Bounded<'_, P> {
         self.page.is_loading()
     }
 
+    fn call_regardless(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        self.page.call_regardless(method, params, timeout)
+    }
+
     /// None once the command is stopped, which ends its waits too.
     fn time_left(&self) -> Duration {
         if self.cancelled.load(Ordering::Acquire) {
@@ -83,6 +112,8 @@ const OUT_OF_TIME: &str = "The browser command ran out of time, so xd stopped it
 const CANCELLED: &str = "The host stopped waiting for this browser command, so xd stopped it.";
 /// How long one DevTools call may take.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long letting go of a button or key may take.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a command waits for a page it opened to finish loading.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a click or key waits for a navigation it started.
@@ -457,8 +488,13 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
                 // Only the element, what it holds, or its label take its
                 // click; one that lets clicks through to its container does
                 // not get it.
+                // Through a label, unless the point is on another control in
+                // it, such as a link, which takes the click for itself.
+                const control = top && top.closest
+                    && top.closest('a[href], button, input, select, textarea, summary, [role], [contenteditable]');
                 const reaches = top && (within(element, top)
-                    || (element.labels && [...element.labels].some(label => within(label, top))));
+                    || (element.labels && [...element.labels].some(label => within(label, top)
+                        && (!control || control === element || !within(label, control)))));
                 const describe = node => node.tagName.toLowerCase()
                     + (node.id ? '#' + node.id : '')
                     + (typeof node.className === 'string' && node.className.trim()
@@ -492,20 +528,52 @@ fn locate(page: &impl Page, number: &str) -> Result<(f64, f64), String> {
 fn click(page: &impl Page, number: &str, double: bool) -> Result<(), String> {
     let (x, y) = locate(page, number)?;
     let mouse = |kind: &str, count: u32| {
-        page.call(
-            "Input.dispatchMouseEvent",
-            json!({"type": kind, "x": x, "y": y, "button": if kind == "mouseMoved" { "none" } else { "left" },
-                "buttons": if kind == "mousePressed" { 1 } else { 0 }, "clickCount": count}),
-            CALL_TIMEOUT,
-        )
-        .map(|_| ())
+        json!({"type": kind, "x": x, "y": y,
+            "button": if kind == "mouseMoved" { "none" } else { "left" },
+            "buttons": if kind == "mousePressed" { 1 } else { 0 }, "clickCount": count})
     };
-    mouse("mouseMoved", 0)?;
+    page.call(
+        "Input.dispatchMouseEvent",
+        mouse("mouseMoved", 0),
+        CALL_TIMEOUT,
+    )?;
     for count in 1..=if double { 2 } else { 1 } {
-        mouse("mousePressed", count)?;
-        mouse("mouseReleased", count)?;
+        held(
+            page,
+            || {
+                page.call(
+                    "Input.dispatchMouseEvent",
+                    mouse("mousePressed", count),
+                    CALL_TIMEOUT,
+                )
+            },
+            || {
+                page.call_regardless(
+                    "Input.dispatchMouseEvent",
+                    mouse("mouseReleased", count),
+                    RELEASE_TIMEOUT,
+                )
+            },
+        )?;
     }
     Ok(())
+}
+
+/// Presses with `down` and lets go with `up`. Once `down` has been tried,
+/// `up` is sent whatever became of it, even for a command stopped or out of
+/// time meanwhile, so no button or key is left held on the page.
+fn held(
+    page: &impl Page,
+    down: impl FnOnce() -> Result<Value, String>,
+    up: impl FnOnce() -> Result<Value, String>,
+) -> Result<(), String> {
+    if page.time_left().is_zero() {
+        // Refused before anything is pressed.
+        return down().map(|_| ());
+    }
+    let pressed = down();
+    let released = up();
+    pressed.and(released).map(|_| ())
 }
 
 fn type_text(page: &impl Page, number: &str, text: &str, append: bool) -> Result<(), String> {
@@ -549,18 +617,10 @@ fn type_text(page: &impl Page, number: &str, text: &str, append: bool) -> Result
     if append {
         // To the end of what is there, which the editor does for every kind
         // of field, where the selection API has no say over some inputs.
-        key_event(
-            page,
-            "rawKeyDown",
-            &key("End")?,
-            2,
-            &["moveToEndOfDocument"],
-        )?;
-        key_event(page, "keyUp", &key("End")?, 2, &[])?;
+        chord(page, &key("End")?, 2, &["moveToEndOfDocument"])?;
     } else {
         // Select what is there, so the typed text replaces it.
-        key_event(page, "rawKeyDown", &key("a")?, 2, &["selectAll"])?;
-        key_event(page, "keyUp", &key("a")?, 2, &[])?;
+        chord(page, &key("a")?, 2, &["selectAll"])?;
         if text.is_empty() {
             press(page, "Delete")?;
         }
@@ -629,13 +689,8 @@ fn key(name: &str) -> Result<Key, String> {
     })
 }
 
-fn key_event(
-    page: &impl Page,
-    kind: &str,
-    key: &Key,
-    modifiers: u32,
-    commands: &[&str],
-) -> Result<(), String> {
+/// The DevTools event for pressing or letting go of `key`.
+fn key_event(kind: &str, key: &Key, modifiers: u32, commands: &[&str]) -> Value {
     let mut event = json!({"type": kind, "key": key.key, "code": key.code,
         "windowsVirtualKeyCode": key.key_code, "nativeVirtualKeyCode": key.key_code,
         "modifiers": modifiers});
@@ -648,8 +703,28 @@ fn key_event(
     if !commands.is_empty() {
         event["commands"] = json!(commands);
     }
-    page.call("Input.dispatchKeyEvent", event, CALL_TIMEOUT)
-        .map(|_| ())
+    event
+}
+
+/// Presses `key` with `modifiers` held, running the editor's `commands`.
+fn chord(page: &impl Page, key: &Key, modifiers: u32, commands: &[&str]) -> Result<(), String> {
+    held(
+        page,
+        || {
+            page.call(
+                "Input.dispatchKeyEvent",
+                key_event("rawKeyDown", key, modifiers, commands),
+                CALL_TIMEOUT,
+            )
+        },
+        || {
+            page.call_regardless(
+                "Input.dispatchKeyEvent",
+                key_event("keyUp", key, modifiers, &[]),
+                RELEASE_TIMEOUT,
+            )
+        },
+    )
 }
 
 fn press(page: &impl Page, name: &str) -> Result<(), String> {
@@ -659,8 +734,23 @@ fn press(page: &impl Page, name: &str) -> Result<(), String> {
     } else {
         "rawKeyDown"
     };
-    key_event(page, down, &key, 0, &[])?;
-    key_event(page, "keyUp", &key, 0, &[])
+    held(
+        page,
+        || {
+            page.call(
+                "Input.dispatchKeyEvent",
+                key_event(down, &key, 0, &[]),
+                CALL_TIMEOUT,
+            )
+        },
+        || {
+            page.call_regardless(
+                "Input.dispatchKeyEvent",
+                key_event("keyUp", &key, 0, &[]),
+                RELEASE_TIMEOUT,
+            )
+        },
+    )
 }
 
 fn screenshot(page: &impl Page, full_page: bool) -> Result<Outcome, String> {
@@ -1255,6 +1345,55 @@ mod tests {
         stop.join().unwrap();
         assert_eq!(outcome, Err(CANCELLED.into()));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// Stops its command once `calls` DevTools calls have been made.
+    struct StopAfter<'a> {
+        script: &'a Script,
+        calls: usize,
+        cancelled: &'a AtomicBool,
+    }
+
+    impl Page for StopAfter<'_> {
+        fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+            let answer = self.script.call(method, params, timeout);
+            if self.script.calls.borrow().len() >= self.calls {
+                self.cancelled.store(true, Ordering::Release);
+            }
+            answer
+        }
+    }
+
+    #[test]
+    fn a_command_stopped_while_a_button_is_down_lets_it_go() {
+        let script = Script::new(vec![
+            ("Runtime.evaluate", value(json!(null))),
+            (
+                "Runtime.evaluate",
+                value(json!({"x": 5, "y": 5, "covered": null})),
+            ),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+            ("Input.dispatchMouseEvent", Ok(json!({}))),
+        ]);
+        let cancelled = AtomicBool::new(false);
+        // Stopped as soon as the button goes down.
+        let page = StopAfter {
+            script: &script,
+            calls: 4,
+            cancelled: &cancelled,
+        };
+        let outcome = super::run(
+            &page,
+            &json!({"action": "click", "ref": "e1"}),
+            Instant::now() + COMMAND_TIME,
+            &cancelled,
+        );
+        assert_eq!(outcome, Err(CANCELLED.into()));
+        let calls = script.calls.borrow();
+        assert_eq!(calls[3].1["type"], "mousePressed");
+        assert_eq!(calls[4].1["type"], "mouseReleased");
+        assert_eq!(calls.len(), 5);
     }
 
     #[test]

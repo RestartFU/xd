@@ -1118,6 +1118,14 @@ impl DevTools {
         Self { cancelled, ..self }
     }
 
+    /// The same page, for calls nothing stops, such as letting go of a key.
+    pub fn unstoppable(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+            cancelled: Arc::default(),
+        }
+    }
+
     /// Calls `method` and waits up to `timeout` for its result.
     pub fn call(
         &self,
