@@ -391,6 +391,7 @@ impl Engine {
                 .and_then(|watch| watch.expected_head.clone()))
             .filter(|commit| {
                 !commit.eq_ignore_ascii_case(&status.head)
+                    && !caught_up(store, &workdir, &status)
                     && !head_contains(store, &workdir, &status.head, commit)
             });
         let mut status = status;
@@ -441,8 +442,14 @@ impl Engine {
         // it waits for otherwise, as it is at this moment, not as read above.
         // Read again just now, so a push the earlier watch recorded meanwhile
         // is seen here too rather than replaced by an older read.
-        let fresh = pushed_head(store, &workdir, &status)
-            .filter(|commit| !head_contains(store, &workdir, &status.head, commit));
+        // When GitHub has caught up with the checkout's latest push, that head
+        // is recorded, so a commit an earlier watch still waited for is not.
+        let fresh = if caught_up(store, &workdir, &status) {
+            Some(status.head.clone())
+        } else {
+            pushed_head(store, &workdir, &status)
+                .filter(|commit| !head_contains(store, &workdir, &status.head, commit))
+        };
         // Stored and registered as the live watch together, so the thread
         // registered last is always the one the database holds.
         let added = self.ci_watches.register(|| {
@@ -799,7 +806,10 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
                     let check = pushed.observe(
                         &status.head,
                         pushed_head(store, &workdir, &status),
-                        |commit| head_contains(store, &workdir, &status.head, commit),
+                        |commit| {
+                            caught_up(store, &workdir, &status)
+                                || head_contains(store, &workdir, &status.head, commit)
+                        },
                     );
                     if pushed.commit != before {
                         let _ =
@@ -1230,6 +1240,51 @@ fn remote_repository(url: &str) -> Option<(String, String)> {
 /// is what was pushed, whatever was committed since. Any other head came from
 /// elsewhere, so nothing is waited for.
 fn pushed_head(store: &StateStore, workdir: &Path, status: &Status) -> Option<String> {
+    let upstream = tracked_upstream(store, workdir, status)?;
+    if upstream.eq_ignore_ascii_case(&status.head) {
+        return None;
+    }
+    let git = |arguments: &[&str]| {
+        store
+            .run_git(workdir, arguments)
+            .ok()
+            .filter(|(result, _, _)| result.success())
+            .map(|(_, stdout, _)| String::from_utf8_lossy(&stdout).trim().to_owned())
+    };
+    // GitHub is behind the push when its head is part of what was pushed, or
+    // is where the upstream was before, as after a force push. A head that
+    // went another way came from elsewhere.
+    let behind = head_contains(store, workdir, &upstream, &status.head) || {
+        let reference = git(&["rev-parse", "--symbolic-full-name", "@{upstream}"])?;
+        git(&[
+            "reflog",
+            "show",
+            "--format=%H",
+            "-n",
+            "100",
+            &reference,
+            "--",
+        ])
+        .is_some_and(|former| {
+            former
+                .lines()
+                .any(|commit| commit.trim().eq_ignore_ascii_case(&status.head))
+        })
+    };
+    behind.then_some(upstream)
+}
+
+/// Whether the checkout's upstream of the pull request's branch is the head
+/// GitHub shows: whatever the chat pushed before, GitHub has caught up with
+/// its latest push, so no earlier commit is waited for.
+fn caught_up(store: &StateStore, workdir: &Path, status: &Status) -> bool {
+    tracked_upstream(store, workdir, status)
+        .is_some_and(|upstream| upstream.eq_ignore_ascii_case(&status.head))
+}
+
+/// The commit the checkout's upstream is at, when the checkout's branch
+/// tracks the pull request's head branch in its head repository.
+fn tracked_upstream(store: &StateStore, workdir: &Path, status: &Status) -> Option<String> {
     let repository = status.head_repository.as_deref()?;
     let branch = store.checked_out_branch(workdir)?;
     let git = |arguments: &[&str]| {
@@ -1258,33 +1313,8 @@ fn pushed_head(store: &StateStore, workdir: &Path, status: &Status) -> Option<St
         return None;
     }
     let upstream = git(&["rev-parse", "--verify", "--quiet", "@{upstream}"])?;
-    if upstream.is_empty()
-        || !upstream.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || upstream.eq_ignore_ascii_case(&status.head)
-    {
-        return None;
-    }
-    // GitHub is behind the push when its head is part of what was pushed, or
-    // is where the upstream was before, as after a force push. A head that
-    // went another way came from elsewhere.
-    let behind = head_contains(store, workdir, &upstream, &status.head) || {
-        let reference = git(&["rev-parse", "--symbolic-full-name", "@{upstream}"])?;
-        git(&[
-            "reflog",
-            "show",
-            "--format=%H",
-            "-n",
-            "100",
-            &reference,
-            "--",
-        ])
-        .is_some_and(|former| {
-            former
-                .lines()
-                .any(|commit| commit.trim().eq_ignore_ascii_case(&status.head))
-        })
-    };
-    behind.then(|| upstream.to_ascii_lowercase())
+    (!upstream.is_empty() && upstream.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| upstream.to_ascii_lowercase())
 }
 
 /// The message the chat gets when a watch ends. `still` says whether the
@@ -1616,6 +1646,9 @@ mod tests {
         // It shows the push already, or the pull request is another branch's.
         assert_eq!(pushed_head(&store, &work, &status(&pushed, "fix")), None);
         assert_eq!(pushed_head(&store, &work, &status(&old, "other")), None);
+        // GitHub showing the checkout's own upstream has caught up with it.
+        assert!(caught_up(&store, &work, &status(&pushed, "fix")));
+        assert!(!caught_up(&store, &work, &status(&old, "fix")));
         // A fork's branch of the same name is not this checkout's.
         let mut fork = status(&old, "fix");
         fork.head_repository = Some("someone/xd".into());
