@@ -328,6 +328,17 @@ pub(crate) fn nest_sessions(
     nested
 }
 
+/// How many sessions `nest_sessions` lists right below `cards[index]` because
+/// its agent started them, or theirs did, and so on down. Folding that
+/// session hides exactly these.
+pub(crate) fn started_below(cards: &[SessionCard], index: usize) -> usize {
+    let depth = cards[index].depth;
+    cards[index + 1..]
+        .iter()
+        .take_while(|card| card.depth > depth)
+        .count()
+}
+
 pub(crate) fn resumable_session(
     last_chat: Option<&str>,
     chats: &[ChatSummary],
@@ -736,6 +747,12 @@ mod tests {
                 ("loop-a", 0),
                 ("loop-b", 0),
             ]
+        );
+        assert_eq!(
+            (0..nested.len())
+                .map(|index| started_below(&nested, index))
+                .collect::<Vec<_>>(),
+            [0, 3, 0, 1, 0, 0, 0, 0]
         );
     }
 

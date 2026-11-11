@@ -152,6 +152,30 @@ public fun List<MinimalSession>.nestedUnderParents(): List<MinimalSession> {
     return nested + filter { it.id !in placed }
 }
 
+/**
+ * How many sessions [nestedUnderParents] lists right below the one at [index]
+ * because its agent started them, or theirs did, and so on down. Folding that
+ * session hides exactly these.
+ */
+public fun List<MinimalSession>.startedBelow(index: Int): Int {
+    val depth = this[index].depth
+    return drop(index + 1).takeWhile { it.depth > depth }.size
+}
+
+/**
+ * The sessions above [sessionId] in the line of agents that started one
+ * another, nearest first: the ones to unfold so its row shows.
+ */
+public fun TreeSnapshot.sessionsAbove(sessionId: String): List<String> {
+    val above = mutableListOf<String>()
+    var parent = sessions.firstOrNull { it.id == sessionId }?.parentId
+    while (parent != null && parent != sessionId && parent !in above) {
+        above += parent
+        parent = sessions.firstOrNull { it.id == parent }?.parentId
+    }
+    return above
+}
+
 /** Every settled session, most recently settled first, as the desktop's shelf lists them. */
 public fun TreeSnapshot.settledSessions(): List<SettledSession> = minimalProjects().flatMap { project ->
     minimalSessions(project.id).filter(MinimalSession::settled).map { SettledSession(project, it) }

@@ -246,5 +246,11 @@ class MinimalProjectsTest {
             snapshot.activeSessions("compiler").map { it.id to it.depth },
         )
         assertEquals("lead", snapshot.minimalSessions("compiler").first { it.id == "w1" }.parentId)
+        val listed = snapshot.activeSessions("compiler")
+        assertEquals(listOf(0, 3, 0, 1, 0, 0, 0, 0, 0), listed.indices.map(listed::startedBelow))
+        assertEquals(listOf("w1", "lead"), snapshot.sessionsAbove("deep"))
+        assertEquals(emptyList(), snapshot.sessionsAbove("lead"))
+        // A loop of parents ends instead of going round.
+        assertEquals(listOf("loopB"), snapshot.sessionsAbove("loopA"))
     }
 }
