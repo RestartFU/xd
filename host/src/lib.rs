@@ -2397,13 +2397,6 @@ impl Engine {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
         };
-        // A CI report checked before the locks were taken is held back if
-        // the chat pushed again while it waited for them.
-        if let Some(watch) = request.get("ci_watch")
-            && ci_watch::checkout_moved(store, chat_id, watch)
-        {
-            return error_reply(ci_watch::CHECKOUT_MOVED);
-        }
         // A chat past its quota but not yet stopped, such as one the meter
         // charged just before the host went down, stops now, for good, before
         // anything is sent: whatever runs in it ends and the message waits.

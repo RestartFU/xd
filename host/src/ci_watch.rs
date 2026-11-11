@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Engine, error_reply, pull_requests, required_string,
-    storage::{CiWatch, StateStore},
+    storage::{AddedCiWatch, CiWatch, StateStore},
 };
 
 /// How many pull requests one chat may have watched at once.
@@ -95,6 +95,7 @@ struct Status {
     state: PullRequestState,
     head: String,
     head_branch: String,
+    title: String,
     /// `owner/name` of the repository the head branch is in, in lowercase.
     head_repository: Option<String>,
     checks: Vec<Check>,
@@ -142,30 +143,92 @@ impl Status {
     }
 }
 
-/// What became of a report xd tried to send.
-enum Delivery {
-    /// It went out, or the watch is over anyway.
-    Sent,
-    /// The chat pushed again while the send waited, so the watch goes on.
-    Moved,
-    /// Refused before anything was stored; tried again later.
-    Refused,
+/// Content prefix of a CI card: a `tool` row the host writes when a watch
+/// starts and rewrites in place as the checks go.
+pub(crate) const CARD_PREFIX: &str = "ci_run\n";
+/// Checks a card lists at most.
+const CARD_CHECKS: usize = 50;
+
+/// Where a watch is, as its card shows it.
+enum Phase<'a> {
+    /// Still watching; `waiting_for` is a pushed commit GitHub does not show.
+    Running { waiting_for: Option<&'a str> },
+    /// The checks finished.
+    Finished,
+    /// The watch gave up, for `reason`.
+    Stopped(&'a str),
 }
 
-/// The refusal a report gets when the checkout pushed again meanwhile.
-pub(crate) const CHECKOUT_MOVED: &str = "The checkout pushed again before the CI report was sent.";
-
-/// Whether the chat's checkout has pushed since the report `watch` describes
-/// was checked: its upstream is no longer the commit recorded then. Asked
-/// under the locks the send holds, just before the report is stored.
-pub(crate) fn checkout_moved(store: &StateStore, chat: &str, watch: &Value) -> bool {
-    let Some(recorded) = watch.get("upstream") else {
-        return false;
+/// The card for a watch of `url` begun at `started_at`, at `phase`, from what
+/// GitHub said last, if it said anything.
+fn card(url: &str, status: Option<&Status>, phase: Phase<'_>, started_at: i64) -> String {
+    let failed = status.is_some_and(|status| {
+        status
+            .checks
+            .iter()
+            .any(|check| matches!(check.outcome, Outcome::Failed(_)))
+    });
+    let state = match phase {
+        Phase::Running { .. } => "running",
+        Phase::Finished if failed => "failed",
+        Phase::Finished => "passed",
+        Phase::Stopped(_) => "stopped",
     };
-    let Ok(workdir) = store.chat_workdir(chat) else {
-        return false;
-    };
-    upstream_moved(store, &workdir, recorded.as_str())
+    let mut record = json!({
+        "url": url,
+        "status": state,
+        "started_at": started_at,
+        "checks": [],
+    });
+    if let Some(status) = status {
+        record["number"] = json!(status.number);
+        record["head"] = json!(status.short_head());
+        if !status.title.is_empty() {
+            record["title"] = json!(status.title);
+        }
+        record["checks"] = status
+            .checks
+            .iter()
+            .take(CARD_CHECKS)
+            .map(|check| {
+                let (state, conclusion) = match &check.outcome {
+                    Outcome::Pending => ("pending", None),
+                    Outcome::Passed => ("passed", None),
+                    Outcome::Skipped => ("skipped", None),
+                    Outcome::Failed(conclusion) => ("failed", Some(conclusion.as_str())),
+                };
+                let mut entry = json!({"name": check.name, "state": state});
+                if let Some(workflow) = &check.workflow {
+                    entry["workflow"] = json!(workflow);
+                }
+                if let Some(conclusion) = conclusion {
+                    entry["conclusion"] = json!(conclusion);
+                }
+                if let Some(link) = &check.link {
+                    entry["link"] = json!(link);
+                }
+                entry
+            })
+            .collect();
+    } else if let Some(number) = url
+        .rsplit('/')
+        .next()
+        .and_then(|number| number.parse::<u64>().ok())
+    {
+        record["number"] = json!(number);
+    }
+    match phase {
+        Phase::Running {
+            waiting_for: Some(commit),
+        } => record["waiting_for"] = json!(&commit[..commit.len().min(7)]),
+        Phase::Running { waiting_for: None } => {}
+        Phase::Finished => record["finished_at"] = json!(now_seconds()),
+        Phase::Stopped(reason) => {
+            record["finished_at"] = json!(now_seconds());
+            record["reason"] = json!(reason);
+        }
+    }
+    format!("{CARD_PREFIX}{record}")
 }
 
 fn upstream_moved(store: &StateStore, workdir: &Path, recorded: Option<&str>) -> bool {
@@ -203,9 +266,12 @@ impl Engine {
             Ok(watches) => {
                 for watch in watches {
                     // Left recorded when it cannot start, for the next daemon.
-                    let _ = self
-                        .ci_watches
-                        .register(|| Ok::<_, ()>(Some(watch.clone())));
+                    let _ = self.ci_watches.register(|| {
+                        Ok::<_, ()>(Some(AddedCiWatch {
+                            watch: watch.clone(),
+                            retired: None,
+                        }))
+                    });
                     self.ci_watches.start(watch, None);
                 }
             }
@@ -295,11 +361,20 @@ impl Engine {
             match read_status(store, &workdir, &url) {
                 Ok(now) if same_checks(store, &workdir, &status, &now) => {
                     match store.end_ci_watch_if(chat, &url, earlier.as_ref()) {
-                        Ok(true) if !upstream_moved(store, &workdir, upstream.as_deref()) => {
-                            return json!({"ok": true, "url": url, "number": status.number,
-                                "finished": true, "report": text});
+                        Ok(Some(retired)) => {
+                            self.publish_ci_card(chat, Ok(retired));
+                            if !upstream_moved(store, &workdir, upstream.as_deref()) {
+                                let shown =
+                                    card(&url, Some(&status), Phase::Finished, now_seconds());
+                                self.publish_ci_card(
+                                    chat,
+                                    store.add_ci_card(chat, &shown).map(Some),
+                                );
+                                return json!({"ok": true, "url": url, "number": status.number,
+                                    "finished": true, "report": text});
+                            }
                         }
-                        Ok(_) => {}
+                        Ok(None) => {}
                         Err(error) => return error_reply(error),
                     }
                 }
@@ -329,7 +404,10 @@ impl Engine {
             store.add_ci_watch(chat, &url, fresh.as_deref(), earlier.as_ref(), MAX_PER_CHAT)
         });
         let watch = match added {
-            Ok(Some(watch)) => watch,
+            Ok(Some(added)) => {
+                self.publish_ci_card(chat, Ok(added.retired));
+                added.watch
+            }
             Ok(None) => {
                 return error_reply(format!(
                     "This chat already has {MAX_PER_CHAT} pull requests watched, the most it may."
@@ -342,8 +420,27 @@ impl Engine {
             .clone()
             .unwrap_or_else(|| status.head.clone());
         let (checks, pending) = (status.checks.len(), status.pending());
+        let waiting = watch
+            .expected_head
+            .as_deref()
+            .filter(|commit| !commit.eq_ignore_ascii_case(&status.head));
+        let shown = card(
+            &url,
+            Some(&status),
+            Phase::Running {
+                waiting_for: waiting,
+            },
+            watch.created_at,
+        );
+        self.publish_ci_card(chat, store.write_ci_card(chat, &url, &watch.token, &shown));
         if !self.ci_watches.start(watch.clone(), Some(status.clone())) {
-            let _ = store.remove_ci_watch(chat, &url, Some(&watch.token));
+            let removed = store.remove_ci_watch(
+                chat,
+                &url,
+                Some(&watch.token),
+                "xd could not start watching.",
+            );
+            self.publish_ci_card(chat, removed.map(|(_, retired)| retired));
             return error_reply("xd could not start watching CI. Try again in a moment.");
         }
         json!({
@@ -357,39 +454,74 @@ impl Engine {
         })
     }
 
-    /// Sends the chat the report on `watch`, as the agent reports do: a
-    /// paused chat keeps it queued, a busy one queues it, an idle one takes
-    /// it. Storing the message ends the watch, as long as it is still this
-    /// one. `upstream` is the commit the checkout's upstream was at, if it
-    /// has one, when the checks were last read: the send is refused if it has
-    /// moved by the time the message would be stored, since the chat pushed
-    /// again.
-    fn deliver_ci_report(&self, watch: &CiWatch, text: &str, upstream: Option<String>) -> Delivery {
-        let ci_watch = json!({"url": watch.url, "token": watch.token, "upstream": upstream});
-        let reply = self.send_message(&json!({
-            "op": "send", "chat": watch.chat, "text": text, "keep_paused": true,
-            "ci_watch": ci_watch,
-        }));
-        if reply["ok"] == true {
-            self.events
-                .publish(json!({"event": "changed", "chat": watch.chat}));
-            return Delivery::Sent;
+    /// Ends `watch` with `report` for its agent and `shown` on its card, as
+    /// one: the report waits for the chat out of its queue, as an agent's
+    /// does, and goes as soon as the chat is free. Decided under the chat's
+    /// gate. `upstream` is the commit the checkout's upstream was at when the
+    /// poll that led here began: when the chat has pushed since, nothing is
+    /// stored and the watch goes on. Answers whether the watch is over.
+    fn deliver_ci_report(
+        &self,
+        watch: &CiWatch,
+        report: &str,
+        shown: &str,
+        upstream: Option<&str>,
+    ) -> bool {
+        let mut written = None;
+        let handed = self.hand_over_report(&watch.chat, |store| {
+            if store
+                .chat_workdir(&watch.chat)
+                .is_ok_and(|workdir| upstream_moved(store, &workdir, upstream))
+            {
+                return Ok(None);
+            }
+            let delivered = store
+                .deliver_ci_report(&watch.chat, &watch.url, &watch.token, report, shown)
+                .map_err(|error| error.to_string())?;
+            Ok(delivered.map(|(delivery, card)| {
+                written = card;
+                delivery
+            }))
+        });
+        // The card says how it ended even when the turn could not start.
+        if let Some(written) = written {
+            self.publish_ci_card(&watch.chat, Ok(Some(written)));
         }
-        if reply["error"] == CHECKOUT_MOVED {
-            return Delivery::Moved;
+        if let Err(error) = &handed {
+            eprintln!("xd-host: cannot report CI to chat {}: {error}", watch.chat);
         }
-        let Some(store) = self.store.as_ref() else {
-            return Delivery::Sent;
-        };
-        // Replaced, gone with its chat, or stored before a turn failed to start.
-        if !store
-            .owns_ci_watch(&watch.chat, &watch.url, &watch.token)
-            .unwrap_or(false)
-        {
-            return Delivery::Sent;
+        // Stored, or no longer this watch's to tell: replaced, gone with its
+        // chat, or stored before a turn failed to start. Otherwise the chat
+        // pushed meanwhile, or the report was refused before it was stored.
+        matches!(handed, Ok(Some(())))
+            || !self.store.as_ref().is_some_and(|store| {
+                store
+                    .owns_ci_watch(&watch.chat, &watch.url, &watch.token)
+                    .unwrap_or(false)
+            })
+    }
+
+    /// Tells clients of a card write: a new card reloads the chat, a changed
+    /// one is rewritten in place.
+    fn publish_ci_card(
+        &self,
+        chat: &str,
+        written: Result<Option<crate::storage::CardWrite>, crate::StorageError>,
+    ) {
+        match written {
+            Ok(Some(card)) if card.created => self
+                .events
+                .publish(json!({"event": "changed", "chat": chat})),
+            Ok(Some(card)) => self.events.publish(json!({
+                "event": "record",
+                "chat": chat,
+                "record": format!("ci:{}", card.message_id),
+                "message_id": card.message_id,
+                "text": card.text,
+            })),
+            Ok(None) => {}
+            Err(error) => eprintln!("xd-host: cannot write a CI card: {error}"),
         }
-        eprintln!("xd-host: cannot report CI to chat {}: {reply}", watch.chat);
-        Delivery::Refused
     }
 }
 
@@ -398,11 +530,11 @@ impl CiWatches {
     /// the live one, both under the record's lock.
     fn register<E>(
         &self,
-        add: impl FnOnce() -> Result<Option<CiWatch>, E>,
-    ) -> Result<Option<CiWatch>, E> {
+        add: impl FnOnce() -> Result<Option<AddedCiWatch>, E>,
+    ) -> Result<Option<AddedCiWatch>, E> {
         let mut live = self.live.lock().unwrap_or_else(|error| error.into_inner());
         let added = add()?;
-        if let Some(watch) = &added {
+        if let Some(AddedCiWatch { watch, .. }) = &added {
             live.insert((watch.chat.clone(), watch.url.clone()), watch.token.clone());
         }
         Ok(added)
@@ -543,6 +675,8 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
     };
     let mut empty = EmptyPolls::default();
     let (mut failed_polls, mut refused) = (0_u32, 0_u32);
+    // What GitHub said last, for the card.
+    let mut last: Option<Status> = None;
     let mut last_complete: Option<(Vec<String>, i64)> = None;
     loop {
         {
@@ -580,6 +714,7 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
                 }
                 Ok(status) => {
                     failed_polls = 0;
+                    last = Some(status.clone());
                     let before = pushed.commit.clone();
                     let check = pushed.observe(
                         &status.head,
@@ -618,43 +753,69 @@ fn run(engine: Weak<Engine>, watch: CiWatch, mut first: Option<Status>) {
                     reason: "Its checks were still running after 6 hours.".into(),
                 });
             }
-            if let Some(ending) = ending {
-                let text = report(&ending, store, &workdir);
-                // Reading failed jobs' logs takes a while; a push, or a check
-                // run again, meanwhile means there is more to wait for. One
-                // that cannot be read again is not sent on trust: the watch
-                // goes on as after any failed poll.
-                let current = match &ending {
-                    Ending::Finished(done) => match read_status(store, &workdir, url) {
-                        Ok(now) if same_checks(store, &workdir, done, &now) => true,
-                        Ok(now) => {
-                            first = Some(now);
-                            false
-                        }
-                        Err(_) => {
-                            failed_polls += 1;
-                            false
-                        }
-                    },
-                    Ending::Stopped { .. } => true,
-                };
-                if !current {
-                    last_complete = None;
-                    if first.is_some() {
-                        continue;
-                    }
-                } else {
-                    match engine.deliver_ci_report(&watch, &text, upstream.clone()) {
-                        Delivery::Sent => return,
-                        Delivery::Moved => last_complete = None,
-                        Delivery::Refused => {
-                            // Refused before it was stored: the next poll
-                            // tries again, for a while.
-                            refused += 1;
-                            if refused >= FAILED_POLLS {
-                                let _ = store.remove_ci_watch(chat, url, Some(token));
-                                return;
+            match ending {
+                None => {
+                    let shown = card(
+                        url,
+                        last.as_ref(),
+                        Phase::Running {
+                            waiting_for: pushed.commit.as_deref(),
+                        },
+                        watch.created_at,
+                    );
+                    engine.publish_ci_card(chat, store.write_ci_card(chat, url, token, &shown));
+                }
+                Some(ending) => {
+                    let text = report(&ending, store, &workdir);
+                    // Reading failed jobs' logs takes a while; a push, or a check run
+                    // again, meanwhile means there is more to wait for. One that
+                    // cannot be read again is not sent on trust: the watch goes on as
+                    // after any failed poll.
+                    let current = match &ending {
+                        Ending::Finished(done) => match read_status(store, &workdir, url) {
+                            Ok(now) if same_checks(store, &workdir, done, &now) => true,
+                            Ok(now) => {
+                                first = Some(now);
+                                false
                             }
+                            Err(_) => {
+                                failed_polls += 1;
+                                false
+                            }
+                        },
+                        Ending::Stopped { .. } => true,
+                    };
+                    if !current {
+                        last_complete = None;
+                        if first.is_some() {
+                            continue;
+                        }
+                    } else {
+                        let shown = match &ending {
+                            Ending::Finished(done) => {
+                                card(url, Some(done), Phase::Finished, watch.created_at)
+                            }
+                            Ending::Stopped { reason, .. } => {
+                                card(url, last.as_ref(), Phase::Stopped(reason), watch.created_at)
+                            }
+                        };
+                        if engine.deliver_ci_report(&watch, &text, &shown, upstream.as_deref()) {
+                            return;
+                        }
+                        last_complete = None;
+                        // Refused before it was stored, or the chat pushed meanwhile:
+                        // the next poll looks again, and a report refused every time
+                        // ends the watch after a while.
+                        refused += 1;
+                        if refused >= FAILED_POLLS {
+                            let removed = store.remove_ci_watch(
+                                chat,
+                                url,
+                                Some(token),
+                                "xd could not send its report.",
+                            );
+                            engine.publish_ci_card(chat, removed.map(|(_, retired)| retired));
+                            return;
                         }
                     }
                 }
@@ -768,8 +929,8 @@ fn read_status(store: &StateStore, workdir: &Path, url: &str) -> Result<Status, 
                 "view",
                 url,
                 "--json",
-                "url,number,state,headRefOid,headRefName,headRepository,headRepositoryOwner,\
-                 statusCheckRollup",
+                "url,number,title,state,headRefOid,headRefName,headRepository,\
+                 headRepositoryOwner,statusCheckRollup",
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -814,6 +975,12 @@ fn parse_status(parsed: &Value) -> Result<Status, String> {
         number: parsed["number"].as_u64().unwrap_or_default(),
         state,
         head,
+        title: parsed["title"]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect(),
         head_branch: parsed["headRefName"]
             .as_str()
             .unwrap_or_default()
@@ -1457,7 +1624,7 @@ mod tests {
     }
 
     #[test]
-    fn a_watch_is_only_ever_removed_by_its_own_token() {
+    fn a_watch_is_only_ever_ended_by_its_own_token_and_keeps_its_card() {
         let root = std::env::temp_dir().join(format!("xd-ci-rows-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("Workspaces")).unwrap();
         let engine = Engine::with_store(
@@ -1474,22 +1641,52 @@ mod tests {
             .to_owned();
         let store = engine.store.as_ref().unwrap();
         let url = "https://github.com/o/r/pull/7";
+        let rows = || {
+            store.messages(&json!({"chat": chat})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["content"].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let running = format!("{CARD_PREFIX}{}", json!({"status": "running", "url": url}));
         let first = store
             .add_ci_watch(&chat, url, Some("abc"), None, 1)
             .unwrap()
             .unwrap();
+        assert!(first.retired.is_none());
+        let first = first.watch;
+        // The card is added once, then rewritten only when it changes.
+        let card = store
+            .write_ci_card(&chat, url, &first.token, &running)
+            .unwrap()
+            .unwrap();
+        assert!(card.created);
+        assert_eq!(
+            store
+                .write_ci_card(&chat, url, &first.token, &running)
+                .unwrap(),
+            None
+        );
+        // Another watch of it takes over; the first card says so.
         let second = store
             .add_ci_watch(&chat, url, None, Some(&first), 1)
             .unwrap()
             .unwrap();
+        let retired = second.retired.unwrap();
+        assert_eq!(retired.message_id, card.message_id);
+        assert!(retired.text.contains("\"status\":\"stopped\""));
+        assert!(retired.text.contains(crate::storage::RETIRED_BY_ANOTHER));
+        let second = second.watch;
         assert_ne!(first.token, second.token);
         // It still waits for the commit the watch it replaced waited for.
         assert_eq!(second.expected_head.as_deref(), Some("abc"));
         assert!(!store.owns_ci_watch(&chat, url, &first.token).unwrap());
-        assert!(
-            !store
-                .remove_ci_watch(&chat, url, Some(&first.token))
-                .unwrap()
+        assert_eq!(
+            store
+                .write_ci_card(&chat, url, &first.token, &running)
+                .unwrap(),
+            None
         );
         store
             .set_ci_watch_expected(&chat, url, &first.token, Some("zzz"))
@@ -1498,21 +1695,19 @@ mod tests {
         store
             .set_ci_watch_expected(&chat, url, &second.token, Some("def"))
             .unwrap();
-        assert_eq!(
-            store.ci_watches().unwrap()[0].expected_head.as_deref(),
-            Some("def")
-        );
         // A replacement that read the watch before it recorded def keeps def
         // over the older push it read itself; one that read it after wins.
         let third = store
             .add_ci_watch(&chat, url, Some("old"), Some(&second), 1)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .watch;
         assert_eq!(third.expected_head.as_deref(), Some("def"));
         let second = store
             .add_ci_watch(&chat, url, Some("ggg"), Some(&third), 1)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .watch;
         assert_eq!(second.expected_head.as_deref(), Some("ggg"));
         // One other pull request is the most this chat may watch here.
         assert!(
@@ -1521,42 +1716,61 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        // The report a replaced watch would send is refused, storing nothing;
-        // the current watch's ends it as it is stored.
-        let report = |token: &str| {
-            json!({"chat": chat, "text": "[xd] CI passed", "keep_paused": true,
-                "ci_watch": {"url": url, "token": token}})
-        };
         // An answer given at once ends only the watch it read beforehand.
-        assert!(!store.end_ci_watch_if(&chat, url, Some(&first)).unwrap());
-        assert!(!store.end_ci_watch_if(&chat, url, None).unwrap());
-        // Nor one whose thread has since recorded a pushed commit.
+        assert!(
+            store
+                .end_ci_watch_if(&chat, url, Some(&first))
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.end_ci_watch_if(&chat, url, None).unwrap().is_none());
         let mut stale = store.ci_watch(&chat, url).unwrap().unwrap();
         stale.expected_head = Some("fff".into());
-        assert!(!store.end_ci_watch_if(&chat, url, Some(&stale)).unwrap());
-        assert_eq!(store.ci_watches().unwrap().len(), 1);
+        assert!(
+            store
+                .end_ci_watch_if(&chat, url, Some(&stale))
+                .unwrap()
+                .is_none()
+        );
         assert!(
             store
                 .end_ci_watch_if(&chat, "https://github.com/o/r/pull/9", None)
                 .unwrap()
+                .is_some()
         );
-        assert!(store.prepare_send(&report(&first.token)).is_err());
+        // The report of a replaced watch is refused, storing nothing; the
+        // current watch's ends it, and its card says how CI went.
+        let finished = format!("{CARD_PREFIX}{}", json!({"status": "passed", "url": url}));
+        let before = rows().len();
+        assert!(
+            store
+                .deliver_ci_report(&chat, url, &first.token, "[xd] CI passed", &finished)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(store.ci_watches().unwrap().len(), 1);
-        assert!(
-            store.messages(&json!({"chat": chat})).unwrap()["messages"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        assert!(store.prepare_send(&report(&second.token)).is_ok());
+        assert_eq!(rows().len(), before);
+        let (_, card) = store
+            .deliver_ci_report(&chat, url, &second.token, "[xd] CI passed", &finished)
+            .unwrap()
+            .unwrap();
+        assert!(card.unwrap().created);
         assert!(store.ci_watches().unwrap().is_empty());
-        assert!(store.prepare_send(&report(&second.token)).is_err());
+        assert!(rows().contains(&finished));
+        // Delivered as a report, out of the queue, as an agent's is.
+        assert_eq!(store.chat(&chat).unwrap()["queue"], json!([]));
         assert!(
-            !store
-                .remove_ci_watch(&chat, url, Some(&second.token))
+            store
+                .deliver_ci_report(&chat, url, &second.token, "[xd] CI passed", &finished)
                 .unwrap()
+                .is_none()
         );
+        let (removed, _) = store
+            .remove_ci_watch(&chat, url, Some(&second.token), "gone")
+            .unwrap();
+        assert!(!removed);
         assert!(store.add_ci_watch("nope", url, None, None, 1).is_err());
+        engine.runtime.as_ref().unwrap().shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1794,6 +2008,26 @@ done
              The end of pr / linux's failed steps:\n\n```\nerror: it broke\n```"
         );
         assert!(store.ci_watches().unwrap().is_empty());
+        // One card stands for the watch, rewritten in place as it went.
+        let cards = || {
+            store.messages(&json!({"chat": chat})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|row| row["content"].as_str())
+                .filter_map(|text| text.strip_prefix(CARD_PREFIX))
+                .map(|record| serde_json::from_str::<Value>(record).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let shown = cards();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0]["status"], "failed");
+        assert_eq!(shown[0]["number"], 7);
+        assert_eq!(shown[0]["head"], "1e3d4a4");
+        assert_eq!(shown[0]["checks"][0]["name"], "linux");
+        assert_eq!(shown[0]["checks"][0]["state"], "failed");
+        assert_eq!(shown[0]["checks"][0]["conclusion"], "failure");
+        assert_eq!(shown[0]["checks"][1]["state"], "passed");
         let log = std::fs::read_to_string(root.join("gh.log")).unwrap();
         assert!(
             log.contains("run view --job 13 --log-failed --repo o/r"),
@@ -1811,6 +2045,10 @@ done
                 .starts_with("[xd] CI failed on https://github.com/o/r/pull/7 at 1e3d4a4.")
         );
         assert!(store.ci_watches().unwrap().is_empty());
+        // It gets a card of its own, finished from the start.
+        let shown = cards();
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[1]["status"], "failed");
 
         // A watch ends with its chat, without a word.
         std::fs::write(root.join("polls"), "-1000000").unwrap();
@@ -1825,6 +2063,11 @@ done
         let second = store.ci_watches().unwrap();
         assert_eq!(second.len(), 1);
         assert_ne!(first[0].token, second[0].token);
+        // The first watch's card says it was watched again; the new one runs.
+        let shown = cards();
+        assert_eq!(shown.len(), 4, "{shown:?}");
+        assert_eq!(shown[2]["status"], "stopped");
+        assert_eq!(shown[3]["status"], "running");
         let deleted = engine.dispatch(json!({"op": "delete-chat", "chat": chat}));
         assert_eq!(deleted["ok"], true, "{deleted}");
         assert!(store.ci_watches().unwrap().is_empty());
