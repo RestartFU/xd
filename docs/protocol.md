@@ -1272,7 +1272,9 @@ draft alone. A parent at work, paused or stopped at its quota holds it until
 it is free: when its turn ends it gets every report waiting, oldest first, in
 one turn, ahead of its queue, unless the user steered the message at the front
 of the queue, which goes first. Each report is its own `user` row in that
-turn; the agent reads them as one message. A paused parent gets them when it
+turn; the agent reads them as one message. A turn that cannot start gives its
+reports back to wait in their places; they go with the next report or turn
+end rather than retrying by themselves. A paused parent gets them when it
 resumes. Reports waiting across a restart go to a free parent when the daemon
 starts, and to a chat the restart cut off once the client answers
 `resume-interrupted`. A `list-agents` call naming one agent that is not at work

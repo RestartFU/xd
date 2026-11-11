@@ -297,8 +297,10 @@ impl Engine {
         let child = settled.chat_id.as_str();
         // Reports that came while this chat was busy go once it is free, for
         // the ones a turn ending did not hand over, such as when the turn
-        // after it could not start.
-        if store.has_waiting_reports(child).unwrap_or(false) {
+        // after it could not start. Reports a failed start gave back wait for
+        // something else to happen, or a start that keeps failing would
+        // retry them forever.
+        if store.has_fresh_reports(child).unwrap_or(false) {
             let _answer = self
                 .restart_answer
                 .lock()

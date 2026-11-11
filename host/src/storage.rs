@@ -2958,6 +2958,11 @@ impl StateStore {
                 params![chat_id, error, now_seconds()],
             )?;
         }
+        // The reports this turn was handed have been read.
+        transaction.execute(
+            "DELETE FROM agent_reports WHERE chat_id = ? AND state = 'handed'",
+            [chat_id],
+        )?;
         let (stored, paused, queue_first) = transaction
             .query_row(
                 "SELECT COALESCE(queued, ''), paused, queue_first FROM chats WHERE id = ?",
@@ -3817,7 +3822,7 @@ impl StateStore {
         let mut statement = database.prepare(
             "SELECT DISTINCT chats.id FROM agent_reports \
              JOIN chats ON chats.id = agent_reports.chat_id \
-             WHERE chats.host_working = 0 AND chats.paused = 0 \
+             WHERE agent_reports.state != 'handed' AND chats.host_working = 0 AND chats.paused = 0 \
                AND chats.resume_after_restart = 0 ORDER BY chats.id",
         )?;
         let chats = statement
@@ -3826,16 +3831,22 @@ impl StateStore {
         Ok(chats)
     }
 
-    /// Whether any report waits for `chat_id`.
-    pub fn has_waiting_reports(&self, chat_id: &str) -> Result<bool, StorageError> {
-        has_agent_reports(&*self.reader()?, chat_id)
+    /// Whether a report waits for `chat_id` that no turn has failed to
+    /// start with yet.
+    pub fn has_fresh_reports(&self, chat_id: &str) -> Result<bool, StorageError> {
+        Ok(self.reader()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_reports WHERE chat_id = ? AND state = 'waiting')",
+            [chat_id],
+            |row| row.get(0),
+        )?)
     }
 
     /// The newest report from `agent_id` waiting for `chat_id`, or 0.
     pub fn latest_agent_report(&self, chat_id: &str, agent_id: &str) -> Result<i64, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         Ok(database.query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM agent_reports WHERE chat_id = ? AND agent_id = ?",
+            "SELECT COALESCE(MAX(id), 0) FROM agent_reports \
+             WHERE chat_id = ? AND agent_id = ? AND state != 'handed'",
             params![chat_id, agent_id],
             |row| row.get(0),
         )?)
@@ -3852,7 +3863,8 @@ impl StateStore {
     ) -> Result<usize, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         Ok(database.execute(
-            "DELETE FROM agent_reports WHERE chat_id = ? AND agent_id = ? AND id <= ?",
+            "DELETE FROM agent_reports \
+             WHERE chat_id = ? AND agent_id = ? AND id <= ? AND state != 'handed'",
             params![chat_id, agent_id, through],
         )?)
     }
@@ -3860,6 +3872,11 @@ impl StateStore {
     pub fn abort_turn_start(&self, chat_id: &str, error: &str) -> Result<(), StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
+        // Reports it was to hand over wait again, in their places.
+        transaction.execute(
+            "UPDATE agent_reports SET state = 'returned' WHERE chat_id = ? AND state = 'handed'",
+            [chat_id],
+        )?;
         transaction.execute(
             "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'error', ?, ?)",
             params![chat_id, error, now_seconds()],
@@ -11086,6 +11103,11 @@ fn end_interrupted_turn(
     transaction: &rusqlite::Transaction<'_>,
     chat_id: &str,
 ) -> Result<(), rusqlite::Error> {
+    // The turn ran and had the reports it was handed.
+    transaction.execute(
+        "DELETE FROM agent_reports WHERE chat_id = ? AND state = 'handed'",
+        [chat_id],
+    )?;
     let partial = transaction
         .query_row(
             "SELECT COALESCE(partial_reply, ''), partial_reply_label FROM chats WHERE id = ?",
@@ -11688,7 +11710,9 @@ fn ensure_chat_pull_requests(database: &Connection) -> Result<(), StorageError> 
 
 /// Reports from the agents a chat started, waiting for the chat to be free to
 /// read them: they are the host's, not the user's, so they never join the
-/// chat's queue. Each goes with either chat. `queue_first` marks a queue whose
+/// chat's queue. Each goes with either chat. `state` is `waiting`, `handed`
+/// to a turn that has not ended yet, or `returned` by a turn that could not
+/// start, which waits like the rest but does not retry by itself. `queue_first` marks a queue whose
 /// front message the user steered, which goes before any report.
 ///
 /// No schema version: older hosts ignore the table and the column, and a
@@ -11700,7 +11724,8 @@ fn ensure_agent_reports(database: &Connection) -> Result<(), StorageError> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
             agent_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-            text TEXT NOT NULL, created_at INTEGER NOT NULL);
+            text TEXT NOT NULL, created_at INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'waiting');
          CREATE INDEX IF NOT EXISTS agent_reports_chat ON agent_reports (chat_id, id);
          CREATE INDEX IF NOT EXISTS agent_reports_agent ON agent_reports (agent_id);",
     )?;
@@ -11728,13 +11753,19 @@ fn take_agent_reports(
     chat_id: &str,
 ) -> Result<Option<TurnSpec>, StorageError> {
     let reports = transaction
-        .prepare("SELECT text FROM agent_reports WHERE chat_id = ? ORDER BY id")?
+        .prepare(
+            "SELECT text FROM agent_reports WHERE chat_id = ? AND state != 'handed' ORDER BY id",
+        )?
         .query_map([chat_id], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     if reports.is_empty() {
         return Ok(None);
     }
-    transaction.execute("DELETE FROM agent_reports WHERE chat_id = ?", [chat_id])?;
+    // Kept until the turn ends, so one that cannot start gives them back.
+    transaction.execute(
+        "UPDATE agent_reports SET state = 'handed' WHERE chat_id = ? AND state != 'handed'",
+        [chat_id],
+    )?;
     let prompt = reports.join("\n\n");
     let turn = prepare_turn(
         transaction,
@@ -11767,7 +11798,7 @@ fn steered_front(database: &Connection, chat_id: &str) -> Result<Option<String>,
 
 fn has_agent_reports(database: &Connection, chat_id: &str) -> Result<bool, StorageError> {
     Ok(database.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_reports WHERE chat_id = ?)",
+        "SELECT EXISTS(SELECT 1 FROM agent_reports WHERE chat_id = ? AND state != 'handed')",
         [chat_id],
         |row| row.get(0),
     )?)
@@ -16749,8 +16780,54 @@ mod tests {
                 .deliver_agent_report("lead", "a", "[xd] done")
                 .is_err()
         );
-        assert!(store.has_waiting_reports("lead").unwrap());
+        assert!(store.has_fresh_reports("lead").unwrap());
         assert_eq!(store.chat("lead").unwrap()["working"], false);
+    }
+
+    #[test]
+    fn reports_a_turn_could_not_start_with_wait_again_in_their_places() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "work"}))
+            .unwrap();
+        store
+            .deliver_agent_report("lead", "a", "[xd] first")
+            .unwrap();
+        store
+            .deliver_agent_report("lead", "a", "[xd] second")
+            .unwrap();
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert!(finish.next.is_some());
+        // Handed to a turn, they are no longer waiting...
+        assert!(!store.has_fresh_reports("lead").unwrap());
+        assert_eq!(store.latest_agent_report("lead", "a").unwrap(), 0);
+        // ...until it cannot start, which gives them back, though not as
+        // reports to retry by themselves.
+        store.abort_turn_start("lead", "cannot start").unwrap();
+        assert!(!store.has_fresh_reports("lead").unwrap());
+        assert_eq!(store.chats_with_waiting_reports().unwrap(), ["lead"]);
+        // The next report takes them along, in their places.
+        let ReportDelivery::Start(turn) = store
+            .deliver_agent_report("lead", "a", "[xd] third")
+            .unwrap()
+        else {
+            panic!("the returned reports should go again");
+        };
+        assert_eq!(turn.prompt, "[xd] first\n\n[xd] second\n\n[xd] third");
+        // A turn that ran has read them.
+        store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert!(store.chats_with_waiting_reports().unwrap().is_empty());
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::Held
+        ));
     }
 
     #[test]
