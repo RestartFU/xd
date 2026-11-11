@@ -315,8 +315,7 @@ internal fun ChatScreen(
     }
     // Between turns, the same place says what the agent still runs in the
     // background, unless the agents tray already lists it.
-    val trayShown = runningAgents.isNotEmpty() || trayWorkers.isNotEmpty()
-    val waitingOn = com.restartfu.xd.model.backgroundRowCount(state.working, trayShown, backgroundTasks)
+    val waitingOn = com.restartfu.xd.model.backgroundRowCount(state.working, runningAgents.size, backgroundTasks)
     val trailingItemCount = if (state.working || waitingOn > 0) 1 else 0
     val lastTranscriptIndex = leadingItemCount + rows.lastIndex + trailingItemCount
     // Whether new output keeps the end in view. Only the reader's own drags

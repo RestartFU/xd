@@ -120,10 +120,13 @@ class MinimalProjectsTest {
 
     @Test
     fun backgroundRowStaysAwayWhileTheTrayListsTheWork() {
-        assertEquals(2, backgroundRowCount(working = false, trayShown = false, waitingOn = 2))
-        assertEquals(0, backgroundRowCount(working = false, trayShown = true, waitingOn = 2))
-        assertEquals(0, backgroundRowCount(working = true, trayShown = false, waitingOn = 2))
-        assertEquals(0, backgroundRowCount(working = false, trayShown = false, waitingOn = 0))
+        assertEquals(2, backgroundRowCount(working = false, listed = 0, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = false, listed = 2, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = false, listed = 3, waitingOn = 2))
+        // One task the transcript does not show is still worth the row.
+        assertEquals(2, backgroundRowCount(working = false, listed = 1, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = true, listed = 0, waitingOn = 2))
+        assertEquals(0, backgroundRowCount(working = false, listed = 0, waitingOn = 0))
     }
 
     @Test

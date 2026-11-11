@@ -428,9 +428,11 @@ fn background_label(count: u32) -> String {
 
 /// How many background tasks the row below the chat names: between turns,
 /// the background agents and shells still running, unless the agents tray
-/// already lists what runs, which the row would only repeat.
-fn background_row_count(working: bool, tray_shown: bool, waiting_on: u32) -> u32 {
-    if working || tray_shown {
+/// already lists at least that many running in the transcript, so the row
+/// would only repeat it. Tasks the transcript does not show, such as hidden
+/// ones or those in pages not loaded yet, still bring the row back.
+fn background_row_count(working: bool, listed: usize, waiting_on: u32) -> u32 {
+    if working || listed >= waiting_on as usize {
         0
     } else {
         waiting_on
@@ -18609,11 +18611,9 @@ impl XdDesktop {
             };
         let working = self.model.working;
         let tray_workers = self.tray_workers();
-        let tray_shown =
-            !self.transcript_snapshot.running_agents.is_empty() || !tray_workers.is_empty();
         let waiting_on = background_row_count(
             working,
-            tray_shown,
+            self.transcript_snapshot.running_agents.len(),
             self.model
                 .selected_chat
                 .as_deref()
@@ -26418,10 +26418,13 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[test]
     fn the_background_row_stays_away_while_the_tray_lists_the_work() {
-        assert_eq!(background_row_count(false, false, 2), 2);
-        assert_eq!(background_row_count(false, true, 2), 0);
-        assert_eq!(background_row_count(true, false, 2), 0);
-        assert_eq!(background_row_count(false, false, 0), 0);
+        assert_eq!(background_row_count(false, 0, 2), 2);
+        assert_eq!(background_row_count(false, 2, 2), 0);
+        assert_eq!(background_row_count(false, 3, 2), 0);
+        // One task the transcript does not show is still worth the row.
+        assert_eq!(background_row_count(false, 1, 2), 2);
+        assert_eq!(background_row_count(true, 0, 2), 0);
+        assert_eq!(background_row_count(false, 0, 0), 0);
     }
 
     #[test]

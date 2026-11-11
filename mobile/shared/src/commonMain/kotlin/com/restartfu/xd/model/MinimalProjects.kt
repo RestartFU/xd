@@ -67,10 +67,12 @@ public fun backgroundTasksLabel(count: Int): String =
 /**
  * How many background tasks the row below the chat names: between turns, the
  * background agents and shells still running, unless the agents tray already
- * lists what runs, which the row would only repeat. As on the desktop.
+ * lists at least that many running in the transcript, so the row would only
+ * repeat it. Tasks the transcript does not show, such as hidden ones or those
+ * in pages not loaded yet, still bring the row back. As on the desktop.
  */
-public fun backgroundRowCount(working: Boolean, trayShown: Boolean, waitingOn: Int): Int =
-    if (working || trayShown) 0 else waitingOn
+public fun backgroundRowCount(working: Boolean, listed: Int, waitingOn: Int): Int =
+    if (working || listed >= waitingOn) 0 else waitingOn
 
 /** A settled session on the shelf, with the project it belongs to. */
 public data class SettledSession(
