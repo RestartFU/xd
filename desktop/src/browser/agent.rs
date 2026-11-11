@@ -507,10 +507,11 @@ fn locate(page: &impl Page, number: &str, scroll: bool) -> Result<(f64, f64), St
                     if (!inner || inner === top) break;
                     top = inner;
                 }}
-                // The control nearest the point: what the snapshots took for
-                // controls, the ones agents are given refs for, so the two
-                // agree. Looked for through shadow roots, as `within` looks.
-                const controls = new Set(refs.values());
+                // The control nearest the point: what the latest snapshot took
+                // for controls, so the two agree. Looked for through shadow
+                // roots, as `within` looks.
+                const controls = window.__xdBrowserControls instanceof Set
+                    ? window.__xdBrowserControls : new Set();
                 const controlAt = node => {{
                     for (let at = node; at; at = at.assignedSlot || at.parentNode || at.host)
                         if (controls.has(at)) return at;
@@ -523,7 +524,8 @@ fn locate(page: &impl Page, number: &str, scroll: bool) -> Result<(f64, f64), St
                 // click for itself. One that lets clicks through to its
                 // container does not get it.
                 const own = holder => within(holder, top)
-                    && (!control || control === element || !within(holder, control));
+                    && (!control || control === element || control === holder
+                        || !within(holder, control));
                 const reaches = top && (own(element)
                     || (element.labels && [...element.labels].some(own)));
                 const describe = node => node.tagName.toLowerCase()
@@ -836,6 +838,8 @@ fn screenshot(page: &impl Page, full_page: bool) -> Result<Outcome, String> {
 const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
   if (!(window.__xdBrowserRefs instanceof Map)) window.__xdBrowserRefs = new Map();
   const refs = window.__xdBrowserRefs;
+  // What this snapshot takes for controls, for clicks to tell them apart.
+  const controls = new Set();
   let next = first;
   const lines = [];
   let size = 0;
@@ -989,6 +993,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
         flush();
         add(describe(element, tag, role));
         refs.set(next, element);
+        controls.add(element);
         next += 1;
         // A control's own text is its name, but it may hold more controls,
         // as an expanded tree item or a clickable card does, which are found
@@ -1035,6 +1040,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(limit, first, most) => {
   };
   walk(document.body || document.documentElement);
   flush();
+  window.__xdBrowserControls = controls;
   // Keep the newest; a ref older than these says to take a new snapshot.
   for (const number of refs.keys()) {
     if (refs.size <= 20000) break;
