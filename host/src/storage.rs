@@ -3932,6 +3932,19 @@ impl StateStore {
         Ok(agents)
     }
 
+    /// Whether agent `agent_id` holds a report back while free and not
+    /// waiting on the user's answer about resuming it.
+    pub fn holds_idle_report(&self, agent_id: &str) -> Result<bool, StorageError> {
+        Ok(self.reader()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_reports JOIN chats \
+               ON chats.id = agent_reports.agent_id \
+             WHERE agent_reports.agent_id = ? AND agent_reports.state = 'held' \
+               AND chats.host_working = 0 AND chats.resume_after_restart = 0)",
+            [agent_id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Lets the report agent `agent_id` held back wait for its chat like any
     /// other: no turn of the agent's will replace it.
     pub fn release_held_report(&self, agent_id: &str) -> Result<(), StorageError> {
@@ -17147,6 +17160,7 @@ mod tests {
             store.idle_agents_holding_reports().unwrap(),
             [("a".to_owned(), "lead".to_owned())]
         );
+        assert!(store.holds_idle_report("a").unwrap());
         // ...until no turn of the agent's will replace it, and only the last.
         store.release_held_report("a").unwrap();
         let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {

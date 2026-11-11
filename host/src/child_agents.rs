@@ -487,13 +487,19 @@ impl Engine {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return;
         };
-        let agents = store
-            .idle_agents_holding_reports()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(agent, _)| agent)
-            .collect::<Vec<_>>();
-        runtime.tell_unheld(&agents);
+        for (agent, _) in store.idle_agents_holding_reports().unwrap_or_default() {
+            // Asked again under the agent's gate, which every turn of its
+            // starts under, so none is starting meanwhile.
+            let Ok(gate) = self.chat_execution_gate(&agent) else {
+                continue;
+            };
+            let Ok(_execution) = gate.lock() else {
+                continue;
+            };
+            if store.holds_idle_report(&agent).unwrap_or(false) {
+                runtime.tell_unheld(std::slice::from_ref(&agent));
+            }
+        }
     }
 
     /// Lets the report agent `agent` held back wait for its chat, and hands
