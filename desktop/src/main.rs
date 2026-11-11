@@ -666,6 +666,8 @@ enum ButtonKind {
     Secondary,
     Ghost,
     Danger,
+    /// A destructive choice offered beside others: danger text, no frame.
+    DangerGhost,
 }
 
 /// The one button vocabulary used across the shell, popovers, and dialogs.
@@ -710,6 +712,9 @@ fn ui_button(
         ButtonKind::Danger => base
             .border_1()
             .border_color(rgb(colors.danger))
+            .text_color(rgb(colors.danger))
+            .hover(|style| style.bg(rgb(colors.danger_surface))),
+        ButtonKind::DangerGhost => base
             .text_color(rgb(colors.danger))
             .hover(|style| style.bg(rgb(colors.danger_surface))),
     }
@@ -1675,6 +1680,85 @@ struct OpenQuestion {
     accepts_input: bool,
 }
 
+/// What a chat's composer can have docked at its top while the chat waits on
+/// the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DockedAsk {
+    /// An approval, or a request for input, from the running turn.
+    Interaction,
+    /// The chat stopped at its quota.
+    Quota,
+    /// The agent's reply ended in a tagged question.
+    Question,
+}
+
+/// Where an answer to the docked question goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AskAnswer {
+    /// The reply's tagged question: the answer is the next message.
+    Tagged,
+    /// A question in a request for input.
+    Interaction {
+        request_id: String,
+        question_id: String,
+    },
+}
+
+/// What taking an answer came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answered {
+    /// Not taken: nothing to answer, or it could not be sent.
+    No,
+    /// Kept for the request's other questions.
+    Kept,
+    /// Sent to the host, which has yet to take it.
+    Sent,
+}
+
+/// One request for input: the host it came through, its chat, and its id.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct InteractionKey {
+    endpoint: ChatEndpoint,
+    chat_id: String,
+    request_id: String,
+}
+
+/// What the user has answered of one request for input. It lasts until the
+/// request is settled, whichever chat is open meanwhile, and goes with its
+/// host's connection.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RequestAnswers {
+    /// Answers kept by question id while the request's other questions wait.
+    answers: HashMap<String, String>,
+    /// Set once every question is answered and the response is on its way,
+    /// until the host replies to it. Its last question stays open but cannot
+    /// be answered again meanwhile, so a refusal gives it back rather than
+    /// leaving a request nothing can answer.
+    submit: Option<InteractionSubmit>,
+    /// The host took the response; the request goes once it is resolved.
+    accepted: bool,
+    /// The request was resolved or cleared while its response was on its
+    /// way; only the reply is still awaited.
+    resolved: bool,
+}
+
+/// A request's answers on their way to the host.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct InteractionSubmit {
+    /// The composer's words it answered with, which left the composer as a
+    /// sent message's do, and come back if the host refuses them.
+    typed: Option<String>,
+}
+
+/// The docked question's choices: each answer, with a description when the
+/// agent gave one.
+struct AskChoices {
+    /// Which question these belong to.
+    key: String,
+    target: AskAnswer,
+    choices: Vec<(String, Option<String>)>,
+}
+
 fn question_from_event(body: &Value) -> Option<OpenQuestion> {
     if body.get("waiting").and_then(Value::as_bool) != Some(true) {
         return None;
@@ -2493,7 +2577,6 @@ struct XdDesktop {
     device_name_input: Entity<ComposerInput>,
     remote_address_input: Entity<ComposerInput>,
     remote_pairing_input: Entity<ComposerInput>,
-    question_input: Entity<ComposerInput>,
     secret_question_input: Entity<ComposerInput>,
     source_build_input: Entity<ComposerInput>,
     /// The new quota a chat that stopped at its quota goes on with.
@@ -2653,8 +2736,19 @@ struct XdDesktop {
     sending: bool,
     pending_send: Option<PendingSend>,
     open_question: Option<OpenQuestion>,
+    /// What the secret answer field holds. Other answers are typed in the
+    /// composer.
     question_answer: String,
-    interaction_answers: HashMap<String, String>,
+    /// The secret question `question_answer` was typed for, so it is never
+    /// offered to another one.
+    secret_owner: Option<(InteractionKey, String)>,
+    interaction_answers: HashMap<InteractionKey, RequestAnswers>,
+    /// Words of answers that did not go through, by endpoint and chat,
+    /// waiting for that chat to open with an empty composer.
+    answer_restores: HashMap<(ChatEndpoint, String), String>,
+    /// The docked ask's choice the arrow keys moved to, by the question it
+    /// belongs to, so it does not carry over to the next one.
+    ask_focus: Option<(String, usize)>,
     source_build_panel: SourceBuildPanel,
     source_build_run: Option<SourceBuildRun>,
     source_build_generation: u64,
@@ -3135,22 +3229,9 @@ impl XdDesktop {
         .detach();
         let secret_question_input = cx.new(|cx| ComposerInput::password(cx, "Type your answer…"));
         cx.subscribe(&secret_question_input, |this, _, event, cx| match event {
-            ComposerEvent::Changed(text) => {
-                this.question_answer = text.clone();
-                cx.notify();
-            }
+            ComposerEvent::Changed(text) => this.secret_answer_changed(text.clone(), cx),
             ComposerEvent::Submit => this.send_question_input(cx),
             _ => {}
-        })
-        .detach();
-        let question_input = cx.new(|cx| ComposerInput::new(cx, "Type your answer…"));
-        cx.subscribe(&question_input, |this, _, event, cx| match event {
-            ComposerEvent::Changed(text) => {
-                this.question_answer = text.clone();
-                cx.notify();
-            }
-            ComposerEvent::Submit => this.send_question_input(cx),
-            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         // Window tests must not inherit settings written by another fixture.
@@ -3344,7 +3425,6 @@ impl XdDesktop {
             device_name_input,
             remote_address_input,
             remote_pairing_input,
-            question_input,
             secret_question_input,
             source_build_input,
             quota_input,
@@ -3462,7 +3542,10 @@ impl XdDesktop {
             pending_send: None,
             open_question: None,
             question_answer: String::new(),
+            secret_owner: None,
             interaction_answers: HashMap::new(),
+            answer_restores: HashMap::new(),
+            ask_focus: None,
             source_build_panel,
             source_build_run: None,
             source_build_generation: 0,
@@ -3756,6 +3839,7 @@ impl XdDesktop {
                 | RequestKind::Cancel { .. }
                 | RequestKind::PauseAll { .. }
                 | RequestKind::SetOption { .. }
+                | RequestKind::Respond { .. }
                 | RequestKind::SetShortcuts { .. }
                 | RequestKind::ChatTitleSettings
                 | RequestKind::SetChatTitleSettings
@@ -3933,7 +4017,9 @@ impl XdDesktop {
         self.pending_send = None;
         self.sending = false;
         self.pause_all_pending = false;
-        self.clear_question(cx);
+        self.clear_question();
+        self.forget_interaction_answers(None, cx);
+        self.clear_secret_answer(cx);
         self.cancel_queue_edit(cx);
         Arc::make_mut(&mut self.workflow_statuses).clear();
         Arc::make_mut(&mut self.workflow_pending).clear();
@@ -4189,6 +4275,7 @@ impl XdDesktop {
                     return;
                 }
                 self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
+                self.forget_interaction_answers(Some(ChatEndpoint::Remote), cx);
                 self.remote_host = None;
                 self.remote_bridge = None;
                 let remote_model = self.endpoint_model_mut(ChatEndpoint::Remote);
@@ -4578,6 +4665,7 @@ impl XdDesktop {
                 self.host = None;
                 self.model.connected = false;
                 self.model.connection_error = Some(format!("{message} Reconnecting…"));
+                self.forget_interaction_answers(Some(ChatEndpoint::Local), cx);
                 self.background_reading = false;
                 self.sending = false;
                 self.pause_all_pending = false;
@@ -4798,6 +4886,15 @@ impl XdDesktop {
                 RequestKind::ChatTitleSettings => self.chat_title_settings = None,
                 // The switch moved ahead of the host, so take back its answer.
                 RequestKind::SetChatTitleSettings => self.request_chat_title_settings(),
+                RequestKind::Respond {
+                    chat_id,
+                    request_id,
+                } => {
+                    self.interaction_refused(chat_id, request_id, cx);
+                    if self.chat_is_active(chat_id) {
+                        self.request_chat(chat_id);
+                    }
+                }
                 RequestKind::QueueMutation { chat_id }
                 | RequestKind::Cancel { chat_id }
                 | RequestKind::SetOption { chat_id }
@@ -6154,6 +6251,8 @@ impl XdDesktop {
                 self.send_first_message_aside(&chat_id);
             }
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
+                // The chat's first state since it opened brings its draft.
+                let opening = self.model.backend.is_empty();
                 let local_attachments = self
                     .attachments_dirty
                     .then(|| self.model.draft_attachments.clone());
@@ -6172,6 +6271,11 @@ impl XdDesktop {
                     let draft = self.model.draft.clone();
                     self.sync_composer_draft(draft, cx);
                 }
+                // Words of an answer that did not go through come back to a
+                // chat opened with nothing typed.
+                if opening {
+                    self.apply_answer_restore(cx);
+                }
                 if self
                     .first_chat_prompts
                     .get(&chat_id)
@@ -6185,11 +6289,11 @@ impl XdDesktop {
                     self.send_composer(cx);
                 }
                 if self.model.working || !self.model.queue.is_empty() {
-                    self.clear_question(cx);
+                    self.clear_question();
                 } else if !self.transcript_loading && !self.transcript_has_newer {
                     // Metadata can arrive after history; restore once both agree
                     // that this turn has finished.
-                    self.sync_question_from_history(&chat_id, cx);
+                    self.sync_question_from_history(&chat_id);
                 }
                 if self
                     .terminal_panel
@@ -6232,7 +6336,7 @@ impl XdDesktop {
                     self.transcript_snapshot.sync_live_text(&self.model);
                 }
                 if !self.transcript_has_newer {
-                    self.sync_question_from_history(&chat_id, cx);
+                    self.sync_question_from_history(&chat_id);
                 }
                 match direction {
                     MessagePageDirection::Tail => {
@@ -6329,6 +6433,15 @@ impl XdDesktop {
             RequestKind::Cancel { chat_id } if self.chat_is_active(&chat_id) => {}
             RequestKind::SetOption { chat_id } if self.chat_is_active(&chat_id) => {
                 self.request_chat(&chat_id);
+            }
+            RequestKind::Respond {
+                chat_id,
+                request_id,
+            } => {
+                self.interaction_accepted(&chat_id, &request_id);
+                if self.chat_is_active(&chat_id) {
+                    self.request_chat(&chat_id);
+                }
             }
             // The authoritative shortcuts-changed event follows this reply
             // and refetches the active workspace's merged shortcut state.
@@ -6798,20 +6911,11 @@ impl XdDesktop {
             name,
             body.get("chat").and_then(Value::as_str),
         );
-        if self.event_is_active(&body)
-            && matches!(name, "interaction-resolved" | "interactions-cleared")
+        if matches!(name, "interaction-resolved" | "interactions-cleared")
+            && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
         {
-            if let Some(id) = body.get("request_id").and_then(Value::as_str) {
-                self.interaction_answers
-                    .retain(|key, _| !key.starts_with(&format!("{id}/")));
-            } else {
-                self.interaction_answers.clear();
-            }
-            self.question_answer.clear();
-            self.question_input
-                .update(cx, |input, cx| input.set_text("", cx));
-            self.secret_question_input
-                .update(cx, |input, cx| input.set_text("", cx));
+            let request_id = body.get("request_id").and_then(Value::as_str);
+            self.interaction_resolved(chat_id, request_id);
         }
 
         if Self::is_terminal_screen_event(name) {
@@ -6986,7 +7090,7 @@ impl XdDesktop {
                 self.model.apply_event(name, &body);
             }
             "turn-started" if self.event_is_active(&body) => {
-                self.clear_question(cx);
+                self.clear_question();
                 self.model.apply_event(name, &body);
                 self.invalidate_live_render();
                 self.transcript_snapshot.sync_live_text(&self.model);
@@ -7061,9 +7165,6 @@ impl XdDesktop {
             "turn-finished" if self.event_is_active(&body) => {
                 self.model.apply_event(name, &body);
                 self.open_question = question_from_event(&body);
-                self.question_answer.clear();
-                self.question_input
-                    .update(cx, |input, cx| input.set_text("", cx));
                 if let Some(chat_id) = self.model.selected_chat.clone() {
                     self.request_messages(&chat_id);
                     self.request_chat(&chat_id);
@@ -11368,6 +11469,42 @@ impl XdDesktop {
     }
 
     fn submit_composer(&mut self, steer: bool, cx: &mut Context<Self>) {
+        // While a request's answers are on their way, Send neither answers
+        // again nor turns the words into a message.
+        if self.interaction_submitting() {
+            return;
+        }
+        let typed_answer = self
+            .typed_answer()
+            .filter(|_| !self.composer.trim().is_empty());
+        // A request's question answers the request, not the chat, so the
+        // words go there and the files wait for the next message.
+        if let Some(target @ AskAnswer::Interaction { .. }) = typed_answer {
+            if self.active_host().is_none() {
+                self.model.connection_error = Some("xd is not connected to a host.".into());
+                cx.notify();
+                return;
+            }
+            let answer = self.composer.trim().to_owned();
+            // Taken, the words leave the composer as a sent message's do. Ones
+            // sent to the host are kept with the request, and come back if it
+            // refuses them; ones that could not go anywhere stay.
+            match self.answer_ask(target, answer.clone(), cx) {
+                Answered::Kept => self.clear_composer_words(cx),
+                Answered::Sent => {
+                    if let Some(submit) = self
+                        .docked_request_answers_mut()
+                        .and_then(|request| request.submit.as_mut())
+                    {
+                        submit.typed = Some(answer);
+                    }
+                    self.clear_composer_words(cx);
+                }
+                Answered::No => {}
+            }
+            cx.notify();
+            return;
+        }
         if self.sending || self.attachments_reading > 0 {
             return;
         }
@@ -11414,6 +11551,11 @@ impl XdDesktop {
             optimistic,
             agent_draft: None,
         });
+        // The reply's question takes a typed answer as the next message, so
+        // that message answers it.
+        if typed_answer == Some(AskAnswer::Tagged) {
+            self.clear_question();
+        }
         self.set_composer_text(String::new(), cx);
         self.model.draft_attachments.clear();
         self.draft_dirty = true;
@@ -11751,14 +11893,48 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn clear_question(&mut self, cx: &mut Context<Self>) {
+    /// Forgets the open question once it is answered. The composer keeps
+    /// whatever else the user had typed.
+    fn clear_question(&mut self) {
         self.open_question = None;
+        self.ask_focus = None;
+    }
+
+    /// Empties the masked field a secret is typed into, and what it holds,
+    /// so a secret never outlives its question, chat or host.
+    fn clear_secret_answer(&mut self, cx: &mut Context<Self>) {
+        self.secret_owner = None;
         self.question_answer.clear();
-        self.question_input
+        self.secret_question_input
             .update(cx, |input, cx| input.set_text("", cx));
     }
 
-    fn sync_question_from_history(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    /// The secret question the open chat waits on, as `secret_owner` names it.
+    fn docked_secret_question(&self) -> Option<(InteractionKey, String)> {
+        let (request_id, question, ..) = self.pending_input_question()?;
+        (question["isSecret"] == true).then_some(())?;
+        Some((
+            self.interaction_key(&request_id)?,
+            question["id"].as_str()?.to_owned(),
+        ))
+    }
+
+    /// Typing in the secret field: it belongs to the question shown.
+    fn secret_answer_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        self.secret_owner = self.docked_secret_question();
+        self.question_answer = text;
+        cx.notify();
+    }
+
+    /// Empties the secret field once the question it was typed for is gone,
+    /// whatever took it away; a refresh that leaves it in place keeps it.
+    fn sync_secret_answer(&mut self, cx: &mut Context<Self>) {
+        if self.secret_owner.is_some() && self.secret_owner != self.docked_secret_question() {
+            self.clear_secret_answer(cx);
+        }
+    }
+
+    fn sync_question_from_history(&mut self, chat_id: &str) {
         let pending = (!self.model.working && self.model.queue.is_empty())
             .then(|| {
                 self.model
@@ -11783,50 +11959,278 @@ impl XdDesktop {
         }
         if pending != self.open_question {
             self.open_question = pending;
-            self.question_answer.clear();
-            self.question_input
-                .update(cx, |input, cx| input.set_text("", cx));
         }
     }
 
-    fn answer_question(&mut self, answer: String, cx: &mut Context<Self>) {
-        if self.send_shortcut(answer) {
-            // Keep the navigation mark until the host confirms a new turn.
-            self.clear_question(cx);
-            cx.notify();
+    fn answer_question(&mut self, answer: String, cx: &mut Context<Self>) -> bool {
+        if !self.send_shortcut(answer) {
+            return false;
         }
+        // Keep the navigation mark until the host confirms a new turn.
+        self.clear_question();
+        cx.notify();
+        true
     }
 
+    /// Answers the user-input question waiting now with what its secret
+    /// field holds. Other answers are typed in the composer.
     fn send_question_input(&mut self, cx: &mut Context<Self>) {
-        if let Some(pending) = self
-            .model
-            .interactions
-            .iter()
-            .find(|p| p["method"] == "item/tool/requestUserInput")
-            .cloned()
-            && let Some(id) = pending["request_id"].as_str()
-            && let Some(question) =
-                pending["params"]["questions"]
-                    .as_array()
-                    .and_then(|questions| {
-                        questions.iter().find(|q| {
-                            !self.interaction_answers.contains_key(&format!(
-                                "{id}/{}",
-                                q["id"].as_str().unwrap_or_default()
-                            ))
-                        })
-                    })
-            && let Some(qid) = question["id"].as_str()
+        if let Some((request_id, question, ..)) = self.pending_input_question()
+            && let Some(question_id) = question["id"].as_str()
         {
             self.answer_interaction(
-                id.to_owned(),
-                qid.to_owned(),
+                request_id,
+                question_id.to_owned(),
                 self.question_answer.clone(),
                 cx,
             );
-            return;
         }
-        self.answer_question(self.question_answer.trim().to_owned(), cx);
+    }
+
+    /// The user-input question the open chat waits on, if the first thing it
+    /// waits on is a user-input request: the request, the question, and where
+    /// the question falls among the request's questions.
+    fn pending_input_question(&self) -> Option<(String, Value, usize, usize)> {
+        let pending = self.model.interactions.first()?;
+        if pending["method"] != "item/tool/requestUserInput" {
+            return None;
+        }
+        let request_id = pending["request_id"].as_str()?;
+        let questions = pending["params"]["questions"].as_array()?;
+        let answered = self
+            .interaction_key(request_id)
+            .and_then(|key| self.interaction_answers.get(&key));
+        // Taken by the host, it only waits to be resolved.
+        if answered.is_some_and(|request| request.accepted) {
+            return None;
+        }
+        let (index, question) = questions.iter().enumerate().find(|(_, question)| {
+            answered.is_none_or(|request| {
+                !request
+                    .answers
+                    .contains_key(question["id"].as_str().unwrap_or_default())
+            })
+        })?;
+        Some((
+            request_id.to_owned(),
+            question.clone(),
+            index,
+            questions.len(),
+        ))
+    }
+
+    /// What the open chat's composer has docked at its top, if anything:
+    /// one thing at a time, an approval or a request first.
+    fn docked_ask(&self) -> Option<DockedAsk> {
+        if !self.model.interactions.is_empty() {
+            Some(DockedAsk::Interaction)
+        } else if self.quota_card_visible() {
+            Some(DockedAsk::Quota)
+        } else if self.open_question.is_some() {
+            Some(DockedAsk::Question)
+        } else {
+            None
+        }
+    }
+
+    /// The docked question's choices, for the pointer and the keyboard.
+    fn ask_choices(&self) -> Option<AskChoices> {
+        match self.docked_ask()? {
+            DockedAsk::Interaction => {
+                let (request_id, question, ..) = self.pending_input_question()?;
+                let question_id = question["id"].as_str()?.to_owned();
+                let choices = question["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|option| {
+                        (
+                            option["label"].as_str().unwrap_or_default().to_owned(),
+                            option["description"]
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|description| !description.is_empty())
+                                .map(str::to_owned),
+                        )
+                    })
+                    .collect();
+                Some(AskChoices {
+                    key: format!("{request_id}/{question_id}"),
+                    target: AskAnswer::Interaction {
+                        request_id,
+                        question_id,
+                    },
+                    choices,
+                })
+            }
+            DockedAsk::Question => {
+                let question = self.open_question.as_ref()?;
+                Some(AskChoices {
+                    key: format!("{}\n{}", question.chat_id, question.question),
+                    target: AskAnswer::Tagged,
+                    choices: question
+                        .options
+                        .iter()
+                        .map(|option| (option.clone(), None))
+                        .collect(),
+                })
+            }
+            DockedAsk::Quota => None,
+        }
+    }
+
+    /// Where Send puts the composer's words while the docked question takes
+    /// a typed answer. A secret one has its own masked field instead.
+    fn typed_answer(&self) -> Option<AskAnswer> {
+        match self.docked_ask()? {
+            DockedAsk::Interaction => {
+                let (request_id, question, ..) = self.pending_input_question()?;
+                (question["isSecret"] != true).then(|| AskAnswer::Interaction {
+                    request_id,
+                    question_id: question["id"].as_str().unwrap_or_default().to_owned(),
+                })
+            }
+            DockedAsk::Question => self
+                .open_question
+                .as_ref()
+                .filter(|question| question.accepts_input)
+                .map(|_| AskAnswer::Tagged),
+            DockedAsk::Quota => None,
+        }
+    }
+
+    fn answer_ask(
+        &mut self,
+        target: AskAnswer,
+        answer: String,
+        cx: &mut Context<Self>,
+    ) -> Answered {
+        self.ask_focus = None;
+        match target {
+            AskAnswer::Tagged => {
+                if self.answer_question(answer, cx) {
+                    Answered::Sent
+                } else {
+                    Answered::No
+                }
+            }
+            AskAnswer::Interaction {
+                request_id,
+                question_id,
+            } => self.answer_interaction(request_id, question_id, answer, cx),
+        }
+    }
+
+    fn pick_ask_choice(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
+        let Some(choices) = self.ask_choices() else {
+            return false;
+        };
+        let Some((answer, _)) = choices.choices.get(index).cloned() else {
+            return false;
+        };
+        if self.interaction_submitting() {
+            return false;
+        }
+        self.answer_ask(choices.target, answer, cx);
+        cx.notify();
+        true
+    }
+
+    /// Whether keys reach the docked ask's choices: only while the composer
+    /// has the focus and nothing typed, so they never take a typed letter.
+    fn ask_keys_apply(&self, window: &Window, cx: &App) -> bool {
+        self.composer.is_empty()
+            && self
+                .composer_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+    }
+
+    /// The choice the arrow keys are on, while the composer is empty.
+    fn focused_ask_choice(&self, choices: &AskChoices) -> Option<usize> {
+        self.ask_focus
+            .as_ref()
+            .filter(|(key, index)| {
+                *key == choices.key && *index < choices.choices.len() && self.composer.is_empty()
+            })
+            .map(|(_, index)| *index)
+    }
+
+    /// 1 to 9 pick that choice.
+    fn ask_number_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.modified() || !self.ask_keys_apply(window, cx) {
+            return false;
+        }
+        let Some(index) = keystroke
+            .key
+            .parse::<usize>()
+            .ok()
+            .filter(|number| (1..=9).contains(number))
+        else {
+            return false;
+        };
+        // A choice's key does nothing while the answers are on their way,
+        // rather than typing the number.
+        self.interaction_submitting() || self.pick_ask_choice(index - 1, cx)
+    }
+
+    /// Up moves from the editor onto the choices above it, from the nearest
+    /// one; Down moves back toward the editor and, past the last, into it.
+    fn move_ask_focus(&mut self, up: bool, window: &Window, cx: &mut Context<Self>) -> bool {
+        if !self.ask_keys_apply(window, cx) {
+            return false;
+        }
+        let Some(choices) = self
+            .ask_choices()
+            .filter(|choices| !choices.choices.is_empty())
+        else {
+            return false;
+        };
+        let last = choices.choices.len() - 1;
+        let next = match (self.focused_ask_choice(&choices), up) {
+            (None, true) => Some(last),
+            (None, false) => return false,
+            (Some(index), true) => Some(index.saturating_sub(1)),
+            (Some(index), false) => (index < last).then_some(index + 1),
+        };
+        self.ask_focus = next.map(|index| (choices.key, index));
+        cx.notify();
+        true
+    }
+
+    /// Enter on the choice the arrow keys are on picks it.
+    fn pick_focused_ask_choice(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        if !self.ask_keys_apply(window, cx) {
+            return false;
+        }
+        let Some(index) = self
+            .ask_choices()
+            .and_then(|choices| self.focused_ask_choice(&choices))
+        else {
+            return false;
+        };
+        self.pick_ask_choice(index, cx)
+    }
+
+    /// Empties the composer after its words went somewhere other than a
+    /// message, such as an answer to a request. Its files stay.
+    fn clear_composer_words(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        self.set_composer_text(String::new(), cx);
+        self.draft_dirty = true;
+        self.draft_generation = self.draft_generation.saturating_add(1);
+        if let Some(host) = self.active_host() {
+            let _ = host.set_draft(&chat_id, "", None, None);
+        }
     }
 
     fn queue_edit_changed(&mut self, text: String, cx: &mut Context<Self>) {
@@ -12771,7 +13175,9 @@ impl XdDesktop {
                 self.diff_generation = self.diff_generation.saturating_add(1);
                 self.diff_panel = None;
             }
-            self.interaction_answers.clear();
+            // Answers outlive a visit elsewhere: the kept ones are there on
+            // the way back, and replies to sent ones still settle them.
+            self.clear_secret_answer(cx);
             self.model.select_chat(chat_id.clone());
             self.set_composer_text(String::new(), cx);
             self.draft_dirty = false;
@@ -18454,54 +18860,333 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn respond_interaction(&mut self, request_id: String, response: Value, cx: &mut Context<Self>) {
-        if let (Some(chat), Some(host)) = (self.model.selected_chat.as_deref(), self.active_host())
-            && let Err(error) = host.respond(chat, &request_id, response)
-        {
-            self.model.connection_error = Some(error);
-        }
+    /// Whether the response reached the host's connection.
+    fn respond_interaction(
+        &mut self,
+        request_id: String,
+        response: Value,
+        cx: &mut Context<Self>,
+    ) -> bool {
         cx.notify();
+        let (Some(chat), Some(host)) = (self.model.selected_chat.as_deref(), self.active_host())
+        else {
+            self.model.connection_error = Some("xd is not connected to a host.".into());
+            return false;
+        };
+        match host.respond(chat, &request_id, response) {
+            Ok(()) => true,
+            Err(error) => {
+                self.model.connection_error = Some(error);
+                false
+            }
+        }
     }
 
+    /// Keeps the answer for the request's other questions, or sends it with
+    /// them. The last one is not kept as answered until the host takes the
+    /// request, so its question stays open, and comes back if it is refused.
     fn answer_interaction(
         &mut self,
         request_id: String,
         question_id: String,
         answer: String,
         cx: &mut Context<Self>,
-    ) {
-        if answer.trim().is_empty() {
-            return;
+    ) -> Answered {
+        if answer.trim().is_empty() || self.interaction_submitting() {
+            return Answered::No;
         }
-        self.interaction_answers
-            .insert(format!("{request_id}/{question_id}"), answer);
         let Some(pending) = self
             .model
             .interactions
             .iter()
             .find(|pending| pending["request_id"].as_str() == Some(&request_id))
         else {
-            return;
+            return Answered::No;
         };
-        let mut answers = serde_json::Map::new();
         let questions = pending["params"]["questions"]
             .as_array()
             .cloned()
             .unwrap_or_default();
+        let Some(key) = self.interaction_key(&request_id) else {
+            return Answered::No;
+        };
+        let request = self.interaction_answers.entry(key.clone()).or_default();
+        let mut answers = serde_json::Map::new();
         for question in questions {
             let Some(id) = question["id"].as_str() else {
-                return;
+                return Answered::No;
             };
-            let Some(answer) = self.interaction_answers.get(&format!("{request_id}/{id}")) else {
-                self.question_answer.clear();
-                self.question_input
-                    .update(cx, |input, cx| input.set_text("", cx));
+            let answer = if id == question_id {
+                &answer
+            } else if let Some(answer) = request.answers.get(id) {
+                answer
+            } else {
+                // Others wait: keep this one for them.
+                request.answers.insert(question_id, answer);
+                self.clear_secret_answer(cx);
                 cx.notify();
-                return;
+                return Answered::Kept;
             };
             answers.insert(id.to_owned(), serde_json::json!({"answers":[answer]}));
         }
-        self.respond_interaction(request_id, serde_json::json!({"answers":answers}), cx);
+        // The last answer is not kept as given until the host takes it.
+        if !self.respond_interaction(request_id, serde_json::json!({"answers":answers}), cx) {
+            return Answered::No;
+        }
+        self.interaction_answers.entry(key).or_default().submit =
+            Some(InteractionSubmit::default());
+        Answered::Sent
+    }
+
+    /// The open chat's request with this id, as its answers are kept.
+    fn interaction_key(&self, request_id: &str) -> Option<InteractionKey> {
+        Some(InteractionKey {
+            endpoint: self.active_endpoint,
+            chat_id: self.model.selected_chat.clone()?,
+            request_id: request_id.to_owned(),
+        })
+    }
+
+    /// What the open chat's request keeps as the answer to a question.
+    #[cfg(all(test, unix))]
+    fn kept_answer(&self, request_id: &str, question_id: &str) -> Option<&str> {
+        self.interaction_answers
+            .get(&self.interaction_key(request_id)?)?
+            .answers
+            .get(question_id)
+            .map(String::as_str)
+    }
+
+    /// The answers kept for the request docked in the open chat.
+    fn docked_request_answers_mut(&mut self) -> Option<&mut RequestAnswers> {
+        let request_id = self.model.interactions.first()?["request_id"].as_str()?;
+        let key = self.interaction_key(request_id)?;
+        self.interaction_answers.get_mut(&key)
+    }
+
+    /// Whether the open chat's docked request has answers on their way.
+    fn interaction_submitting(&self) -> bool {
+        self.model
+            .interactions
+            .first()
+            .and_then(|pending| pending["request_id"].as_str())
+            .and_then(|request_id| self.interaction_key(request_id))
+            .and_then(|key| self.interaction_answers.get(&key))
+            .is_some_and(|request| request.submit.is_some())
+    }
+
+    /// The host took a request's response. The request goes once it is
+    /// resolved, if that has not happened already.
+    fn interaction_accepted(&mut self, chat_id: &str, request_id: &str) {
+        let key = InteractionKey {
+            endpoint: self.active_endpoint,
+            chat_id: chat_id.to_owned(),
+            request_id: request_id.to_owned(),
+        };
+        let Some(request) = self.interaction_answers.get_mut(&key) else {
+            return;
+        };
+        if request.resolved {
+            self.interaction_answers.remove(&key);
+        } else {
+            request.submit = None;
+            request.accepted = true;
+        }
+    }
+
+    /// A request, or all of a chat's requests, left the chat. One whose
+    /// response is still on its way waits for the reply, which can still
+    /// give the words back.
+    fn interaction_resolved(&mut self, chat_id: &str, request_id: Option<&str>) {
+        let endpoint = self.active_endpoint;
+        self.interaction_answers.retain(|key, request| {
+            let resolved = key.endpoint == endpoint
+                && key.chat_id == chat_id
+                && request_id.is_none_or(|request_id| key.request_id == request_id);
+            if !resolved {
+                return true;
+            }
+            request.answers.clear();
+            request.resolved = true;
+            request.submit.is_some()
+        });
+    }
+
+    /// The host refused a request's response: its words come back, its last
+    /// question opens again if the request is still there, and the answers
+    /// kept for its other questions stay.
+    fn interaction_refused(&mut self, chat_id: &str, request_id: &str, cx: &mut Context<Self>) {
+        let key = InteractionKey {
+            endpoint: self.active_endpoint,
+            chat_id: chat_id.to_owned(),
+            request_id: request_id.to_owned(),
+        };
+        let Some(request) = self.interaction_answers.get_mut(&key) else {
+            return;
+        };
+        let typed = request.submit.take().and_then(|submit| submit.typed);
+        if request.resolved {
+            self.interaction_answers.remove(&key);
+        }
+        if let Some(typed) = typed {
+            self.give_back_answer(key.endpoint, key.chat_id, typed, cx);
+        }
+    }
+
+    /// Settles the answers on their way through a connection that closed, or
+    /// through every connection on a host switch: replies to them will not
+    /// come, so their words come back and their last questions open again.
+    /// Answers kept for a request's earlier questions stay, under the host
+    /// they were given on, since a request outlives a reconnect; the entry
+    /// goes when the request is resolved or cleared.
+    fn forget_interaction_answers(
+        &mut self,
+        endpoint: Option<ChatEndpoint>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut given_back = Vec::new();
+        self.interaction_answers.retain(|key, request| {
+            if endpoint.is_some_and(|endpoint| key.endpoint != endpoint) {
+                return true;
+            }
+            if let Some(typed) = request.submit.take().and_then(|submit| submit.typed) {
+                given_back.push((key.endpoint, key.chat_id.clone(), typed));
+            }
+            // Nothing is left of one already resolved or taken, and one taken
+            // asks again if the host still lists it after reconnecting.
+            !request.resolved && !request.accepted && !request.answers.is_empty()
+        });
+        for (endpoint, chat_id, typed) in given_back {
+            self.give_back_answer(endpoint, chat_id, typed, cx);
+        }
+    }
+
+    /// Puts the words of an answer that did not go through back in their
+    /// chat's composer, if it is open and empty; otherwise they wait for the
+    /// chat to open with an empty composer. Typed text is never replaced.
+    fn give_back_answer(
+        &mut self,
+        endpoint: ChatEndpoint,
+        chat_id: String,
+        words: String,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.active_endpoint == endpoint
+            && self.model.selected_chat.as_deref() == Some(chat_id.as_str());
+        if open && self.composer.trim().is_empty() {
+            self.restore_composer_words(words, cx);
+            return;
+        }
+        self.answer_restores
+            .entry((endpoint, chat_id))
+            .and_modify(|waiting| {
+                waiting.push('\n');
+                waiting.push_str(&words);
+            })
+            .or_insert(words);
+    }
+
+    /// Words waiting for the open chat, put in its composer once the chat's
+    /// own draft is known to be empty.
+    fn apply_answer_restore(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if !self.composer.trim().is_empty() {
+            return;
+        }
+        if let Some(words) = self
+            .answer_restores
+            .remove(&(self.active_endpoint, chat_id))
+        {
+            self.restore_composer_words(words, cx);
+        }
+    }
+
+    fn restore_composer_words(&mut self, words: String, cx: &mut Context<Self>) {
+        self.set_composer_text(words, cx);
+        self.draft_dirty = true;
+        self.schedule_draft_sync(cx);
+        cx.notify();
+    }
+
+    /// What the open chat's composer docks at its top while the chat waits
+    /// on the user: an approval or request, a quota stop, or the question
+    /// its agent's reply ended with.
+    fn render_docked_ask(
+        &mut self,
+        colors: ThemeColors,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        match self.docked_ask()? {
+            DockedAsk::Interaction => self.render_interaction(colors, cx),
+            DockedAsk::Quota => self.render_quota_card(colors, window, cx),
+            DockedAsk::Question => self.render_tagged_question(colors, cx),
+        }
+    }
+
+    /// The docked question's choices as rows. A click, its number key, or
+    /// Enter once the arrow keys are on it picks one.
+    fn render_ask_choices(
+        &self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let choices = self
+            .ask_choices()
+            .filter(|choices| !choices.choices.is_empty())?;
+        let focused = self.focused_ask_choice(&choices);
+        let submitting = self.interaction_submitting();
+        let rows = choices
+            .choices
+            .into_iter()
+            .enumerate()
+            .map(|(index, (label, description))| {
+                composer::ask_choice(
+                    index,
+                    label,
+                    description,
+                    focused == Some(index),
+                    !submitting,
+                    colors,
+                )
+                .when(!submitting, |row| {
+                    row.on_click(cx.listener(move |this, _, _, cx| {
+                        this.pick_ask_choice(index, cx);
+                    }))
+                })
+            })
+            .collect::<Vec<_>>();
+        // The rows reach past the section's padding, so their hover lines up
+        // with the text around them.
+        Some(
+            div()
+                .mx(px(-10.0))
+                .flex()
+                .flex_col()
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    fn render_tagged_question(
+        &self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let question = self.open_question.as_ref()?.question.clone();
+        Some(
+            div()
+                .debug_selector(|| "tagged-question".into())
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(composer::ask_header(question, None, colors))
+                .children(self.render_ask_choices(colors, cx))
+                .into_any_element(),
+        )
     }
 
     fn render_interaction(
@@ -18513,98 +19198,73 @@ impl XdDesktop {
         let request_id = pending["request_id"].as_str()?.to_owned();
         let method = pending["method"].as_str().unwrap_or_default();
         let params = &pending["params"];
+        let waiting = self.model.interactions.len();
         let mut card = div()
+            .debug_selector(|| "interaction-card".into())
             .w_full()
             // Long patch lines scroll inside the preview; they must not
-            // widen the card past the column.
+            // widen the composer past the column.
             .min_w_0()
-            .overflow_hidden()
-            .px_4()
-            .py_3()
             .flex()
             .flex_col()
-            .gap(px(10.0))
-            .rounded(px(8.0))
-            .border(px(1.5))
-            .border_color(rgb(colors.waiting))
-            .bg(rgb(colors.surface))
+            .gap(px(12.0))
             .text_size(px(13.0))
             .text_color(rgb(colors.text));
         if method == "item/tool/requestUserInput" {
-            let question = params["questions"]
-                .as_array()?
-                .iter()
-                .find(|q| {
-                    !self.interaction_answers.contains_key(&format!(
-                        "{request_id}/{}",
-                        q["id"].as_str().unwrap_or_default()
-                    ))
-                })?
-                .clone();
+            let (_, question, index, count) = self.pending_input_question()?;
             let question_id = question["id"].as_str()?.to_owned();
-            card = card.child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_3()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(
-                                question["question"]
-                                    .as_str()
-                                    .unwrap_or("Your input is needed")
-                                    .to_owned(),
-                            ),
-                    )
-                    .child(stamp("Waiting on you", colors.waiting)),
-            );
-            let buttons = question["options"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .enumerate()
-                .map(|(index, option)| {
-                    let label = option["label"].as_str().unwrap_or_default().to_owned();
-                    let answer = label.clone();
-                    let id = request_id.clone();
-                    let question = question_id.clone();
-                    ui_button(("interaction-answer", index), ButtonKind::Secondary, colors)
-                        .justify_start()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.answer_interaction(
-                                id.clone(),
-                                question.clone(),
-                                answer.clone(),
-                                cx,
-                            )
-                        }))
-                        .child(label)
-                })
-                .collect::<Vec<_>>();
+            // Its own questions, answered one after another, or else the
+            // requests waiting behind it.
+            let submitting = self.interaction_submitting();
+            let counter = if submitting {
+                Some("Sending…".to_owned())
+            } else if count > 1 {
+                Some(format!("{} / {count}", index + 1))
+            } else {
+                (waiting > 1).then(|| format!("1 / {waiting}"))
+            };
             card = card
-                .child(div().flex().flex_wrap().gap_2().children(buttons))
-                .child(div().h(px(40.0)).child(if question["isSecret"] == true {
-                    self.secret_question_input.clone()
-                } else {
-                    self.question_input.clone()
-                }));
-            card = card.child(
-                div().flex().child(
-                    ui_button("interaction-submit", ButtonKind::Primary, colors)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.answer_interaction(
-                                request_id.clone(),
-                                question_id.clone(),
-                                this.question_answer.clone(),
-                                cx,
-                            )
-                        }))
-                        .child("Submit answer"),
-                ),
-            );
+                .child(composer::ask_header(
+                    question["question"]
+                        .as_str()
+                        .unwrap_or("Your input is needed")
+                        .to_owned(),
+                    counter,
+                    colors,
+                ))
+                .children(self.render_ask_choices(colors, cx));
+            // A secret is never typed into the composer, which shows its text
+            // and keeps it as a draft, so it keeps a masked field of its own.
+            if question["isSecret"] == true {
+                card = card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h(px(40.0))
+                                .child(self.secret_question_input.clone()),
+                        )
+                        .child(
+                            ui_button("interaction-submit", ButtonKind::Primary, colors)
+                                .when(submitting, |button| button.opacity(0.5))
+                                .when(!submitting, |button| {
+                                    button.on_click(cx.listener(move |this, _, _, cx| {
+                                        this.answer_interaction(
+                                            request_id.clone(),
+                                            question_id.clone(),
+                                            this.question_answer.clone(),
+                                            cx,
+                                        );
+                                    }))
+                                })
+                                .child("Submit answer"),
+                        ),
+                );
+            }
         } else {
             let command = params.get("command").and_then(Value::as_str);
             let reason = params
@@ -18619,7 +19279,6 @@ impl XdDesktop {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let title = approval_title(method, tool);
-            let waiting = self.model.interactions.len();
             let patch = params
                 .get("patch")
                 .and_then(Value::as_str)
@@ -18661,39 +19320,11 @@ impl XdDesktop {
                         .collect::<Vec<_>>()
                 });
             card = card
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex_1()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(title),
-                        )
-                        .when(waiting > 1, |row| {
-                            row.child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .text_color(rgb(colors.faint))
-                                    .child(format!("1 of {waiting}")),
-                            )
-                        })
-                        .child(stamp("Waiting on you", colors.waiting)),
-                )
-                .when_some(reason.filter(|_| command.is_some()), |card, reason| {
-                    card.child(
-                        div()
-                            .id("interaction-reason")
-                            .max_h(px(220.0))
-                            .overflow_y_scroll()
-                            .text_size(px(12.5))
-                            .line_height(px(19.0))
-                            .text_color(rgb(colors.muted))
-                            .child(reason.to_owned()),
-                    )
-                })
+                .child(composer::ask_header(
+                    title,
+                    (waiting > 1).then(|| format!("1 / {waiting}")),
+                    colors,
+                ))
                 .child(
                     div()
                         .id("interaction-detail")
@@ -18701,14 +19332,26 @@ impl XdDesktop {
                         .min_w_0()
                         .max_h(px(140.0))
                         .overflow_y_scroll()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(5.0))
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .rounded(px(8.0))
                         .bg(rgb(colors.background))
                         .font_family(MONO)
                         .text_size(px(12.5))
+                        .line_height(px(19.0))
                         .child(detail.to_owned()),
                 )
+                .when_some(reason.filter(|_| command.is_some()), |card, reason| {
+                    card.child(
+                        div()
+                            .id("interaction-reason")
+                            .max_h(px(220.0))
+                            .overflow_y_scroll()
+                            .line_height(px(20.0))
+                            .text_color(rgb(colors.muted))
+                            .child(reason.to_owned()),
+                    )
+                })
                 .when_some(patch, |card, lines| {
                     card.child(
                         div()
@@ -18737,35 +19380,33 @@ impl XdDesktop {
                         .child(permissions.to_string()),
                 );
             }
+            let decision = |index: usize, label: &'static str, decision: &'static str| {
+                let id = request_id.clone();
+                let kind = match decision {
+                    "accept" => ButtonKind::Primary,
+                    "decline" => ButtonKind::DangerGhost,
+                    _ => ButtonKind::Secondary,
+                };
+                ui_button(("interaction-decision", index), kind, colors)
+                    .debug_selector(move || format!("interaction-decision-{index}"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.respond_interaction(
+                            id.clone(),
+                            serde_json::json!({"decision":decision}),
+                            cx,
+                        );
+                    }))
+                    .child(label)
+            };
             card = card.child(
-                div().flex().gap_2().children(
-                    [
-                        ("Allow once", "accept"),
-                        ("Allow for session", "acceptForSession"),
-                        ("Deny", "decline"),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (label, decision))| {
-                        let id = request_id.clone();
-                        let kind = match decision {
-                            "accept" => ButtonKind::Primary,
-                            "decline" => ButtonKind::Danger,
-                            _ => ButtonKind::Secondary,
-                        };
-                        ui_button(("interaction-decision", index), kind, colors)
-                            .when(decision == "decline", |button| button.ml_4())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond_interaction(
-                                    id.clone(),
-                                    serde_json::json!({"decision":decision}),
-                                    cx,
-                                )
-                            }))
-                            .child(label)
-                    })
-                    .collect::<Vec<_>>(),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(decision(0, "Allow once", "accept"))
+                    .child(decision(1, "Allow for session", "acceptForSession"))
+                    .child(div().flex_1())
+                    .child(decision(2, "Deny", "decline")),
             );
         }
         Some(card.into_any_element())
@@ -19146,14 +19787,19 @@ impl XdDesktop {
         // How wide the composer box can get.
         let composer_width = px(if empty_ready { 660.0 } else { 736.0 });
         let metadata_ready = !self.model.backend.is_empty();
+        // A request's answers on their way hold the composer: its words are
+        // the answer until the host takes it.
+        let answering = self.interaction_submitting();
         let can_send = self.model.connected
             && metadata_ready
             && !self.sending
+            && !answering
             && self.attachments_reading == 0
             && (!self.composer.trim().is_empty() || !self.model.draft_attachments.is_empty());
         // A draft with files is queued by sending it, which queues only while
         // a turn runs, and waits on a send in flight like the send button does.
         let can_queue = self.model.connected
+            && !answering
             && self.attachments_reading == 0
             && if self.model.draft_attachments.is_empty() {
                 !self.composer.trim().is_empty()
@@ -19198,8 +19844,22 @@ impl XdDesktop {
         let can_submit = can_send || can_resume;
         let agent = AgentCli::from_backend(&self.model.backend);
 
-        let interaction = self.render_interaction(colors, cx);
-        let quota_card = self.render_quota_card(colors, window, cx);
+        self.sync_secret_answer(cx);
+        let docked_ask = self.docked_ask();
+        let ask = self.render_docked_ask(colors, window, cx);
+        let ask_has_choices = self
+            .ask_choices()
+            .is_some_and(|choices| !choices.choices.is_empty());
+        // What the empty editor says follows what Send does with its words.
+        let placeholder = if docked_ask == Some(DockedAsk::Quota) {
+            "Messages you send wait until it goes on…"
+        } else if self.typed_answer().is_some() {
+            "Or type your own answer…"
+        } else {
+            editor::MESSAGE_PLACEHOLDER
+        };
+        self.composer_input
+            .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
         let agents_tray = Self::render_agents_tray(
             colors,
             &self.transcript_snapshot.running_agents,
@@ -19312,7 +19972,7 @@ impl XdDesktop {
                     .into_any_element(),
             );
         }
-        if !working || can_send {
+        if !working || can_send || answering {
             actions.push(
                 composer::composer_send_button(
                     "native-send-message",
@@ -19339,19 +19999,48 @@ impl XdDesktop {
                 .into_any_element(),
             );
         }
-        let composer = self.render_composer(
-            composer::ComposerParts {
-                owner: image_preview::DraftOwner::Chat,
-                width: composer_width,
-                editor,
-                controls: options,
-                actions,
-                show_attachments: true,
-            },
-            colors,
-            window,
-            cx,
-        );
+        let composer = self
+            .render_composer(
+                composer::ComposerParts {
+                    owner: image_preview::DraftOwner::Chat,
+                    width: composer_width,
+                    editor,
+                    controls: options,
+                    actions,
+                    show_attachments: true,
+                    ask,
+                },
+                colors,
+                window,
+                cx,
+            )
+            // Keys for the docked question's choices, ahead of the editor. Each
+            // passes through unless the composer is focused and empty.
+            .when(ask_has_choices, |composer| {
+                composer
+                    .capture_key_down(cx.listener(
+                        |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if this.ask_number_key(event, window, cx) {
+                                cx.stop_propagation();
+                            }
+                        },
+                    ))
+                    .capture_action(cx.listener(|this, _: &EditorUp, window, cx| {
+                        if this.move_ask_focus(true, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &EditorDown, window, cx| {
+                        if this.move_ask_focus(false, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &EditorSubmit, window, cx| {
+                        if this.pick_focused_ask_choice(window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+            });
         let context_row = metadata_ready
             .then(|| self.render_chat_context_row(colors))
             .flatten();
@@ -19439,85 +20128,12 @@ impl XdDesktop {
                         },
                     ),
             )
-            .when_some(interaction, |chat, card| {
-                chat.child(div().w_full().max_w(px(736.0)).mb_3().child(card))
-            })
-            // As wide as the transcript column, as the background row is.
-            .when_some(quota_card, |chat, card| {
-                chat.child(div().w(px(column.min(736.0))).mb_3().child(card))
-            })
             .children(agents_tray)
-            .when_some(
-                self.open_question
-                    .clone()
-                    .filter(|_| self.model.interactions.is_empty()),
-                |chat, question| {
-                    let buttons = question
-                        .options
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, answer)| {
-                            let label = answer.clone();
-                            ui_button(("tagged-question", index), ButtonKind::Secondary, colors)
-                                .justify_start()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.answer_question(answer.clone(), cx)
-                                }))
-                                .child(label)
-                        })
-                        .collect::<Vec<_>>();
-                    chat.child(
-                        div()
-                            .w_full()
-                            .max_w(px(736.0))
-                            .mb_3()
-                            .px_4()
-                            .py_3()
-                            .flex()
-                            .flex_col()
-                            .gap(px(10.0))
-                            .rounded(px(8.0))
-                            .border(px(1.5))
-                            .border_color(rgb(colors.waiting))
-                            .bg(rgb(colors.surface))
-                            .text_size(px(13.0))
-                            .text_color(rgb(colors.text))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_start()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(question.question),
-                                    )
-                                    .child(stamp("Waiting on you", colors.waiting)),
-                            )
-                            .child(div().flex().flex_wrap().gap_2().children(buttons))
-                            .when(question.accepts_input, |card| {
-                                card.child(div().h(px(40.0)).child(self.question_input.clone()))
-                                    .child(
-                                        div().flex().child(
-                                            ui_button(
-                                                "tagged-question-submit",
-                                                ButtonKind::Primary,
-                                                colors,
-                                            )
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.send_question_input(cx)
-                                            }))
-                                            .child("Submit answer"),
-                                        ),
-                                    )
-                            }),
-                    )
-                },
-            )
             .when_some(background_row, |chat, row| chat.child(row))
-            .when(working, |chat| {
-                let (status, dot) = turn_status(!self.model.interactions.is_empty(), colors);
+            // While an approval or request waits, the ask docked in the
+            // composer says so; a status line above it would only repeat it.
+            .when(working && self.model.interactions.is_empty(), |chat| {
+                let (status, dot) = turn_status(false, colors);
                 chat.child(
                     div()
                         .w_full()
@@ -19529,19 +20145,15 @@ impl XdDesktop {
                         .gap(px(8.0))
                         .text_size(px(12.5))
                         .text_color(rgb(colors.muted))
-                        .child(if self.model.interactions.is_empty() {
+                        .child(
                             div()
                                 .size(px(7.0))
                                 .rounded_full()
                                 .bg(rgb(dot))
-                                .opacity(pulse_opacity())
-                        } else {
-                            waiting_ring(colors)
-                        })
+                                .opacity(pulse_opacity()),
+                        )
                         .child(status)
-                        .when(self.model.interactions.is_empty(), |row| {
-                            row.child(working_dots(0, colors.muted))
-                        }),
+                        .child(working_dots(0, colors.muted)),
                 )
             })
             .when(!queued.is_empty(), |chat| {
@@ -20336,7 +20948,6 @@ impl XdDesktop {
             self.device_name_input.clone(),
             self.remote_address_input.clone(),
             self.remote_pairing_input.clone(),
-            self.question_input.clone(),
             self.secret_question_input.clone(),
             self.source_build_input.clone(),
             self.quota_input.clone(),
@@ -24706,7 +25317,7 @@ Binary files /dev/null and b/image.png differ\n";
         cx: &mut gpui::TestAppContext,
     ) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
-        cx.update_window_entity(&desktop, |desktop, _, cx| {
+        cx.update_window_entity(&desktop, |desktop, _, _| {
             desktop.model.select_chat("chat");
             desktop.model.messages = vec![
                 Message::new(
@@ -24717,14 +25328,14 @@ Binary files /dev/null and b/image.png differ\n";
                 ),
                 Message::new(Some(2), "duration", "2", None),
             ];
-            desktop.sync_question_from_history("chat", cx);
+            desktop.sync_question_from_history("chat");
             assert_eq!(desktop.open_question.as_ref().unwrap().options.len(), 2);
             assert!(desktop.model.is_waiting("chat"));
             desktop
                 .model
                 .messages
                 .push(Message::new(Some(3), "user", "First", None));
-            desktop.sync_question_from_history("chat", cx);
+            desktop.sync_question_from_history("chat");
             assert!(desktop.open_question.is_none());
             assert!(!desktop.model.is_waiting("chat"));
         });
@@ -24889,8 +25500,18 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(desktop.quota_card.text, "35");
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("chat-quota-card").is_some());
+        // Docked in the composer, above the editor, with no frame of its own.
+        let card = cx.debug_bounds("chat-quota-card").unwrap();
+        let composer = cx.debug_bounds("chat-composer").unwrap();
+        let editor = cx.debug_bounds("native-composer").unwrap();
+        assert!(composer.contains(&card.origin) && card.bottom() < editor.top());
         assert!(cx.debug_bounds("native-quota-meter").is_none());
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert_eq!(
+                desktop.composer_input.read(cx).placeholder(),
+                "Messages you send wait until it goes on…"
+            );
+        });
         let continue_button = cx.debug_bounds("chat-quota-continue").unwrap();
         cx.simulate_click(continue_button.center(), gpui::Modifiers::default());
         cx.run_until_parked();
@@ -24968,6 +25589,864 @@ Binary files /dev/null and b/image.png differ\n";
         // newly appears can be seen here; the card's state is checked above.
         redraw(cx);
         assert!(cx.debug_bounds("native-quota-meter").is_some());
+    }
+
+    /// An open chat on a host the test plays, for the docked ask's tests:
+    /// the desktop, what it sends the host, and the host's updates, which
+    /// must outlive the test.
+    #[cfg(unix)]
+    fn docked_ask_fixture(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Entity<XdDesktop>,
+        &mut gpui::VisualTestContext,
+        std::io::BufReader<std::os::unix::net::UnixStream>,
+        async_channel::Receiver<HostUpdate>,
+    ) {
+        use std::os::unix::net::UnixStream;
+
+        cx.update(|cx| {
+            cx.bind_keys([
+                KeyBinding::new("up", EditorUp, Some("MessageEditor")),
+                KeyBinding::new("down", EditorDown, Some("MessageEditor")),
+                KeyBinding::new("enter", EditorSubmit, Some("MessageEditor")),
+            ])
+        });
+        let (client, server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (host, updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            PathBuf::from("docked-ask-test"),
+        );
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1280.0), px(900.0)));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.model.connected = true;
+            desktop.host = Some(host);
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.set_composer_text(String::new(), cx);
+            window.blur();
+        });
+        cx.run_until_parked();
+        (desktop, cx, std::io::BufReader::new(server), updates)
+    }
+
+    /// Whether `inner` sits in the chat's composer, above its editor.
+    #[cfg(unix)]
+    fn docked_in_composer(cx: &mut gpui::VisualTestContext, inner: &'static str) -> bool {
+        let inner = cx.debug_bounds(inner).unwrap();
+        let composer = cx.debug_bounds("chat-composer").unwrap();
+        let editor = cx.debug_bounds("native-composer").unwrap();
+        composer.contains(&inner.origin) && inner.bottom() <= editor.top()
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_question_docks_in_the_composer_and_send_answers_it(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx, mut requests, _updates) = docked_ask_fixture(cx);
+        let question = OpenQuestion {
+            chat_id: "implementation".into(),
+            question: "Which region should staging deploy to?".into(),
+            options: vec!["us-east-1".into(), "eu-west-1".into()],
+            accepts_input: true,
+        };
+        // Answered: the host takes the message and the turn ends again.
+        let ask_again =
+            |desktop: &mut XdDesktop, window: &mut Window, cx: &mut Context<XdDesktop>| {
+                assert!(desktop.open_question.is_none(), "an answer closes it");
+                desktop.sending = false;
+                desktop.pending_send = None;
+                desktop.model.stop_working();
+                desktop.model.queue.clear();
+                desktop.open_question = Some(question.clone());
+                window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+            };
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            // A draft from before the question stays, and becomes the answer.
+            desktop.set_composer_text("Somewhere in Europe".into(), cx);
+            desktop.open_question = Some(question.clone());
+        });
+        redraw(cx);
+        assert!(docked_in_composer(cx, "tagged-question"));
+        assert!(cx.debug_bounds("composer-ask-choice-1").is_some());
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert_eq!(desktop.composer, "Somewhere in Europe");
+            assert_eq!(
+                desktop.composer_input.read(cx).placeholder(),
+                "Or type your own answer…"
+            );
+        });
+        let send = cx.debug_bounds("native-send-message").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let request = next_request_with_op(&mut requests, "send");
+        assert_eq!(request["chat"], "implementation");
+        assert_eq!(request["text"], "Somewhere in Europe");
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(desktop.composer.is_empty(), "sent like any message");
+            ask_again(desktop, window, cx);
+        });
+        redraw(cx);
+
+        // With nothing typed, a choice's number picks it.
+        cx.simulate_keystrokes("2");
+        assert_eq!(
+            next_request_with_op(&mut requests, "send")["text"],
+            "eu-west-1"
+        );
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(desktop.composer.is_empty(), "the number is not typed");
+            ask_again(desktop, window, cx);
+        });
+        redraw(cx);
+
+        // Up moves from the editor onto the nearest choice, Down back toward
+        // the editor, and Enter picks the one it is on.
+        cx.simulate_keystrokes("up up");
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(desktop.ask_focus.as_ref().map(|(_, index)| *index), Some(0));
+        });
+        cx.simulate_keystrokes("down down");
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(
+                desktop.ask_focus.is_none(),
+                "past the last, back in the editor"
+            );
+        });
+        cx.simulate_keystrokes("up enter");
+        assert_eq!(
+            next_request_with_op(&mut requests, "send")["text"],
+            "eu-west-1"
+        );
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            ask_again(desktop, window, cx);
+        });
+        redraw(cx);
+
+        // Once something is typed, numbers are words again.
+        cx.simulate_input("a1");
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(desktop.composer, "a1");
+            assert!(desktop.open_question.is_some());
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_request_for_input_takes_the_composer_words_as_its_answer(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx, mut requests, _updates) = docked_ask_fixture(cx);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.set_composer_text("Staging only".into(), cx);
+            desktop.model.start_working();
+            desktop.model.interactions = vec![serde_json::json!({
+                "request_id": "ask-1",
+                "method": "item/tool/requestUserInput",
+                "params": {"questions": [
+                    {"id": "q0", "question": "Which region?", "options": [
+                        {"label": "us-east-1", "description": "Virginia"},
+                        {"label": "eu-west-1"},
+                    ]},
+                    {"id": "q1", "question": "Which database?", "options": [
+                        {"label": "Postgres"},
+                        {"label": "SQLite"},
+                    ]},
+                ]},
+            })];
+        });
+        redraw(cx);
+        assert!(docked_in_composer(cx, "interaction-card"));
+        assert!(
+            cx.debug_bounds("composer-ask-counter").is_some(),
+            "question 1 of 2 says so"
+        );
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert_eq!(desktop.composer, "Staging only", "the draft stays");
+            assert_eq!(
+                desktop.composer_input.read(cx).placeholder(),
+                "Or type your own answer…"
+            );
+        });
+        let send = cx.debug_bounds("native-send-message").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert_eq!(desktop.kept_answer("ask-1", "q0"), Some("Staging only"));
+            assert!(desktop.composer.is_empty());
+            assert!(desktop.model.queue.is_empty(), "an answer, not a message");
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("2");
+        let request = next_request_with_op(&mut requests, "respond");
+        assert_eq!(request["request_id"], "ask-1");
+        assert_eq!(
+            request["response"],
+            serde_json::json!({"answers": {
+                "q0": {"answers": ["Staging only"]},
+                "q1": {"answers": ["SQLite"]},
+            }})
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn an_approval_docks_in_the_composer_and_leaves_its_editor_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx, mut requests, _updates) = docked_ask_fixture(cx);
+        let approval = |id: &str| {
+            serde_json::json!({
+                "request_id": id,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "command": "cargo publish --dry-run",
+                    "reason": "Checks that the crate packages cleanly.",
+                },
+            })
+        };
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model.start_working();
+            desktop.model.interactions = vec![approval("approve-1"), approval("approve-2")];
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+        });
+        redraw(cx);
+        assert!(docked_in_composer(cx, "interaction-card"));
+        assert!(cx.debug_bounds("composer-ask-counter").is_some(), "1 / 2");
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert_eq!(
+                desktop.composer_input.read(cx).placeholder(),
+                editor::MESSAGE_PLACEHOLDER
+            );
+            assert!(desktop.typed_answer().is_none());
+        });
+        // No choices to pick, so a number is typed.
+        cx.simulate_input("1");
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(desktop.composer, "1");
+        });
+        let deny = cx.debug_bounds("interaction-decision-2").unwrap();
+        cx.simulate_click(deny.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let request = next_request_with_op(&mut requests, "respond");
+        assert_eq!(request["request_id"], "approve-1");
+        assert_eq!(request["response"]["decision"], "decline");
+    }
+
+    #[gpui::test]
+    fn a_secret_answer_is_forgotten_with_its_question_and_chat(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            let type_secret = |desktop: &mut XdDesktop, cx: &mut Context<XdDesktop>| {
+                desktop.question_answer = "hunter2".into();
+                desktop
+                    .secret_question_input
+                    .update(cx, |input, cx| input.set_text("hunter2", cx));
+            };
+            let forgotten = |desktop: &XdDesktop, cx: &mut Context<XdDesktop>| {
+                desktop.question_answer.is_empty()
+                    && desktop.secret_question_input.read(cx).text().is_empty()
+            };
+            // Typed for a question that is no longer there, such as one on
+            // the host the user switched away from, it is emptied.
+            type_secret(desktop, cx);
+            desktop.secret_owner = Some((
+                InteractionKey {
+                    endpoint: ChatEndpoint::Remote,
+                    chat_id: "implementation".into(),
+                    request_id: "ask-1".into(),
+                },
+                "q0".into(),
+            ));
+            desktop.sync_secret_answer(cx);
+            assert!(forgotten(desktop, cx));
+            // So does opening another chat.
+            type_secret(desktop, cx);
+            desktop.route_minimal_session(
+                "atlas".into(),
+                "review".into(),
+                AgentCli::Codex,
+                false,
+                cx,
+            );
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
+            assert!(forgotten(desktop, cx));
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_typed_answer_the_host_never_got_stays_in_the_composer(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx, requests, updates) = docked_ask_fixture(cx);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.set_composer_text("Staging only".into(), cx);
+            desktop.model.start_working();
+            desktop.model.interactions = vec![serde_json::json!({
+                "request_id": "ask-1",
+                "method": "item/tool/requestUserInput",
+                "params": {"questions": [
+                    {"id": "q0", "question": "Which region?", "options": [{"label": "us-east-1"}]},
+                ]},
+            })];
+        });
+        // The host goes away, though the desktop has not heard yet.
+        drop(requests);
+        loop {
+            match updates.recv_blocking() {
+                Ok(HostUpdate::Disconnected { .. }) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        redraw(cx);
+        let send = cx.debug_bounds("native-send-message").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(desktop.composer, "Staging only", "the words stay");
+            assert!(!desktop.draft_dirty, "and so does the draft");
+            assert!(
+                desktop.kept_answer("ask-1", "q0").is_none(),
+                "the question stays open"
+            );
+            assert!(!desktop.interaction_submitting());
+            assert!(desktop.pending_input_question().is_some());
+            assert!(desktop.model.connection_error.is_some());
+        });
+    }
+
+    /// Plays the host's reply to the desktop's next `respond`, through the
+    /// socket, and hands the desktop the reply as its connection reads it.
+    #[cfg(unix)]
+    fn reply_to_respond(
+        desktop: &Entity<XdDesktop>,
+        requests: &mut std::io::BufReader<std::os::unix::net::UnixStream>,
+        updates: &async_channel::Receiver<HostUpdate>,
+        mut reply: Value,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Value {
+        use std::io::Write;
+
+        let request = next_request_with_op(requests, "respond");
+        reply["_xd_request"] = request["_xd_request"].clone();
+        writeln!(requests.get_mut(), "{reply}").unwrap();
+        loop {
+            if let HostUpdate::Reply {
+                kind: kind @ RequestKind::Respond { .. },
+                body,
+                attachments,
+            } = updates.recv_blocking().unwrap()
+            {
+                cx.update_window_entity(desktop, |desktop, _, cx| {
+                    desktop.handle_reply(kind, body, attachments, cx)
+                });
+                break;
+            }
+        }
+        redraw(cx);
+        request
+    }
+
+    /// A request for input with one question, waiting in the open chat.
+    #[cfg(unix)]
+    fn one_question_request(request_id: &str) -> Value {
+        serde_json::json!({
+            "request_id": request_id,
+            "method": "item/tool/requestUserInput",
+            "params": {"questions": [
+                {"id": "q0", "question": "Which region?", "options": [
+                    {"label": "us-east-1"},
+                    {"label": "eu-west-1"},
+                ]},
+            ]},
+        })
+    }
+
+    /// Opens a chat of the fixture's session, as its state reads once its
+    /// metadata is back.
+    #[cfg(unix)]
+    fn open_chat(desktop: &Entity<XdDesktop>, chat_id: &str, cx: &mut gpui::VisualTestContext) {
+        cx.update_window_entity(desktop, |desktop, _, cx| {
+            desktop.route_minimal_session(
+                "atlas".into(),
+                chat_id.into(),
+                AgentCli::Codex,
+                false,
+                cx,
+            );
+            desktop.model.backend = "codex".into();
+            desktop.model.connected = true;
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+        });
+        redraw(cx);
+    }
+
+    /// Types `words` as the answer to the open chat's request and sends them.
+    #[cfg(unix)]
+    fn answer_with_words(
+        desktop: &Entity<XdDesktop>,
+        request: Value,
+        words: &str,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        cx.update_window_entity(desktop, |desktop, _, cx| {
+            desktop.set_composer_text(words.into(), cx);
+            desktop.model.start_working();
+            desktop.model.interactions = vec![request];
+        });
+        redraw(cx);
+        let send = cx.debug_bounds("native-send-message").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    /// Whether answers to a request in this chat are on their way.
+    #[cfg(unix)]
+    fn submitting_in(desktop: &XdDesktop, chat_id: &str) -> bool {
+        desktop
+            .interaction_answers
+            .iter()
+            .any(|(key, request)| key.chat_id == chat_id && request.submit.is_some())
+    }
+
+    /// The open chat's state as the host sends it while its turn runs: its
+    /// draft and the request it waits on.
+    #[cfg(unix)]
+    fn chat_state_arrives(
+        desktop: &Entity<XdDesktop>,
+        chat_id: &str,
+        draft: &str,
+        revision: i64,
+        interactions: Vec<Value>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        cx.update_window_entity(desktop, |desktop, _, cx| {
+            desktop.handle_reply(
+                RequestKind::Chat {
+                    chat_id: chat_id.into(),
+                },
+                serde_json::json!({
+                    "ok": true,
+                    "working": true,
+                    "backend": "codex",
+                    "draft": draft,
+                    "draft_revision": revision,
+                    "interactions": interactions,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+                None,
+                cx,
+            );
+        });
+        redraw(cx);
+    }
+
+    /// Opens a chat as the user does, before its state arrives.
+    #[cfg(unix)]
+    fn go_to_chat(desktop: &Entity<XdDesktop>, chat_id: &str, cx: &mut gpui::VisualTestContext) {
+        cx.update_window_entity(desktop, |desktop, _, cx| {
+            desktop.route_minimal_session(
+                "atlas".into(),
+                chat_id.into(),
+                AgentCli::Codex,
+                false,
+                cx,
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn an_answer_leaves_the_composer_like_a_message_and_a_refusal_away_gives_it_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx, mut requests, updates) = docked_ask_fixture(cx);
+        // Taken: the words left at once, and the reply leaves alone whatever
+        // was typed since.
+        answer_with_words(&desktop, one_question_request("ask-1"), "Staging only", cx);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert!(desktop.composer.is_empty(), "sent like a message");
+            assert!(desktop.interaction_submitting());
+            desktop.set_composer_text("Later words".into(), cx);
+        });
+        reply_to_respond(
+            &desktop,
+            &mut requests,
+            &updates,
+            serde_json::json!({"ok": true}),
+            cx,
+        );
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert!(!desktop.interaction_submitting());
+            assert_eq!(desktop.composer, "Later words");
+            desktop.set_composer_text(String::new(), cx);
+        });
+
+        // Refused while the user is in another chat: the words wait, and come
+        // back when the chat opens again with nothing typed.
+        answer_with_words(
+            &desktop,
+            one_question_request("ask-2"),
+            "Production too",
+            cx,
+        );
+        open_chat(&desktop, "review", cx);
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            // Elsewhere, nothing reads as sending.
+            assert!(!desktop.interaction_submitting());
+            assert!(submitting_in(desktop, "implementation"));
+        });
+        reply_to_respond(
+            &desktop,
+            &mut requests,
+            &updates,
+            serde_json::json!({"ok": false, "error": "The request is no longer waiting."}),
+            cx,
+        );
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(!submitting_in(desktop, "implementation"));
+            assert!(
+                desktop.composer.is_empty(),
+                "review's composer is untouched"
+            );
+        });
+        go_to_chat(&desktop, "implementation", cx);
+        chat_state_arrives(
+            &desktop,
+            "implementation",
+            "",
+            1,
+            vec![one_question_request("ask-2")],
+            cx,
+        );
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(desktop.composer, "Production too");
+            assert!(desktop.typed_answer().is_some(), "and the question is open");
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn words_given_back_never_replace_a_draft(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx, mut requests, updates) = docked_ask_fixture(cx);
+        answer_with_words(&desktop, one_question_request("ask-1"), "Staging only", cx);
+        open_chat(&desktop, "review", cx);
+        reply_to_respond(
+            &desktop,
+            &mut requests,
+            &updates,
+            serde_json::json!({"ok": false, "error": "Refused."}),
+            cx,
+        );
+        // Back to a chat whose draft has words in it, from another device say:
+        // they stay, and the refused words keep waiting.
+        go_to_chat(&desktop, "implementation", cx);
+        chat_state_arrives(&desktop, "implementation", "Newer words", 7, vec![], cx);
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(desktop.composer, "Newer words");
+            assert!(!desktop.answer_restores.is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_request_cleared_on_stop_still_gives_back_refused_words(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx, mut requests, updates) = docked_ask_fixture(cx);
+        answer_with_words(&desktop, one_question_request("ask-1"), "Staging only", cx);
+        // Stop clears the chat's requests before the reply to the answer.
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.handle_event(
+                "interactions-cleared",
+                serde_json::json!({"chat": "implementation"}),
+                None,
+                cx,
+            );
+            assert!(desktop.composer.is_empty());
+            assert!(submitting_in(desktop, "implementation"));
+        });
+        reply_to_respond(
+            &desktop,
+            &mut requests,
+            &updates,
+            serde_json::json!({"ok": false, "error": "The turn was stopped."}),
+            cx,
+        );
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(desktop.composer, "Staging only", "the words come back");
+            assert!(desktop.interaction_answers.is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn answers_on_their_way_in_two_chats_are_settled_each_on_its_own(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx, mut requests, updates) = docked_ask_fixture(cx);
+        answer_with_words(&desktop, one_question_request("ask-1"), "Staging only", cx);
+        open_chat(&desktop, "review", cx);
+        answer_with_words(&desktop, one_question_request("ask-2"), "Use Postgres", cx);
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(submitting_in(desktop, "implementation"));
+            assert!(
+                desktop.interaction_submitting(),
+                "review's is on its way too"
+            );
+        });
+        // The first chat's answer is refused, the open chat's is still on its
+        // way; then that one is taken.
+        let first = reply_to_respond(
+            &desktop,
+            &mut requests,
+            &updates,
+            serde_json::json!({"ok": false, "error": "Refused."}),
+            cx,
+        );
+        assert_eq!(first["request_id"], "ask-1");
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(!submitting_in(desktop, "implementation"));
+            assert!(desktop.interaction_submitting());
+            assert!(desktop.composer.is_empty(), "the other chat's words wait");
+        });
+        let second = reply_to_respond(
+            &desktop,
+            &mut requests,
+            &updates,
+            serde_json::json!({"ok": true}),
+            cx,
+        );
+        assert_eq!(second["request_id"], "ask-2");
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(!desktop.interaction_submitting());
+            assert!(desktop.composer.is_empty());
+            assert_eq!(
+                desktop
+                    .answer_restores
+                    .get(&(desktop.active_endpoint, "implementation".to_owned()))
+                    .map(String::as_str),
+                Some("Staging only")
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_partly_answered_request_keeps_its_answers_while_the_user_is_away(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx, _requests, _updates) = docked_ask_fixture(cx);
+        let request = serde_json::json!({
+            "request_id": "ask-1",
+            "method": "item/tool/requestUserInput",
+            "params": {"questions": [
+                {"id": "q0", "question": "Which region?", "options": []},
+                {"id": "q1", "question": "Which database?", "options": []},
+            ]},
+        });
+        answer_with_words(&desktop, request.clone(), "Staging only", cx);
+        open_chat(&desktop, "review", cx);
+        open_chat(&desktop, "implementation", cx);
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            desktop.model.start_working();
+            desktop.model.interactions = vec![request];
+            assert_eq!(desktop.kept_answer("ask-1", "q0"), Some("Staging only"));
+            let (_, question, index, _) = desktop.pending_input_question().unwrap();
+            assert_eq!((question["id"].as_str(), index), (Some("q1"), 1));
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_lost_connection_keeps_earlier_answers_and_gives_back_the_last(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx, _requests, _updates) = docked_ask_fixture(cx);
+        let request = serde_json::json!({
+            "request_id": "ask-1",
+            "method": "item/tool/requestUserInput",
+            "params": {"questions": [
+                {"id": "q0", "question": "Which region?", "options": []},
+                {"id": "q1", "question": "Which database?", "options": []},
+            ]},
+        });
+        // The first answer is kept; the last is on its way when the
+        // connection drops.
+        answer_with_words(&desktop, request.clone(), "Staging only", cx);
+        answer_with_words(&desktop, request.clone(), "Use Postgres", cx);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert!(desktop.interaction_submitting());
+            assert!(desktop.composer.is_empty());
+            let generation = desktop.connection_generation;
+            desktop.handle_host_update(
+                HostUpdate::Disconnected {
+                    message: "The host went away.".into(),
+                },
+                generation,
+                cx,
+            );
+            assert!(!desktop.interaction_submitting());
+            assert_eq!(desktop.composer, "Use Postgres", "the last words come back");
+            assert_eq!(
+                desktop.kept_answer("ask-1", "q0"),
+                Some("Staging only"),
+                "the earlier answer outlives the reconnect"
+            );
+            let (_, question, ..) = desktop.pending_input_question().unwrap();
+            assert_eq!(question["id"], "q1");
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_secret_being_typed_survives_a_refresh_but_not_its_question(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx, _requests, _updates) = docked_ask_fixture(cx);
+        let secret = |request_id: &str| {
+            serde_json::json!({
+                "request_id": request_id,
+                "method": "item/tool/requestUserInput",
+                "params": {"questions": [
+                    {"id": "q0", "question": "Your token?", "isSecret": true, "options": []},
+                ]},
+            })
+        };
+        let refresh = |desktop: &Entity<XdDesktop>,
+                       interactions: Vec<Value>,
+                       cx: &mut gpui::VisualTestContext| {
+            cx.update_window_entity(desktop, |desktop, _, cx| {
+                // The chat's state again, as an option change or a reload
+                // brings it, while the turn still runs.
+                desktop.handle_reply(
+                    RequestKind::Chat {
+                        chat_id: "implementation".into(),
+                    },
+                    serde_json::json!({
+                        "ok": true,
+                        "working": true,
+                        "backend": "codex",
+                        "interactions": interactions,
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                    None,
+                    cx,
+                );
+            });
+            redraw(cx);
+        };
+        let typed = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            cx.update_window_entity(desktop, |desktop, _, cx| {
+                (
+                    desktop.question_answer.clone(),
+                    desktop.secret_question_input.read(cx).text().to_owned(),
+                )
+            })
+        };
+        refresh(&desktop, vec![secret("ask-1")], cx);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop
+                .secret_question_input
+                .update(cx, |input, cx| input.set_text("hunter2", cx));
+            desktop.secret_answer_changed("hunter2".into(), cx);
+        });
+        refresh(&desktop, vec![secret("ask-1")], cx);
+        assert_eq!(typed(&desktop, cx), ("hunter2".into(), "hunter2".into()));
+        // Another question in its place: the secret was not typed for it.
+        refresh(&desktop, vec![secret("ask-2")], cx);
+        assert_eq!(typed(&desktop, cx), (String::new(), String::new()));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_refused_answer_opens_its_question_again_with_the_words_kept(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx, mut requests, updates) = docked_ask_fixture(cx);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.set_composer_text("Staging only".into(), cx);
+            desktop.model.start_working();
+            desktop.model.interactions = vec![serde_json::json!({
+                "request_id": "ask-1",
+                "method": "item/tool/requestUserInput",
+                "params": {"questions": [
+                    {"id": "q0", "question": "Which region?", "options": [
+                        {"label": "us-east-1"},
+                        {"label": "eu-west-1"},
+                    ]},
+                ]},
+            })];
+        });
+        redraw(cx);
+        let send = cx.debug_bounds("native-send-message").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            // Gone from the composer like a sent message. On its way, the
+            // question stays in view, but nothing answers it again or sends
+            // new words as a message meanwhile.
+            assert!(desktop.interaction_submitting());
+            assert!(desktop.composer.is_empty());
+            assert!(desktop.pending_input_question().is_some());
+            assert!(!desktop.pick_ask_choice(0, cx));
+            desktop.set_composer_text("Something else".into(), cx);
+            desktop.submit_composer(false, cx);
+            assert!(desktop.pending_send.is_none());
+            assert!(desktop.model.queue.is_empty());
+            desktop.set_composer_text(String::new(), cx);
+        });
+        reply_to_respond(
+            &desktop,
+            &mut requests,
+            &updates,
+            serde_json::json!({"ok": false, "error": "The request is no longer waiting."}),
+            cx,
+        );
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(!desktop.interaction_submitting());
+            assert_eq!(desktop.composer, "Staging only", "the words come back");
+            assert!(desktop.draft_dirty, "and go back to the draft");
+            assert_eq!(
+                desktop.model.connection_error.as_deref(),
+                Some("The request is no longer waiting.")
+            );
+            assert!(desktop.kept_answer("ask-1", "q0").is_none());
+            assert!(
+                desktop.typed_answer().is_some(),
+                "the question takes an answer again"
+            );
+        });
+
+        // Tried again and taken.
+        let send = cx.debug_bounds("native-send-message").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        reply_to_respond(
+            &desktop,
+            &mut requests,
+            &updates,
+            serde_json::json!({"ok": true}),
+            cx,
+        );
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(!desktop.interaction_submitting());
+            assert!(desktop.composer.is_empty());
+        });
     }
 
     #[gpui::test]

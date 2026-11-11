@@ -14,21 +14,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TextField
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Button
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -556,7 +550,6 @@ internal fun ChatScreen(
                         workers = trayWorkers,
                         onOpenChat = openChat,
                     )
-                    state.interactions.firstOrNull()?.let { request -> InteractionCard(request, model) }
                 Composer(
                     state = state,
                     composer = composer,
@@ -872,9 +865,6 @@ private fun Composer(
                 }
             }
         }
-        remember(state) { AskBlock.pending(state) }?.let { ask ->
-            AskButtons(ask, onAnswer = model::answer, enabled = !sending)
-        }
         if (state.todos.isNotEmpty()) {
             val completed = state.todos.count { it.status == TodoStatus.COMPLETED }
             Surface(
@@ -978,96 +968,166 @@ private fun Composer(
                 }
             }
         }
-        // In place of the resume button: a chat stopped at its quota goes on
-        // only with a new one. Messages sent meanwhile wait in its queue.
-        if (state.quotaReached && !state.working) {
-            val quotaBusy by model.quotaBusy.collectAsStateWithLifecycle()
-            val quotaError by model.quotaError.collectAsStateWithLifecycle()
-            Spacer(Modifier.height(6.dp))
-            QuotaReachedCard(
-                quota = state.quota,
-                busy = quotaBusy,
-                error = quotaError,
-                onContinue = model::continueWithQuota,
-            )
-        }
         Spacer(Modifier.height(6.dp))
+        val prompt = rememberComposerAsk(state, sending, model)
         if (compact) {
-            CompactComposerRow(state, composer, sending, cancelling, steering, model, attachments.size, onModel) {
+            CompactComposerRow(state, composer, sending, cancelling, steering, model, attachments.size, onModel, prompt) {
                 picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             }
             return@Column
         }
-        // One rounded box, the way the desktop draws it: the message on top,
-        // attach and send underneath.
+        // One rounded box, the way the desktop draws it: what waits on the
+        // reader on top, then the message, then attach and send.
         Surface(
             shape = RoundedCornerShape(20.dp),
             color = MaterialTheme.colorScheme.surfaceContainer,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         ) {
-            Column(Modifier.padding(start = 4.dp, end = 8.dp, top = 2.dp, bottom = 6.dp)) {
-                TextField(
-                    value = composer,
-                    onValueChange = model::updateDraft,
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Ask anything, or describe a task…", color = LocalXdSignals.current.faint) },
-                    minLines = 1,
-                    maxLines = 6,
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = Color.Transparent,
-                        unfocusedContainerColor = Color.Transparent,
-                        disabledContainerColor = Color.Transparent,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                        disabledIndicatorColor = Color.Transparent,
-                    ),
-                    // The desktop queues with Enter while a turn runs, since its
-                    // button is the stop. The keyboard's own action key is where
-                    // that lives here.
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(
-                        onSend = { if (state.working) model.enqueue() else model.send() },
-                    ),
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    // An icon button rather than a text button: a lone glyph in a
-                    // label-sized run of text is a small thing to hit, and this
-                    // one gets a square touch target.
-                    IconButton(
-                        onClick = {
-                            picker.launch(
-                                PickVisualMediaRequest(
-                                    ActivityResultContracts.PickVisualMedia.ImageOnly,
-                                ),
-                            )
+            Column {
+                prompt.section?.invoke()
+                Column(Modifier.padding(start = 4.dp, end = 8.dp, top = 2.dp, bottom = 6.dp)) {
+                    TextField(
+                        value = composer,
+                        onValueChange = model::updateDraft,
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = {
+                            Text(prompt.placeholder ?: "Ask anything, or describe a task…", color = LocalXdSignals.current.faint)
                         },
-                        enabled = attachments.size < Limits.MAX_IMAGES,
-                    ) {
-                        Icon(
-                            painterResource(R.drawable.ic_add),
-                            contentDescription = "Attach images",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp),
+                        minLines = 1,
+                        maxLines = 6,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            disabledIndicatorColor = Color.Transparent,
+                        ),
+                        // The desktop queues with Enter while a turn runs, since its
+                        // button is the stop. The keyboard's own action key is where
+                        // that lives here.
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(
+                            onSend = {
+                                when {
+                                    prompt.answer != null -> prompt.answer.invoke()
+                                    state.working -> model.enqueue()
+                                    else -> model.send()
+                                }
+                            },
+                        ),
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // An icon button rather than a text button: a lone glyph in a
+                        // label-sized run of text is a small thing to hit, and this
+                        // one gets a square touch target.
+                        IconButton(
+                            onClick = {
+                                picker.launch(
+                                    PickVisualMediaRequest(
+                                        ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                    ),
+                                )
+                            },
+                            enabled = attachments.size < Limits.MAX_IMAGES,
+                        ) {
+                            Icon(
+                                painterResource(R.drawable.ic_add),
+                                contentDescription = "Attach images",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                        Text(
+                            DisplayLabels.backend(state.backend, catalog),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        SendButton(
+                            state = state,
+                            empty = composer.isBlank() && attachments.isEmpty(),
+                            sending = sending,
+                            cancelling = cancelling,
+                            steering = steering,
+                            model = model,
+                            size = 48.dp,
+                            answer = prompt.answer?.takeIf { composer.isNotBlank() },
+                            submittingAnswer = prompt.submitting,
                         )
                     }
-                    Text(
-                        DisplayLabels.backend(state.backend, catalog),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    SendButton(
-                        state = state,
-                        empty = composer.isBlank() && attachments.isEmpty(),
-                        sending = sending,
-                        cancelling = cancelling,
-                        steering = steering,
-                        model = model,
-                        size = 48.dp,
-                    )
                 }
             }
         }
+    }
+}
+
+/**
+ * What the composer carries for whatever waits on the reader: the ask
+ * section docked on top of it, the placeholder in its place, and what Send
+ * does with a typed answer, where it differs from sending a message.
+ */
+private class ComposerAsk(
+    val section: (@Composable () -> Unit)?,
+    val placeholder: String?,
+    val answer: (() -> Unit)?,
+    /** Answers are on their way to the host: Send waits, busy, rather than becoming the stop. */
+    val submitting: Boolean = false,
+)
+
+@Composable
+private fun rememberComposerAsk(state: ChatState, sending: Boolean, model: ChatViewModel): ComposerAsk {
+    val docked = remember(state) { dockedAsk(state) }
+    val answers by model.interactionAnswers.collectAsStateWithLifecycle()
+    val submitting by model.submittingAnswers.collectAsStateWithLifecycle()
+    return when (docked) {
+        null -> ComposerAsk(null, null, null)
+        is DockedAsk.Interaction -> {
+            val request = docked.request
+            val showing = request.showing(answers[request.requestId].orEmpty())
+            if (showing == null) {
+                ComposerAsk({ ApprovalAsk(request, docked.waiting) { model.approve(request.requestId, it) } }, null, null)
+            } else if (request.requestId in submitting) {
+                // Nothing to answer until the host takes these or refuses them,
+                // and the keyboard's Send must not queue the answer as a message.
+                ComposerAsk(
+                    section = { AgentQuestionAsk(request, showing, docked.waiting) { _, _ -> } },
+                    placeholder = if (showing.question.secret) null else TYPED_ANSWER_PLACEHOLDER,
+                    answer = {},
+                    submitting = true,
+                )
+            } else {
+                // A secret is typed in the ask itself, not in a draft the host keeps.
+                val typed = !showing.sent && !showing.question.secret
+                ComposerAsk(
+                    section = {
+                        AgentQuestionAsk(request, showing, docked.waiting) { id, answer ->
+                            model.answerQuestion(request, id, answer)
+                        }
+                    },
+                    placeholder = if (typed) TYPED_ANSWER_PLACEHOLDER else null,
+                    answer = if (typed) ({ model.answerWithDraft(request, showing.question.id) }) else null,
+                )
+            }
+        }
+        // In place of the resume button: a chat stopped at its quota goes on
+        // only with a new one. Messages sent meanwhile wait in its queue.
+        DockedAsk.Quota -> {
+            val quotaBusy by model.quotaBusy.collectAsStateWithLifecycle()
+            val quotaError by model.quotaError.collectAsStateWithLifecycle()
+            ComposerAsk(
+                section = { QuotaAsk(state.quota, quotaBusy, quotaError, model::continueWithQuota) },
+                placeholder = QUOTA_PLACEHOLDER,
+                answer = null,
+            )
+        }
+        // A typed answer to a tagged question is the next message, so Send
+        // keeps its meaning; only the placeholder says it answers.
+        is DockedAsk.Tagged -> ComposerAsk(
+            section = { TaggedAsk(docked.ask, enabled = !sending, onAnswer = model::answer) },
+            placeholder = if (docked.ask.acceptsInput) TYPED_ANSWER_PLACEHOLDER else null,
+            answer = null,
+        )
     }
 }
 
@@ -1088,6 +1148,7 @@ private fun CompactComposerRow(
     model: ChatViewModel,
     attached: Int,
     onModel: () -> Unit,
+    prompt: ComposerAsk,
     onAttach: () -> Unit,
 ) {
     val catalog by model.catalog.collectAsStateWithLifecycle()
@@ -1097,90 +1158,128 @@ private fun CompactComposerRow(
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Row(
-            modifier = Modifier.padding(4.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            IconButton(onClick = onAttach, enabled = attached < Limits.MAX_IMAGES, modifier = Modifier.size(40.dp)) {
-                Icon(
-                    painterResource(R.drawable.ic_add),
-                    contentDescription = "Attach images",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-            androidx.compose.foundation.text.BasicTextField(
-                value = composer,
-                onValueChange = model::updateDraft,
-                modifier = Modifier.weight(1f).heightIn(min = 40.dp),
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
-                cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.onSurface),
-                maxLines = 6,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(
-                    onSend = { if (state.working) model.enqueue() else model.send() },
-                ),
-                decorationBox = { field ->
-                    Box(Modifier.padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), contentAlignment = Alignment.CenterStart) {
-                        if (composer.isEmpty()) {
-                            Text(
-                                "Ask anything…",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = faint,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        field()
-                    }
-                },
-            )
-            // Drawn at 32dp in the 40dp control line. The platform still
-            // extends its touch area to 48dp around it.
-            Box(Modifier.height(40.dp), contentAlignment = Alignment.Center) {
-            CompositionLocalProvider(androidx.compose.material3.LocalMinimumInteractiveComponentSize provides 0.dp) {
-            Surface(
-                onClick = onModel,
-                shape = RoundedCornerShape(16.dp),
-                color = Color.Transparent,
-                modifier = Modifier.padding(horizontal = 2.dp),
+        Column {
+            prompt.section?.invoke()
+            Row(
+                modifier = Modifier.padding(4.dp),
+                verticalAlignment = Alignment.Bottom,
             ) {
-                Row(
-                    modifier = Modifier.height(32.dp).padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    BackendIcon(state.backend, size = 14.dp)
-                    Text(
-                        DisplayLabels.model(state.model, state.backend, catalog),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.widthIn(max = 96.dp),
+                IconButton(onClick = onAttach, enabled = attached < Limits.MAX_IMAGES, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        painterResource(R.drawable.ic_add),
+                        contentDescription = "Attach images",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
                     )
                 }
+                androidx.compose.foundation.text.BasicTextField(
+                    value = composer,
+                    onValueChange = model::updateDraft,
+                    modifier = Modifier.weight(1f).heightIn(min = 40.dp),
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.onSurface),
+                    maxLines = 6,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(
+                        onSend = {
+                            when {
+                                prompt.answer != null -> prompt.answer.invoke()
+                                state.working -> model.enqueue()
+                                else -> model.send()
+                            }
+                        },
+                    ),
+                    decorationBox = { field ->
+                        Box(Modifier.padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), contentAlignment = Alignment.CenterStart) {
+                            if (composer.isEmpty()) {
+                                Text(
+                                    prompt.placeholder ?: "Ask anything…",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = faint,
+                                    // An ask's placeholder is a sentence the reader needs whole.
+                                    maxLines = if (prompt.placeholder != null) 2 else 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            field()
+                        }
+                    },
+                )
+                // Drawn at 32dp in the 40dp control line. The platform still
+                // extends its touch area to 48dp around it.
+                Box(Modifier.height(40.dp), contentAlignment = Alignment.Center) {
+                CompositionLocalProvider(androidx.compose.material3.LocalMinimumInteractiveComponentSize provides 0.dp) {
+                Surface(
+                    onClick = onModel,
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color.Transparent,
+                    modifier = Modifier.padding(horizontal = 2.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.height(32.dp).padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        BackendIcon(state.backend, size = 14.dp)
+                        Text(
+                            DisplayLabels.model(state.model, state.backend, catalog),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 96.dp),
+                        )
+                    }
+                }
+                }
+                }
+                SendButton(
+                    state = state,
+                    empty = composer.isBlank() && attached == 0,
+                    sending = sending,
+                    cancelling = cancelling,
+                    steering = steering,
+                    model = model,
+                    size = 40.dp,
+                    answer = prompt.answer?.takeIf { composer.isNotBlank() },
+                    submittingAnswer = prompt.submitting,
+                )
             }
-            }
-            }
-            SendButton(
-                state = state,
-                empty = composer.isBlank() && attached == 0,
-                sending = sending,
-                cancelling = cancelling,
-                steering = steering,
-                model = model,
-                size = 40.dp,
-            )
         }
     }
+}
+
+/** What the composer's one round button does. */
+internal enum class SendAction { SEND, STOP, RESUME, SEND_ANSWER, ANSWER_BUSY }
+
+/**
+ * The button's action. A typed answer to the agent's question is sent even
+ * while the turn waiting on it runs, and while that answer is on its way the
+ * button stays a busy send: becoming the stop then would let a second tap
+ * cancel the very turn the answer is for.
+ */
+internal fun sendAction(
+    working: Boolean,
+    resumable: Boolean,
+    quotaReached: Boolean,
+    empty: Boolean,
+    answerTyped: Boolean,
+    submittingAnswer: Boolean,
+): SendAction = when {
+    submittingAnswer -> SendAction.ANSWER_BUSY
+    answerTyped -> SendAction.SEND_ANSWER
+    working -> SendAction.STOP
+    // A chat stopped at its quota is continued from its quota ask instead.
+    resumable && !quotaReached && empty -> SendAction.RESUME
+    else -> SendAction.SEND
 }
 
 /**
  * One round button that sends and then stops, as on the desktop: an arrow in
  * the accent while it is yours to send, a neutral stop while the turn is the
  * assistant's to finish. With nothing typed after a turn was cut short, the
- * same button continues it, as the desktop's play button does.
+ * same button continues it, as the desktop's play button does. See
+ * [sendAction] for answers to the agent's questions.
  */
 @Composable
 private fun SendButton(
@@ -1191,25 +1290,41 @@ private fun SendButton(
     steering: Boolean,
     model: ChatViewModel,
     size: androidx.compose.ui.unit.Dp,
+    /** Sends what is typed as the answer to the question showing, when one takes it. */
+    answer: (() -> Unit)? = null,
+    /** Answers to the agent's question are on their way. */
+    submittingAnswer: Boolean = false,
 ) {
-    // A chat stopped at its quota is continued from its quota card instead.
-    val resuming = !state.working && state.resumable && !state.quotaReached && empty
+    val action = sendAction(
+        working = state.working,
+        resumable = state.resumable,
+        quotaReached = state.quotaReached,
+        empty = empty,
+        answerTyped = answer != null,
+        submittingAnswer = submittingAnswer,
+    )
+    val stopping = action == SendAction.STOP
+    val resuming = action == SendAction.RESUME
     FilledIconButton(
         onClick = {
-            when {
-                state.working -> model.cancel()
-                resuming -> model.resumeTurn()
-                else -> model.send()
+            when (action) {
+                SendAction.ANSWER_BUSY -> Unit
+                SendAction.SEND_ANSWER -> answer?.invoke()
+                SendAction.STOP -> model.cancel()
+                SendAction.RESUME -> model.resumeTurn()
+                SendAction.SEND -> model.send()
             }
         },
-        enabled = when {
-            state.working -> !cancelling && !steering
-            resuming -> !sending
+        enabled = when (action) {
+            SendAction.ANSWER_BUSY -> false
+            SendAction.SEND_ANSWER -> true
+            SendAction.STOP -> !cancelling && !steering
+            SendAction.RESUME -> !sending
             // The host accepts text, images, or both.
-            else -> !sending && !empty
+            SendAction.SEND -> !sending && !empty
         },
         modifier = Modifier.size(size),
-        colors = if (state.working) {
+        colors = if (stopping) {
             IconButtonDefaults.filledIconButtonColors(
                 containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                 contentColor = MaterialTheme.colorScheme.onSurface,
@@ -1223,20 +1338,22 @@ private fun SendButton(
     ) {
         Icon(
             painter = painterResource(
-                when {
-                    state.working -> R.drawable.ic_stop
-                    resuming -> R.drawable.ic_play
+                when (action) {
+                    SendAction.STOP -> R.drawable.ic_stop
+                    SendAction.RESUME -> R.drawable.ic_play
                     else -> R.drawable.ic_send
                 },
             ),
             contentDescription = when {
+                action == SendAction.ANSWER_BUSY -> "Sending answer"
+                action == SendAction.SEND_ANSWER -> "Send answer"
                 cancelling -> "Stopping"
-                state.working -> "Stop"
+                stopping -> "Stop"
                 sending -> "Sending"
                 resuming -> "Continue where it left off"
                 else -> "Send"
             },
-            modifier = Modifier.size(if (state.working || resuming) size / 3 else size * 5 / 12),
+            modifier = Modifier.size(if (stopping || resuming) size / 3 else size * 5 / 12),
         )
     }
 }
@@ -1748,103 +1865,3 @@ internal fun agentRelayLabel(description: String): String = "To $description"
 
 /** The caption on a message sent in reply to a question, as on the desktop. */
 internal fun answeredQuestionLabel(question: String): String = "Answering \u201c${question.trim()}\u201d"
-
-private fun approvalTitle(request: com.restartfu.xd.model.PendingInteraction): String =
-    when (request.tool) {
-        "Bash" -> "Run this command?"
-        "Edit", "MultiEdit", "NotebookEdit" -> "Apply this edit?"
-        "Write" -> "Write this file?"
-        "WebFetch" -> "Fetch this page?"
-        "WebSearch" -> "Search the web?"
-        "ExitPlanMode" -> "Approve the plan?"
-        null -> when (request.method) {
-            "item/fileChange/requestApproval" -> "Apply these changes?"
-            "item/commandExecution/requestApproval" -> "Run this command?"
-            else -> "Approval needed"
-        }
-        else -> "Allow ${request.tool}?"
-    }
-
-@Composable
-@OptIn(ExperimentalLayoutApi::class)
-private fun InteractionCard(request: com.restartfu.xd.model.PendingInteraction, model: ChatViewModel) {
-    var answers by remember(request.requestId) { mutableStateOf(emptyMap<String, String>()) }
-    val waiting = LocalXdSignals.current.waiting
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            // Never taller than half the screen, so the answer stays in reach.
-            .heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.5f).dp),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, waiting.copy(alpha = 0.6f)),
-    ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    if (request.questions.isEmpty()) approvalTitle(request) else "Question",
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                StatusPill("Waiting on you", waiting)
-            }
-            Column(
-                modifier = Modifier
-                    .weight(1f, fill = false)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                if (request.questions.isEmpty()) {
-                    request.reason?.let {
-                        Text(
-                            it,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    Text(
-                        request.detail,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 140.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(MaterialTheme.colorScheme.background)
-                            .verticalScroll(rememberScrollState())
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        fontFamily = XdMonoFamily,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    request.patch?.let { patch -> DiffText(patch) }
-                } else {
-                    request.questions.forEach { question ->
-                        Text(question.text)
-                        question.options.forEach { option ->
-                            OutlinedButton(
-                                onClick = { answers = answers + (question.id to option) },
-                                modifier = Modifier.fillMaxWidth(),
-                            ) { Text(option) }
-                        }
-                        OutlinedTextField(value = answers[question.id].orEmpty(), onValueChange = { answers = answers + (question.id to it) }, label = { Text("Answer") },
-                            visualTransformation = if (question.secret) androidx.compose.ui.text.input.PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None)
-                    }
-                }
-            }
-            if (request.questions.isEmpty()) {
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Button(onClick = { model.approve(request.requestId, "accept") }) { Text("Allow once") }
-                    OutlinedButton(onClick = { model.approve(request.requestId, "acceptForSession") }) { Text("Allow for session") }
-                    TextButton(onClick = { model.approve(request.requestId, "decline") }) {
-                        Text("Deny", color = MaterialTheme.colorScheme.error)
-                    }
-                }
-            } else {
-                Button(onClick = { model.answer(request.requestId, answers) }, enabled = request.questions.all { !answers[it.id].isNullOrBlank() }) { Text("Submit answers") }
-            }
-        }
-    }
-}

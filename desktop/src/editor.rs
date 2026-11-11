@@ -51,6 +51,9 @@ actions!(
     ]
 );
 
+/// What a chat's empty composer says while nothing changes what Send does.
+pub const MESSAGE_PLACEHOLDER: &str = "Message xd…";
+
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
     Changed(String),
@@ -170,7 +173,7 @@ impl FileEditor {
     pub fn composer(cx: &mut Context<Self>) -> Self {
         Self {
             allow_images: true,
-            ..Self::message(cx, "Message xd…")
+            ..Self::message(cx, MESSAGE_PLACEHOLDER)
         }
     }
 
@@ -200,6 +203,26 @@ impl FileEditor {
         self.history.clear();
         self.pending_edit = None;
         cx.notify();
+    }
+
+    /// What the empty editor says. Redraws only when that changes, so a view
+    /// can set it on every frame.
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = placeholder.into();
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder;
+            cx.notify();
+        }
+    }
+
+    /// Only the Unix-only docked ask tests read it back.
+    #[cfg(all(test, unix))]
+    pub fn placeholder(&self) -> &str {
+        &self.placeholder
     }
 
     pub fn set_file(&mut self, path: &str, text: impl Into<SharedString>, cx: &mut Context<Self>) {

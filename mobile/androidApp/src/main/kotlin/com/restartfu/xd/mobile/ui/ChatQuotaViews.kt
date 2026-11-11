@@ -1,6 +1,18 @@
 package com.restartfu.xd.mobile.ui
 
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.Button
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,10 +22,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -43,6 +53,10 @@ internal fun chatQuotaDetail(percent: Int?): String =
 
 /** The quota card's headline, with the desktop's wording. */
 internal const val QUOTA_REACHED_TITLE = "This chat reached its quota"
+
+/** What follows the used figure in the quota ask, with the desktop's wording. */
+internal fun quotaUsedSentence(quota: ChatQuota): String =
+    "used of the 5-hour limit, past its ${quota.percent}% quota"
 
 /** What the chat used and what its quota was, with the desktop's wording. */
 internal fun quotaReachedSentence(quota: ChatQuota?): String =
@@ -115,74 +129,131 @@ internal fun ChatQuotaSection(model: MainViewModel) {
 }
 
 /**
- * Shown in place of the resume button while the chat is stopped at its
- * quota: continue with a new quota, twice the last one to begin with, or
- * without a limit. Messages sent meanwhile wait in the queue.
+ * Docked in the composer in place of the resume button while the chat is
+ * stopped at its quota: continue with a new quota, twice the last one to
+ * begin with, or without a limit. Messages sent meanwhile wait in the queue,
+ * which the composer's placeholder says.
  */
 @Composable
-internal fun QuotaReachedCard(
+@OptIn(ExperimentalLayoutApi::class)
+internal fun QuotaAsk(
     quota: ChatQuota?,
     busy: Boolean,
     error: String?,
     onContinue: (percent: Int?) -> Unit,
-    modifier: Modifier = Modifier,
 ) {
     var typed by rememberSaveable(quota?.percent) { mutableStateOf(ChatQuota.nextPercent(quota?.percent).toString()) }
     val chosen = ChatQuota.typedPercent(typed)
-    // Waiting on the user like a question, so it wears the same mark.
-    val waiting = LocalXdSignals.current.waiting
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, waiting.copy(alpha = 0.6f)),
-    ) {
-        Column(
-            Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val small = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, lineHeight = 19.sp)
+    AskFrame {
+        AskHeader(QUOTA_REACHED_TITLE)
+        if (quota != null) {
+            Row(Modifier.padding(horizontal = AskInset), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text(
+                    "${quota.usedLabel}%",
+                    modifier = Modifier.alignByBaseline(),
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        fontFeatureSettings = "tnum",
+                    ),
+                )
+                Text(quotaUsedSentence(quota), modifier = Modifier.alignByBaseline(), color = muted, style = small)
+            }
+        } else {
+            Text(quotaReachedSentence(null), modifier = Modifier.padding(horizontal = AskInset), color = muted, style = small)
+        }
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = AskInset),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(QUOTA_REACHED_TITLE, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                StatusPill("Waiting on you", waiting)
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    quotaReachedSentence(quota),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    "Messages you send wait in the queue until it goes on.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("New quota", style = MaterialTheme.typography.bodyMedium)
-                PercentField(
-                    text = typed,
-                    onText = { typed = it },
-                    onDone = { if (chosen != null && !busy) onContinue(chosen) },
-                    enabled = !busy,
-                    label = "New quota",
-                )
-            }
-            if (chosen == null) {
-                Text(
-                    "Enter a whole number from 1 to 100.",
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilledTonalButton(onClick = { chosen?.let(onContinue) }, enabled = chosen != null && !busy) {
-                    Text("Continue")
-                }
-                TextButton(onClick = { onContinue(null) }, enabled = !busy) { Text("Continue without a limit") }
-            }
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            Text("New quota", modifier = Modifier.align(Alignment.CenterVertically), color = muted, style = small)
+            QuotaPercentField(
+                text = typed,
+                onText = { typed = it },
+                onDone = { if (chosen != null && !busy) onContinue(chosen) },
+                enabled = !busy,
+                label = "New quota",
+                modifier = Modifier.align(Alignment.CenterVertically),
+            )
+            Button(
+                onClick = { chosen?.let(onContinue) },
+                enabled = chosen != null && !busy,
+                contentPadding = AskButtonPadding,
+                modifier = Modifier.align(Alignment.CenterVertically),
+            ) { Text("Continue") }
+            Spacer(Modifier.weight(1f))
+            TextButton(
+                onClick = { onContinue(null) },
+                enabled = !busy,
+                modifier = Modifier.align(Alignment.CenterVertically),
+            ) { Text("Continue without a limit", color = if (busy) LocalXdSignals.current.faint else muted) }
+        }
+        if (chosen == null) {
+            Text(
+                "Enter a whole number from 1 to 100.",
+                modifier = Modifier.padding(horizontal = AskInset),
+                color = MaterialTheme.colorScheme.error,
+                style = small,
+            )
+        }
+        error?.let {
+            Text(it, modifier = Modifier.padding(horizontal = AskInset), color = MaterialTheme.colorScheme.error, style = small)
         }
     }
+}
+
+/**
+ * The quota field in the ask: small, with `%` inside, its border the danger
+ * colour while what is typed is not a quota. Drawn at 40dp; the platform
+ * still gives it a 48dp touch target.
+ */
+@Composable
+private fun QuotaPercentField(
+    text: String,
+    onText: (String) -> Unit,
+    onDone: () -> Unit,
+    label: String,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val valid = ChatQuota.typedPercent(text) != null
+    BasicTextField(
+        value = text,
+        onValueChange = { typed -> onText(typed.filter(Char::isDigit).take(3)) },
+        modifier = modifier
+            .minimumInteractiveComponentSize()
+            .width(76.dp)
+            .height(40.dp)
+            .semantics { contentDescription = "$label, percent" },
+        enabled = enabled,
+        singleLine = true,
+        textStyle = MaterialTheme.typography.bodyMedium.copy(
+            color = MaterialTheme.colorScheme.onSurface,
+            fontFeatureSettings = "tnum",
+        ),
+        cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { onDone() }),
+        decorationBox = { field ->
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .border(
+                        1.dp,
+                        if (valid) MaterialTheme.colorScheme.outlineVariant else MaterialTheme.colorScheme.error,
+                        RoundedCornerShape(8.dp),
+                    )
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.weight(1f)) { field() }
+                Text("%", color = LocalXdSignals.current.faint, style = MaterialTheme.typography.bodyMedium)
+            }
+        },
+    )
 }
 
 /** A whole percentage from 1 to 100, typed with the number keyboard. */
