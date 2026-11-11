@@ -45,6 +45,10 @@ pub const TAB_BAR_HEIGHT: f32 = 43.0;
 #[cfg(target_os = "linux")]
 const NEW_TAB_NOTE: &str = "The page opened a new tab, which is now the selected one, so later \
 commands act on it. What follows is the page before; take a browser_snapshot to read the new tab.";
+/// The same, after a command that failed.
+#[cfg(target_os = "linux")]
+const NEW_TAB_AFTER_ERROR: &str = "The page also opened a new tab, which is now the selected one, \
+so later commands act on it; take a browser_snapshot to read it.";
 
 /// Page tabs keep one width so a loading title does not move its neighbours.
 const BROWSER_TAB_WIDTH: f32 = 148.0;
@@ -474,6 +478,9 @@ impl BrowserPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return reply(Err("The command was stopped.".into()));
+        }
         if command["action"] == "navigate" {
             match command["url"].as_str().map(normalize_url) {
                 Some(Ok(url)) => command["url"] = serde_json::Value::String(url),
@@ -515,13 +522,18 @@ impl BrowserPane {
                             let outcome = agent::run(&page, &command, deadline, &cancelled);
                             page.sleep();
                             // The pane selects the tab, and later commands
-                            // act on it, not the page this one describes.
-                            outcome.map(|mut outcome| {
-                                if page.popups() > popups {
+                            // act on it, not the page this one describes,
+                            // even when the command then failed.
+                            if page.popups() == popups {
+                                return outcome;
+                            }
+                            match outcome {
+                                Ok(mut outcome) => {
                                     outcome.text = format!("{NEW_TAB_NOTE}\n\n{}", outcome.text);
+                                    Ok(outcome)
                                 }
-                                outcome
-                            })
+                                Err(error) => Err(format!("{error}\n\n{NEW_TAB_AFTER_ERROR}")),
+                            }
                         });
                     reply(outcome.map(agent::Outcome::into_value));
                 });
@@ -2484,6 +2496,37 @@ mod tests {
             assert!(pane.address.read(cx).focus_handle(cx).is_focused(window));
             assert_eq!(pane.draft, "localhost:3000");
         });
+    }
+
+    #[gpui::test]
+    fn a_stopped_agent_command_opens_no_tab(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                Some("https://example.com/".into()),
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let (answer, answered) = std::sync::mpsc::channel();
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.run_agent_command(
+                    serde_json::json!({"action": "navigate", "url": "localhost:3000",
+                        "new_tab": true}),
+                    Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                    move |outcome| answer.send(outcome).unwrap(),
+                    window,
+                    cx,
+                );
+            });
+        });
+        assert_eq!(
+            answered.try_recv().unwrap(),
+            Err("The command was stopped.".into())
+        );
+        cx.update(|_, cx| assert_eq!(pane.read(cx).session().tabs.len(), 1));
     }
 
     #[gpui::test]

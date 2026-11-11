@@ -9167,6 +9167,11 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Stopped before its turn on the window came: it changes nothing.
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            reply(Err("The command was stopped.".into()));
+            return;
+        }
         // Which pane is the chat's depends on its session, which the tree says.
         if !self
             .endpoint_model(endpoint)

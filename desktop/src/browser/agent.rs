@@ -240,8 +240,10 @@ fn evaluate(page: &impl Page, expression: &str) -> Result<Value, String> {
 fn evaluate_for_agent(page: &impl Page, expression: &str) -> Result<String, String> {
     let reply = page.call(
         "Runtime.evaluate",
+        // Not in REPL mode, which hands back a promise the expression gives
+        // rather than what it settles to.
         json!({"expression": expression, "returnByValue": true, "awaitPromise": true,
-            "userGesture": true, "replMode": true}),
+            "userGesture": true}),
         CALL_TIMEOUT,
     )?;
     if let Some(details) = reply.get("exceptionDetails") {

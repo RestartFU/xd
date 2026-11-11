@@ -417,8 +417,9 @@ fn browser_tools() -> Vec<Value> {
             BROWSER_TOOLS[6].0,
             "Run JavaScript",
             "Evaluate a JavaScript expression in the selected tab's page and return its value \
-                as JSON. A promise is awaited. Use it to read what a snapshot leaves out, or to \
-                scroll, such as window.scrollBy(0, 800).",
+                as JSON. A promise it gives is awaited; for await, wrap the code in an async \
+                function, as in (async () => { ... })(). Use it to read what a snapshot leaves \
+                out, or to scroll, such as window.scrollBy(0, 800).",
             json!({"expression": {"type": "string"}}),
             &["expression"],
             false,
