@@ -3132,11 +3132,12 @@ impl StateStore {
                 mark_waiting_chat_to_resume(&transaction, &chat_id)?;
             }
         }
-        // Reports handed to a turn that is no longer running, such as one an
-        // older host, which knows nothing of them, ended: that turn had them.
+        // No turn runs now. Reports handed to one wait again: a restart may
+        // have come before its agent read them, and an older host, which
+        // knows nothing of them, may have ended it. Read twice is better
+        // than never read.
         transaction.execute(
-            "DELETE FROM agent_reports WHERE state = 'handed' \
-             AND chat_id IN (SELECT id FROM chats WHERE host_working = 0)",
+            "UPDATE agent_reports SET state = 'returned' WHERE state = 'handed'",
             [],
         )?;
         transaction.commit()?;
@@ -3701,6 +3702,11 @@ impl StateStore {
         if !working {
             return Ok(false);
         }
+        // Stopped by the user, the turn is done with its reports.
+        transaction.execute(
+            "DELETE FROM agent_reports WHERE chat_id = ? AND state = 'handed'",
+            [chat_id],
+        )?;
         end_interrupted_turn(&transaction, chat_id)?;
         transaction.commit()?;
         Ok(true)
@@ -11110,11 +11116,6 @@ fn end_interrupted_turn(
     transaction: &rusqlite::Transaction<'_>,
     chat_id: &str,
 ) -> Result<(), rusqlite::Error> {
-    // The turn ran and had the reports it was handed.
-    transaction.execute(
-        "DELETE FROM agent_reports WHERE chat_id = ? AND state = 'handed'",
-        [chat_id],
-    )?;
     let partial = transaction
         .query_row(
             "SELECT COALESCE(partial_reply, ''), partial_reply_label FROM chats WHERE id = ?",
@@ -16838,7 +16839,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_handed_to_a_turn_an_older_host_ended_are_cleared_at_start() {
+    fn reports_handed_to_a_turn_an_older_host_ended_go_again() {
         let fixture = Fixture::new();
         fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
         let database = Connection::open(&fixture.database).unwrap();
@@ -16861,11 +16862,41 @@ mod tests {
             .unwrap();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         store.recover_interrupted_turns().unwrap();
-        let left: i64 = Connection::open(&fixture.database)
+        // Read twice rather than never: it goes again.
+        assert_eq!(store.chats_with_waiting_reports().unwrap(), ["lead"]);
+        let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {
+            panic!("the report should go again");
+        };
+        assert_eq!(turn.prompt, "[xd] done");
+    }
+
+    #[test]
+    fn reports_handed_to_a_turn_a_restart_cut_off_go_again() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let ReportDelivery::Start(_) = store
+            .deliver_agent_report("lead", "a", "[xd] done")
             .unwrap()
-            .query_row("SELECT COUNT(*) FROM agent_reports", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(left, 0);
+        else {
+            panic!("a free chat should take the report");
+        };
+        // The host went down before the turn could start, or while it ran.
+        drop(store);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(store.recover_interrupted_turns().unwrap(), ["lead"]);
+        // Held while the user decides on resuming, then handed over again.
+        assert!(store.chats_with_waiting_reports().unwrap().is_empty());
+        assert_eq!(store.take_chats_to_resume().unwrap().len(), 1);
+        let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {
+            panic!("the report should go again");
+        };
+        assert_eq!(turn.prompt, "[xd] done");
     }
 
     #[test]
