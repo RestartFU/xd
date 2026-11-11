@@ -339,12 +339,14 @@ fn settle(page: &impl Page, mark: &str, quiet: Duration) -> bool {
     let started = Instant::now();
     let end = started + NAVIGATION_TIMEOUT.min(page.time_left());
     loop {
-        let loading = page.is_loading();
         // Fails while one document gives way to the next.
         let state = evaluate(
             page,
             &format!("[window.__xdBrowserMark === {mark:?}, document.readyState]"),
         );
+        // Looked at after the document, so a navigation that began while
+        // reading it counts.
+        let loading = page.is_loading();
         match state.as_ref().ok().and_then(Value::as_array) {
             Some(state) if !loading && state[0] == true && started.elapsed() >= quiet => {
                 return false;

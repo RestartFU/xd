@@ -3322,9 +3322,10 @@ pub fn serve_daemon_connection(
     });
     // The app has gone even while requests it sent are still being answered.
     engine.release_app_client(subscriber);
-    // Its browser commands that asked to stop with it stop: an agent's tool
-    // server that has gone will read no answer.
-    engine.browser.abandon(&engine.events, subscriber);
+    // A desktop that has gone answers no more browser commands, and an
+    // agent's tool server that has gone will read no answer: neither waits
+    // for this connection's other work to finish.
+    engine.browser.closed(&engine.events, subscriber);
     if result.is_err() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
     }

@@ -3,6 +3,8 @@
 
 use std::{
     io::{self, BufRead, Read, Write},
+    sync::mpsc,
+    thread,
     time::Duration,
 };
 
@@ -20,22 +22,34 @@ pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(xd_host::AGENT_TOO
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
 pub(super) fn serve(options: HostOptions, chat: &str) -> Result<(), String> {
-    let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        let read = input
-            .by_ref()
-            .take(MAX_LINE_BYTES as u64 + 1)
-            .read_until(b'\n', &mut line)
-            .map_err(|error| error.to_string())?;
-        if read == 0 {
-            return Ok(());
+    // Messages are read on their own thread, so the agent leaving is noticed
+    // even while a call waits on the daemon: the server then exits, closing
+    // its daemon connection, which stops what the call started.
+    let (messages, received) = mpsc::sync_channel::<Vec<u8>>(16);
+    thread::spawn(move || {
+        let mut input = io::stdin().lock();
+        loop {
+            let mut line = Vec::new();
+            let read = input
+                .by_ref()
+                .take(MAX_LINE_BYTES as u64 + 1)
+                .read_until(b'\n', &mut line);
+            match read {
+                Ok(0) | Err(_) => std::process::exit(0),
+                Ok(_) if line.len() > MAX_LINE_BYTES => {
+                    eprintln!("xd-host: an MCP message was too long");
+                    std::process::exit(1);
+                }
+                Ok(_) => {
+                    if messages.send(line).is_err() {
+                        return;
+                    }
+                }
+            }
         }
-        if line.len() > MAX_LINE_BYTES {
-            return Err("an MCP message was too long".into());
-        }
+    });
+    while let Ok(line) = received.recv() {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
@@ -49,6 +63,7 @@ pub(super) fn serve(options: HostOptions, chat: &str) -> Result<(), String> {
             output.flush().map_err(|error| error.to_string())?;
         }
     }
+    Ok(())
 }
 
 /// Sends the daemon `request` for this server's chat, which the agent cannot

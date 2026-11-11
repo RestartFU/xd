@@ -70,31 +70,30 @@ impl BrowserRelay {
         state.providers.push(subscriber);
     }
 
-    /// The connection closed. Commands it had not answered fail at once
-    /// instead of waiting out the timeout, and those it asked for stop.
+    /// The connection is gone for good: as [`Self::closed`], and nothing
+    /// more of it can come, so it is forgotten.
     pub(crate) fn forget(&self, events: &EventBus, subscriber: u64) {
-        {
-            let mut state = self.state();
-            state.providers.retain(|provider| *provider != subscriber);
-            // Dropping the sender wakes the waiting call.
-            state
-                .waiting
-                .retain(|_, waiting| waiting.provider != subscriber);
-        }
-        self.abandon(events, subscriber);
-        // Gone for good, so nothing more of it can come.
+        self.closed(events, subscriber);
         self.state().gone.remove(&subscriber);
     }
 
-    /// The connection `requester` has stopped sending, as when an agent's
-    /// tool server exits mid-command: the commands it asked to stop with it
-    /// stop on the desktop, and any it sent last are refused.
-    pub(crate) fn abandon(&self, events: &EventBus, requester: u64) {
+    /// The connection `subscriber` has stopped sending, as when a desktop
+    /// quits or an agent's tool server exits mid-command. As a desktop it can
+    /// answer nothing more, so the commands it was running fail at once and
+    /// it offers its browser no longer. As an agent's, the commands it asked
+    /// to stop with it stop on their desktop, and any it sent last are
+    /// refused.
+    pub(crate) fn closed(&self, events: &EventBus, subscriber: u64) {
         let mut abandoned = Vec::new();
         let mut state = self.state();
-        state.gone.insert(requester);
+        state.providers.retain(|provider| *provider != subscriber);
+        state.gone.insert(subscriber);
         state.waiting.retain(|request, waiting| {
-            let keep = waiting.requester != requester || !waiting.cancel_on_close;
+            // Dropping the sender wakes the waiting call.
+            if waiting.provider == subscriber {
+                return false;
+            }
+            let keep = waiting.requester != subscriber || !waiting.cancel_on_close;
             if !keep {
                 abandoned.push((*request, waiting.provider));
             }
@@ -288,7 +287,8 @@ mod tests {
             })
         };
         desktop_events.recv_timeout(Duration::from_secs(5)).unwrap();
-        relay.forget(&events, desktop);
+        // At the end of what it sends, before its other work is done.
+        relay.closed(&events, desktop);
         let reply = running.join().unwrap();
         assert_eq!(reply["ok"], false);
         assert!(reply["error"].as_str().unwrap().contains("disconnected"));
@@ -338,9 +338,9 @@ mod tests {
         };
         let command = desktop_events.recv_timeout(Duration::from_secs(5)).unwrap();
         // Another connection's leaving touches nothing.
-        relay.abandon(&events, desktop + agent + 1);
+        relay.closed(&events, desktop + agent + 1);
         assert!(desktop_events.try_recv().is_err());
-        relay.abandon(&events, agent);
+        relay.closed(&events, agent);
         let cancel = desktop_events.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(cancel["event"], "browser-cancel");
         assert_eq!(cancel["request"], command["request"]);
@@ -376,7 +376,7 @@ mod tests {
         };
         let command = desktop_events.recv_timeout(Duration::from_secs(5)).unwrap();
         // It closed its sending side, and reads on.
-        relay.abandon(&events, client);
+        relay.closed(&events, client);
         assert!(desktop_events.try_recv().is_err());
         relay.answer(
             desktop,
