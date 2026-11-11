@@ -2062,6 +2062,10 @@ impl TurnRuntime {
 
     /// Releases running and idle resources when a conversation is deleted.
     pub(crate) fn discard_chat(&self, chat_id: &str) {
+        // A chat thrown away has nothing more to tell of.
+        if let Ok(mut held) = self.inner.held_turns.lock() {
+            held.remove(chat_id);
+        }
         self.cancel(chat_id);
         self.drop_session(chat_id);
         if let Ok(mut commands) = self.inner.commands.lock() {
@@ -3265,17 +3269,22 @@ impl TurnRuntime {
     /// Tells whoever listens that a turn ended for good. A turn that ran is
     /// told of with the chat's succession held, so in the order turns ended.
     fn settled(&self, settled: SettledTurn) {
-        // A turn's news replaces any the chat's last turn left held.
-        if let Ok(mut held) = self.inner.held_turns.lock() {
-            if settled.background {
-                held.insert(settled.chat_id.clone(), settled.clone());
-            } else {
-                held.remove(&settled.chat_id);
-            }
-        }
         let chat_id = settled.chat_id.clone();
         let background = settled.background;
-        self.tell_settled(settled);
+        // A turn's news replaces any the chat's last turn left held, and is
+        // told under the same lock, so a release in between can neither take
+        // this turn for the last one nor tell of the last one after it.
+        match self.inner.held_turns.lock() {
+            Ok(mut held) => {
+                if background {
+                    held.insert(chat_id.clone(), settled.clone());
+                } else {
+                    held.remove(&chat_id);
+                }
+                self.tell_settled(settled);
+            }
+            Err(_) => self.tell_settled(settled),
+        }
         // The work it waited on may have ended since the turn looked, with
         // nothing left to release it.
         if background {
@@ -3294,7 +3303,19 @@ impl TurnRuntime {
     /// Tells of a chat's held turn as finished once the agent will not take
     /// another to report on its background work: that work ended and no
     /// report is owed or under way, or `gone`, the process ended with it.
+    ///
+    /// Decided and told with the held turns locked, as [`Self::settled`]
+    /// records and tells, so a turn that settles meanwhile is either seen
+    /// first, replacing the held one, or told of after it. Under that lock it
+    /// takes the active turns and then a router, one at a time, and nothing
+    /// takes the held turns while holding either.
     fn release_held_turn(&self, chat_id: &str, gone: bool) {
+        let Ok(mut held) = self.inner.held_turns.lock() else {
+            return;
+        };
+        if !held.contains_key(chat_id) {
+            return;
+        }
         let running = self
             .inner
             .active
@@ -3313,16 +3334,10 @@ impl TurnRuntime {
                 return;
             }
         }
-        let held = self
-            .inner
-            .held_turns
-            .lock()
-            .ok()
-            .and_then(|mut held| held.remove(chat_id));
-        if let Some(held) = held {
+        if let Some(turn) = held.remove(chat_id) {
             self.tell_settled(SettledTurn {
                 background: false,
-                ..held
+                ..turn
             });
         }
     }

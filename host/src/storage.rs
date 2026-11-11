@@ -362,6 +362,10 @@ pub enum ReportDelivery {
     Held,
     /// The chat was free: this turn hands it the report.
     Start(TurnSpec),
+    /// The chat is free, but the message the user steered to the front of
+    /// its queue goes first, and nothing has started it: the caller starts
+    /// that message, this text, and the reports follow its turn.
+    SteeredFirst(String),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -3739,19 +3743,23 @@ impl StateStore {
             "INSERT INTO agent_reports (chat_id, agent_id, text, created_at) VALUES (?, ?, ?, ?)",
             params![chat_id, agent_id, text, now_seconds()],
         )?;
-        let turn = if working || paused || !reports_go_first(&transaction, chat_id)? {
-            None
+        let delivery = if working || paused {
+            ReportDelivery::Held
+        } else if let Some(front) = steered_front(&transaction, chat_id)? {
+            ReportDelivery::SteeredFirst(front)
         } else {
             take_agent_reports(&transaction, &self.workspace_root, chat_id)?
+                .map_or(ReportDelivery::Held, ReportDelivery::Start)
         };
         transaction.commit()?;
-        Ok(turn.map_or(ReportDelivery::Held, ReportDelivery::Start))
+        Ok(delivery)
     }
 
-    /// Starts the turn that hands a free chat the reports waiting for it.
-    /// `None` when it is busy or paused, has none, or a message the user
-    /// steered waits at the front of its queue.
-    pub fn start_agent_reports(&self, chat_id: &str) -> Result<Option<TurnSpec>, StorageError> {
+    /// Starts the turn that hands a free chat the reports waiting for it:
+    /// [`ReportDelivery::Held`] when it is busy or paused or has none, and
+    /// [`ReportDelivery::SteeredFirst`] when a message the user steered waits
+    /// at the front of its queue.
+    pub fn start_agent_reports(&self, chat_id: &str) -> Result<ReportDelivery, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let free = transaction
@@ -3762,13 +3770,16 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
-        let turn = if free && reports_go_first(&transaction, chat_id)? {
-            take_agent_reports(&transaction, &self.workspace_root, chat_id)?
+        let delivery = if !free || !has_agent_reports(&transaction, chat_id)? {
+            ReportDelivery::Held
+        } else if let Some(front) = steered_front(&transaction, chat_id)? {
+            ReportDelivery::SteeredFirst(front)
         } else {
-            None
+            take_agent_reports(&transaction, &self.workspace_root, chat_id)?
+                .map_or(ReportDelivery::Held, ReportDelivery::Start)
         };
         transaction.commit()?;
-        Ok(turn)
+        Ok(delivery)
     }
 
     /// Free chats with agent reports waiting, which no turn ending will hand
@@ -11699,15 +11710,17 @@ fn take_agent_reports(
     Ok(Some(turn))
 }
 
-/// Whether reports may go before the chat's queue: not when the user steered
-/// the message at its front, which goes first.
-fn reports_go_first(database: &Connection, chat_id: &str) -> Result<bool, StorageError> {
+/// The message at the front of the chat's queue when the user steered it
+/// there, which goes before any report.
+fn steered_front(database: &Connection, chat_id: &str) -> Result<Option<String>, StorageError> {
     let (stored, queue_first) = database.query_row(
         "SELECT COALESCE(queued, ''), queue_first FROM chats WHERE id = ?",
         [chat_id],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
     )?;
-    Ok(!queue_first || queue_from_column(Some(&stored)).is_empty())
+    Ok(queue_first
+        .then(|| queue_from_column(Some(&stored)).into_iter().next())
+        .flatten())
 }
 
 fn has_agent_reports(database: &Connection, chat_id: &str) -> Result<bool, StorageError> {
@@ -16593,12 +16606,20 @@ mod tests {
         ));
         assert!(store.chat_is_paused("lead").unwrap());
         assert!(store.chats_with_waiting_reports().unwrap().is_empty());
-        assert!(store.start_agent_reports("lead").unwrap().is_none());
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::Held
+        ));
         assert!(store.unpause_chat("lead").unwrap());
         assert_eq!(store.chats_with_waiting_reports().unwrap(), ["lead"]);
-        let turn = store.start_agent_reports("lead").unwrap().expect("reports");
+        let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {
+            panic!("a free chat should take its reports");
+        };
         assert_eq!(turn.prompt, "[xd] later from b");
-        assert!(store.start_agent_reports("lead").unwrap().is_none());
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::Held
+        ));
 
         // Reports the chat's agent has read for itself are dropped, newer
         // ones kept; one from an agent goes with its chat.
@@ -16621,7 +16642,8 @@ mod tests {
         );
 
         // A free chat whose queue waits behind a message the user steered,
-        // as a restart can leave one, keeps its reports behind that message.
+        // as a restart can leave one, has that message started first; its
+        // reports follow that turn.
         assert!(
             store
                 .finish_turn("lead", true, None, 1, false)
@@ -16636,14 +16658,23 @@ mod tests {
             store
                 .deliver_agent_report("lead", "a", "[xd] behind it")
                 .unwrap(),
-            ReportDelivery::Held
+            ReportDelivery::SteeredFirst(front) if front == "steered, then cut off"
         ));
-        assert!(store.start_agent_reports("lead").unwrap().is_none());
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::SteeredFirst(front) if front == "steered, then cut off"
+        ));
         store
             .take_queued(&json!({"chat": "lead", "index": 0, "text": "steered, then cut off"}))
             .unwrap();
-        let turn = store.start_agent_reports("lead").unwrap().expect("reports");
-        assert_eq!(turn.prompt, "[xd] behind it");
+        let SendDisposition::Start { .. } = store
+            .prepare_send(&json!({"chat": "lead", "text": "steered, then cut off"}))
+            .unwrap()
+        else {
+            panic!("the steered message should start");
+        };
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert_eq!(finish.next.expect("the report").prompt, "[xd] behind it");
     }
 
     #[test]

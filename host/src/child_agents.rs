@@ -354,6 +354,9 @@ impl Engine {
             .map_err(|error| error.to_string())?
         {
             ReportDelivery::Held => Ok(()),
+            ReportDelivery::SteeredFirst(front) => {
+                self.start_queued_if_idle(parent, &front, true, false)
+            }
             ReportDelivery::Start(turn) => {
                 if settled {
                     self.events.publish(json!({"event": "tree"}));
@@ -371,8 +374,9 @@ impl Engine {
     }
 
     /// Starts the turn that hands chat `chat_id` the agent reports waiting
-    /// for it, when it is free. True when one started. `gated` when the
-    /// caller holds the chat's execution gate.
+    /// for it, when it is free, or first the message the user steered to the
+    /// front of its queue. True when either started. `gated` when the caller
+    /// holds the chat's execution gate.
     pub(crate) fn start_waiting_reports(&self, chat_id: &str, gated: bool) -> Result<bool, String> {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return Ok(false);
@@ -393,11 +397,18 @@ impl Engine {
             .session_resources
             .lock()
             .map_err(|_| "Session resources are unavailable.".to_owned())?;
-        let Some(turn) = store
+        let turn = match store
             .start_agent_reports(chat_id)
             .map_err(|error| error.to_string())?
-        else {
-            return Ok(false);
+        {
+            ReportDelivery::Held => return Ok(false),
+            // The message the user steered goes first; the reports follow.
+            ReportDelivery::SteeredFirst(front) => {
+                return self
+                    .start_queued_if_idle(chat_id, &front, true, false)
+                    .map(|()| true);
+            }
+            ReportDelivery::Start(turn) => turn,
         };
         let started = runtime.start(turn.clone());
         if let Err(error) = &started {
