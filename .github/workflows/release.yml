@@ -305,7 +305,9 @@ jobs:
 
       # The runner's own resolver has been seen failing every lookup of the
       # Ubuntu archive for an hour at a time while the rest of the internet
-      # resolved. Inline rather than a script: a release builds an older tag.
+      # resolved. Written out here, not in a script, because a release builds
+      # an older tag that would not have the script; keep the copies in
+      # release, nightly, mobile and windows alike.
       - name: Resolve through public DNS
         run: |
           set -euo pipefail
