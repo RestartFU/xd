@@ -41,6 +41,11 @@ use crate::input::{ComposerEvent, ComposerInput};
 /// side tool's own controls, beside the chat tabs. One rule closes both columns.
 pub const SESSION_HEADER_HEIGHT: f32 = 48.0;
 pub const TAB_BAR_HEIGHT: f32 = 43.0;
+/// Told to an agent whose command made the page open a tab.
+#[cfg(target_os = "linux")]
+const NEW_TAB_NOTE: &str = "The page opened a new tab, which is now the selected one, so later \
+commands act on it. What follows is the page before; take a browser_snapshot to read the new tab.";
+
 /// Page tabs keep one width so a loading title does not move its neighbours.
 const BROWSER_TAB_WIDTH: f32 = 148.0;
 
@@ -505,10 +510,18 @@ impl BrowserPane {
                             let left =
                                 deadline.saturating_duration_since(std::time::Instant::now());
                             page.wait_until_started(left.min(Duration::from_secs(10)))?;
+                            let popups = page.popups();
                             page.wake();
                             let outcome = agent::run(&page, &command, deadline, &cancelled);
                             page.sleep();
-                            outcome
+                            // The pane selects the tab, and later commands
+                            // act on it, not the page this one describes.
+                            outcome.map(|mut outcome| {
+                                if page.popups() > popups {
+                                    outcome.text = format!("{NEW_TAB_NOTE}\n\n{}", outcome.text);
+                                }
+                                outcome
+                            })
                         });
                     reply(outcome.map(agent::Outcome::into_value));
                 });

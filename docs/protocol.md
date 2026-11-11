@@ -1355,7 +1355,9 @@ content.
 
 The desktop runs the command on the selected tab of the chat's browser pane,
 opening the pane for that chat; a chat not on screen keeps its pane hidden while
-its page still loads and paints. Commands on one page run one at a time. A
+its page still loads and paints. Commands on one page run one at a time. A tab
+a page opens becomes the selected one, without taking the keyboard when an
+agent's command opened it, and that command's result says so. A
 command for a chat the desktop's tree does not have yet fails, asking the agent
 to try again, since the chat's session decides its pane. It drives the page through Chromium's DevTools
 protocol, so only the Linux desktop offers its browser. A remote host's agents

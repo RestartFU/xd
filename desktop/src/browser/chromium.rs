@@ -374,6 +374,8 @@ struct Shared {
     /// When the last agent command here ended. A popup it caused can be
     /// asked for a moment after.
     agent_finished: Option<std::time::Instant>,
+    /// Tabs this page has asked for, so a command can tell it opened one.
+    popups: u64,
     devtools: Arc<DevToolsCalls>,
     devtools_observer: Option<SharedRegistration>,
     /// Held by the agent command running on this page; see `agent::take_turn`.
@@ -615,7 +617,11 @@ wrap_life_span_handler! {
             {
                 // Decided now, while the command that made the page ask may
                 // still run, rather than when GPUI gets to the event.
-                let by_agent = lock(&self.shared).agent_active();
+                let by_agent = {
+                    let mut shared = lock(&self.shared);
+                    shared.popups += 1;
+                    shared.agent_active()
+                };
                 self.events.send(NativeEvent::Open { url, by_agent });
             }
             1
@@ -1153,10 +1159,34 @@ impl DevTools {
             calls.take(id);
             return Err("The browser has shut down.".into());
         }
-        let result = answered.recv_timeout(timeout);
+        // Waited for in short spells, so a stopped command lets the page go.
+        let started = std::time::Instant::now();
+        let result = loop {
+            let left = timeout.saturating_sub(started.elapsed());
+            match answered.recv_timeout(left.min(Duration::from_millis(100))) {
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if !left.is_zero() && !self.cancelled.load(Ordering::Acquire) => {}
+                result => break result,
+            }
+        };
         calls.take(id);
         match result {
             Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) if self.cancelled.load(Ordering::Acquire) => {
+                let abandoned = state
+                    .compare_exchange(
+                        CALL_WAITING,
+                        CALL_ABANDONED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok();
+                Err(if abandoned {
+                    "The command was stopped.".into()
+                } else {
+                    format!("The command was stopped; the page may still finish {method}.")
+                })
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let abandoned = state
                     .compare_exchange(
@@ -1178,6 +1208,11 @@ impl DevTools {
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err("The page has closed.".into()),
         }
+    }
+
+    /// How many tabs this page has asked for.
+    pub fn popups(&self) -> u64 {
+        lock(&self.shared).popups
     }
 
     /// What an agent command holds while it runs on this page.
@@ -1207,6 +1242,9 @@ impl DevTools {
                 if shared.browser_gone || shared.closed.is_some() {
                     return Err("The page has closed.".into());
                 }
+            }
+            if self.cancelled.load(Ordering::Acquire) {
+                return Err("The command was stopped.".into());
             }
             if started.elapsed() >= timeout {
                 return Err("The browser did not start in time.".into());
