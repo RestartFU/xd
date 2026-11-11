@@ -1511,6 +1511,16 @@ impl Engine {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
         };
+        self.delete_chat_by(chat_id, |store| store.delete_chat(request))
+    }
+
+    /// Deletes `chat_id` with `delete`, stopping its work and telling clients,
+    /// as `delete-chat` does.
+    fn delete_chat_by(
+        &self,
+        chat_id: &str,
+        delete: impl FnOnce(&StateStore) -> Result<Value, StorageError>,
+    ) -> Value {
         let gate = match self.chat_execution_gate(chat_id) {
             Ok(gate) => gate,
             Err(error) => return error_reply(error),
@@ -1539,14 +1549,14 @@ impl Engine {
             Some(runtime) => {
                 let mut deleted = None;
                 runtime.stop_chat_if(chat_id, |_| {
-                    let result = store.delete_chat(request);
+                    let result = delete(store);
                     let ok = result.is_ok();
                     deleted = Some(result);
                     ok
                 });
                 deleted.expect("stop_chat_if always decides")
             }
-            None => store.delete_chat(request),
+            None => delete(store),
         };
         match deleted {
             Ok(reply) => {
@@ -1631,9 +1641,20 @@ impl Engine {
         }
     }
 
-    /// Settling waits for what the session still owes the user. The locks keep
-    /// a message from starting a turn between this check and the update.
+    /// Settling waits for what the session still owes the user, then throws
+    /// away the agents its chats started, as [`Self::discard_settled_agents`]
+    /// says.
     fn settle_session(&self, request: &Value) -> Value {
+        let reply = self.mark_session_settled(request);
+        if reply["ok"] == true {
+            self.discard_settled_agents();
+        }
+        reply
+    }
+
+    /// The locks keep a message from starting a turn between the check and the
+    /// update.
+    fn mark_session_settled(&self, request: &Value) -> Value {
         let session =
             match required_string(request, "session", "settle-session needs a session id.") {
                 Ok(session) => session,
@@ -1660,6 +1681,30 @@ impl Engine {
             );
         }
         self.tree_mutation(|store| store.settle_session(request))
+    }
+
+    /// Deletes the agents that chats in settled sessions started, as
+    /// `stop-agent` would: any turn one is taking stops, and it leaves every
+    /// client's tree and its lead's transcript. Once its lead is settled
+    /// nothing more is asked of an agent, so it would only crowd the active
+    /// list. Files it wrote in a worktree stay on disk. Returns how many went.
+    fn discard_settled_agents(&self) -> usize {
+        let Some(store) = self.store.as_ref() else {
+            return 0;
+        };
+        let agents = match store.settled_agents() {
+            Ok(agents) => agents,
+            Err(error) => {
+                eprintln!("xd: cannot look for the agents of settled sessions: {error}");
+                return 0;
+            }
+        };
+        agents
+            .iter()
+            .filter(|agent| {
+                self.delete_chat_by(agent, |store| store.delete_settled_agent(agent))["ok"] == true
+            })
+            .count()
     }
 
     fn set_auto_settle_settings(&self, request: &Value) -> Value {
@@ -1703,6 +1748,7 @@ impl Engine {
                     self.events.clone(),
                     Box::new(move || {
                         if let Some(engine) = engine.upgrade() {
+                            engine.discard_settled_agents();
                             engine.auto_delete_sweep(settlement::now_seconds(), &mut reported);
                         }
                     }),
@@ -3803,6 +3849,66 @@ mod tests {
         let tree = engine.dispatch(json!({"op": "tree"}));
         assert!(tree["chats"].as_array().unwrap().is_empty());
         assert!(tree["sessions"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Settling a session throws away the agents its chats started, cards
+    /// and all, and leaves another session's agents alone.
+    #[test]
+    fn settling_a_session_deletes_the_agents_it_started() {
+        let root = test_directory();
+        let store = StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap();
+        let engine = Engine::with_store(store);
+        let store = engine.store.as_ref().unwrap();
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
+        let lead = engine.dispatch(json!({"op": "new-chat", "folder": folder, "title": "Lead"}));
+        let other = engine.dispatch(json!({"op": "new-chat", "folder": folder, "title": "Other"}));
+        let agent_of = |parent: &Value| {
+            let parent = parent["id"].as_str().unwrap();
+            let agent = store
+                .new_child_chat(&json!({"folder": folder, "title": "Agent"}), parent, true)
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            store.open_agent_record(&agent, "Fix it").unwrap();
+            agent
+        };
+        let agent = agent_of(&lead);
+        let kept = agent_of(&other);
+        let cards = |chat: &Value| {
+            store.messages(&json!({"chat": chat["id"]})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| {
+                    row["content"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("subagent_run\n"))
+                })
+                .count()
+        };
+        assert_eq!(cards(&lead), 1);
+
+        let settled = engine.dispatch(json!({"op": "settle-session", "session": lead["session"]}));
+        assert_eq!(settled["ok"], true, "{settled}");
+        let tree = engine.dispatch(json!({"op": "tree"}));
+        let listed = tree["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chat| chat["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert!(!listed.contains(&agent), "{tree}");
+        assert!(listed.contains(&kept), "{tree}");
+        assert!(listed.iter().any(|chat| chat == &lead["id"]), "{tree}");
+        assert_eq!(cards(&lead), 0);
+        assert_eq!(cards(&other), 1);
+        assert_eq!(
+            engine.dispatch(json!({"op": "list-agents", "chat": lead["id"]}))["agents"],
+            json!([])
+        );
+        assert_eq!(engine.discard_settled_agents(), 0);
         let _ = std::fs::remove_dir_all(root);
     }
 

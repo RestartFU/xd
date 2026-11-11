@@ -6022,13 +6022,15 @@ impl StateStore {
     }
 
     /// Sessions in this workspace that match `filter`, a condition on the
-    /// session `s`, with nothing running, paused, or queued in any member chat.
+    /// session `s`, with nothing running, paused, or queued in any member chat
+    /// or in any agent one of them started.
     fn quiet_sessions(&self, filter: &str) -> Result<Vec<SettlementCandidate>, StorageError> {
         let database = self.reader()?;
         let root = self.workspace_root.to_string_lossy();
         let mut statement = database.prepare(&format!(
             "SELECT s.id, s.created_at, c.id, c.folder_id, c.workdir, c.original_workdir, \
-               c.host_working OR c.paused, c.queued, c.created_at, c.last_user_message_at, \
+               c.host_working OR c.paused OR {AGENT_BUSY}, c.queued, c.created_at, \
+               c.last_user_message_at, \
                (SELECT created_at FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) \
              FROM workspace_sessions s \
              JOIN chats c ON c.workspace_session_id = s.id \
@@ -6409,6 +6411,32 @@ impl StateStore {
 
     pub fn delete_chat(&self, request: &Value) -> Result<Value, StorageError> {
         let chat_id = required_string(request, "chat", "delete-chat needs a chat id")?;
+        self.delete_chat_where(chat_id, "1")
+    }
+
+    /// The agents that chats in settled sessions started, which settling
+    /// throws away: once its lead is settled, nothing more is asked of one.
+    pub(crate) fn settled_agents(&self) -> Result<Vec<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(&format!(
+            "SELECT id FROM chats WHERE {STARTED_IN_SETTLED_SESSION} ORDER BY created_at, rowid"
+        ))?;
+        let agents = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, rusqlite::Error>>()?;
+        Ok(agents)
+    }
+
+    /// Deletes agent `chat_id` as [`Self::delete_chat`] does, if the chat that
+    /// started it is still in a settled session. One statement checks and
+    /// deletes, so a session un-settled meanwhile keeps its agents.
+    pub(crate) fn delete_settled_agent(&self, chat_id: &str) -> Result<Value, StorageError> {
+        self.delete_chat_where(chat_id, STARTED_IN_SETTLED_SESSION)
+    }
+
+    /// Deletes chat `chat_id` when it also matches `condition`, a condition on
+    /// the row in `chats`.
+    fn delete_chat_where(&self, chat_id: &str, condition: &str) -> Result<Value, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let session: Option<String> = database
             .query_row(
@@ -6417,7 +6445,10 @@ impl StateStore {
                 |row| row.get(0),
             )
             .optional()?;
-        let changed = database.execute("DELETE FROM chats WHERE id = ?", [chat_id])?;
+        let changed = database.execute(
+            &format!("DELETE FROM chats WHERE id = ? AND {condition}"),
+            [chat_id],
+        )?;
         if changed != 1 {
             return Err(StorageError::NoChat(chat_id.into()));
         }
@@ -7809,11 +7840,23 @@ const SETTLEABLE_SESSION: &str = "s.settled_override IS NULL AND s.auto_settle_d
 /// back or kept out of the rules.
 const DELETABLE_SESSION: &str =
     "COALESCE(s.settled_override, '') != 'active' AND s.auto_settle_disabled_at IS NULL";
+/// Whether the row in `chats` is an agent that a chat in a settled session
+/// started.
+const STARTED_IN_SETTLED_SESSION: &str = "parent_chat_id IN (SELECT lead.id FROM chats lead \
+       JOIN workspace_sessions s ON s.id = lead.workspace_session_id \
+       WHERE s.settled_override = 'settled')";
+/// Whether an agent chat `c` started is running a turn, paused, or holding a
+/// queued message: settling would throw that work away, so the rules wait.
+const AGENT_BUSY: &str = "EXISTS (SELECT 1 FROM chats a WHERE a.parent_chat_id = c.id AND ( \
+       a.host_working != 0 OR a.paused != 0 OR COALESCE(a.queued, '') NOT IN ('', '[]')))";
 /// Whether any chat in session `?1` has done anything since the sweep looked:
 /// `?2` is the user's latest message or start it saw, `?3` the newest activity,
-/// which it read from each chat's newest message as this does.
+/// which it read from each chat's newest message as this does. An agent one
+/// of them started that is at work counts too, as [`AGENT_BUSY`] says.
 const SESSION_CHANGED_SINCE: &str = "EXISTS (SELECT 1 FROM chats c WHERE c.workspace_session_id = ?1 AND ( \
        c.host_working != 0 OR c.paused != 0 OR COALESCE(c.queued, '') NOT IN ('', '[]') \
+       OR EXISTS (SELECT 1 FROM chats a WHERE a.parent_chat_id = c.id AND ( \
+         a.host_working != 0 OR a.paused != 0 OR COALESCE(a.queued, '') NOT IN ('', '[]'))) \
        OR c.last_user_message_at / 1000000 > ?2 OR c.created_at > ?2 \
        OR COALESCE((SELECT m.created_at FROM messages m WHERE m.chat_id = c.id \
          ORDER BY m.id DESC LIMIT 1), 0) > ?3))";
@@ -17234,6 +17277,74 @@ mod tests {
             panic!("the answered chat should take its reports");
         };
         assert_eq!(turn.prompt, "[xd] done");
+    }
+
+    #[test]
+    fn a_settled_leads_agents_are_thrown_away_once_none_is_at_work() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        for chat in ["lead", "agent", "other", "other-agent"] {
+            fixture.insert_chat(&database, chat, "folder");
+        }
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let run = |sql: &str| {
+            store.database.lock().unwrap().execute(sql, []).unwrap();
+        };
+        run("UPDATE chats SET parent_chat_id = 'lead' WHERE id = 'agent'");
+        run("UPDATE chats SET parent_chat_id = 'other' WHERE id = 'other-agent'");
+        let session: String = store
+            .database
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT workspace_session_id FROM chats WHERE id = 'lead'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let lead_candidate = || {
+            store
+                .settlement_candidates()
+                .unwrap()
+                .into_iter()
+                .find(|candidate| candidate.session == session)
+        };
+
+        // The rules leave a lead alone while its agent is at work, and one
+        // that starts after the sweep looked voids its decision.
+        let looked = lead_candidate().unwrap();
+        run("UPDATE chats SET host_working = 1 WHERE id = 'agent'");
+        assert!(lead_candidate().is_none());
+        let settings = store.auto_settle_settings().unwrap();
+        assert!(
+            !store
+                .auto_settle_session(&looked, looked.activity_at, &settings, None)
+                .unwrap()
+        );
+        run("UPDATE chats SET host_working = 0, paused = 1 WHERE id = 'agent'");
+        assert!(lead_candidate().is_none());
+        run("UPDATE chats SET paused = 0 WHERE id = 'agent'");
+        assert!(lead_candidate().is_some());
+
+        assert!(store.settled_agents().unwrap().is_empty());
+        store.settle_session(&json!({"session": session})).unwrap();
+        assert_eq!(store.settled_agents().unwrap(), ["agent"]);
+        assert!(matches!(
+            store.delete_settled_agent("other-agent"),
+            Err(StorageError::NoChat(_))
+        ));
+        // Un-settled before the delete, the agent stays.
+        store
+            .unsettle_session(&json!({"session": session}))
+            .unwrap();
+        assert!(store.delete_settled_agent("agent").is_err());
+        store.settle_session(&json!({"session": session})).unwrap();
+        assert_eq!(store.delete_settled_agent("agent").unwrap()["ok"], true);
+        assert!(store.settled_agents().unwrap().is_empty());
+        assert!(store.chat("other-agent").is_ok());
     }
 
     #[test]

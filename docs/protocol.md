@@ -501,7 +501,12 @@ Each operation requires a session id, replies with `ok`, and broadcasts `tree`.
 It is refused while any member chat is running a turn, has a queued message, or
 is waiting on an approval or question. Settling a settled session keeps its
 original `settled_at`. No terminal closes, and work an agent is still doing goes
-on. The host stops the process of an agent with nothing running, within two
+on. The agents the session's chats started with `start_agent` are deleted, as
+`stop-agent` deletes one: a turn one is taking stops, and its chat leaves every
+client's `tree` and its card the parent's transcript. Files they wrote in a
+worktree stay on disk, and un-settling the session does not bring them back.
+The automatic rules leave a session alone while one of its agents is running a
+turn, paused, or holding a queued message. The host stops the process of an agent with nothing running, within two
 minutes of settling or after 30 idle minutes in any session, and the next message
 resumes the conversation in a new process.
 
