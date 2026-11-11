@@ -57,7 +57,7 @@ const HINT: &str = "When you open, take over, or push to a pull request \
 other than by running gh pr create here, link it to this chat with xd's \
 link_pull_requests tool. To wait for a pull request's CI, call xd's watch_ci \
 tool instead of running gh run watch, gh pr checks --watch or a polling loop: \
-xd watches the checks and messages you here once they finish, so carry on or \
+xd watches the checks on a CI card in this chat and reports here once they finish, so carry on or \
 end your turn. To hand work to another Claude or Codex agent that \
 should outlive this turn or work in parallel, start it with xd's start_agent \
 tool, not codex exec, claude -p or a detached process: xd runs it on the \
@@ -70,7 +70,7 @@ const STARTED_HINT: &str = "When you open, take over, or push to a pull request 
 other than by running gh pr create here, link it to this chat with xd's \
 link_pull_requests tool. To wait for a pull request's CI, call xd's watch_ci \
 tool instead of running gh run watch, gh pr checks --watch or a polling loop: \
-xd watches the checks and messages you here once they finish. Another agent \
+xd watches the checks on a CI card in this chat and reports here once they finish. Another agent \
 started you through xd and reads your final reply, so end each turn with what \
 it needs to know. To open or use \
 a web page, use xd's browser tools (browser_navigate, browser_snapshot, \

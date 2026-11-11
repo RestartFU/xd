@@ -700,6 +700,7 @@ internal fun ChatScreen(
                     is TranscriptRow.Tools -> ToolGroupRow(row)
                     is TranscriptRow.AccountSwitch -> AccountSwitchNotice(row.sentence)
                     is TranscriptRow.Pipeline -> PipelineCard(row.run, model.client)
+                    is TranscriptRow.Ci -> CiCard(row.run, openLink)
                     is TranscriptRow.Subagent -> if (row.run.chat != null) {
                         // An agent started with start_agent is a chat of its own.
                         val chat = row.run.chat.orEmpty()
@@ -1628,6 +1629,7 @@ private fun rowContentType(row: TranscriptRow): String = when (row) {
     is TranscriptRow.Tools -> "tools"
     is TranscriptRow.AccountSwitch -> "account-switch"
     is TranscriptRow.Pipeline -> "pipeline"
+    is TranscriptRow.Ci -> "ci"
     is TranscriptRow.Subagent -> "subagent"
 }
 
