@@ -209,6 +209,7 @@ fn run_inner(options: HostOptions, stop_with_app: bool) -> io::Result<()> {
     engine.start_account_switching();
     engine.start_chat_quotas();
     engine.start_reporting_agents();
+    engine.deliver_waiting_agent_reports();
     #[cfg(target_os = "linux")]
     engine.start_memory_guard();
     if stop_with_app {

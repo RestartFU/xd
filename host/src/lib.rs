@@ -707,6 +707,10 @@ impl Engine {
             .and_then(|store| store.take_chats_to_resume().ok())
             .unwrap_or_default();
         let mut resumed = Vec::new();
+        let cut_off = chats
+            .iter()
+            .map(|chat| chat.chat_id.clone())
+            .collect::<Vec<_>>();
         if request.get("resume").and_then(Value::as_bool) == Some(true) {
             for chat in chats {
                 let prompt = chat.prompt();
@@ -726,6 +730,13 @@ impl Engine {
                 } else {
                     eprintln!("xd-host: not resuming chat {chat_id}: {reply}");
                 }
+            }
+        }
+        // A chat the restart cut off held its agents' reports until now; one
+        // that resumed gets them once that turn ends.
+        for chat_id in cut_off.iter().filter(|chat_id| !resumed.contains(chat_id)) {
+            if let Err(error) = self.start_waiting_reports(chat_id, false) {
+                eprintln!("xd-host: cannot hand chat {chat_id} its agents' reports: {error}");
             }
         }
         json!({"ok": true, "resumed": resumed})
@@ -2666,15 +2677,28 @@ impl Engine {
                     return false;
                 }
                 self.events.publish(json!({"event": "tree"}));
-                let queued = store
-                    .chat(&chat_id)
-                    .ok()
-                    .and_then(|chat| chat["queue"][0].as_str().map(str::to_owned));
-                if let Some(text) = queued
-                    && let Err(error) = self.start_queued_if_idle(&chat_id, &text, true, true)
-                {
-                    eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
-                    return false;
+                // Reports its agents sent while it was paused go first, as
+                // they would when a turn ends; the queue follows them.
+                match self.start_waiting_reports(&chat_id, true) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let queued = store
+                            .chat(&chat_id)
+                            .ok()
+                            .and_then(|chat| chat["queue"][0].as_str().map(str::to_owned));
+                        if let Some(text) = queued
+                            && let Err(error) =
+                                self.start_queued_if_idle(&chat_id, &text, true, true)
+                        {
+                            eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
+                            return false;
+                        }
+                    }
+                    Err(error) => {
+                        self.keep_paused_after_failed_start(&chat_id, true);
+                        eprintln!("xd-host: cannot resume chat {chat_id}'s reports: {error}");
+                        return false;
+                    }
                 }
             }
         }

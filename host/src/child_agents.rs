@@ -5,7 +5,8 @@
 //! owned by the daemon rather than by the agent that asked for it. So it keeps
 //! running when that agent's process ends, it shows in every client nested
 //! under its parent, and pausing, resuming and pull request links work on it.
-//! Each finished turn is reported back to the parent chat when asked to.
+//! Each finished turn is reported back to the parent chat when asked to, out of
+//! the parent's queue: see [`Engine::deliver_report`].
 
 use std::{
     sync::{Arc, Mutex, mpsc},
@@ -17,7 +18,7 @@ use serde_json::{Value, json};
 use crate::{
     Engine, error_reply, required_string,
     runtime::SettledTurn,
-    storage::{AgentOrigin, ChildAgent},
+    storage::{AgentOrigin, ChildAgent, ReportDelivery},
 };
 
 /// Agents one chat may have at work at once.
@@ -130,6 +131,8 @@ impl Engine {
         if let Err(error) = store.agent_origin(parent) {
             return error_reply(error);
         }
+        // Read before the agent's state: any report written since is newer.
+        let waiting = only.map(|only| store.latest_agent_report(parent, only).unwrap_or(0));
         let children = match store.child_agents(parent) {
             Ok(children) => children,
             Err(error) => return error_reply(error),
@@ -142,11 +145,26 @@ impl Engine {
         } else {
             SUMMARY_CHARS
         };
+        let background = |child: &ChildAgent| {
+            self.runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.background_tasks(&child.id) > 0)
+        };
         let agents = children
             .iter()
             .filter(|child| only.is_none_or(|only| child.id == only))
-            .map(|child| describe(child, limit))
+            .map(|child| describe(child, limit, background(child)))
             .collect::<Vec<_>>();
+        // Asked about one agent, the chat's agent has read its whole reply,
+        // as a report would give it, so a report still waiting with that
+        // news is not handed over again.
+        if let (Some(only), Some(through)) = (only, waiting.filter(|through| *through > 0))
+            && children.iter().any(|child| {
+                child.id == only && !child.working && !child.paused && !background(child)
+            })
+        {
+            let _ = store.drop_agent_reports(parent, only, through);
+        }
         json!({"ok": true, "agents": agents})
     }
 
@@ -281,14 +299,18 @@ impl Engine {
             return;
         };
         // The card follows every turn; the message only when it was asked
-        // for and has something to say.
+        // for and has something to say. An agent waiting on background work
+        // of its own is still at it: its next turn says how that went.
         let (status, summary) = match &settled.error {
             _ if settled.stopped => ("stopped", None),
             Some(error) => ("failed", Some(clip(error, SUMMARY_CHARS))),
+            None if settled.background => {
+                ("running", Some(clip_start(&settled.reply, SUMMARY_CHARS)))
+            }
             None => ("completed", Some(clip_start(&settled.reply, SUMMARY_CHARS))),
         };
         self.write_agent_record(child, status, summary.as_deref());
-        if !reports || settled.quiet || settled.stopped {
+        if !reports || settled.quiet || settled.stopped || settled.background {
             return;
         }
         let title = store
@@ -298,16 +320,119 @@ impl Engine {
             .map(|agent| agent.title)
             .unwrap_or_default();
         let text = report(child, &title, settled);
-        // Decided under the parent's own gate, as one with any pause: a paused
-        // parent keeps it queued, a busy one queues it, an idle one takes it.
-        let reply = self.send_message(
-            &json!({"op": "send", "chat": parent, "text": text, "keep_paused": true}),
-        );
-        if reply["ok"] == true {
-            self.events
-                .publish(json!({"event": "changed", "chat": parent}));
+        if let Err(error) = self.deliver_report(&parent, child, &text) {
+            eprintln!("xd-host: cannot report agent {child} to chat {parent}: {error}");
+        }
+    }
+
+    /// Hands chat `parent` the report `text` from its agent `child`: now when
+    /// the chat is free, otherwise held out of its queue until its turn ends
+    /// or it resumes. Decided under the chat's gate, as a send is, so it is
+    /// ordered with any pause.
+    fn deliver_report(&self, parent: &str, child: &str, text: &str) -> Result<(), String> {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return Err("Rust host state storage is not configured.".into());
+        };
+        let gate = self.chat_execution_gate(parent)?;
+        let _execution = gate
+            .lock()
+            .map_err(|_| "This session's agent state is unavailable.".to_owned())?;
+        let _resources = self
+            .session_resources
+            .lock()
+            .map_err(|_| "Session resources are unavailable.".to_owned())?;
+        // As for a message: a chat past its quota but not yet stopped stops now.
+        if store
+            .chat_quota(parent)
+            .is_ok_and(|quota| !quota.reached && quota.spent())
+        {
+            self.stop_for_quota_gated(parent);
+        }
+        let settled = store.chat_has_settlement_override(parent).unwrap_or(false);
+        match store
+            .deliver_agent_report(parent, child, text)
+            .map_err(|error| error.to_string())?
+        {
+            ReportDelivery::Held => Ok(()),
+            ReportDelivery::Start(turn) => {
+                if settled {
+                    self.events.publish(json!({"event": "tree"}));
+                }
+                let started = runtime.start(turn.clone());
+                if let Err(error) = &started {
+                    let _ = store.abort_turn_start(&turn.chat_id, error);
+                    runtime.report_start_failure(parent, error, false);
+                }
+                self.events
+                    .publish(json!({"event": "changed", "chat": parent}));
+                started
+            }
+        }
+    }
+
+    /// Starts the turn that hands chat `chat_id` the agent reports waiting
+    /// for it, when it is free. True when one started. `gated` when the
+    /// caller holds the chat's execution gate.
+    pub(crate) fn start_waiting_reports(&self, chat_id: &str, gated: bool) -> Result<bool, String> {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return Ok(false);
+        };
+        let gate = if gated {
+            None
         } else {
-            eprintln!("xd-host: cannot report agent {child} to chat {parent}: {reply}");
+            Some(self.chat_execution_gate(chat_id)?)
+        };
+        let _execution = match &gate {
+            Some(gate) => Some(
+                gate.lock()
+                    .map_err(|_| "This session's agent state is unavailable.".to_owned())?,
+            ),
+            None => None,
+        };
+        let _resources = self
+            .session_resources
+            .lock()
+            .map_err(|_| "Session resources are unavailable.".to_owned())?;
+        let Some(turn) = store
+            .start_agent_reports(chat_id)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(false);
+        };
+        let started = runtime.start(turn.clone());
+        if let Err(error) = &started {
+            let _ = store.abort_turn_start(&turn.chat_id, error);
+            runtime.report_start_failure(chat_id, error, false);
+        }
+        self.events
+            .publish(json!({"event": "changed", "chat": chat_id}));
+        started.map(|()| true)
+    }
+
+    /// Hands every free chat the agent reports left waiting for it, such as
+    /// those a restart left behind. Off the startup path, since a turn can
+    /// take a while to start.
+    pub fn deliver_waiting_agent_reports(self: &Arc<Self>) {
+        let engine = Arc::downgrade(self);
+        let spawned = thread::Builder::new()
+            .name("xd-waiting-reports".into())
+            .spawn(move || {
+                let Some(engine) = engine.upgrade() else {
+                    return;
+                };
+                let Some(store) = engine.store.as_ref() else {
+                    return;
+                };
+                for chat_id in store.chats_with_waiting_reports().unwrap_or_default() {
+                    if let Err(error) = engine.start_waiting_reports(&chat_id, false) {
+                        eprintln!(
+                            "xd-host: cannot hand chat {chat_id} its agents' reports: {error}"
+                        );
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("xd-host: cannot hand chats their agents' reports: {error}");
         }
     }
 }
@@ -396,7 +521,9 @@ fn new_chat_request(origin: &AgentOrigin, request: &Value, prompt: &str) -> Resu
     Ok(new_chat)
 }
 
-fn status(agent: &ChildAgent) -> &'static str {
+/// `background` when it waits on background agents or shells of its own,
+/// which it reports on in a turn of its own once they end.
+fn status(agent: &ChildAgent, background: bool) -> &'static str {
     if agent.paused {
         "paused"
     } else if agent.working {
@@ -405,6 +532,8 @@ fn status(agent: &ChildAgent) -> &'static str {
         "stopped with an error"
     } else if agent.reply.as_deref().and_then(crate::ask::parse).is_some() {
         "waiting for an answer"
+    } else if background {
+        "working"
     } else if agent.reply.is_some() {
         "finished"
     } else {
@@ -412,12 +541,12 @@ fn status(agent: &ChildAgent) -> &'static str {
     }
 }
 
-fn describe(agent: &ChildAgent, limit: usize) -> Value {
+fn describe(agent: &ChildAgent, limit: usize, background: bool) -> Value {
     let mut described = json!({
         "id": agent.id,
         "title": agent.title,
         "assistant": agent.backend,
-        "status": status(agent),
+        "status": status(agent, background),
     });
     if let Some(model) = &agent.model {
         described["model"] = json!(model);
@@ -552,6 +681,7 @@ mod tests {
             waiting: false,
             stopped: false,
             quiet: false,
+            background: false,
         };
         assert_eq!(
             report("child", "Fix the tests", &settled),
@@ -584,12 +714,20 @@ mod tests {
             reply: Some(question.into()),
             ..agent()
         };
-        assert_eq!(status(&asking), "waiting for an answer");
+        assert_eq!(status(&asking, false), "waiting for an answer");
+        assert_eq!(status(&asking, true), "waiting for an answer");
+        // Waiting on background work of its own, it is still at work.
+        let waiting = ChildAgent {
+            reply: Some("Tests are running; I'll wait for them.".into()),
+            ..agent()
+        };
+        assert_eq!(status(&waiting, true), "working");
+        assert_eq!(status(&waiting, false), "finished");
         let failed = ChildAgent {
             error: Some("Could not start.".into()),
             ..asking
         };
-        assert_eq!(status(&failed), "stopped with an error");
+        assert_eq!(status(&failed, false), "stopped with an error");
     }
 
     #[test]
@@ -605,6 +743,7 @@ mod tests {
                 ..agent()
             },
             SUMMARY_CHARS,
+            false,
         );
         assert_eq!(described["status"], "working");
         assert_eq!(
