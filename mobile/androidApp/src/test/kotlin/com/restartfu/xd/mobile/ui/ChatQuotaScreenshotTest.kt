@@ -56,8 +56,8 @@ import org.robolectric.shadows.ShadowLooper
 
 /**
  * Chat quotas against a scripted host: the host-wide setting in Settings,
- * and the card a chat stopped at its quota shows in place of its resume
- * button. With `-Pxd.shots=<dir>` it writes PNG captures there.
+ * and what a chat stopped at its quota docks in its composer in place of
+ * its resume button. With `-Pxd.shots=<dir>` it writes PNG captures there.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -78,7 +78,7 @@ class ChatQuotaScreenshotTest {
         check(!shows("Chat quota"))
     }
 
-    /** Stopped at its quota with a message queued: the card replaces the play button. */
+    /** Stopped at its quota with a message queued: the quota ask replaces the play button. */
     @Test fun aChatStoppedAtItsQuotaOffersANewOne() {
         val socket = ScriptedSocket(chatQuotas = true, quotaReached = true)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -120,9 +120,12 @@ class ChatQuotaScreenshotTest {
                 dir.mkdirs()
                 File(dir, "chat-quota-reached-dark.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
             }
-            check(shows("This chat reached its quota") && shows("Waiting on you"))
-            check(shows("It used 10% of its account's 5-hour limit; its quota was 10%."))
+            // Docked in the composer, with no second "waiting" status on it.
+            check(shows("This chat reached its quota") && !shows("Waiting on you"))
+            check(shows("10%") && shows("used of the 5-hour limit, past its 10% quota"))
             check(shows("New quota") && shows("Continue without a limit"))
+            // What is sent meanwhile waits, which the composer says.
+            check(shows("Messages you send wait until it goes on…"))
             // Prefilled with twice the last quota.
             check(compose.onAllNodes(hasText("20"), useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())
             // The play button would ask the host to resume, which it refuses here.

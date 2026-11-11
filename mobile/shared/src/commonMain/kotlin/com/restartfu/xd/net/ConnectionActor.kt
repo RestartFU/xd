@@ -103,6 +103,11 @@ internal class ConnectionActor(
     private val _credentialsReady = MutableStateFlow(false)
     private val _events = MutableSharedFlow<SequencedEvent>(extraBufferCapacity = 1024)
     private var credentials: StoredCredentials? = null
+        set(value) {
+            field = value
+            _host.value = value?.connection?.let(::hostIdentity)
+        }
+    private val _host = MutableStateFlow<String?>(null)
     private var socket: PlatformSocket? = null
     private var generation: Long = 0
     private var inboundSequence: Long = 0
@@ -119,6 +124,9 @@ internal class ConnectionActor(
     val link: StateFlow<Link> = _link.asStateFlow()
     val hasCredentials: StateFlow<Boolean> = _hasCredentials.asStateFlow()
     val credentialsReady: StateFlow<Boolean> = _credentialsReady.asStateFlow()
+
+    /** Which host the saved credentials are for, as [hostIdentity] names it; null with none saved. */
+    val host: StateFlow<String?> = _host.asStateFlow()
     val events: SharedFlow<SequencedEvent> = _events.asSharedFlow()
 
     init {
@@ -709,6 +717,17 @@ private fun validateConnection(connection: SshConnection) {
         require(it.fingerprint.isNotBlank()) { "Host-key fingerprint must not be blank" }
     }
 }
+
+/**
+ * A host's stable name across connections: the key pinned when it was paired,
+ * else its pinned SSH key's fingerprint with the account and port (accounts
+ * on one machine share its key but each runs its own daemon), else where it
+ * is reached.
+ */
+internal fun hostIdentity(connection: SshConnection): String =
+    (connection.authentication as? SshAuthentication.Paired)?.fingerprint?.let { "paired:$it" }
+        ?: connection.hostKey?.fingerprint?.let { "key:$it:${connection.username}:${connection.port}" }
+        ?: "ssh:${connection.username}@${connection.host}:${connection.port}"
 
 private fun remoteName(connection: SshConnection): String =
     if (connection.authentication is SshAuthentication.Paired) "${connection.host}:${connection.port}" else "${connection.username}@${connection.host}"

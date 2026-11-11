@@ -1,5 +1,5 @@
 //! Chat quotas: the host's default share of an account's usage limit that each
-//! chat may use, and the card a chat shows once it has used its share.
+//! chat may use, and what a chat's composer shows once it has used its share.
 
 use super::*;
 use xd_desktop::model::{parse_quota_percent, quota_points};
@@ -131,8 +131,8 @@ impl XdDesktop {
         }
     }
 
-    /// In place of the resume button: how much of its quota the chat used,
-    /// and a new quota to go on with.
+    /// Docked in the composer, in place of the resume button: how much of
+    /// its quota the chat used, and a new quota to go on with.
     pub(super) fn render_quota_card(
         &self,
         colors: ThemeColors,
@@ -142,13 +142,27 @@ impl XdDesktop {
         if !self.quota_card_visible() {
             return None;
         }
-        let detail = match self.model.quota {
-            Some(quota) => format!(
-                "It used {}% of its account's 5-hour limit; its quota was {}%.",
-                quota_points(quota.used),
-                quota.percent
-            ),
-            None => "It used its share of its account's 5-hour limit.".to_owned(),
+        let used = match self.model.quota {
+            Some(quota) => div()
+                .flex()
+                .items_baseline()
+                .gap(px(18.0))
+                .debug_selector(|| "chat-quota-detail".into())
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(22.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("{}%", quota_points(quota.used))),
+                )
+                .child(div().min_w_0().text_color(rgb(colors.muted)).child(format!(
+                    "used of the 5-hour limit, past its {}% quota",
+                    quota.percent
+                ))),
+            None => div()
+                .text_color(rgb(colors.muted))
+                .debug_selector(|| "chat-quota-detail".into())
+                .child("It used its share of its account's 5-hour limit."),
         };
         let waiting = self.quota_card.pending.is_some();
         let percent = parse_quota_percent(&self.quota_card.text);
@@ -168,75 +182,33 @@ impl XdDesktop {
             colors.border
         };
         Some(
-            // Waiting on the user like a question, so it wears the same mark.
             div()
                 .id("chat-quota-card")
                 .debug_selector(|| "chat-quota-card".into())
                 .w_full()
-                .px_4()
-                .py_3()
                 .flex()
                 .flex_col()
-                .gap(px(10.0))
-                .rounded(px(8.0))
-                .border(px(1.5))
-                .border_color(rgb(colors.waiting))
-                .bg(rgb(colors.surface))
+                .gap(px(12.0))
                 .text_size(px(13.0))
                 .text_color(rgb(colors.text))
                 .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .gap(px(3.0))
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .debug_selector(|| "chat-quota-sentence".into())
-                                        .child("This chat reached its quota"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(colors.muted))
-                                        .debug_selector(|| "chat-quota-detail".into())
-                                        .child(detail),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(colors.muted))
-                                        .child(
-                                            "Messages you send wait in the queue until it goes on.",
-                                        ),
-                                ),
-                        )
-                        .child(stamp("Waiting on you", colors.waiting)),
+                    composer::ask_header("This chat reached its quota", None, colors)
+                        .debug_selector(|| "chat-quota-sentence".into()),
                 )
+                .child(used)
                 .child(
                     div()
                         .flex()
                         .flex_wrap()
                         .items_center()
                         .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(rgb(colors.muted))
-                                .child("New quota"),
-                        )
+                        .child(div().text_color(rgb(colors.muted)).child("New quota"))
                         .child(
                             div()
                                 .id("chat-quota-input")
-                                .w(px(72.0))
+                                .w(px(70.0))
                                 .h(px(30.0))
-                                .px(px(8.0))
+                                .px(px(10.0))
                                 .flex()
                                 .items_center()
                                 .gap_1()
@@ -252,13 +224,7 @@ impl XdDesktop {
                                     }),
                                 )
                                 .child(div().flex_1().min_w_0().child(self.quota_input.clone()))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(12.5))
-                                        .text_color(rgb(colors.muted))
-                                        .child("%"),
-                                ),
+                                .child(div().flex_none().text_color(rgb(colors.faint)).child("%")),
                         )
                         .child(
                             ui_button("chat-quota-continue", ButtonKind::Primary, colors)
@@ -271,6 +237,7 @@ impl XdDesktop {
                                 })
                                 .child("Continue"),
                         )
+                        .child(div().flex_1())
                         // No limit at all is the bigger step, so it asks for
                         // less attention than going on with a quota.
                         .child(
@@ -283,17 +250,17 @@ impl XdDesktop {
                                     }))
                                 })
                                 .child("Continue without a limit"),
-                        )
-                        .when(invalid, |row| {
-                            row.child(
-                                div()
-                                    .debug_selector(|| "chat-quota-invalid".into())
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(colors.danger))
-                                    .child("Enter a whole number from 1 to 100."),
-                            )
-                        }),
+                        ),
                 )
+                .when(invalid, |card| {
+                    card.child(
+                        div()
+                            .debug_selector(|| "chat-quota-invalid".into())
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.danger))
+                            .child("Enter a whole number from 1 to 100."),
+                    )
+                })
                 .into_any_element(),
         )
     }

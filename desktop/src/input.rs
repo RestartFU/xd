@@ -242,6 +242,11 @@ impl ComposerInput {
         }
     }
 
+    #[cfg(test)]
+    pub fn text(&self) -> &str {
+        &self.content
+    }
+
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
         self.history.clear();

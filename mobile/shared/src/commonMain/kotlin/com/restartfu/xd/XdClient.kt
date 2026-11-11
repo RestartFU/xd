@@ -94,6 +94,13 @@ public class XdClient(
     public val link: StateFlow<Link> = actor.link
     public val hasCredentials: StateFlow<Boolean> = actor.hasCredentials
     public val credentialsReady: StateFlow<Boolean> = actor.credentialsReady
+
+    /**
+     * The host this client is for, by its pinned key or else its address;
+     * null with no host saved. One client is reused for another host, so
+     * what is kept per host is kept under this.
+     */
+    public val host: StateFlow<String?> = actor.host
     public val tree: StateFlow<TreeSnapshot> = treeStore.state
     private val _sessionGeneration = MutableStateFlow(0L)
     /** Changes when forgetting a remote invalidates all retained chat handles. */

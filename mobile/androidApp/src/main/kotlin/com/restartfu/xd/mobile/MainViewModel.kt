@@ -37,6 +37,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -641,7 +644,9 @@ class MainViewModel @JvmOverloads constructor(
         _error.value = null
         viewModelScope.launch {
             try {
+                val host = client.host.value
                 client.forget()
+                InteractionAnswers.forget(client, host)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -1135,27 +1140,88 @@ class ChatViewModel(
     private var draftAttachmentsDirty = false
     private var draftRevision = -1L
 
+    /**
+     * The reader's answers to agents' questions, kept beside the client, not
+     * this screen, under the host this chat is on.
+     */
+    private val answerStore = InteractionAnswers.of(client)
+
+    /**
+     * What the reader answered so far to each of this chat's questions, by
+     * request id, then question id. The questions come one at a time, so
+     * this decides which one shows.
+     */
+    val interactionAnswers: StateFlow<Map<String, Map<String, String>>> =
+        answerStore.answers(chatId).stateIn(viewModelScope, SharingStarted.Eagerly, answerStore.answersNow(chatId))
+
+    /**
+     * Requests whose answers are on their way to the host: from the last
+     * answer until the host takes or refuses them. Send stays a busy send
+     * meanwhile, not the turn's stop, so a second tap cannot cancel the turn
+     * the answers are for.
+     */
+    val submittingAnswers: StateFlow<Set<String>> =
+        answerStore.submitting(chatId).stateIn(viewModelScope, SharingStarted.Eagerly, answerStore.submittingNow(chatId))
+
+    /**
+     * The chat's own reply, with the host's draft, has arrived and been taken
+     * into the composer. Until then an empty composer says nothing.
+     */
+    private val draftKnown = MutableStateFlow(false)
+
     init {
         loadCatalog()
         viewModelScope.launch {
+            // A request seen here and then gone was resolved or cleared, so its
+            // answers go. One never seen, as before the chat loads, is left:
+            // its answers outlive leaving the chat and reconnecting.
+            var asked: Set<String>? = null
             state.collect { synced ->
-                if (synced.draftRevision <= draftRevision) return@collect
-                draftRevision = synced.draftRevision
-                if (!draftTextDirty) _draft.value = synced.draft
-                if (
-                    !draftAttachmentsDirty &&
-                    !sameImages(_attachments.value, synced.draftAttachments)
-                ) {
-                    val revision = synced.draftRevision
-                    val prepared = buildList {
-                        for (png in synced.draftAttachments) {
-                            add(ImageAttachments.fromPng(png))
-                        }
-                    }
-                    if (state.value.draftRevision == revision && !draftAttachmentsDirty) {
-                        _attachments.value = prepared
+                val now = synced.interactions.map { it.requestId }.toSet()
+                asked?.let { before -> (before - now).forEach { answerStore.resolved(chatId, it) } }
+                asked = now
+            }
+        }
+        viewModelScope.launch {
+            // A refused answer's words come back to an empty composer: now if
+            // this chat is open, otherwise when it is next opened. Text typed
+            // meanwhile is never replaced; the words wait for the next visit.
+            // Only once the chat's own reply has put the host's draft in the
+            // composer: restoring before it arrived would make the words a
+            // local edit that then replaces that draft.
+            combine(answerStore.givenBack(chatId), draftKnown) { words, known -> words.takeIf { known } }
+                .collect { words ->
+                    if (words != null && _draft.value.isEmpty() && answerStore.takeGivenBack(chatId, words)) {
+                        updateDraft(words)
                     }
                 }
+        }
+        viewModelScope.launch {
+            state.collect { synced ->
+                // The host's draft goes into the composer first, so an empty
+                // composer below means the chat really has no draft.
+                syncDraft(synced)
+                if (synced.draftLoaded) draftKnown.value = true
+            }
+        }
+    }
+
+    private suspend fun syncDraft(synced: com.restartfu.xd.model.ChatState) {
+        if (synced.draftRevision <= draftRevision) return
+        draftRevision = synced.draftRevision
+        if (!draftTextDirty) _draft.value = synced.draft
+        if (
+            !draftAttachmentsDirty &&
+            !sameImages(_attachments.value, synced.draftAttachments)
+        ) {
+            val revision = synced.draftRevision
+            val prepared = buildList {
+                for (png in synced.draftAttachments) {
+                    add(ImageAttachments.fromPng(png))
+                }
+            }
+            if (state.value.draftRevision == revision && !draftAttachmentsDirty) {
+                _attachments.value = prepared
             }
         }
     }
@@ -1239,6 +1305,26 @@ class ChatViewModel(
     }
     fun answer(requestId: String, answers: Map<String, String>) {
         viewModelScope.launch { runCatching { session.answer(requestId, answers) } }
+    }
+
+    /**
+     * Answers one of [request]'s questions. The last answer sends them all,
+     * as the agent asked for them together.
+     */
+    fun answerQuestion(request: com.restartfu.xd.model.PendingInteraction, questionId: String, answer: String) {
+        answerStore.answer(client, chatId, request, questionId, answer)
+    }
+
+    /**
+     * Sends the composer's text as the answer to the question showing, the
+     * way a message is sent: the composer empties at once, and the words
+     * come back to it only if the host refuses the answer.
+     */
+    fun answerWithDraft(request: com.restartfu.xd.model.PendingInteraction, questionId: String) {
+        val text = _draft.value
+        if (text.isBlank() || request.requestId in answerStore.submittingNow(chatId)) return
+        updateDraft("")
+        answerStore.answer(client, chatId, request, questionId, text.trim(), typed = text)
     }
 
     fun updateDraft(value: String) {

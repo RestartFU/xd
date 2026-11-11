@@ -29,6 +29,130 @@ pub(super) struct ComposerParts {
     pub actions: Vec<gpui::AnyElement>,
     /// Whether the draft's tiles show: not once they have been sent.
     pub show_attachments: bool,
+    /// What waits on the user in this chat, docked at the top of the box
+    /// above a hairline: a question, an approval, or a quota stop.
+    pub ask: Option<gpui::AnyElement>,
+}
+
+/// The docked ask's first line: the waiting ring, its title, and, when more
+/// than one thing waits, which one this is, such as "1 / 2".
+pub(super) fn ask_header(
+    title: impl Into<SharedString>,
+    counter: Option<String>,
+    colors: ThemeColors,
+) -> gpui::Div {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(10.0))
+        // Centred on the title's first line, however many lines it takes.
+        .child(
+            div()
+                .h(px(22.0))
+                .flex()
+                .items_center()
+                .child(waiting_ring(colors)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(15.0))
+                .line_height(px(22.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(colors.text))
+                .child(title.into()),
+        )
+        .when_some(counter, |row, counter| {
+            row.child(
+                div()
+                    .flex_none()
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .debug_selector(|| "composer-ask-counter".into())
+                    .text_size(px(12.0))
+                    .text_color(rgb(colors.faint))
+                    .child(counter),
+            )
+        })
+}
+
+/// One of a question's choices in the docked ask: a faint number, which is
+/// also its key, the answer, and an arrow on the row under the pointer or the
+/// keyboard.
+pub(super) fn ask_choice(
+    index: usize,
+    label: String,
+    description: Option<String>,
+    focused: bool,
+    enabled: bool,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    let group: SharedString = format!("composer-ask-choice-{index}").into();
+    div()
+        .id(("composer-ask-choice", index))
+        .debug_selector(move || format!("composer-ask-choice-{index}"))
+        .group(group.clone())
+        .w_full()
+        .px(px(10.0))
+        .py(px(9.0))
+        .flex()
+        .items_start()
+        .gap(px(14.0))
+        .rounded(px(8.0))
+        .text_size(px(14.0))
+        .line_height(px(20.0))
+        .text_color(rgb(colors.text))
+        // Waiting on the host, a choice reads as one that cannot be picked.
+        .when(!enabled, |row| row.opacity(0.5))
+        .when(enabled && focused, |row| {
+            row.bg(rgb(colors.selected_surface))
+        })
+        .when(enabled, |row| {
+            row.cursor_pointer()
+                .hover(|style| style.bg(rgb(colors.selected_surface)))
+        })
+        .child(
+            div()
+                .flex_none()
+                .w(px(10.0))
+                .text_size(px(12.0))
+                .text_color(rgb(colors.faint))
+                .child((index + 1).to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .gap_x(px(6.0))
+                .child(div().min_w_0().child(label))
+                .when_some(description, |text, description| {
+                    text.child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(13.0))
+                            .text_color(rgb(colors.muted))
+                            .child(format!("· {description}")),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex_none()
+                .h(px(20.0))
+                .flex()
+                .items_center()
+                .when(!enabled, |arrow| arrow.invisible())
+                .when(enabled && !focused, |arrow| {
+                    arrow
+                        .invisible()
+                        .group_hover(group, |style| style.visible())
+                })
+                .child(icon(ARROW_RIGHT_ICON, 14.0, colors.faint)),
+        )
 }
 
 /// What an empty chat, or a new one, says above its composer.
@@ -191,6 +315,7 @@ impl XdDesktop {
             controls,
             actions,
             show_attachments,
+            ask,
         } = parts;
         let input = match owner {
             DraftOwner::Chat => self.composer_input.clone(),
@@ -238,6 +363,38 @@ impl XdDesktop {
                 let focus = this.draft_editor_focus(owner, cx);
                 window.focus(&focus);
             }))
+            .when_some(ask, |shell, ask| {
+                // The shell is padded 10 at the top and 8 at the sides; the
+                // section sits 16 from the top and 18 from the sides. A tall
+                // one scrolls inside itself so the editor stays in view.
+                shell
+                    .child(
+                        div()
+                            .id("composer-ask")
+                            .debug_selector(|| "composer-ask".into())
+                            .flex_shrink_0()
+                            .max_h(window.viewport_size().height * 0.5)
+                            .overflow_y_scroll()
+                            // Choice rows reach into its padding; patches and
+                            // commands scroll inside their own boxes.
+                            .overflow_x_hidden()
+                            .pt(px(6.0))
+                            .px(px(10.0))
+                            .pb(px(6.0))
+                            // Its buttons and fields keep the focus they take,
+                            // rather than the box handing it to the editor.
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .child(ask),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .mx(px(10.0))
+                            .mb(px(6.0))
+                            .h(px(1.0))
+                            .bg(rgb(colors.border)),
+                    )
+            })
             .children(attachments)
             .child(
                 div()

@@ -352,6 +352,7 @@ public object TranscriptMachine {
                 queueRevision = if (isOlderQueue(chat.queueRevision, state.queueRevision)) state.queueRevision else chat.queueRevision,
                 draft = chat.draft,
                 draftRevision = chat.draftRevision,
+                draftLoaded = true,
                 // Files attached on a desktop are its to show; this app shows images.
                 draftAttachments = chat.draftAttachments
                     .filter { it.mime == Limits.PNG_MIME }

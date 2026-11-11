@@ -579,6 +579,11 @@ pub enum RequestKind {
     SetOption {
         chat_id: String,
     },
+    /// An answer to an approval or a request for input.
+    Respond {
+        chat_id: String,
+        request_id: String,
+    },
     SetShortcuts {
         folder_id: Option<String>,
     },
@@ -2298,8 +2303,9 @@ impl HostHandle {
 
     pub fn respond(&self, chat_id: &str, request_id: &str, response: Value) -> Result<(), String> {
         self.send(
-            RequestKind::SetOption {
+            RequestKind::Respond {
                 chat_id: chat_id.to_owned(),
+                request_id: request_id.to_owned(),
             },
             json!({"op":"respond", "chat":chat_id,"request_id":request_id,"response":response}),
         )
