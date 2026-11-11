@@ -467,7 +467,9 @@ impl BrowserPane {
                 None => return reply(Err("Pass url, the address to open.".into())),
             }
             if command["new_tab"] == true {
-                self.add_tab(None, window, cx);
+                // The user may be typing elsewhere; an agent's tab leaves the
+                // keyboard where it is.
+                self.open_tab(None, false, window, cx);
             } else if self.auxiliary.is_some() {
                 self.select_auxiliary(None, cx);
             }
@@ -583,12 +585,25 @@ impl BrowserPane {
     }
 
     fn add_tab(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tab(url, true, window, cx);
+    }
+
+    /// Adds a tab and selects it, giving it the keyboard when `focus`.
+    fn open_tab(
+        &mut self,
+        url: Option<String>,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.select_auxiliary(None, cx);
         self.insert_tab(url, window, cx);
         self.session.active_tab = self.tabs.len() - 1;
         self.tab_scroll.scroll_to_item(self.active_tab_index());
         self.update_visibility();
-        self.focus_active_tab(window, cx);
+        if focus {
+            self.focus_active_tab(window, cx);
+        }
         cx.emit(BrowserEvent::SessionChanged(self.session()));
         cx.notify();
     }
@@ -2441,6 +2456,41 @@ mod tests {
             let pane = pane.read(cx);
             assert!(pane.address.read(cx).focus_handle(cx).is_focused(window));
             assert_eq!(pane.draft, "localhost:3000");
+        });
+    }
+
+    #[gpui::test]
+    fn an_agents_new_tab_leaves_the_keyboard_where_it_is(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                Some("https://example.com/".into()),
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let (answer, answered) = std::sync::mpsc::channel();
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.run_agent_command(
+                    serde_json::json!({"action": "navigate", "url": "localhost:3000",
+                        "new_tab": true}),
+                    Arc::default(),
+                    move |outcome| answer.send(outcome).unwrap(),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        // A test window has no engine to run the command in.
+        assert!(answered.try_recv().unwrap().is_err());
+        cx.update(|window, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.session().active_tab, 1);
+            let tab = pane.tabs[1].entity.read(cx);
+            assert!(!tab.address.read(cx).focus_handle(cx).is_focused(window));
         });
     }
 
