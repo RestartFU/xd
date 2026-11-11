@@ -180,17 +180,13 @@ impl Engine {
         reply
     }
 
-    /// `stop-agent`: throws one of `chat`'s agents away. An agent is only
-    /// worth showing while it works or may be asked for more, so stopping it
-    /// deletes its chat as the user deleting it would: any turn it is taking
-    /// stops, it leaves every client's tree, and its card leaves the parent.
-    /// Files it wrote in a worktree stay on disk.
+    /// `stop-agent`: stops the turn one of `chat`'s agents is taking.
     pub(crate) fn stop_agent(&self, request: &Value) -> Value {
         let child = match self.own_agent(request) {
             Ok(child) => child,
             Err(error) => return error_reply(error),
         };
-        let reply = self.delete_chat(&json!({"op": "delete-chat", "chat": child.id}));
+        let reply = self.cancel(&json!({"op": "cancel", "chat": child.id}));
         if reply["ok"] == true {
             return json!({"ok": true, "was_working": child.working});
         }

@@ -1175,7 +1175,7 @@ as a request for the server's chat:
 | `start_agent` | `start-agent` | Starts a chat under this one and sends it `prompt`. |
 | `list_agents` | `list-agents` | Lists this chat's agents, or the one named by `agent`. |
 | `message_agent` | `message-agent` | Sends one of them `text`, queued behind a running turn. |
-| `stop_agent` | `stop-agent` | Throws one of them away, as `delete-chat` would. |
+| `stop_agent` | `stop-agent` | Stops one of them, as `cancel` would. |
 
 ```json
 {"op":"start-agent","chat":"lead","prompt":"Fix CI on #12","title":"CI","assistant":"codex","workspace":"new_worktree"}
@@ -1200,13 +1200,6 @@ stopped nor moving to another account, sends the parent a message beginning
 parent gets it in its queue without resuming. Statuses in `list-agents` are
 `working`, `paused`, `waiting for an answer`, `stopped with an error`,
 `finished` and `idle`.
-
-`stop-agent` is for an agent the parent needs nothing more from. It deletes the
-agent's chat exactly as `delete-chat` does: a turn at work stops, the chat leaves
-every client's `tree` and `list-agents`, and its card leaves the parent's
-transcript. Files it wrote in a worktree stay on disk. It answers
-`{"ok":true,"was_working":<bool>}`. To change an agent's course without
-discarding it, send it a message instead.
 
 The parent's transcript also gets one card per agent: a `tool` row holding a
 `subagent_run` record (see the subagent records above) with `key` set to
