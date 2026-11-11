@@ -83,7 +83,8 @@ struct RuntimeInner {
     /// The last turn of each chat that ended with background work of its own
     /// still going, told of again as finished if the agent never takes
     /// another: see [`TurnRuntime::release_held_turn`].
-    held_turns: Mutex<HashMap<String, SettledTurn>>,
+    /// Each with the process the turn ran in, whose background work it waits on.
+    held_turns: Mutex<HashMap<String, HeldTurn>>,
     /// Told whenever a turn starts or ends, with the chat, assistant, and
     /// account; see [`crate::quota`].
     on_activity: Mutex<Option<ActivityHandler>>,
@@ -123,6 +124,10 @@ pub(crate) enum AgentActivity {
     /// Reported without an assistant or account when the process is gone.
     BackgroundEnded,
 }
+
+/// A turn held while its agent's background work goes on, and the router of
+/// the process running that work.
+type HeldTurn = (SettledTurn, Option<std::sync::Weak<Mutex<Router>>>);
 
 /// A turn that ended for good: neither stopped nor going on elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1144,19 +1149,19 @@ impl TurnRuntime {
                                 AgentActivity::BackgroundEnded,
                             );
                         }
-                        router.tasks.is_empty().then_some(false)
+                        router.tasks.is_empty()
                     }
-                    Err(_) => None,
+                    Err(_) => false,
                 },
                 None => {
                     publish(0);
                     self.note_activity(chat_id, "", "", AgentActivity::BackgroundEnded);
-                    Some(true)
+                    true
                 }
             }
         };
-        if let Some(gone) = ended {
-            self.release_held_turn(chat_id, gone);
+        if ended {
+            self.release_held_turn(chat_id, None);
         }
     }
 
@@ -1913,19 +1918,15 @@ impl TurnRuntime {
                 // the sessions keeps a new process from reporting first.
                 if idle && let Some(inner) = inner.upgrade() {
                     let runtime = TurnRuntime { inner };
-                    let current = runtime.inner.sessions.lock().is_ok_and(|sessions| {
-                        let current = sessions
+                    if let Ok(sessions) = runtime.inner.sessions.lock()
+                        && sessions
                             .get(&chat_id)
-                            .is_some_and(|session| Arc::ptr_eq(&session.router, &router));
-                        if current {
-                            runtime.settle_orphaned_agents(&chat_id);
-                        }
-                        current
-                    });
-                    // No report on its background work can come from it now.
-                    if current {
-                        runtime.release_held_turn(&chat_id, true);
+                            .is_some_and(|session| Arc::ptr_eq(&session.router, &router))
+                    {
+                        runtime.settle_orphaned_agents(&chat_id);
                     }
+                    // No report on its background work can come from it now.
+                    runtime.release_held_turn(&chat_id, Some(&router));
                 }
             });
     }
@@ -2293,7 +2294,7 @@ impl TurnRuntime {
             let _ = child.wait();
         }
         self.settle_orphaned_agents(chat_id);
-        self.release_held_turn(chat_id, true);
+        self.release_held_turn(chat_id, None);
     }
 
     /// Stops the kept processes nobody is using, so an idle chat costs no memory.
@@ -2349,7 +2350,7 @@ impl TurnRuntime {
                 let released = self.release_agent(chat_id, *quiet_since, &accompanied);
                 // No report on background work can come from it now.
                 if released {
-                    self.release_held_turn(chat_id, true);
+                    self.release_held_turn(chat_id, None);
                 }
                 released
             })
@@ -3271,13 +3272,18 @@ impl TurnRuntime {
     fn settled(&self, settled: SettledTurn) {
         let chat_id = settled.chat_id.clone();
         let background = settled.background;
+        // Its background work runs in the chat's current process.
+        let process = background
+            .then(|| self.router(&chat_id))
+            .flatten()
+            .map(|router| Arc::downgrade(&router));
         // A turn's news replaces any the chat's last turn left held, and is
         // told under the same lock, so a release in between can neither take
         // this turn for the last one nor tell of the last one after it.
         match self.inner.held_turns.lock() {
             Ok(mut held) => {
                 if background {
-                    held.insert(chat_id.clone(), settled.clone());
+                    held.insert(chat_id.clone(), (settled.clone(), process));
                 } else {
                     held.remove(&chat_id);
                 }
@@ -3288,7 +3294,7 @@ impl TurnRuntime {
         // The work it waited on may have ended since the turn looked, with
         // nothing left to release it.
         if background {
-            self.release_held_turn(&chat_id, false);
+            self.release_held_turn(&chat_id, None);
         }
     }
 
@@ -3301,21 +3307,22 @@ impl TurnRuntime {
     }
 
     /// Tells of a chat's held turn as finished once the agent will not take
-    /// another to report on its background work: that work ended and no
-    /// report is owed or under way, or `gone`, the process ended with it.
+    /// another to report on its background work: the process running that
+    /// work is gone, being no longer the chat's or the one `exited` names, or
+    /// it is still the chat's, its work ended and no report is owed.
     ///
     /// Decided and told with the held turns locked, as [`Self::settled`]
     /// records and tells, so a turn that settles meanwhile is either seen
     /// first, replacing the held one, or told of after it. Under that lock it
-    /// takes the active turns and then a router, one at a time, and nothing
-    /// takes the held turns while holding either.
-    fn release_held_turn(&self, chat_id: &str, gone: bool) {
+    /// takes the active turns, and then the sessions and a router, one at a
+    /// time; nothing takes the held turns while holding any of them.
+    fn release_held_turn(&self, chat_id: &str, exited: Option<&Arc<Mutex<Router>>>) {
         let Ok(mut held) = self.inner.held_turns.lock() else {
             return;
         };
-        if !held.contains_key(chat_id) {
+        let Some((_, process)) = held.get(chat_id) else {
             return;
-        }
+        };
         let running = self
             .inner
             .active
@@ -3324,8 +3331,15 @@ impl TurnRuntime {
         if running {
             return;
         }
+        let current = self.router(chat_id);
+        let is = |router: &Arc<Mutex<Router>>| {
+            process
+                .as_ref()
+                .is_some_and(|process| std::ptr::eq(process.as_ptr(), Arc::as_ptr(router)))
+        };
+        let gone = exited.is_some_and(is) || !current.as_ref().is_some_and(is);
         if !gone {
-            let owed = self.router(chat_id).is_some_and(|router| {
+            let owed = current.is_none_or(|router| {
                 router
                     .lock()
                     .map_or(true, |router| !router.tasks.is_empty() || router.report_due)
@@ -3334,7 +3348,7 @@ impl TurnRuntime {
                 return;
             }
         }
-        if let Some(turn) = held.remove(chat_id) {
+        if let Some((turn, _)) = held.remove(chat_id) {
             self.tell_settled(SettledTurn {
                 background: false,
                 ..turn

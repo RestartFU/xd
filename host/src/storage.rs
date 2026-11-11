@@ -357,8 +357,9 @@ pub(crate) struct ChatTitleSpec {
 /// What became of a report from one of a chat's agents.
 #[allow(clippy::large_enum_variant)]
 pub enum ReportDelivery {
-    /// The chat is busy, paused or stopped at its quota, so the report waits
-    /// for it, out of the user's queue.
+    /// The chat is busy, paused, stopped at its quota or cut off by a
+    /// restart the user has not answered yet, so the report waits for it,
+    /// out of the user's queue.
     Held,
     /// The chat was free: this turn hands it the report.
     Start(TurnSpec),
@@ -3722,11 +3723,18 @@ impl StateStore {
     ) -> Result<ReportDelivery, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let (working, mut paused) = transaction
+        // A chat a restart cut off waits for the user's answer on resuming it.
+        let (working, mut paused, cut_off) = transaction
             .query_row(
-                "SELECT host_working, paused FROM chats WHERE id = ?",
+                "SELECT host_working, paused, resume_after_restart != 0 FROM chats WHERE id = ?",
                 [chat_id],
-                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
@@ -3743,7 +3751,7 @@ impl StateStore {
             "INSERT INTO agent_reports (chat_id, agent_id, text, created_at) VALUES (?, ?, ?, ?)",
             params![chat_id, agent_id, text, now_seconds()],
         )?;
-        let delivery = if working || paused {
+        let delivery = if working || paused || cut_off {
             ReportDelivery::Held
         } else if let Some(front) = steered_front(&transaction, chat_id)? {
             ReportDelivery::SteeredFirst(front)
@@ -3764,7 +3772,8 @@ impl StateStore {
         let transaction = database.transaction()?;
         let free = transaction
             .query_row(
-                "SELECT host_working = 0 AND paused = 0 FROM chats WHERE id = ?",
+                "SELECT host_working = 0 AND paused = 0 AND resume_after_restart = 0 \
+                 FROM chats WHERE id = ?",
                 [chat_id],
                 |row| row.get::<_, bool>(0),
             )
@@ -6546,7 +6555,11 @@ impl StateStore {
             ));
         }
         let mut queue = queue_from_column(Some(&stored));
+        let front = queue.first().cloned();
         if mutate(&mut queue)? {
+            // The mark is the steered message's own: it goes with it when
+            // that message leaves the front.
+            let same_front = !queue.is_empty() && queue.first() == front.as_ref();
             let encoded = if queue.is_empty() {
                 None
             } else {
@@ -6555,9 +6568,15 @@ impl StateStore {
                 })?)
             };
             let changed = transaction.execute(
-                "UPDATE chats SET queued = ?, queue_first = (queue_first OR ?) AND ?, \
+                "UPDATE chats SET queued = ?, queue_first = ? OR (queue_first AND ?), \
                  updated_at = ? WHERE id = ?",
-                params![encoded, steered, !queue.is_empty(), now_seconds(), chat_id],
+                params![
+                    encoded,
+                    steered && !queue.is_empty(),
+                    same_front,
+                    now_seconds(),
+                    chat_id
+                ],
             )?;
             if changed != 1 {
                 return Err(StorageError::NoChat(chat_id.into()));
@@ -16642,8 +16661,8 @@ mod tests {
         );
 
         // A free chat whose queue waits behind a message the user steered,
-        // as a restart can leave one, has that message started first; its
-        // reports follow that turn.
+        // as a crash can leave one, has that message started first; the
+        // reports follow its turn, still ahead of the rest of the queue.
         assert!(
             store
                 .finish_turn("lead", true, None, 1, false)
@@ -16652,29 +16671,79 @@ mod tests {
                 .is_none()
         );
         store
-            .requeue_front("lead", "steered, then cut off")
+            .prepare_send(&json!({"chat": "lead", "text": "busy"}))
             .unwrap();
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "ordinary"}))
+            .unwrap();
+        store.requeue_front("lead", "steered").unwrap();
+        store.abort_turn_start("lead", "crashed").unwrap();
+        assert_eq!(
+            store.chat("lead").unwrap()["queue"],
+            json!(["steered", "ordinary"])
+        );
         assert!(matches!(
             store
                 .deliver_agent_report("lead", "a", "[xd] behind it")
                 .unwrap(),
-            ReportDelivery::SteeredFirst(front) if front == "steered, then cut off"
+            ReportDelivery::SteeredFirst(front) if front == "steered"
         ));
         assert!(matches!(
             store.start_agent_reports("lead").unwrap(),
-            ReportDelivery::SteeredFirst(front) if front == "steered, then cut off"
+            ReportDelivery::SteeredFirst(front) if front == "steered"
         ));
+        // As the engine starts it: taken from the queue, then sent.
         store
-            .take_queued(&json!({"chat": "lead", "index": 0, "text": "steered, then cut off"}))
+            .take_queued(&json!({"chat": "lead", "index": 0, "text": "steered"}))
             .unwrap();
         let SendDisposition::Start { .. } = store
-            .prepare_send(&json!({"chat": "lead", "text": "steered, then cut off"}))
+            .prepare_send(&json!({"chat": "lead", "text": "steered"}))
             .unwrap()
         else {
             panic!("the steered message should start");
         };
         let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
         assert_eq!(finish.next.expect("the report").prompt, "[xd] behind it");
+        let finish = store.finish_turn("lead", true, None, 1, false).unwrap();
+        assert_eq!(finish.next.expect("the queue").prompt, "ordinary");
+    }
+
+    #[test]
+    fn a_chat_a_restart_cut_off_holds_reports_until_the_user_answers() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "lead", "folder");
+        fixture.insert_chat(&database, "a", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .prepare_send(&json!({"chat": "lead", "text": "work"}))
+            .unwrap();
+        // The host went down mid-turn.
+        drop(store);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(store.recover_interrupted_turns().unwrap(), ["lead"]);
+        assert_eq!(store.chat("lead").unwrap()["working"], false);
+        assert!(matches!(
+            store
+                .deliver_agent_report("lead", "a", "[xd] done")
+                .unwrap(),
+            ReportDelivery::Held
+        ));
+        assert!(matches!(
+            store.start_agent_reports("lead").unwrap(),
+            ReportDelivery::Held
+        ));
+        assert!(store.chats_with_waiting_reports().unwrap().is_empty());
+        // Answered, without resuming: the reports go.
+        assert_eq!(store.take_chats_to_resume().unwrap().len(), 1);
+        assert_eq!(store.chats_with_waiting_reports().unwrap(), ["lead"]);
+        let ReportDelivery::Start(turn) = store.start_agent_reports("lead").unwrap() else {
+            panic!("the answered chat should take its reports");
+        };
+        assert_eq!(turn.prompt, "[xd] done");
     }
 
     #[test]
