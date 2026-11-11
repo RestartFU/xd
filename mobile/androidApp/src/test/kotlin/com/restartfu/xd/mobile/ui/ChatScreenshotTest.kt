@@ -132,6 +132,8 @@ class ChatScreenshotTest {
         }
         check(chat.state.value.visibleItems.size >= 6)
         if (ci) {
+            compose.onNodeWithText("#300 · Fix the settings test").assertIsDisplayed()
+            compose.onNodeWithText("1 failed, 3 passed").assertIsDisplayed()
             compose.onNodeWithText("CI failed on #300").assertIsDisplayed()
             compose.onNodeWithText("1 of 4 checks did not pass", substring = true).assertDoesNotExist()
         }
@@ -239,6 +241,7 @@ class ChatScreenshotTest {
             "tool" to "\$ git push",
             "tool" to "Watch CI  https://github.com/RestartFU/xd/pull/300",
             "assistant" to "\n\nxd is watching CI on #300 and will tell me when the checks finish.",
+            "tool" to "ci_run\n{\"checks\":[{\"conclusion\":\"failure\",\"link\":\"https://github.com/RestartFU/xd/actions/runs/43100/job/130600\",\"name\":\"linux\",\"state\":\"failed\",\"workflow\":\"pr\"},{\"link\":\"https://github.com/RestartFU/xd/actions/runs/43100/job/130601\",\"name\":\"macos\",\"state\":\"passed\",\"workflow\":\"pr\"},{\"link\":\"https://github.com/RestartFU/xd/actions/runs/43100/job/130602\",\"name\":\"windows\",\"state\":\"passed\",\"workflow\":\"pr\"},{\"link\":\"https://app.coderabbit.ai/x\",\"name\":\"CodeRabbit\",\"state\":\"passed\"}],\"counts\":{\"failed\":1,\"passed\":3,\"pending\":0,\"skipped\":0},\"finished_at\":1794420805,\"head\":\"9f2c7b1\",\"number\":300,\"started_at\":1794420788,\"status\":\"failed\",\"title\":\"Fix the settings test\",\"url\":\"https://github.com/restartfu/xd/pull/300\"}",
             "user" to "[xd] CI failed on https://github.com/restartfu/xd/pull/300 at 9f2c7b1.\n\n1 of 4 checks did not pass (3 passed):\n- pr / linux: failure (https://github.com/RestartFU/xd/actions/runs/43100/job/130600)\n\nThe end of pr / linux's failed steps:\n\n```\ntest settings::tests::saves_the_theme ... FAILED\nthread settings::tests::saves_the_theme panicked at desktop/src/settings.rs:212:9:\nassertion `left == right` failed\n  left: \"light\"\n right: \"dark\"\ntest result: FAILED. 460 passed; 1 failed\n```",
             "assistant" to "CI failed on linux: `settings::tests::saves_the_theme` expects the dark theme but the settings file now defaults to light. I'll make the test write the theme it reads back.",
         )
