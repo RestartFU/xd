@@ -3739,7 +3739,7 @@ impl StateStore {
             "INSERT INTO agent_reports (chat_id, agent_id, text, created_at) VALUES (?, ?, ?, ?)",
             params![chat_id, agent_id, text, now_seconds()],
         )?;
-        let turn = if working || paused {
+        let turn = if working || paused || !reports_go_first(&transaction, chat_id)? {
             None
         } else {
             take_agent_reports(&transaction, &self.workspace_root, chat_id)?
@@ -3749,7 +3749,8 @@ impl StateStore {
     }
 
     /// Starts the turn that hands a free chat the reports waiting for it.
-    /// `None` when it is busy or paused, or has none.
+    /// `None` when it is busy or paused, has none, or a message the user
+    /// steered waits at the front of its queue.
     pub fn start_agent_reports(&self, chat_id: &str) -> Result<Option<TurnSpec>, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
@@ -3761,7 +3762,7 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
-        let turn = if free {
+        let turn = if free && reports_go_first(&transaction, chat_id)? {
             take_agent_reports(&transaction, &self.workspace_root, chat_id)?
         } else {
             None
@@ -11698,6 +11699,17 @@ fn take_agent_reports(
     Ok(Some(turn))
 }
 
+/// Whether reports may go before the chat's queue: not when the user steered
+/// the message at its front, which goes first.
+fn reports_go_first(database: &Connection, chat_id: &str) -> Result<bool, StorageError> {
+    let (stored, queue_first) = database.query_row(
+        "SELECT COALESCE(queued, ''), queue_first FROM chats WHERE id = ?",
+        [chat_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+    )?;
+    Ok(!queue_first || queue_from_column(Some(&stored)).is_empty())
+}
+
 fn has_agent_reports(database: &Connection, chat_id: &str) -> Result<bool, StorageError> {
     Ok(database.query_row(
         "SELECT EXISTS(SELECT 1 FROM agent_reports WHERE chat_id = ?)",
@@ -16607,6 +16619,31 @@ mod tests {
             finish.next.expect("the unread report").prompt,
             "[xd] unread"
         );
+
+        // A free chat whose queue waits behind a message the user steered,
+        // as a restart can leave one, keeps its reports behind that message.
+        assert!(
+            store
+                .finish_turn("lead", true, None, 1, false)
+                .unwrap()
+                .next
+                .is_none()
+        );
+        store
+            .requeue_front("lead", "steered, then cut off")
+            .unwrap();
+        assert!(matches!(
+            store
+                .deliver_agent_report("lead", "a", "[xd] behind it")
+                .unwrap(),
+            ReportDelivery::Held
+        ));
+        assert!(store.start_agent_reports("lead").unwrap().is_none());
+        store
+            .take_queued(&json!({"chat": "lead", "index": 0, "text": "steered, then cut off"}))
+            .unwrap();
+        let turn = store.start_agent_reports("lead").unwrap().expect("reports");
+        assert_eq!(turn.prompt, "[xd] behind it");
     }
 
     #[test]

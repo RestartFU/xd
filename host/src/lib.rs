@@ -707,10 +707,6 @@ impl Engine {
             .and_then(|store| store.take_chats_to_resume().ok())
             .unwrap_or_default();
         let mut resumed = Vec::new();
-        let cut_off = chats
-            .iter()
-            .map(|chat| chat.chat_id.clone())
-            .collect::<Vec<_>>();
         if request.get("resume").and_then(Value::as_bool) == Some(true) {
             for chat in chats {
                 let prompt = chat.prompt();
@@ -732,11 +728,14 @@ impl Engine {
                 }
             }
         }
-        // A chat the restart cut off held its agents' reports until now; one
-        // that resumed gets them once that turn ends.
-        for chat_id in cut_off.iter().filter(|chat_id| !resumed.contains(chat_id)) {
-            if let Err(error) = self.start_waiting_reports(chat_id, false) {
-                eprintln!("xd-host: cannot hand chat {chat_id} its agents' reports: {error}");
+        // The chats the restart cut off held their agents' reports until
+        // now, those not offered for resuming too. One that resumed gets them
+        // once that turn ends.
+        if let Some(store) = self.store.as_ref() {
+            for chat_id in store.chats_with_waiting_reports().unwrap_or_default() {
+                if let Err(error) = self.start_waiting_reports(&chat_id, false) {
+                    eprintln!("xd-host: cannot hand chat {chat_id} its agents' reports: {error}");
+                }
             }
         }
         json!({"ok": true, "resumed": resumed})

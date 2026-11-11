@@ -2342,7 +2342,12 @@ impl TurnRuntime {
         };
         due.iter()
             .filter(|(chat_id, quiet_since)| {
-                self.release_agent(chat_id, *quiet_since, &accompanied)
+                let released = self.release_agent(chat_id, *quiet_since, &accompanied);
+                // No report on background work can come from it now.
+                if released {
+                    self.release_held_turn(chat_id, true);
+                }
+                released
             })
             .count()
     }
@@ -3268,7 +3273,14 @@ impl TurnRuntime {
                 held.remove(&settled.chat_id);
             }
         }
+        let chat_id = settled.chat_id.clone();
+        let background = settled.background;
         self.tell_settled(settled);
+        // The work it waited on may have ended since the turn looked, with
+        // nothing left to release it.
+        if background {
+            self.release_held_turn(&chat_id, false);
+        }
     }
 
     fn tell_settled(&self, settled: SettledTurn) {
