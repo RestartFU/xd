@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 /// Dark and Light are a quiet neutral ground in the manner of T3 Code: near-black
 /// or near-white canvas, surfaces separated by hairline borders, neutral fill for
 /// the primary action, and signal colors reserved for session state. Modern and
-/// Modern Light are frosted glass in the manner of macOS: a soft colored wash
-/// behind the app, translucent panes over it, and an indigo accent. See [`Glass`].
+/// Modern Light are frosted glass in the manner of macOS: a soft wash behind the
+/// app (black in Modern, pastel in Modern Light), translucent panes over it, and
+/// an indigo accent. See [`Glass`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemeColors {
     pub background: u32,
@@ -189,41 +190,41 @@ impl ThemePreset {
                 glass: None,
             },
             Self::Modern => ThemeColors {
-                background: 0x11141d,
-                sidebar: 0x1e2236,
-                surface: 0x1b1f2f,
-                surface_high: 0x252a3d,
-                border: 0x2e3348,
-                selected_surface: 0x2a3049,
+                background: 0x0b0b0b,
+                sidebar: 0x161616,
+                surface: 0x161616,
+                surface_high: 0x202020,
+                border: 0x2a2a2a,
+                selected_surface: 0x262626,
                 selected_border: 0x7178e6,
-                text: 0xedeff5,
+                text: 0xf2f2f2,
                 codex_icon: 0xffffff,
                 claude_icon: 0xd97757,
-                muted: 0xb0b6c9,
-                faint: 0x959cb2,
+                muted: 0xadadad,
+                faint: 0x929292,
                 accent: 0x8b8ff8,
                 accent_ink: 0xa9adff,
                 accent_hover: 0xa6a9ff,
                 accent_text: 0x0e1016,
-                rule: 0x2a2e42,
+                rule: 0x262626,
                 working: 0x63d8a8,
                 waiting: 0xf0c06a,
                 done: 0xa9adff,
                 danger: 0xff94a2,
-                danger_surface: 0x2c1520,
-                diff_added: 0x173328,
-                diff_removed: 0x3b1d28,
+                danger_surface: 0x2a1416,
+                diff_added: 0x142b20,
+                diff_removed: 0x351a20,
                 selection: 0x8b8ff840,
-                backdrop: 0x05060ab3,
-                chrome: 0x1e2236,
-                composer: 0x252a42,
+                backdrop: 0x000000b3,
+                chrome: 0x161616,
+                composer: 0x1e1e1e,
                 glass: Some(Glass {
-                    wash_from: 0x1d1b4d,
-                    wash_to: 0x0a2229,
-                    glow: 0x6a2e8059,
-                    pane: 0x2a2f528c,
-                    composer: 0x30365cc7,
-                    edge: 0xffffff24,
+                    wash_from: 0x181818,
+                    wash_to: 0x050505,
+                    glow: 0x4a4a4a40,
+                    pane: 0x2a2a2a8c,
+                    composer: 0x2f2f2fc7,
+                    edge: 0xffffff1f,
                 }),
             },
             Self::ModernLight => ThemeColors {

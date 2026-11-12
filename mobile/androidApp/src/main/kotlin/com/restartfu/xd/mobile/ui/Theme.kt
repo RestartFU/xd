@@ -144,7 +144,7 @@ public enum class MinimalThemePreset(
 ) {
     DARK("dark", "Dark", Color(0xFF1B1B1B), isLight = false),
     LIGHT("light", "Light", Color(0xFFF4F4F4), isLight = true),
-    MODERN("modern", "Modern", Color(0xFF11141D), isLight = false),
+    MODERN("modern", "Modern", Color(0xFF0B0B0B), isLight = false),
     MODERN_LIGHT("modern-light", "Modern Light", Color(0xFFEEF0F9), isLight = true),
     ;
 
@@ -189,9 +189,9 @@ public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
     )
     MinimalThemePreset.MODERN -> XdSignals(
         working = Color(0xFF63D8A8), waiting = Color(0xFFF0C06A),
-        done = Color(0xFFA9ADFF), rule = Color(0xFF2A2E42),
-        link = Color(0xFFA9ADFF), faint = Color(0xFF959CB2),
-        diffAdded = Color(0xFF173328), diffRemoved = Color(0xFF3B1D28),
+        done = Color(0xFFA9ADFF), rule = Color(0xFF262626),
+        link = Color(0xFFA9ADFF), faint = Color(0xFF929292),
+        diffAdded = Color(0xFF142B20), diffRemoved = Color(0xFF351A20),
         codexIcon = Color.White, claudeIcon = Color(0xFFD97757),
     )
     MinimalThemePreset.MODERN_LIGHT -> XdSignals(
@@ -226,8 +226,8 @@ public data class XdGlass(
 public fun xdGlass(theme: MinimalThemePreset): XdGlass? = when (theme) {
     MinimalThemePreset.DARK, MinimalThemePreset.LIGHT -> null
     MinimalThemePreset.MODERN -> XdGlass(
-        washFrom = Color(0xFF1D1B4D), washTo = Color(0xFF0A2229), glow = Color(0x596A2E80),
-        pane = Color(0x8C2A2F52), composer = Color(0xC730365C), edge = Color(0x24FFFFFF),
+        washFrom = Color(0xFF181818), washTo = Color(0xFF050505), glow = Color(0x404A4A4A),
+        pane = Color(0x8C2A2A2A), composer = Color(0xC72F2F2F), edge = Color(0x1FFFFFFF),
     )
     MinimalThemePreset.MODERN_LIGHT -> XdGlass(
         washFrom = Color(0xFFDCDCFB), washTo = Color(0xFFD3EBF3), glow = Color(0x99F7D6EE),
@@ -310,8 +310,9 @@ public fun glassComposer(solid: Color): Color = LocalXdGlass.current?.composer ?
 public fun glassEdge(solid: Color): Color = LocalXdGlass.current?.edge ?: solid
 
 /**
- * Neutral charcoal and silver (Dark, Light), or frosted slate with an indigo
- * accent (Modern, Modern Light), expressed through complete Material color roles.
+ * Neutral charcoal and silver (Dark, Light), or frosted glass with an indigo
+ * accent (Modern on black, Modern Light on pastel), expressed through complete
+ * Material color roles.
  */
 public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) {
     MinimalThemePreset.DARK -> darkColorScheme(
@@ -354,22 +355,22 @@ public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) 
     )
     MinimalThemePreset.MODERN -> darkColorScheme(
         primary = Color(0xFF8B8FF8), onPrimary = Color(0xFF0E1016),
-        primaryContainer = Color(0xFF2E3348), onPrimaryContainer = Color(0xFFEDEFF5),
-        secondary = Color(0xFFB0B6C9), onSecondary = Color(0xFF0E1016),
-        secondaryContainer = Color(0xFF2E3348), onSecondaryContainer = Color(0xFFEDEFF5),
+        primaryContainer = Color(0xFF2A2A2A), onPrimaryContainer = Color(0xFFF2F2F2),
+        secondary = Color(0xFFADADAD), onSecondary = Color(0xFF0B0B0B),
+        secondaryContainer = Color(0xFF2A2A2A), onSecondaryContainer = Color(0xFFF2F2F2),
         tertiary = Color(0xFFA9ADFF), onTertiary = Color(0xFF0E1016),
-        tertiaryContainer = Color(0xFF2E3348), onTertiaryContainer = Color(0xFFEDEFF5),
-        background = Color(0xFF11141D), onBackground = Color(0xFFEDEFF5),
-        surface = Color(0xFF11141D), onSurface = Color(0xFFEDEFF5),
-        surfaceVariant = Color(0xFF252A42), onSurfaceVariant = Color(0xFFB0B6C9),
-        surfaceContainerLowest = Color(0xFF0B0E16), surfaceContainerLow = Color(0xFF1E2236),
-        surfaceContainer = Color(0xFF1B1F2F), surfaceContainerHigh = Color(0xFF252A3D),
-        surfaceContainerHighest = Color(0xFF2E3348), surfaceBright = Color(0xFF2E3348),
-        surfaceDim = Color(0xFF11141D), inverseSurface = Color(0xFFEDEFF5),
-        inverseOnSurface = Color(0xFF1E2236), inversePrimary = Color(0xFF4B4FB8),
-        outline = Color(0xFF7B8296), outlineVariant = Color(0xFF343A52),
-        scrim = Color(0xFF000000), error = Color(0xFFFF94A2), onError = Color(0xFF3B1D28),
-        errorContainer = Color(0xFF3B1D28), onErrorContainer = Color(0xFFFFD9DE),
+        tertiaryContainer = Color(0xFF2A2A2A), onTertiaryContainer = Color(0xFFF2F2F2),
+        background = Color(0xFF0B0B0B), onBackground = Color(0xFFF2F2F2),
+        surface = Color(0xFF0B0B0B), onSurface = Color(0xFFF2F2F2),
+        surfaceVariant = Color(0xFF1E1E1E), onSurfaceVariant = Color(0xFFADADAD),
+        surfaceContainerLowest = Color(0xFF050505), surfaceContainerLow = Color(0xFF161616),
+        surfaceContainer = Color(0xFF161616), surfaceContainerHigh = Color(0xFF202020),
+        surfaceContainerHighest = Color(0xFF2A2A2A), surfaceBright = Color(0xFF2A2A2A),
+        surfaceDim = Color(0xFF0B0B0B), inverseSurface = Color(0xFFF2F2F2),
+        inverseOnSurface = Color(0xFF161616), inversePrimary = Color(0xFF4B4FB8),
+        outline = Color(0xFF858585), outlineVariant = Color(0xFF333333),
+        scrim = Color(0xFF000000), error = Color(0xFFFF94A2), onError = Color(0xFF351A20),
+        errorContainer = Color(0xFF351A20), onErrorContainer = Color(0xFFFFD9DE),
     )
     MinimalThemePreset.MODERN_LIGHT -> lightColorScheme(
         primary = Color(0xFF5257D9), onPrimary = Color(0xFFFFFFFF),
