@@ -9,6 +9,11 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -2474,6 +2479,95 @@ private fun NewProjectDialog(
 }
 
 /**
+ * The theme choices as cards with the swatch over the name, like the
+ * desktop's, three across. When the names cannot fit that way, as on a narrow
+ * phone with enlarged text, the choices stack as full-width rows instead.
+ */
+@Composable
+private fun ThemePicker(theme: MinimalThemePreset, choose: (MinimalThemePreset) -> Unit) {
+    val presets = MinimalThemePreset.entries
+    val measurer = rememberTextMeasurer()
+    val style = LocalTextStyle.current.copy(fontWeight = FontWeight.SemiBold)
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val gap = 8.dp
+        val padding = 10.dp
+        val cell = (maxWidth - gap * (presets.size - 1)) / presets.size - padding * 2
+        val widest = with(LocalDensity.current) {
+            presets.maxOf { measurer.measure(it.label, style).size.width }.toDp()
+        }
+        val across = widest <= cell
+        val choices: @Composable (Modifier) -> Unit = { modifier ->
+            presets.forEach { preset ->
+                ThemeChoice(preset, chosen = theme == preset, across = across, padding = padding, modifier = modifier) {
+                    choose(preset)
+                }
+            }
+        }
+        if (across) {
+            Row(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                choices(Modifier.weight(1f))
+            }
+        } else {
+            Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(gap)) {
+                choices(Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThemeChoice(
+    preset: MinimalThemePreset,
+    chosen: Boolean,
+    across: Boolean,
+    padding: Dp,
+    modifier: Modifier,
+    choose: () -> Unit,
+) {
+    val shape = RoundedCornerShape(8.dp)
+    val card = modifier
+        .heightIn(min = 48.dp)
+        .clip(shape)
+        .border(
+            if (chosen) 1.5.dp else 1.dp,
+            if (chosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+            shape,
+        )
+        .selectable(selected = chosen, role = Role.RadioButton, onClick = choose)
+        .padding(padding)
+    val swatch = Modifier
+        .clip(RoundedCornerShape(4.dp))
+        .background(preset.preview)
+        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(4.dp))
+    val label: @Composable () -> Unit = {
+        Text(
+            preset.label,
+            fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
+            textAlign = TextAlign.Center,
+        )
+    }
+    if (across) {
+        Column(
+            card,
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(swatch.fillMaxWidth().height(20.dp))
+            label()
+        }
+    } else {
+        Row(
+            card,
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(swatch.size(width = 28.dp, height = 20.dp))
+            label()
+        }
+    }
+}
+
+/**
  * The app's settings: how it looks and behaves on this phone, and the parts of
  * the connected host it can manage, as on the desktop's Settings page.
  */
@@ -2500,43 +2594,7 @@ private fun MinimalSettingsDialog(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 Text("Appearance", style = MaterialTheme.typography.titleSmall)
-                // Swatch over name, like the desktop's theme cards, so three
-                // fit across a narrow phone without the names wrapping.
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MinimalThemePreset.entries.forEach { preset ->
-                        val chosen = theme == preset
-                        Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 48.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .border(
-                                    if (chosen) 1.5.dp else 1.dp,
-                                    if (chosen) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.outlineVariant,
-                                    RoundedCornerShape(8.dp),
-                                )
-                                .clickable { settings.setTheme(preset) }
-                                .padding(10.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Box(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .height(20.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(preset.preview)
-                                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(4.dp)),
-                            )
-                            Text(
-                                preset.label,
-                                fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
-                                maxLines = 1,
-                            )
-                        }
-                    }
-                }
+                ThemePicker(theme, settings::setTheme)
                 HorizontalDivider()
                 SettingSwitch(
                     title = "All permissions",

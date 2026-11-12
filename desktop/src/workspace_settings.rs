@@ -691,12 +691,14 @@ impl XdDesktop {
                                                     .flex()
                                                     .flex_col()
                                                     .gap(px(8.0))
+                                                    // The accent, so themes that share a
+                                                    // dark ground still look different.
                                                     .child(
                                                         div()
                                                             .w(px(72.0))
                                                             .h(px(5.0))
                                                             .rounded_full()
-                                                            .bg(rgb(swatch.muted)),
+                                                            .bg(rgb(swatch.accent)),
                                                     )
                                                     .child(
                                                         div()
