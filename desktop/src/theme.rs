@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 /// Keeping the roles semantic lets GPUI views change theme without knowing
 /// which concrete color belongs to a background, divider, or text treatment.
 ///
-/// The palette is a quiet neutral ground in the manner of T3 Code: near-black
-/// or near-white canvas, surfaces separated by hairline borders, neutral fill for
-/// the primary action, and signal colors reserved for session state.
+/// Both themes are frosted glass in the manner of macOS, drawn inside an opaque
+/// window: Dark is black glass, Light frosted white over a cool grey, both with
+/// an indigo accent and signal colors reserved for session state. See [`Glass`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemeColors {
     pub background: u32,
@@ -50,6 +50,48 @@ pub struct ThemeColors {
     pub chrome: u32,
     /// The message composer.
     pub composer: u32,
+    /// The frosted glass the window, panes and composer draw with. The opaque
+    /// roles above stay complete, so anything that does not draw glass (cards,
+    /// menus, dialogs, previews) still looks right.
+    pub glass: Glass,
+}
+
+/// Glass drawn inside the app; the window itself stays opaque, so nothing
+/// outside it ever shows through.
+///
+/// The window paints one flat backdrop. Page canvases (the chat, a project's
+/// page, the session column) leave it showing, and the sidebar, title bars, tab
+/// rows and composer are translucent panes over it, set apart by a hairline
+/// edge. Reading surfaces such as the terminal, code blocks, cards, menus and
+/// dialogs keep their opaque roles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Glass {
+    /// What the window paints behind everything.
+    pub backdrop: u32,
+    /// The sidebar, title bars and tab rows, as `0xRRGGBBAA`.
+    pub pane: u32,
+    /// The message composer, as `0xRRGGBBAA`.
+    pub composer: u32,
+    /// The hairline along a pane's edge, as `0xRRGGBBAA`: light on the dark
+    /// backdrop, dark on the light one.
+    pub edge: u32,
+}
+
+impl Glass {
+    /// The opaque color a translucent `0xRRGGBBAA` fill shows over `under`.
+    pub const fn over(fill: u32, under: u32) -> u32 {
+        let alpha = fill & 0xff;
+        let top = fill >> 8;
+        let mut out = 0;
+        let mut shift = 0;
+        while shift <= 16 {
+            let a = (top >> shift) & 0xff;
+            let b = (under >> shift) & 0xff;
+            out |= ((a * alpha + b * (255 - alpha) + 127) / 255) << shift;
+            shift += 8;
+        }
+        out
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -75,64 +117,76 @@ impl ThemePreset {
     pub const fn colors(self) -> ThemeColors {
         match self {
             Self::Dark => ThemeColors {
-                background: 0x1b1b1b,
-                sidebar: 0x202020,
-                surface: 0x292929,
-                surface_high: 0x333333,
-                border: 0x383838,
-                selected_surface: 0x373737,
-                selected_border: 0x858585,
-                text: 0xf1f1f1,
+                background: 0x0b0b0b,
+                sidebar: 0x0f0f0f,
+                surface: 0x111111,
+                surface_high: 0x1b1b1b,
+                border: 0x2a2a2a,
+                selected_surface: 0x222222,
+                selected_border: 0x7178e6,
+                text: 0xf2f2f2,
                 codex_icon: 0xffffff,
                 claude_icon: 0xd97757,
-                muted: 0xb1b1b1,
-                faint: 0xababab,
-                accent: 0xdedede,
-                accent_ink: 0xdedede,
-                accent_hover: 0xf2f2f2,
-                accent_text: 0x1b1b1b,
-                rule: 0x383838,
-                working: 0x8dceb0,
-                waiting: 0xe2c28d,
-                done: 0xdedede,
-                danger: 0xefa7ad,
-                danger_surface: 0x2a1616,
-                diff_added: 0x263b30,
-                diff_removed: 0x462c30,
-                selection: 0xffffff35,
+                muted: 0xadadad,
+                faint: 0x929292,
+                accent: 0x8b8ff8,
+                accent_ink: 0xa9adff,
+                accent_hover: 0xa6a9ff,
+                accent_text: 0x0e1016,
+                rule: 0x262626,
+                working: 0x63d8a8,
+                waiting: 0xf0c06a,
+                done: 0xa9adff,
+                danger: 0xff94a2,
+                danger_surface: 0x2a1416,
+                diff_added: 0x142b20,
+                diff_removed: 0x351a20,
+                selection: 0x8b8ff840,
                 backdrop: 0x000000b3,
-                chrome: 0x292929,
-                composer: 0x303030,
+                chrome: 0x0f0f0f,
+                composer: 0x161616,
+                glass: Glass {
+                    backdrop: 0x0b0b0b,
+                    pane: 0xffffff04,
+                    composer: 0x161616d9,
+                    edge: 0xffffff1f,
+                },
             },
             Self::Light => ThemeColors {
-                background: 0xfafafa,
-                sidebar: 0xe4e4e4,
-                surface: 0xffffff,
-                surface_high: 0xefefef,
-                border: 0xd0d0d0,
-                selected_surface: 0xededed,
-                selected_border: 0x7d7d7d,
-                text: 0x202020,
-                codex_icon: 0x202020,
+                background: 0xeef0f9,
+                sidebar: 0xf3f4fb,
+                surface: 0xf8f9fd,
+                surface_high: 0xeceef7,
+                border: 0xd3d7e6,
+                selected_surface: 0xdfe2f4,
+                selected_border: 0x6366e0,
+                text: 0x1b1e2c,
+                codex_icon: 0x1b1e2c,
                 claude_icon: 0xb85c3f,
-                muted: 0x5a5a5a,
-                faint: 0x606060,
-                accent: 0x363636,
-                accent_ink: 0x444444,
-                accent_hover: 0x202020,
+                muted: 0x4b5165,
+                faint: 0x5a6074,
+                accent: 0x5257d9,
+                accent_ink: 0x4045bb,
+                accent_hover: 0x4347c4,
                 accent_text: 0xffffff,
-                rule: 0xd0d0d0,
-                working: 0x226347,
-                waiting: 0x745319,
-                done: 0x444444,
-                danger: 0xa13242,
-                danger_surface: 0xfdeeee,
-                diff_added: 0xe6f5eb,
-                diff_removed: 0xfcebeb,
-                selection: 0x20202030,
-                backdrop: 0x18181b66,
-                chrome: 0xf1f1f1,
+                rule: 0xdadde9,
+                working: 0x17603f,
+                waiting: 0x6c490a,
+                done: 0x4045bb,
+                danger: 0x97203a,
+                danger_surface: 0xfbe9ed,
+                diff_added: 0xdff2e6,
+                diff_removed: 0xf8e1e6,
+                selection: 0x5257d933,
+                backdrop: 0x1b1e2c66,
+                chrome: 0xf3f4fb,
                 composer: 0xffffff,
+                glass: Glass {
+                    backdrop: 0xe4e7f4,
+                    pane: 0xffffff8c,
+                    composer: 0xffffffd0,
+                    edge: 0x1b1e2c1f,
+                },
             },
         }
     }

@@ -30,14 +30,14 @@ xd does not ship its own model or agent. It wraps the user's own CLIs, authentic
 ## Capabilities and Constraints
 
 - Desktop UI is GPUI: no CSS, no web components; everything is drawn in Rust in `desktop/src/main.rs` and its siblings. The palette lives in `desktop/src/theme.rs` as semantic roles.
-- Themes: exactly two, Dark and Light (confirmed 2026-10-23). Saved legacy theme names load as Dark.
+- Themes: exactly two, Dark and Light (confirmed 2026-10-23), both a glassy, macOS-style look drawn inside the app, with no gradient (confirmed 2026-11-12). The earlier charcoal and silver looks were replaced. Saved legacy theme names load as Dark.
 - The Linux browser pane is Chromium (through CEF) over X11.
 - Redesign scope (confirmed 2026-10-23): the whole UI, including navigation and flows, on both desktop and Android. Existing capabilities stay available; sessions gain separate chat tabs sharing their workspace.
 
 ## Brand Commitments
 
 - The name is lowercase `xd`. There is an existing app icon in `desktop/assets/icons`.
-- The approved direction is a T3 Code-like workspace with neutral charcoal, plus a neutral silver Light theme. Preserve real platform window controls without decorative traffic lights (confirmed 2026-10-30). The window and its surfaces are opaque; the earlier clear-glass treatment was removed because seeing behind the app was unwanted (confirmed 2026-11-06).
+- The approved direction is a T3 Code-like workspace in frosted glass: black glass for Dark, frosted white over cool grey for Light, with an indigo accent (confirmed 2026-11-12; it replaced neutral charcoal and silver). Preserve real platform window controls without decorative traffic lights (confirmed 2026-10-30). The window is opaque; the earlier clear-glass treatment was removed because seeing behind the app was unwanted (confirmed 2026-11-06). Glass returned inside that opaque window instead: translucent chrome over a flat backdrop, never anything outside the app (confirmed 2026-11-12). Gradients were tried and rejected (2026-11-12).
 
 ## Evidence on Hand
 

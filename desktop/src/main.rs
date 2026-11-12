@@ -72,6 +72,7 @@ mod chat_quota;
 mod composer;
 mod editor;
 mod files;
+mod glass;
 mod image_preview;
 mod input;
 mod minimal;
@@ -8225,9 +8226,9 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap_1()
-            .bg(rgb(colors.chrome))
+            .bg(glass::pane(colors))
             .border_b_1()
-            .border_color(rgb(colors.border))
+            .border_color(glass::edge(colors))
             .child(
                 div()
                     .id("session-chat-tab-scroll")
@@ -13918,9 +13919,9 @@ impl XdDesktop {
             } else {
                 16.0
             }))
-            .bg(rgb(colors.chrome))
+            .bg(glass::pane(colors))
             .border_b_1()
-            .border_color(rgb(colors.border))
+            .border_color(glass::edge(colors))
             .when(titlebar, |bar| {
                 bar.on_mouse_down(MouseButton::Left, |event, window, _| {
                     if event.click_count >= 2 {
@@ -14085,7 +14086,7 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .bg(rgb(colors.chrome))
+            .bg(glass::pane(colors))
             .child(
                 div()
                     .min_w_0()
@@ -16199,12 +16200,12 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(rgb(if self.catalog_drag.is_some() {
-                colors.accent
+            .border_color(if self.catalog_drag.is_some() {
+                rgb(colors.accent)
             } else {
-                colors.border
-            }))
-            .bg(rgb(colors.sidebar))
+                glass::edge(colors)
+            })
+            .bg(glass::pane(colors))
             .child(
                 div()
                     .h(px(40.0))
@@ -16467,7 +16468,7 @@ impl XdDesktop {
             .min_w_0()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(rgb(colors.background))
+            .bg(glass::canvas())
             .child(
                 div()
                     .w_full()
@@ -18609,7 +18610,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgb(colors.background))
+                .bg(glass::canvas())
                 .text_size(px(13.0))
                 .text_color(rgb(colors.muted))
                 .child("This agent's record is not loaded. Scroll the chat back to it and open it again.")
@@ -18933,7 +18934,7 @@ impl XdDesktop {
                     } else {
                         colors.border
                     }))
-                    .bg(rgb(colors.composer))
+                    .bg(glass::composer(colors))
                     .shadow_md()
                     .child(
                         div()
@@ -18972,7 +18973,7 @@ impl XdDesktop {
             .flex_col()
             .items_center()
             .px(px(24.0))
-            .bg(rgb(colors.background))
+            .bg(glass::canvas())
             .child(
                 div()
                     .id("agent-view-scroll")
@@ -20217,7 +20218,7 @@ impl XdDesktop {
             .items_center()
             .when(empty_ready, |chat| chat.justify_center())
             .px(px(24.0))
-            .bg(rgb(colors.background))
+            .bg(glass::canvas())
             // Files dropped anywhere on the chat join the draft.
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let Some(chat) = this.model.selected_chat.clone() else {
@@ -20692,7 +20693,7 @@ impl XdDesktop {
                     .child(
                         div()
                             .h(px(browser::TAB_BAR_HEIGHT))
-                            .bg(rgb(colors.chrome))
+                            .bg(glass::pane(colors))
                             .flex_none()
                             .pl_2()
                             .pr_3()
@@ -20817,7 +20818,7 @@ impl XdDesktop {
                     .child(
                         div()
                             .h(px(browser::TAB_BAR_HEIGHT))
-                            .bg(rgb(colors.chrome))
+                            .bg(glass::pane(colors))
                             .flex_none()
                             .pl_3()
                             .pr_2()
@@ -21036,7 +21037,7 @@ impl XdDesktop {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(colors.background))
+            .bg(glass::canvas())
             .child(
                 div()
                     .flex_1()
@@ -21044,7 +21045,7 @@ impl XdDesktop {
                     .flex_col()
                     .min_w_0()
                     .min_h_0()
-                    .bg(rgb(colors.background))
+                    .bg(glass::canvas())
                     .child(content),
             )
             .into_any_element()
@@ -21062,7 +21063,7 @@ impl XdDesktop {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(colors.background))
+            .bg(glass::canvas())
             .child(
                 div()
                     .h(px(52.0))
@@ -21090,6 +21091,7 @@ impl XdDesktop {
             self.queue_edit_input.clone(),
             self.file_editor.clone(),
             self.tab_editor.clone(),
+            self.agent_input.clone(),
         ] {
             editor.update(cx, |editor, cx| editor.set_colors(colors, cx));
         }
@@ -22631,7 +22633,7 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .key_context("XdDesktop")
-            .bg(rgb(colors.background))
+            .bg(glass::window(colors))
             .font_family(UI_FONT)
             .on_mouse_move(
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
@@ -29311,7 +29313,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[test]
     fn a_turn_held_up_on_the_user_reads_as_waiting_in_amber() {
-        for preset in [ThemePreset::Dark, ThemePreset::Light] {
+        for preset in ThemePreset::ALL {
             let colors = preset.colors();
             assert_eq!(turn_status(false, colors), ("Working", colors.working));
             assert_eq!(

@@ -728,7 +728,7 @@ impl XdDesktop {
             .items_center()
             .when(!starting, |view| view.justify_center())
             .px_6()
-            .bg(rgb(colors.background))
+            .bg(crate::glass::canvas())
             .when(!starting, |view| {
                 let (heading, description) = composer::EMPTY_CHAT;
                 view.child(

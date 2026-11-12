@@ -169,6 +169,7 @@ class ProjectsScreenshotTest {
         checkBarCentred()
     }
 
+    /** The list scrolls beneath the floating bar, which stays opaque over the glass. */
     @Test fun longListDark() = longList("long-list-dark", MinimalThemePreset.DARK)
 
     @Test fun longListLight() = longList("long-list-light", MinimalThemePreset.LIGHT)
@@ -588,11 +589,7 @@ class ProjectsScreenshotTest {
         compose.mainClock.autoAdvance = false
         compose.setContent {
             val link by model.client.link.collectAsStateWithLifecycle()
-            CompositionLocalProvider(LocalXdSignals provides xdSignals(theme)) {
-                MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography) {
-                    Surface(Modifier.fillMaxSize()) { MinimalMobileApp(model, link, settings) }
-                }
-            }
+            XdRoot(theme) { MinimalMobileApp(model, link, settings) }
         }
         val screen = Screen(compose, activity)
         // The scripted host answers on its own threads, so wait for the tree and avatars.

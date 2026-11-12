@@ -13,8 +13,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isNotSelected
+import androidx.compose.ui.test.isSelectable
+import androidx.compose.ui.test.isSelected
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
+import android.content.res.Configuration
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.performClick
@@ -62,22 +69,40 @@ class SettingsScreenshotTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     /** Replies are no longer read aloud, so Settings has no switch for it. */
-    @Test fun settingsDark() {
+    @Test fun settingsDark() = shoot("settings-dark", MinimalThemePreset.DARK)
+
+    /** Both themes are offered, and the chosen one is the one marked. */
+    @Test fun settingsLight() = shoot("settings-light", MinimalThemePreset.LIGHT)
+
+    /** The themes still fit side by side on a narrow phone. */
+    @Config(qualifiers = "w360dp-h780dp-420dpi")
+    @Test fun settingsNarrow() = shoot("settings-narrow", MinimalThemePreset.DARK)
+
+    /** With enlarged text the themes stack rather than clip their names. */
+    @Config(qualifiers = "w360dp-h780dp-420dpi")
+    @Test fun settingsLargeText() =
+        shoot("settings-large-text", MinimalThemePreset.DARK, fontScale = 2f)
+
+    private fun shoot(name: String, theme: MinimalThemePreset, fontScale: Float = 1f) {
         val activity = compose.activity
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val model = MainViewModel(activity.application, XdClient({ ScriptedSocket() }, NoCredentials, scope))
         val connected = runBlocking { model.client.connect(connection) }
         check(connected is ConnectResult.Success) { "Could not reach the scripted host: $connected" }
         val settings = MobileSettings(activity)
-        val theme = MinimalThemePreset.DARK
+        settings.setTheme(theme)
+        // Through the configuration, because the dialog's own view reads its
+        // density from there, not from the page's composition.
+        if (fontScale != 1f) {
+            val resources = activity.resources
+            val config = Configuration(resources.configuration).apply { this.fontScale = fontScale }
+            @Suppress("DEPRECATION")
+            resources.updateConfiguration(config, resources.displayMetrics)
+        }
         compose.mainClock.autoAdvance = false
         compose.setContent {
             val link by model.client.link.collectAsStateWithLifecycle()
-            CompositionLocalProvider(LocalXdSignals provides xdSignals(theme)) {
-                MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography) {
-                    Surface(Modifier.fillMaxSize()) { MinimalMobileApp(model, link, settings) }
-                }
-            }
+            XdRoot(theme) { MinimalMobileApp(model, link, settings) }
         }
         val deadline = System.currentTimeMillis() + 60_000
         while (model.client.tree.value.folders.isEmpty() && System.currentTimeMillis() < deadline) settle()
@@ -90,10 +115,25 @@ class SettingsScreenshotTest {
             }
             check(shows("All permissions") && shows("Resume chats after a restart"))
             check(!shows("Read replies aloud"))
+            for (preset in MinimalThemePreset.entries) {
+                // The card is one radio choice, marked only when it is the theme in use.
+                compose.onNode(hasText(preset.label) and isSelectable())
+                    .assert(if (preset == theme) isSelected() else isNotSelected())
+                val layout = mutableListOf<TextLayoutResult>()
+                compose.onNode(hasText(preset.label), useUnmergedTree = true)
+                    .fetchSemanticsNode().config[SemanticsActions.GetTextLayoutResult].action!!(layout)
+                // The name's natural one-line width fits the width its card gives it.
+                val text = layout.single()
+                val natural = text.multiParagraph.intrinsics.maxIntrinsicWidth
+                check(text.lineCount == 1 && natural <= text.layoutInput.constraints.maxWidth) {
+                    "${preset.label} does not fit its card: ${text.lineCount} lines, " +
+                        "$natural px wide in ${text.layoutInput.constraints.maxWidth} px"
+                }
+            }
         } finally {
             out?.let { dir ->
                 dir.mkdirs()
-                File(dir, "settings-dark.png").outputStream().use { capture().compress(Bitmap.CompressFormat.PNG, 100, it) }
+                File(dir, "$name.png").outputStream().use { capture().compress(Bitmap.CompressFormat.PNG, 100, it) }
             }
             scope.cancel()
         }

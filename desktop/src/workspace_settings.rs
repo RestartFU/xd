@@ -1,5 +1,27 @@
 use super::*;
 
+/// Room for a theme name and the chosen dot.
+const THEME_CARD_MIN_WIDTH: f32 = 136.0;
+/// The gap between theme cards, `gap_4`.
+const THEME_CARD_GAP: f32 = 16.0;
+/// The settings section navigation beside the content, with its border.
+const SETTINGS_NAV_WIDTH: f32 = 177.0;
+
+/// How many theme cards sit in a row across `room`: all of them, or two to
+/// a row, or one, whichever keeps every card wide enough for its name. With two
+/// themes, both sit side by side unless the panel is very narrow.
+fn theme_columns(room: f32) -> usize {
+    [ThemePreset::ALL.len(), 2]
+        .into_iter()
+        .find(|&columns| theme_card_width(room, columns) >= THEME_CARD_MIN_WIDTH)
+        .unwrap_or(1)
+}
+
+fn theme_card_width(room: f32, columns: usize) -> f32 {
+    // A pixel short, so rounding never pushes the last card onto a new row.
+    ((room - THEME_CARD_GAP * (columns - 1) as f32) / columns as f32).floor() - 1.0
+}
+
 /// The settings section that holds the assistant accounts.
 pub(super) const AGENTS_SECTION: usize = 2;
 
@@ -554,6 +576,9 @@ impl XdDesktop {
         let width = (f32::from(window.viewport_size().width) - 48.0).clamp(280.0, 900.0);
         let height = (f32::from(window.viewport_size().height) - 64.0).clamp(240.0, 760.0);
         let compact = width < 640.0;
+        let content_padding = if compact { 20.0 } else { 32.0 };
+        let content_room =
+            width - if compact { 0.0 } else { SETTINGS_NAV_WIDTH } - 2.0 * content_padding;
         let section = self.settings_section.min(SETTINGS_SECTIONS.len() - 1);
         let minimal_popup_focus = self.minimal_popup_focus.clone();
         let (title, description) = SETTINGS_SECTIONS[section];
@@ -622,7 +647,7 @@ impl XdDesktop {
             .min_h_0()
             .h_full()
             .overflow_y_scroll()
-            .p(px(if compact { 20.0 } else { 32.0 }))
+            .p(px(content_padding))
             .bg(rgb(colors.background))
             .text_color(rgb(colors.text))
             .child(
@@ -642,18 +667,21 @@ impl XdDesktop {
 
         match section {
             0 => {
+                let card_width = theme_card_width(content_room, theme_columns(content_room));
                 content = content.child(settings_heading("Theme", colors)).child(
-                    div()
-                        .flex()
-                        .gap_4()
-                        .children(ThemePreset::ALL.into_iter().enumerate().map(
-                            |(index, theme)| {
+                    // Side by side when there is room, else one to a row, so the
+                    // cards never clip their names.
+                    div().flex().flex_wrap().gap_4().children(
+                        ThemePreset::ALL
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, theme)| {
                                 let swatch = theme.colors();
                                 let selected = self.settings.theme == theme;
                                 div()
                                     .id(("minimal-theme-choice", index))
-                                    .flex_1()
-                                    .min_w_0()
+                                    .flex_none()
+                                    .w(px(card_width))
                                     .rounded(px(12.0))
                                     .overflow_hidden()
                                     .border_1()
@@ -676,13 +704,13 @@ impl XdDesktop {
                                             .p_3()
                                             .flex()
                                             .gap(px(10.0))
-                                            .bg(rgb(swatch.background))
+                                            .bg(crate::glass::window(swatch))
                                             .child(
                                                 div()
                                                     .w(px(28.0))
                                                     .h_full()
                                                     .rounded(px(5.0))
-                                                    .bg(rgb(swatch.sidebar)),
+                                                    .bg(crate::glass::pane(swatch)),
                                             )
                                             .child(
                                                 div()
@@ -691,12 +719,14 @@ impl XdDesktop {
                                                     .flex()
                                                     .flex_col()
                                                     .gap(px(8.0))
+                                                    // The accent, so themes that share a
+                                                    // dark ground still look different.
                                                     .child(
                                                         div()
                                                             .w(px(72.0))
                                                             .h(px(5.0))
                                                             .rounded_full()
-                                                            .bg(rgb(swatch.muted)),
+                                                            .bg(rgb(swatch.accent)),
                                                     )
                                                     .child(
                                                         div()
@@ -742,8 +772,8 @@ impl XdDesktop {
                                                 )
                                             }),
                                     )
-                            },
-                        )),
+                            }),
+                    ),
                 );
             }
             1 => {
@@ -1268,5 +1298,28 @@ impl XdDesktop {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_cards_sit_side_by_side_unless_their_names_would_clip() {
+        // The widest panel, the panel at the window's minimum width, a compact
+        // panel, and the narrowest panel.
+        assert_eq!(theme_columns(900.0 - SETTINGS_NAV_WIDTH - 64.0), 2);
+        assert_eq!(theme_columns(712.0 - SETTINGS_NAV_WIDTH - 64.0), 2);
+        assert_eq!(theme_columns(600.0 - 40.0), 2);
+        assert_eq!(theme_columns(280.0 - 40.0), 1);
+        for room in [240.0, 300.0, 471.0, 560.0, 659.0] {
+            let columns = theme_columns(room);
+            let width = theme_card_width(room, columns);
+            assert!(width >= THEME_CARD_MIN_WIDTH, "{room}: {width}");
+            // The row fits in the room, so it never wraps early.
+            let row = width * columns as f32 + THEME_CARD_GAP * (columns - 1) as f32;
+            assert!(row <= room, "{room}: {row}");
+        }
     }
 }

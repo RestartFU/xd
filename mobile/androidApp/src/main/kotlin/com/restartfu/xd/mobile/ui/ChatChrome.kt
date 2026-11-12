@@ -123,7 +123,7 @@ internal fun CompactChatBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface)
+                .background(glassPane())
                 .statusBarsPadding()
                 .height(56.dp)
                 .padding(start = 4.dp, end = 4.dp),

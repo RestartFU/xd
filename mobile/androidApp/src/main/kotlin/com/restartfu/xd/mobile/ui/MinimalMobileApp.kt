@@ -9,11 +9,17 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -335,7 +341,7 @@ internal fun MinimalMobileApp(
         model.consumeSettledNotice(notice)
     }
     Box(Modifier.fillMaxSize()) {
-    Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    Row(Modifier.fillMaxSize().background(GlassPage)) {
         if (expanded) {
             XdNavigationRail(mobileDestination, showProjects, showTerminal, showUsage)
         }
@@ -346,7 +352,7 @@ internal fun MinimalMobileApp(
                         model, settings, link, showProjects, barInset,
                     )
                     mobileDestination == MobileDestination.USAGE -> Column(
-                        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+                        Modifier.fillMaxSize().background(GlassPage),
                     ) {
                         ProductHeader(link = link, title = "Usage", onSettings = { settingsOpen = true })
                         // Kept with the other per-host stores, so leaving Usage keeps what it read.
@@ -726,7 +732,7 @@ private fun MinimalProjectsHome(
     Column(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(GlassPage)
             .navigationBarsPadding(),
     ) {
         val pausingAll by model.pausingAll.collectAsStateWithLifecycle()
@@ -1068,7 +1074,7 @@ private fun MinimalGlobalTerminal(
     Column(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(GlassPage)
             .navigationBarsPadding(),
     ) {
         ProductHeader(link = link, title = "Terminal", onSettings = { settingsOpen = true })
@@ -1280,7 +1286,7 @@ private fun ProductHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
+            .background(glassPane())
             .statusBarsPadding()
             .height(56.dp)
             .padding(start = 16.dp, end = 4.dp),
@@ -1381,8 +1387,8 @@ private fun XdNavigationBar(
     Surface(
         modifier = modifier.navigationBarsPadding().padding(bottom = 16.dp).height(FloatingBarHeight),
         shape = CircleShape,
-        color = colors.surfaceContainer,
-        border = BorderStroke(1.dp, colors.outlineVariant),
+        color = glassOverlay(),
+        border = BorderStroke(1.dp, glassEdge()),
         shadowElevation = 6.dp,
     ) {
         Row(
@@ -1437,7 +1443,7 @@ private fun XdNavigationRail(
     onTerminal: () -> Unit,
     onUsage: () -> Unit,
 ) {
-    NavigationRail(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+    NavigationRail(containerColor = glassPane()) {
         Spacer(Modifier.height(16.dp))
         listOf(
             Triple(MobileDestination.PROJECTS, "Projects", R.drawable.ic_projects) to onProjects,
@@ -2489,6 +2495,108 @@ private fun NewProjectDialog(
 }
 
 /**
+ * The theme choices as cards with the swatch over the name, like the
+ * desktop's: all in one row when the names fit, else two to a row. When even
+ * that cannot fit them, as on a narrow phone with enlarged text, the choices
+ * stack as full-width rows instead.
+ */
+@Composable
+private fun ThemePicker(theme: MinimalThemePreset, choose: (MinimalThemePreset) -> Unit) {
+    val presets = MinimalThemePreset.entries
+    val measurer = rememberTextMeasurer()
+    val style = LocalTextStyle.current.copy(fontWeight = FontWeight.SemiBold)
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val gap = 8.dp
+        val padding = 10.dp
+        val widest = with(LocalDensity.current) {
+            presets.maxOf { measurer.measure(it.label, style).size.width }.toDp()
+        }
+        val fits = { columns: Int -> (maxWidth - gap * (columns - 1)) / columns - padding * 2 >= widest }
+        val columns = listOf(presets.size, 2).firstOrNull(fits) ?: 1
+        val card = columns > 1
+        Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(gap)) {
+            presets.chunked(columns).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                    row.forEach { preset ->
+                        ThemeChoice(
+                            preset,
+                            chosen = theme == preset,
+                            card = card,
+                            padding = padding,
+                            modifier = Modifier.weight(1f),
+                        ) { choose(preset) }
+                    }
+                    repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+        }
+    }
+}
+
+/** The theme's ground at a glance: its glass backdrop under a frosted strip. */
+@Composable
+private fun ThemeSwatch(preset: MinimalThemePreset, modifier: Modifier) {
+    val glass = xdGlass(preset)
+    val shape = RoundedCornerShape(4.dp)
+    Box(
+        modifier
+            .clip(shape)
+            .background(glass.backdrop)
+            .border(1.dp, MaterialTheme.colorScheme.outline, shape),
+    ) {
+        Box(Modifier.fillMaxHeight().fillMaxWidth(0.35f).background(glass.pane))
+    }
+}
+
+@Composable
+private fun ThemeChoice(
+    preset: MinimalThemePreset,
+    chosen: Boolean,
+    card: Boolean,
+    padding: Dp,
+    modifier: Modifier,
+    choose: () -> Unit,
+) {
+    val shape = RoundedCornerShape(8.dp)
+    val frame = modifier
+        .heightIn(min = 48.dp)
+        .clip(shape)
+        .border(
+            if (chosen) 1.5.dp else 1.dp,
+            if (chosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+            shape,
+        )
+        .selectable(selected = chosen, role = Role.RadioButton, onClick = choose)
+        .padding(padding)
+    val label: @Composable () -> Unit = {
+        Text(
+            preset.label,
+            fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
+            textAlign = TextAlign.Center,
+        )
+    }
+    if (card) {
+        Column(
+            frame,
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ThemeSwatch(preset, Modifier.fillMaxWidth().height(20.dp))
+            label()
+        }
+    } else {
+        Row(
+            frame,
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            ThemeSwatch(preset, Modifier.size(width = 28.dp, height = 20.dp))
+            label()
+        }
+    }
+}
+
+/**
  * The app's settings: how it looks and behaves on this phone, and the parts of
  * the connected host it can manage, as on the desktop's Settings page.
  */
@@ -2515,39 +2623,7 @@ private fun MinimalSettingsDialog(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 Text("Appearance", style = MaterialTheme.typography.titleSmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MinimalThemePreset.entries.forEach { preset ->
-                        val chosen = theme == preset
-                        Row(
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 48.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .border(
-                                    if (chosen) 1.5.dp else 1.dp,
-                                    if (chosen) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.outlineVariant,
-                                    RoundedCornerShape(8.dp),
-                                )
-                                .clickable { settings.setTheme(preset) }
-                                .padding(horizontal = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Box(
-                                Modifier
-                                    .size(width = 22.dp, height = 16.dp)
-                                    .clip(RoundedCornerShape(3.dp))
-                                    .background(preset.preview)
-                                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(3.dp)),
-                            )
-                            Text(
-                                preset.label,
-                                fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
-                            )
-                        }
-                    }
-                }
+                ThemePicker(theme, settings::setTheme)
                 HorizontalDivider()
                 SettingSwitch(
                     title = "All permissions",

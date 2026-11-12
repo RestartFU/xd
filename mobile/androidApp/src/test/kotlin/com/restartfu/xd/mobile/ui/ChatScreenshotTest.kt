@@ -101,19 +101,15 @@ class ChatScreenshotTest {
         )
         compose.mainClock.autoAdvance = false
         compose.setContent {
-            CompositionLocalProvider(LocalXdSignals provides xdSignals(theme)) {
-                MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography) {
-                    Surface(Modifier.fillMaxSize()) {
-                        ChatScreen(
-                            model = chat,
-                            goBack = {},
-                            sessionTitle = "reconnect-backoff",
-                            projectName = "xd",
-                            backgroundTasks = backgroundTasks,
-                            sessionChats = SessionChats(chats, "chat", {}, {}, {}, {}, {}),
-                        )
-                    }
-                }
+            XdRoot(theme) {
+                ChatScreen(
+                    model = chat,
+                    goBack = {},
+                    sessionTitle = "reconnect-backoff",
+                    projectName = "xd",
+                    backgroundTasks = backgroundTasks,
+                    sessionChats = SessionChats(chats, "chat", {}, {}, {}, {}, {}),
+                )
             }
         }
         repeat(60) {
