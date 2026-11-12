@@ -20969,6 +20969,7 @@ impl XdDesktop {
             self.queue_edit_input.clone(),
             self.file_editor.clone(),
             self.tab_editor.clone(),
+            self.agent_input.clone(),
         ] {
             editor.update(cx, |editor, cx| editor.set_colors(colors, cx));
         }
