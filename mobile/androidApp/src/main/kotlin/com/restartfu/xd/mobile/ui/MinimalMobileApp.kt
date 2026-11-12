@@ -1374,7 +1374,7 @@ private fun XdNavigationBar(
     Surface(
         modifier = modifier.navigationBarsPadding().padding(bottom = 16.dp).height(FloatingBarHeight),
         shape = CircleShape,
-        color = glassPane(colors.surfaceContainer),
+        color = glassOverlay(colors.surfaceContainer),
         border = BorderStroke(1.dp, glassEdge(colors.outlineVariant)),
         shadowElevation = 6.dp,
     ) {

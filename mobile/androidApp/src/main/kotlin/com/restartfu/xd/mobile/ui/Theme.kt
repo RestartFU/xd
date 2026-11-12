@@ -14,6 +14,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -269,6 +271,18 @@ public fun XdTheme(theme: MinimalThemePreset, content: @Composable () -> Unit) {
 /** A header, tab bar or rail over the page: translucent under glass. */
 @Composable
 public fun glassPane(solid: Color): Color = LocalXdGlass.current?.pane ?: solid
+
+/**
+ * Something that floats over content that scrolls beneath it, such as the
+ * floating tab bar. Without a backdrop blur a translucent pane would show that
+ * content through it, so under glass this is the pane already laid over the
+ * middle of the wash: the same frosted tone, but opaque.
+ */
+@Composable
+public fun glassOverlay(solid: Color): Color = LocalXdGlass.current?.overlay() ?: solid
+
+/** The pane over the middle of the wash, opaque. */
+public fun XdGlass.overlay(): Color = pane.compositeOver(lerp(washFrom, washTo, 0.5f))
 
 /** The message composer: translucent under glass. */
 @Composable

@@ -226,7 +226,7 @@ Outside an open chat, Android phones show a floating bar of icon tabs (Projects,
 
 Desktop requests an opaque native window; nothing behind the window shows through. Dark and Light paint the title, sidebar, composer and reading surfaces with opaque roles, and only text selection and the modal backdrop use alpha. The Modern themes are glass drawn inside that opaque window: it paints a diagonal wash (`glass-wash-from` to `glass-wash-to`) with a `glass-glow` fading in from the top right corner; page canvases (the chat, a project's page, the session column) leave it showing; and the sidebar, title bars, tab rows and composer are translucent panes (`glass-pane`, `glass-composer`) over it, edged with a `glass-edge` hairline. Cards, code blocks, the terminal, menus and dialogs keep opaque roles. Every alpha blends over the app itself. Native OS decorations remain responsible for window controls where provided. Floating menus and dialogs retain their existing shadows.
 
-Android expresses the material through opaque layered neutral surfaces and restrained outlines, without compositor blur. Its Modern themes paint the same wash, glow and translucent panes (headers, the floating tab bar, the navigation rail and the composer) inside the app. It retains native dialogs, ripples and navigation behavior.
+Android expresses the material through opaque layered neutral surfaces and restrained outlines, without compositor blur. Its Modern themes paint the same wash, glow and translucent panes (headers, the navigation rail and the composer) inside the app. The floating tab bar, which lists scroll beneath, takes the same frosted tone made opaque, so nothing shows through it. It retains native dialogs, ripples and navigation behavior.
 
 ## Shapes
 

@@ -172,6 +172,11 @@ class ProjectsScreenshotTest {
 
     @Test fun longListLight() = longList("long-list-light", MinimalThemePreset.LIGHT)
 
+    /** The list scrolls beneath the floating bar, which stays opaque under glass. */
+    @Test fun longListModern() = longList("long-list-modern", MinimalThemePreset.MODERN)
+
+    @Test fun longListModernLight() = longList("long-list-modern-light", MinimalThemePreset.MODERN_LIGHT)
+
     @Test fun pausingAProjectStopsOnlyItsChats() = shoot("paused-dark", MinimalThemePreset.DARK) {
         // Only projects with work show the button: web runs a turn, shop waits on a task.
         check(shows("Pause chats in web") && shows("Pause chats in shop"))
@@ -574,10 +579,11 @@ class ProjectsScreenshotTest {
         compose.mainClock.autoAdvance = false
         compose.setContent {
             val link by model.client.link.collectAsStateWithLifecycle()
-            CompositionLocalProvider(LocalXdSignals provides xdSignals(theme)) {
-                MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography) {
-                    Surface(Modifier.fillMaxSize()) { MinimalMobileApp(model, link, settings) }
-                }
+            XdTheme(theme) {
+                Surface(
+                    Modifier.fillMaxSize().glassBackdrop(xdGlass(theme)),
+                    color = glassPage(MaterialTheme.colorScheme.surface),
+                ) { MinimalMobileApp(model, link, settings) }
             }
         }
         val screen = Screen(compose, activity)

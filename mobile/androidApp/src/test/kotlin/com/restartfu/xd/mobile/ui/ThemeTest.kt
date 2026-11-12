@@ -52,6 +52,8 @@ class ThemeTest {
                 for (fill in listOf(glass.pane, glass.composer, glass.glow)) {
                     assertTrue("$theme pane is not translucent", fill.alpha > 0f && fill.alpha < 1f)
                 }
+                // Overlays sit over scrolling content, so they must not let it through.
+                assertEquals("$theme overlay", 1f, glass.overlay().alpha)
                 assertEquals(1f, glass.washFrom.alpha)
                 assertEquals(1f, glass.washTo.alpha)
             }
@@ -75,6 +77,7 @@ class ThemeTest {
                     "wash" to wash,
                     "pane" to glass.pane.compositeOver(wash),
                     "composer" to glass.composer.compositeOver(wash),
+                    "overlay" to glass.overlay(),
                 )) {
                     assertAtLeast(7.0, colors.onSurface, color, "$theme onSurface on $ground")
                     assertAtLeast(4.5, colors.onSurfaceVariant, color, "$theme onSurfaceVariant on $ground")
