@@ -13081,10 +13081,6 @@ impl XdDesktop {
         {
             self.pending_minimal_session = None;
         }
-        // Agents' sessions list folded under the session that started them,
-        // so opening one (from its lead's chat, a notification or a search)
-        // unfolds the sessions above it and its row shows.
-        self.reveal_started_session(&chat_id);
         self.route_minimal_session(project_id, chat_id, agent, true, cx);
         let focus = self.composer_input.read(cx).focus_handle(cx);
         window.focus(&focus);
@@ -13176,6 +13172,11 @@ impl XdDesktop {
         {
             return;
         }
+        // Agents' sessions list folded under the session that started them,
+        // so showing one (opened from its lead's chat, a notification or a
+        // search, or picked next after settling) unfolds the sessions above
+        // it and its row shows.
+        self.reveal_started_session(&chat_id);
         // Chats created and left before their state arrived, which is when
         // a chat sends its first message, send it anyway; this one still
         // sends its own when its state arrives.
@@ -28068,6 +28069,18 @@ Binary files /dev/null and b/image.png differ\n";
                 desktop.settings.expanded_session_sets.get("local"),
                 Some(&vec!["lead".to_owned(), "worker".to_owned()])
             );
+
+            // So does a session the app picks by itself, such as the next one
+            // after settling the open session.
+            desktop.toggle_session_folded("lead".into(), cx);
+            assert!(desktop.session_folded("lead", false));
+            desktop.select_minimal_session(
+                "fold-project".into(),
+                "worker-chat".into(),
+                AgentCli::Codex,
+                cx,
+            );
+            assert!(!desktop.session_folded("lead", false));
         });
     }
 
