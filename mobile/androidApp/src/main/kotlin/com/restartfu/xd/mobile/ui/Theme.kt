@@ -226,8 +226,8 @@ public data class XdGlass(
 public fun xdGlass(theme: MinimalThemePreset): XdGlass? = when (theme) {
     MinimalThemePreset.DARK, MinimalThemePreset.LIGHT -> null
     MinimalThemePreset.MODERN -> XdGlass(
-        washFrom = Color(0xFF181818), washTo = Color(0xFF050505), glow = Color(0x404A4A4A),
-        pane = Color(0x8C2A2A2A), composer = Color(0xC72F2F2F), edge = Color(0x1FFFFFFF),
+        washFrom = Color(0xFF0E0E0E), washTo = Color(0xFF080808), glow = Color(0x08FFFFFF),
+        pane = Color(0x08FFFFFF), composer = Color(0xD9232323), edge = Color(0x1FFFFFFF),
     )
     MinimalThemePreset.MODERN_LIGHT -> XdGlass(
         washFrom = Color(0xFFDCDCFB), washTo = Color(0xFFD3EBF3), glow = Color(0x99F7D6EE),
@@ -362,12 +362,12 @@ public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) 
         tertiaryContainer = Color(0xFF2A2A2A), onTertiaryContainer = Color(0xFFF2F2F2),
         background = Color(0xFF0B0B0B), onBackground = Color(0xFFF2F2F2),
         surface = Color(0xFF0B0B0B), onSurface = Color(0xFFF2F2F2),
-        surfaceVariant = Color(0xFF1E1E1E), onSurfaceVariant = Color(0xFFADADAD),
-        surfaceContainerLowest = Color(0xFF050505), surfaceContainerLow = Color(0xFF161616),
+        surfaceVariant = Color(0xFF1F1F1F), onSurfaceVariant = Color(0xFFADADAD),
+        surfaceContainerLowest = Color(0xFF050505), surfaceContainerLow = Color(0xFF131313),
         surfaceContainer = Color(0xFF161616), surfaceContainerHigh = Color(0xFF202020),
         surfaceContainerHighest = Color(0xFF2A2A2A), surfaceBright = Color(0xFF2A2A2A),
         surfaceDim = Color(0xFF0B0B0B), inverseSurface = Color(0xFFF2F2F2),
-        inverseOnSurface = Color(0xFF161616), inversePrimary = Color(0xFF4B4FB8),
+        inverseOnSurface = Color(0xFF131313), inversePrimary = Color(0xFF4B4FB8),
         outline = Color(0xFF858585), outlineVariant = Color(0xFF333333),
         scrim = Color(0xFF000000), error = Color(0xFFFF94A2), onError = Color(0xFF351A20),
         errorContainer = Color(0xFF351A20), onErrorContainer = Color(0xFFFFD9DE),

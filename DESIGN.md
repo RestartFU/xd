@@ -55,7 +55,7 @@ colors:
   light-chrome: "#f1f1f1"
   light-composer: "#ffffff"
   modern-background: "#0b0b0b"
-  modern-sidebar: "#161616"
+  modern-sidebar: "#131313"
   modern-surface: "#161616"
   modern-surface-high: "#202020"
   modern-border: "#2a2a2a"
@@ -80,13 +80,13 @@ colors:
   modern-diff-removed: "#351a20"
   modern-selection: "#8b8ff840"
   modern-backdrop: "#000000b3"
-  modern-chrome: "#161616"
-  modern-composer: "#1e1e1e"
-  modern-glass-wash-from: "#181818"
-  modern-glass-wash-to: "#050505"
-  modern-glass-glow: "#4a4a4a40"
-  modern-glass-pane: "#2a2a2a8c"
-  modern-glass-composer: "#2f2f2fc7"
+  modern-chrome: "#131313"
+  modern-composer: "#1f1f1f"
+  modern-glass-wash-from: "#0e0e0e"
+  modern-glass-wash-to: "#080808"
+  modern-glass-glow: "#ffffff08"
+  modern-glass-pane: "#ffffff08"
+  modern-glass-composer: "#232323d9"
   modern-glass-edge: "#ffffff1f"
   modern-light-background: "#eef0f9"
   modern-light-sidebar: "#f3f4fb"
@@ -190,7 +190,7 @@ components:
 
 xd uses neutral charcoal to frame a generous conversation area. Projects contain sessions; each session contains separate chat tabs sharing one workspace. The sidebar stays compact, chat controls sit beside the conversation, and workspace tools remain available alongside it.
 
-Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Modern and Modern Light are frosted glass in the manner of macOS: Modern is black glass with graphite panes, Modern Light frosted white over a lavender-to-aqua wash, both with an indigo accent for the primary action, links, focus and selection. Their glass is painted inside the app, so the window stays opaque and the wallpaper and other windows never show through it. Android carries the same palette and hierarchy through native Material 3 layouts.
+Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Modern and Modern Light are frosted glass in the manner of macOS: Modern is black glass, one near-black surface whose panes are only a shade lighter and set apart by hairlines, Modern Light frosted white over a lavender-to-aqua wash, both with an indigo accent for the primary action, links, focus and selection. Their glass is painted inside the app, so the window stays opaque and the wallpaper and other windows never show through it. Android carries the same palette and hierarchy through native Material 3 layouts.
 
 **Key Characteristics:**
 
