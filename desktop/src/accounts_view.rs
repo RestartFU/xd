@@ -297,6 +297,10 @@ fn icon_button(
     }
 }
 
+/// What the accounts in Settings are for, shown above them and read by search.
+pub(super) const ACCOUNTS_EXPLANATION: &str = "Each assistant can hold several sign-ins. New chats \
+     start on the first one with room left; a chat stays on its account until that account runs out.";
+
 impl XdDesktop {
     pub(super) fn request_agent_accounts(&mut self) {
         if let Some(host) = self.active_host()
@@ -380,10 +384,7 @@ impl XdDesktop {
                     .text_size(px(12.0))
                     .line_height(px(18.0))
                     .text_color(rgb(colors.muted))
-                    .child(
-                        "Each assistant can hold several sign-ins. New chats start on the first one \
-                         with room left; a chat stays on its account until that account runs out.",
-                    ),
+                    .child(ACCOUNTS_EXPLANATION),
             )
             .when(loading, |body| {
                 body.child(
@@ -401,11 +402,11 @@ impl XdDesktop {
                         .text_size(px(12.0))
                         .line_height(px(18.0))
                         .text_color(rgb(colors.danger))
-                        .child(
-                            div()
-                                .mt(px(2.0))
-                                .child(icon(usage_view::ALERT_ICON, 13.0, colors.danger)),
-                        )
+                        .child(div().mt(px(2.0)).child(icon(
+                            usage_view::ALERT_ICON,
+                            13.0,
+                            colors.danger,
+                        )))
                         .child(error),
                 )
             })

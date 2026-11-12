@@ -1152,7 +1152,10 @@ impl XdDesktop {
                     "Accounts",
                     vec![SettingRow::custom(
                         "Accounts",
-                        "Sign-ins for each assistant. New chats start on the first one with room left.",
+                        format!(
+                            "{} Codex Claude Code sign in",
+                            super::accounts_view::ACCOUNTS_EXPLANATION
+                        ),
                         div()
                             .p(px(SETTINGS_CARD_PADDING))
                             .child(self.render_account_settings(colors, cx)),
@@ -1284,7 +1287,7 @@ impl XdDesktop {
                     row.child(
                         ui_button("pair-device", ButtonKind::Secondary, colors)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.minimal_theme_open = false;
+                                this.leave_settings(cx);
                                 this.share_panel = Some(SharePanel {
                                     loading: true,
                                     ..Default::default()
@@ -1307,7 +1310,7 @@ impl XdDesktop {
                     row.child(
                         ui_button("paired-devices", ButtonKind::Secondary, colors)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.minimal_theme_open = false;
+                                this.leave_settings(cx);
                                 this.devices_panel = Some(DevicesPanel {
                                     loading: true,
                                     ..Default::default()
@@ -1329,7 +1332,7 @@ impl XdDesktop {
                 row.child(
                     ui_button("workspace-settings-connect", ButtonKind::Secondary, colors)
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.minimal_theme_open = false;
+                            this.leave_settings(cx);
                             this.open_remote(window, cx);
                         }))
                         .child("Connect"),
@@ -1350,7 +1353,7 @@ impl XdDesktop {
                             colors,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.minimal_theme_open = false;
+                            this.leave_settings(cx);
                             this.disconnect_remote_runtime(cx);
                         }))
                         .child("Disconnect"),
@@ -1395,6 +1398,13 @@ impl XdDesktop {
         }
         self.clear_settings_search(cx);
         cx.notify();
+    }
+
+    /// Leaves Settings for something it hands over to, such as pairing, with
+    /// no search left behind for the next visit.
+    pub(super) fn leave_settings(&mut self, cx: &mut Context<Self>) {
+        self.minimal_theme_open = false;
+        self.clear_settings_search(cx);
     }
 
     /// Empties the settings search field.

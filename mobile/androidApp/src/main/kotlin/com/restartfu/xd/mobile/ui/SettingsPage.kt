@@ -104,6 +104,8 @@ internal fun SettingsPage(
     val allPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
     val resumeChats by settings.resumeChats.collectAsStateWithLifecycle()
     val tree by model.client.tree.collectAsStateWithLifecycle()
+    // The quota row says its current share, so search reads the same words.
+    val quota by model.chatQuota.collectAsStateWithLifecycle()
     var section by rememberSaveable { mutableStateOf<SettingsSection?>(null) }
     var query by rememberSaveable { mutableStateOf("") }
     var updatingHost by rememberSaveable { mutableStateOf(false) }
@@ -138,7 +140,7 @@ internal fun SettingsPage(
             add(
                 SettingsEntry(
                     SettingsSection.CHATS,
-                    listOf("Limit each chat's usage", chatQuotaDetail(null), "Quota per chat", QUOTA_PER_CHAT_DETAIL),
+                    listOf("Limit each chat's usage", chatQuotaDetail(quota?.percent), "Quota per chat", QUOTA_PER_CHAT_DETAIL),
                 ) { ChatQuotaSection(model) },
             )
         }

@@ -13465,6 +13465,8 @@ impl XdDesktop {
     fn toggle_minimal_theme_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.minimal_theme_open = !self.minimal_theme_open;
         if self.minimal_theme_open {
+            // Settings always opens on its sections, never on an old search.
+            self.clear_settings_search(cx);
             if self.settings_section == workspace_settings::AGENTS_SECTION {
                 self.request_agent_accounts();
             }
@@ -27359,6 +27361,23 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].0, workspace_settings::AGENTS_SECTION);
             assert_eq!(found[0].1[0].title.as_ref(), "Skip permission prompts");
+            // So does the explanation the accounts show above themselves.
+            let words = workspace_settings::settings_query_words("runs out");
+            let found = desktop.settings_search_results(&words, 680.0, colors, cx);
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].1[0].title.as_ref(), "Accounts");
+        });
+        // Leaving for pairing or another host takes no search along.
+        desktop.update(cx, |desktop, cx| {
+            desktop.leave_settings(cx);
+            assert!(!desktop.minimal_theme_open);
+            assert!(desktop.settings_query.is_empty());
+            assert!(desktop.settings_search_input.read(cx).text().is_empty());
+            desktop.minimal_theme_open = true;
+            desktop.settings_query = "shift enter".to_owned();
+            desktop
+                .settings_search_input
+                .update(cx, |input, cx| input.set_text("shift enter", cx));
         });
 
         cx.dispatch_action(CloseSearch);
