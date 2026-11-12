@@ -32,6 +32,11 @@ public data class MinimalSession(
     val branch: String,
     val working: Boolean,
     val chatIds: List<String> = listOf(id),
+    /**
+     * Its chats but the agents started in its own worktree: only a wait on the
+     * user passes from those to the row.
+     */
+    val ownChatIds: List<String> = chatIds,
     /** Background tasks the session waits on while none of its chats has a turn running. */
     val backgroundTasks: Int = 0,
     val terminalChatId: String = id,
@@ -133,12 +138,13 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
                 ?: "Project directory",
             working = own.any { it.working } || grouped.any { it.terminalWorking },
             chatIds = orderedIds,
+            ownChatIds = orderedIds.filter { id -> own.any { it.id == id } },
             backgroundTasks = if (own.any { it.working }) 0 else own.sumOf { it.waitingOn } + agentsAtWork,
             terminalChatId = workspace?.terminalChatId ?: first.id,
             settledAt = workspace?.settledAt,
             autoSettleDisabled = workspace?.autoSettleDisabled ?: false,
             backend = first.backend,
-            paused = grouped.any(ChatSummary::paused),
+            paused = own.any(ChatSummary::paused),
             quotaReached = grouped.any(ChatSummary::quotaReached),
             parentId = workspace?.parentId,
             startedByAgent = if (workspace != null) workspace.parentId != null else first.parentId != null,

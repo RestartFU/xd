@@ -304,6 +304,10 @@ class MinimalProjectsTest {
         assertEquals(false, sessions.getValue("lead").working)
         assertEquals(2, sessions.getValue("lead").backgroundTasks)
         assertEquals(true, sessions.getValue("worker").working)
+        // Unread and paused state stays with the agent tab, not its lead.
+        assertEquals(listOf("lead-chat"), sessions.getValue("lead").ownChatIds)
+        val pausedTab = snapshot.copy(chats = snapshot.chats.map { if (it.id == "tab-chat") it.copy(working = false, paused = true) else it })
+        assertEquals(false, pausedTab.minimalSessions("compiler").first { it.id == "lead" }.paused)
         assertEquals(listOf(false, true, true, false), listOf("lead", "worker", "done", "solo").map {
             sessions.getValue(it).startedByAgent
         })

@@ -14574,22 +14574,34 @@ impl XdDesktop {
     }
 
     fn session_signal(&self, session: &SessionCard) -> SessionSignal {
+        let single = [session.id.clone()];
         let members = self
             .model
             .session_for_chat(&session.id)
-            .map(|group| group.chats.as_slice());
+            .map_or(&single[..], |group| group.chats.as_slice());
+        // An agent started in this session's own worktree is one of its tabs,
+        // but only a wait on the user passes from it to the row.
+        let own = |id: &&String| {
+            !self
+                .model
+                .chat_parents
+                .get(id.as_str())
+                .is_some_and(|parent| members.contains(parent))
+        };
         SessionSignal::of(
             session.working,
+            members.iter().any(|id| self.model.needs_user(id)),
             members
-                .map(|ids| ids.iter().any(|id| self.model.needs_user(id)))
-                .unwrap_or_else(|| self.model.needs_user(&session.id)),
-            members
-                .map(|ids| ids.iter().any(|id| self.model.unread_chats.contains(id)))
-                .unwrap_or_else(|| self.model.unread_chats.contains(&session.id)),
+                .iter()
+                .filter(own)
+                .any(|id| self.model.unread_chats.contains(id)),
             session.background_tasks,
         )
-        .or_paused(self.model.chats.iter().any(|chat| {
-            chat.paused && members.map_or(chat.id == session.id, |ids| ids.contains(&chat.id))
+        .or_paused(members.iter().filter(own).any(|id| {
+            self.model
+                .chats
+                .iter()
+                .any(|chat| &chat.id == id && chat.paused)
         }))
     }
 
@@ -28274,6 +28286,19 @@ Binary files /dev/null and b/image.png differ\n";
             assert!(!desktop.finished_agent_row(row("worker-chat"), None));
             assert!(desktop.finished_agent_row(row("done-chat"), None));
             assert!(!desktop.finished_agent_row(row("done-chat"), Some("done-chat")));
+            // A finished agent tab the user has not read leaves the lead quiet,
+            // as does a paused one; one waiting on the user still shows.
+            desktop.model.chats[1].working = false;
+            desktop.model.chats[1].paused = true;
+            desktop.model.unread_chats.insert("tab-chat".into());
+            let rows = desktop.catalog_session_chats();
+            let lead = minimal::project_sessions("agents-project", &rows)
+                .into_iter()
+                .find(|card| card.id == "lead-chat")
+                .unwrap();
+            assert_eq!(desktop.session_signal(&lead), SessionSignal::Background(1));
+            desktop.model.question_chats.insert("tab-chat".into());
+            assert_eq!(desktop.session_signal(&lead), SessionSignal::Waiting);
             desktop.model.question_chats.insert("done-chat".into());
             assert!(!desktop.finished_agent_row(row("done-chat"), None));
             assert_eq!(
@@ -32409,7 +32434,7 @@ Binary files /dev/null and b/image.png differ\n";
             .expect("end of catalog renderer")
             .0;
 
-        assert!(board.contains("self.model.unread_chats.contains(&session.id)"));
+        assert!(board.contains(".any(|id| self.model.unread_chats.contains(id))"));
         assert!(board.contains("signal_tab(signal, colors)"));
         assert!(board.contains("self.session_signal(&session)"));
         assert!(production.contains("Self::Done => \"Done\""));

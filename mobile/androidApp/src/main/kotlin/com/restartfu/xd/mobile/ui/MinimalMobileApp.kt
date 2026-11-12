@@ -706,7 +706,7 @@ private fun MinimalProjectsHome(
             session.working -> SessionSignal.WORKING
             session.backgroundTasks > 0 -> SessionSignal.BACKGROUND
             session.paused -> SessionSignal.PAUSED
-            session.chatIds.any { it in unread } -> SessionSignal.DONE
+            session.ownChatIds.any { it in unread } -> SessionSignal.DONE
             else -> SessionSignal.IDLE
         }
     }
