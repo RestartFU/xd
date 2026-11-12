@@ -57,6 +57,8 @@ class ChatScreenshotTest {
 
     @Test fun phoneLight() = shoot("phone-light", MinimalThemePreset.LIGHT)
 
+    @Test fun phoneModern() = shoot("phone-modern", MinimalThemePreset.MODERN)
+
     /** The height left with the keyboard open. */
     @Config(qualifiers = "w412dp-h560dp-420dpi")
     @Test fun phoneKeyboard() = shoot("phone-keyboard-dark", MinimalThemePreset.DARK)

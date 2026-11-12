@@ -62,14 +62,23 @@ class SettingsScreenshotTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     /** Replies are no longer read aloud, so Settings has no switch for it. */
-    @Test fun settingsDark() {
+    @Test fun settingsDark() = shoot("settings-dark", MinimalThemePreset.DARK)
+
+    /** Every theme is offered, and the chosen one is the one marked. */
+    @Test fun settingsModern() = shoot("settings-modern", MinimalThemePreset.MODERN)
+
+    /** Three themes still fit across a narrow phone. */
+    @Config(qualifiers = "w360dp-h780dp-420dpi")
+    @Test fun settingsModernNarrow() = shoot("settings-modern-narrow", MinimalThemePreset.MODERN)
+
+    private fun shoot(name: String, theme: MinimalThemePreset) {
         val activity = compose.activity
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val model = MainViewModel(activity.application, XdClient({ ScriptedSocket() }, NoCredentials, scope))
         val connected = runBlocking { model.client.connect(connection) }
         check(connected is ConnectResult.Success) { "Could not reach the scripted host: $connected" }
         val settings = MobileSettings(activity)
-        val theme = MinimalThemePreset.DARK
+        settings.setTheme(theme)
         compose.mainClock.autoAdvance = false
         compose.setContent {
             val link by model.client.link.collectAsStateWithLifecycle()
@@ -90,10 +99,11 @@ class SettingsScreenshotTest {
             }
             check(shows("All permissions") && shows("Resume chats after a restart"))
             check(!shows("Read replies aloud"))
+            check(MinimalThemePreset.entries.all { shows(it.label) })
         } finally {
             out?.let { dir ->
                 dir.mkdirs()
-                File(dir, "settings-dark.png").outputStream().use { capture().compress(Bitmap.CompressFormat.PNG, 100, it) }
+                File(dir, "$name.png").outputStream().use { capture().compress(Bitmap.CompressFormat.PNG, 100, it) }
             }
             scope.cancel()
         }

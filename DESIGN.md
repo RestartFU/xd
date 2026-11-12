@@ -54,6 +54,32 @@ colors:
   light-backdrop: "#18181b66"
   light-chrome: "#f1f1f1"
   light-composer: "#ffffff"
+  modern-background: "#0e1016"
+  modern-sidebar: "#12141c"
+  modern-surface: "#191c26"
+  modern-surface-high: "#222633"
+  modern-border: "#2a2e3c"
+  modern-selected-surface: "#252a3a"
+  modern-selected-border: "#7178e6"
+  modern-text: "#edeff5"
+  modern-muted: "#a6acbd"
+  modern-faint: "#8d93a6"
+  modern-accent: "#8b8ff8"
+  modern-accent-ink: "#a3a7ff"
+  modern-accent-hover: "#a6a9ff"
+  modern-accent-text: "#0e1016"
+  modern-rule: "#262a37"
+  modern-working: "#5fd3a3"
+  modern-waiting: "#f0c06a"
+  modern-done: "#a3a7ff"
+  modern-danger: "#ff8f9d"
+  modern-danger-surface: "#2c1520"
+  modern-diff-added: "#173328"
+  modern-diff-removed: "#3b1d28"
+  modern-selection: "#8b8ff840"
+  modern-backdrop: "#05060ab3"
+  modern-chrome: "#171a23"
+  modern-composer: "#1d2130"
 typography:
   display:
     fontFamily: "Inter"
@@ -122,21 +148,21 @@ components:
 
 xd uses neutral charcoal to frame a generous conversation area. Projects contain sessions; each session contains separate chat tabs sharing one workspace. The sidebar stays compact, chat controls sit beside the conversation, and workspace tools remain available alongside it.
 
-Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Every desktop surface is opaque, so the wallpaper and other windows never show through the app. Android carries the same palette and hierarchy through native Material 3 layouts.
+Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Modern uses cool slate surfaces with an indigo accent for the primary action, links, focus and selection. Every desktop surface is opaque, so the wallpaper and other windows never show through the app. Android carries the same palette and hierarchy through native Material 3 layouts.
 
 **Key Characteristics:**
 
-- Two themes: Dark and Light. Retired saved names load as Dark.
+- Three themes: Dark, Light and Modern. Retired saved names load as Dark.
 - Inter for prose and controls; JetBrains Mono for code and terminal text.
 - Separate chat tabs share a session workspace and terminal.
 - Real platform window controls; no decorative traffic lights.
-- Neutral selection and focus, with color reserved for meaningful status.
+- Neutral selection and focus, with color reserved for meaningful status. Modern alone tints selection and focus with its indigo accent.
 
 ## Colors
 
-The normative desktop values above come from `desktop/src/theme.rs`. Roles pair by the `dark-` and `light-` prefixes. `selection` and `backdrop` include alpha as `#RRGGBBAA`; other values are opaque.
+The normative desktop values above come from `desktop/src/theme.rs`. Roles pair by the `dark-`, `light-` and `modern-` prefixes. `selection` and `backdrop` include alpha as `#RRGGBBAA`; other values are opaque.
 
-Neutral surfaces distinguish canvas, sidebar, panels, hover and selection. Primary actions use a silver fill with dark ink in Dark, and charcoal with white ink in Light. Links and focus stay neutral. Working is green, waiting is amber, and destructive actions are rose. Desktop marks questions and approvals with a steady hollow amber circle and ‘Waiting on you’ in session rows and the chat header. Chat tabs use the same ring. On desktop, a question, approval or quota stop docks inside the composer as a section above a hairline, marked only by the ring, with numbered choices; Send submits the editor's text as a typed answer. Once answered, the reply carries the question above its bubble in faint text after a reply arrow, on desktop and mobile. Status also has text or an icon.
+Neutral surfaces distinguish canvas, sidebar, panels, hover and selection. Primary actions use a silver fill with dark ink in Dark, and charcoal with white ink in Light. Links and focus stay neutral in both. Modern is the one theme with a hue outside status: an indigo fill with dark ink for the primary action, and a lighter indigo for links, focus, the caret, selection and the selected-row border. Working is green, waiting is amber, and destructive actions are rose. Desktop marks questions and approvals with a steady hollow amber circle and ‘Waiting on you’ in session rows and the chat header. Chat tabs use the same ring. On desktop, a question, approval or quota stop docks inside the composer as a section above a hairline, marked only by the ring, with numbered choices; Send submits the editor's text as a typed answer. Once answered, the reply carries the question above its bubble in faint text after a reply arrow, on desktop and mobile. Status also has text or an icon.
 
 Android uses complete Material color roles in `ui/Theme.kt`, with small platform-specific surface adjustments. Its charcoal conversation surface matches the desktop canvas; silver action, text and signal colors follow the same roles. Legacy accent preferences remain readable but do not recolor the main workspace.
 
@@ -178,7 +204,7 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 
 **Workspace tools.** Files, Changes, Browser and Terminal retain session scope across sibling chat switches. Agent history, options, approvals and drafts retain chat scope. Hosts without grouped-session support remain usable with singleton sessions and show an update message when adding a sibling chat.
 
-**Settings.** Desktop groups Appearance, General, Agents, Devices and Shortcuts in one panel using existing capabilities. Android preserves its native settings dialog. Both offer Dark and Light.
+**Settings.** Desktop groups Appearance, General, Agents, Devices and Shortcuts in one panel using existing capabilities. Android preserves its native settings dialog. Both offer Dark, Light and Modern.
 
 **Usage.** The chart icon opens a 348px flyout just above the sidebar footer, without dimming the work behind it. Tabs switch between Limits, Cost and Tokens. Each limit compares what is left with the time left as two thin bars, and stays neutral until it needs attention: amber when spending ahead of pace, rose when spent. Pooled accounts nest under their total, and pressing a row opens its details and reset credit. Cost and Tokens show a total, small period bars and ranked models, in neutral shades. The maximize button or a model row opens the full page, a large panel holding filters, model prices, charts and breakdowns.
 
@@ -189,7 +215,7 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 ### Do:
 
 - Do use catalog display names for models and readable labels for known settings; preserve custom identifiers when no display name is available.
-- Do use semantic ThemeColors or Material color roles in both themes.
+- Do use semantic ThemeColors or Material color roles in every theme.
 - Do center the empty-state context and heading over the composer, allowing natural text height.
 - Do preserve independent chat histories, drafts and agent settings when switching tabs.
 - Do retain native window, keyboard, touch and system inset behavior.

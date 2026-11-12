@@ -29035,7 +29035,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[test]
     fn a_turn_held_up_on_the_user_reads_as_waiting_in_amber() {
-        for preset in [ThemePreset::Dark, ThemePreset::Light] {
+        for preset in ThemePreset::ALL {
             let colors = preset.colors();
             assert_eq!(turn_status(false, colors), ("Working", colors.working));
             assert_eq!(

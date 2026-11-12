@@ -123,7 +123,7 @@ public fun xdColors(accent: AccentPreset = AccentPreset.BLUE): ColorScheme =
 /** The default desktop-matching palette for callers that do not need settings. */
 public val XdColors: ColorScheme = xdColors()
 
-/** The desktop's two themes. Saved names of retired themes load as Dark. */
+/** The desktop's themes. Saved names of retired themes load as Dark. */
 public enum class MinimalThemePreset(
     val key: String,
     val label: String,
@@ -131,6 +131,8 @@ public enum class MinimalThemePreset(
 ) {
     DARK("dark", "Dark", Color(0xFF1B1B1B)),
     LIGHT("light", "Light", Color(0xFFF4F4F4)),
+    // Its canvas would read as Dark's at this size, so the swatch shows the accent.
+    MODERN("modern", "Modern", Color(0xFF8B8FF8)),
     ;
 
     public companion object {
@@ -172,11 +174,21 @@ public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
         diffAdded = Color(0xFFE0EEE5), diffRemoved = Color(0xFFF4E2E5),
         codexIcon = Color(0xFF202020), claudeIcon = Color(0xFFB85C3F),
     )
+    MinimalThemePreset.MODERN -> XdSignals(
+        working = Color(0xFF5FD3A3), waiting = Color(0xFFF0C06A),
+        done = Color(0xFFA3A7FF), rule = Color(0xFF262A37),
+        link = Color(0xFFA3A7FF), faint = Color(0xFF8D93A6),
+        diffAdded = Color(0xFF173328), diffRemoved = Color(0xFF3B1D28),
+        codexIcon = Color.White, claudeIcon = Color(0xFFD97757),
+    )
 }
 
 public val LocalXdSignals = staticCompositionLocalOf { xdSignals(MinimalThemePreset.DARK) }
 
-/** Neutral charcoal and silver expressed through complete Material color roles. */
+/**
+ * Neutral charcoal and silver (Dark, Light), or cool slate with an indigo
+ * accent (Modern), expressed through complete Material color roles.
+ */
 public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) {
     MinimalThemePreset.DARK -> darkColorScheme(
         primary = Color(0xFFDEDEDE), onPrimary = Color(0xFF1B1B1B),
@@ -215,6 +227,25 @@ public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) 
         outline = Color(0xFF7D7D7D), outlineVariant = Color(0xFFD0D0D0),
         scrim = Color(0xFF000000), error = Color(0xFFA13242), onError = Color(0xFFFFFFFF),
         errorContainer = Color(0xFFF4E2E5), onErrorContainer = Color(0xFF701D29),
+    )
+    MinimalThemePreset.MODERN -> darkColorScheme(
+        primary = Color(0xFF8B8FF8), onPrimary = Color(0xFF0E1016),
+        primaryContainer = Color(0xFF2A2E3C), onPrimaryContainer = Color(0xFFEDEFF5),
+        secondary = Color(0xFFA6ACBD), onSecondary = Color(0xFF0E1016),
+        secondaryContainer = Color(0xFF2A2E3C), onSecondaryContainer = Color(0xFFEDEFF5),
+        tertiary = Color(0xFFA3A7FF), onTertiary = Color(0xFF0E1016),
+        tertiaryContainer = Color(0xFF2A2E3C), onTertiaryContainer = Color(0xFFEDEFF5),
+        background = Color(0xFF0A0C11), onBackground = Color(0xFFEDEFF5),
+        surface = Color(0xFF0E1016), onSurface = Color(0xFFEDEFF5),
+        surfaceVariant = Color(0xFF1D2130), onSurfaceVariant = Color(0xFFA6ACBD),
+        surfaceContainerLowest = Color(0xFF0A0C11), surfaceContainerLow = Color(0xFF12141C),
+        surfaceContainer = Color(0xFF191C26), surfaceContainerHigh = Color(0xFF1D2130),
+        surfaceContainerHighest = Color(0xFF2A2E3C), surfaceBright = Color(0xFF2A2E3C),
+        surfaceDim = Color(0xFF0E1016), inverseSurface = Color(0xFFEDEFF5),
+        inverseOnSurface = Color(0xFF12141C), inversePrimary = Color(0xFF4B4FB8),
+        outline = Color(0xFF7B8296), outlineVariant = Color(0xFF323747),
+        scrim = Color(0xFF000000), error = Color(0xFFFF8F9D), onError = Color(0xFF3B1D28),
+        errorContainer = Color(0xFF3B1D28), onErrorContainer = Color(0xFFFFD9DE),
     )
 }
 

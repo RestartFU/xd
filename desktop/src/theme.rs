@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 /// Keeping the roles semantic lets GPUI views change theme without knowing
 /// which concrete color belongs to a background, divider, or text treatment.
 ///
-/// The palette is a quiet neutral ground in the manner of T3 Code: near-black
+/// Dark and Light are a quiet neutral ground in the manner of T3 Code: near-black
 /// or near-white canvas, surfaces separated by hairline borders, neutral fill for
-/// the primary action, and signal colors reserved for session state.
+/// the primary action, and signal colors reserved for session state. Modern keeps
+/// that structure on a cool slate ground and gives the primary action, links,
+/// focus and selection an indigo accent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemeColors {
     pub background: u32,
@@ -60,15 +62,17 @@ pub enum ThemePreset {
     #[serde(alias = "warm", alias = "nord", alias = "dracula")]
     Dark,
     Light,
+    Modern,
 }
 
 impl ThemePreset {
-    pub const ALL: [Self; 2] = [Self::Dark, Self::Light];
+    pub const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::Modern];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Dark => "Dark",
             Self::Light => "Light",
+            Self::Modern => "Modern",
         }
     }
 
@@ -133,6 +137,36 @@ impl ThemePreset {
                 backdrop: 0x18181b66,
                 chrome: 0xf1f1f1,
                 composer: 0xffffff,
+            },
+            Self::Modern => ThemeColors {
+                background: 0x0e1016,
+                sidebar: 0x12141c,
+                surface: 0x191c26,
+                surface_high: 0x222633,
+                border: 0x2a2e3c,
+                selected_surface: 0x252a3a,
+                selected_border: 0x7178e6,
+                text: 0xedeff5,
+                codex_icon: 0xffffff,
+                claude_icon: 0xd97757,
+                muted: 0xa6acbd,
+                faint: 0x8d93a6,
+                accent: 0x8b8ff8,
+                accent_ink: 0xa3a7ff,
+                accent_hover: 0xa6a9ff,
+                accent_text: 0x0e1016,
+                rule: 0x262a37,
+                working: 0x5fd3a3,
+                waiting: 0xf0c06a,
+                done: 0xa3a7ff,
+                danger: 0xff8f9d,
+                danger_surface: 0x2c1520,
+                diff_added: 0x173328,
+                diff_removed: 0x3b1d28,
+                selection: 0x8b8ff840,
+                backdrop: 0x05060ab3,
+                chrome: 0x171a23,
+                composer: 0x1d2130,
             },
         }
     }

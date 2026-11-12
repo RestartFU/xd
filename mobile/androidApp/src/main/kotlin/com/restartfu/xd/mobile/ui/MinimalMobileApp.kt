@@ -2500,10 +2500,12 @@ private fun MinimalSettingsDialog(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 Text("Appearance", style = MaterialTheme.typography.titleSmall)
+                // Swatch over name, like the desktop's theme cards, so three
+                // fit across a narrow phone without the names wrapping.
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MinimalThemePreset.entries.forEach { preset ->
                         val chosen = theme == preset
-                        Row(
+                        Column(
                             modifier = Modifier
                                 .weight(1f)
                                 .heightIn(min = 48.dp)
@@ -2515,20 +2517,22 @@ private fun MinimalSettingsDialog(
                                     RoundedCornerShape(8.dp),
                                 )
                                 .clickable { settings.setTheme(preset) }
-                                .padding(horizontal = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                .padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Box(
                                 Modifier
-                                    .size(width = 22.dp, height = 16.dp)
-                                    .clip(RoundedCornerShape(3.dp))
+                                    .fillMaxWidth()
+                                    .height(20.dp)
+                                    .clip(RoundedCornerShape(4.dp))
                                     .background(preset.preview)
-                                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(3.dp)),
+                                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(4.dp)),
                             )
                             Text(
                                 preset.label,
                                 fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
                             )
                         }
                     }

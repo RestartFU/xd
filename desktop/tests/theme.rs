@@ -3,9 +3,13 @@ use xd_desktop::theme::ThemePreset;
 #[test]
 fn theme_presets_have_stable_names_and_default_to_dark() {
     assert_eq!(ThemePreset::default(), ThemePreset::Dark);
-    assert_eq!(ThemePreset::ALL, [ThemePreset::Dark, ThemePreset::Light]);
+    assert_eq!(
+        ThemePreset::ALL,
+        [ThemePreset::Dark, ThemePreset::Light, ThemePreset::Modern]
+    );
     assert_eq!(ThemePreset::Dark.label(), "Dark");
     assert_eq!(ThemePreset::Light.label(), "Light");
+    assert_eq!(ThemePreset::Modern.label(), "Modern");
 
     assert_eq!(
         serde_json::to_string(&ThemePreset::Dark).unwrap(),
@@ -14,6 +18,14 @@ fn theme_presets_have_stable_names_and_default_to_dark() {
     assert_eq!(
         serde_json::to_string(&ThemePreset::Light).unwrap(),
         r#""light""#
+    );
+    assert_eq!(
+        serde_json::to_string(&ThemePreset::Modern).unwrap(),
+        r#""modern""#
+    );
+    assert_eq!(
+        serde_json::from_str::<ThemePreset>(r#""modern""#).unwrap(),
+        ThemePreset::Modern
     );
 }
 
@@ -63,8 +75,8 @@ fn every_preset_exposes_a_complete_readable_semantic_palette() {
 }
 
 #[test]
-fn default_theme_controls_remain_readable_on_every_surface() {
-    for preset in [ThemePreset::Dark, ThemePreset::Light] {
+fn theme_controls_remain_readable_on_every_surface() {
+    for preset in ThemePreset::ALL {
         let colors = preset.colors();
 
         for (role, background) in [
