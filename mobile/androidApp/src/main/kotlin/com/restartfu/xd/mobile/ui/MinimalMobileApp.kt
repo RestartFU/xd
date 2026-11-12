@@ -2620,14 +2620,14 @@ internal fun AutoSettleSettings(model: MainViewModel) {
     }
     SettingSwitch(
         title = "Settle merged sessions",
-        detail = "Settle a session when its pull request merges. A closed pull request settles it while either rule here is on.",
+        detail = SETTLE_MERGED_DETAIL,
         checked = current.onMerge,
         onCheckedChange = { model.setAutoSettle(onMerge = it) },
         enabled = editable,
     )
     SettingSwitch(
         title = "Settle inactive sessions",
-        detail = "Sessions with no activity for a while settle on their own. Any new activity un-settles them.",
+        detail = SETTLE_INACTIVE_DETAIL,
         checked = current.afterDays != null,
         onCheckedChange = { on ->
             model.setAutoSettle(afterDays = if (on) Ops.AfterDays.Days(DEFAULT_SETTLE_DAYS) else Ops.AfterDays.Off)
@@ -2640,7 +2640,7 @@ internal fun AutoSettleSettings(model: MainViewModel) {
             Column(Modifier.weight(1f).padding(end = 8.dp)) {
                 Text("Days before settling", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "How long a session sits without activity before it settles.",
+                    SETTLE_DAYS_DETAIL,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -2658,7 +2658,7 @@ internal fun AutoSettleSettings(model: MainViewModel) {
     }
     SettingSwitch(
         title = "Keep sessions with a pull request",
-        detail = "Inactivity does not settle sessions with a pull request. Merge and close still do.",
+        detail = SETTLE_KEEP_PR_DETAIL,
         checked = current.keepPullRequests,
         onCheckedChange = { model.setAutoSettle(keepPullRequests = it) },
         enabled = editable,

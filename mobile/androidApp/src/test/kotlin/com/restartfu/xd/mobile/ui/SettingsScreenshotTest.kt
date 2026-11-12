@@ -124,6 +124,17 @@ class SettingsScreenshotTest {
         compose.onNode(hasSetTextAction()).performTextReplacement("zzz")
         idle()
         check(shows("No settings match"))
+        // A word that only a description shows still finds its setting.
+        compose.onNode(hasSetTextAction()).performTextReplacement("inactivity")
+        idle()
+        check(shows("Keep sessions with a pull request")) { "Descriptions are not searched" }
+        // The page's Back clears a search first, as system Back does, then leaves.
+        compose.onNode(hasContentDescription("Back")).performClick()
+        idle()
+        checkHome()
+        compose.onNode(hasContentDescription("Back")).performClick()
+        idle()
+        check(!shows("Search settings")) { "Back did not leave Settings" }
     }
 
     private fun checkHome() {

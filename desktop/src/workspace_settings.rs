@@ -107,8 +107,10 @@ pub(super) fn settings_icon(path: &str) -> Option<&'static [u8]> {
 
 /// One setting: what search matches it by, and how it draws.
 pub(super) struct SettingRow {
-    title: SharedString,
-    description: SharedString,
+    pub(super) title: SharedString,
+    /// What search reads besides the title: the description shown under it,
+    /// or text the row shows some other way, such as a shortcut's keys.
+    pub(super) description: SharedString,
     element: gpui::AnyElement,
 }
 
@@ -141,7 +143,7 @@ fn group(label: &'static str, rows: Vec<SettingRow>) -> SettingGroup {
 }
 
 /// The words of a search, lowercased. Empty when nothing is being searched.
-fn settings_query_words(query: &str) -> Vec<String> {
+pub(super) fn settings_query_words(query: &str) -> Vec<String> {
     query.split_whitespace().map(str::to_lowercase).collect()
 }
 
@@ -1074,8 +1076,12 @@ impl XdDesktop {
             .iter()
             .enumerate()
             .map(|(index, &(label, keys))| {
-                setting((prefix, index), label, "", colors, |row| {
-                    row.child(
+                // The keys are searchable, though they show as a chip rather
+                // than a description.
+                SettingRow::custom(
+                    label,
+                    keys,
+                    settings_row((prefix, index), label, "", colors).child(
                         div()
                             .flex_none()
                             .px(px(7.0))
@@ -1087,8 +1093,8 @@ impl XdDesktop {
                             .text_size(px(11.5))
                             .text_color(rgb(colors.muted))
                             .child(keys),
-                    )
-                })
+                    ),
+                )
             })
             .collect()
     }
@@ -1358,6 +1364,29 @@ impl XdDesktop {
         ]
     }
 
+    /// The settings that match every word of a search, by section, in the
+    /// navigation's order. Sections without a match are left out.
+    pub(super) fn settings_search_results(
+        &mut self,
+        words: &[String],
+        column: f32,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Vec<(usize, Vec<SettingRow>)> {
+        (0..SETTINGS_SECTIONS.len())
+            .filter_map(|index| {
+                let name = SETTINGS_SECTIONS[index].name;
+                let rows = self
+                    .settings_groups(index, column, colors, cx)
+                    .into_iter()
+                    .flat_map(|group| group.rows)
+                    .filter(|row| setting_matches(words, name, &row.title, &row.description))
+                    .collect::<Vec<_>>();
+                (!rows.is_empty()).then_some((index, rows))
+            })
+            .collect()
+    }
+
     /// Opens a section, leaving any search.
     fn open_settings_section(&mut self, index: usize, cx: &mut Context<Self>) {
         self.settings_section = index;
@@ -1394,19 +1423,8 @@ impl XdDesktop {
 
         // While searching, every section is gathered and filtered, so the
         // navigation can say where the matches are.
-        let found: Vec<(usize, Vec<SettingRow>)> = if searching {
-            (0..SETTINGS_SECTIONS.len())
-                .filter_map(|index| {
-                    let name = SETTINGS_SECTIONS[index].name;
-                    let rows = self
-                        .settings_groups(index, column, colors, cx)
-                        .into_iter()
-                        .flat_map(|group| group.rows)
-                        .filter(|row| setting_matches(&words, name, &row.title, &row.description))
-                        .collect::<Vec<_>>();
-                    (!rows.is_empty()).then_some((index, rows))
-                })
-                .collect()
+        let found = if searching {
+            self.settings_search_results(&words, column, colors, cx)
         } else {
             Vec::new()
         };

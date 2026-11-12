@@ -3016,6 +3016,11 @@ impl XdDesktop {
         let settings_search_input = cx.new(|cx| ComposerInput::new(cx, "Search settings"));
         cx.subscribe(&settings_search_input, |this, _, event, cx| {
             if let ComposerEvent::Changed(text) = event {
+                // A search reaches every section, the accounts included, so it
+                // asks for them as Agents does when it opens.
+                if this.settings_query.trim().is_empty() && !text.trim().is_empty() {
+                    this.request_agent_accounts();
+                }
                 this.settings_query = text.clone();
                 cx.notify();
             }
@@ -27335,8 +27340,26 @@ Binary files /dev/null and b/image.png differ\n";
             cx.notify();
         });
         cx.run_until_parked();
-        // The keyboard shortcut is found from the Appearance page.
-        desktop.update(cx, |desktop, _| assert_eq!(desktop.settings_section, 0));
+        // The keyboard shortcut is found from the Appearance page, by its keys.
+        desktop.update(cx, |desktop, cx| {
+            assert_eq!(desktop.settings_section, 0);
+            let words = workspace_settings::settings_query_words(&desktop.settings_query);
+            let colors = desktop.settings.theme.colors();
+            let found = desktop.settings_search_results(&words, 680.0, colors, cx);
+            let titles = found
+                .iter()
+                .flat_map(|(section, rows)| {
+                    rows.iter().map(move |row| (*section, row.title.clone()))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(titles, [(5, "New line".into())]);
+            // A word of a description finds its setting too.
+            let words = workspace_settings::settings_query_words("sandbox");
+            let found = desktop.settings_search_results(&words, 680.0, colors, cx);
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].0, workspace_settings::AGENTS_SECTION);
+            assert_eq!(found[0].1[0].title.as_ref(), "Skip permission prompts");
+        });
 
         cx.dispatch_action(CloseSearch);
         cx.run_until_parked();

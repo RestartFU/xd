@@ -106,7 +106,7 @@ internal fun ChatQuotaSection(model: MainViewModel) {
             Column(Modifier.weight(1f).padding(end = 12.dp)) {
                 Text("Quota per chat", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "A chat's own quota, chosen when it stops, takes the place of this one.",
+                    QUOTA_PER_CHAT_DETAIL,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )

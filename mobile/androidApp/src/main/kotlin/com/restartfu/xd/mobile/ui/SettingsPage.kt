@@ -58,6 +58,19 @@ internal enum class SettingsSection(val title: String, val subtitle: String, @Dr
     UPDATES("Updates", "Keep xd current.", R.drawable.ic_download),
 }
 
+// What the settings drawn as several rows show, shared with search so a word
+// on screen always finds its setting.
+internal const val CHAT_TITLES_DETAIL = "Name a new chat from its first message."
+internal const val NAMING_MODEL_DETAIL = "Also names the worktrees new sessions get."
+internal const val QUOTA_PER_CHAT_DETAIL = "A chat's own quota, chosen when it stops, takes the place of this one."
+internal const val SETTLE_MERGED_DETAIL =
+    "Settle a session when its pull request merges. A closed pull request settles it while either rule here is on."
+internal const val SETTLE_INACTIVE_DETAIL =
+    "Sessions with no activity for a while settle on their own. Any new activity un-settles them."
+internal const val SETTLE_DAYS_DETAIL = "How long a session sits without activity before it settles."
+internal const val SETTLE_KEEP_PR_DETAIL =
+    "Inactivity does not settle sessions with a pull request. Merge and close still do."
+
 /**
  * One block of a section: a setting, or a group of settings the host answers
  * together. [words] are what search matches, besides the section's name.
@@ -108,8 +121,8 @@ internal fun SettingsPage(
             SettingsEntry(
                 SettingsSection.CHATS,
                 listOf(
-                    "Generate chat titles", "Name a new chat from its first message.",
-                    "Codex naming model", "Claude naming model", "Also names the worktrees new sessions get.",
+                    "Generate chat titles", CHAT_TITLES_DETAIL,
+                    "Codex naming model", "Claude naming model", NAMING_MODEL_DETAIL,
                 ),
             ) { ChatTitleSettings(model) },
         )
@@ -125,7 +138,7 @@ internal fun SettingsPage(
             add(
                 SettingsEntry(
                     SettingsSection.CHATS,
-                    listOf("Limit each chat's usage", "Quota per chat", "usage limit"),
+                    listOf("Limit each chat's usage", chatQuotaDetail(null), "Quota per chat", QUOTA_PER_CHAT_DETAIL),
                 ) { ChatQuotaSection(model) },
             )
         }
@@ -153,8 +166,10 @@ internal fun SettingsPage(
                 SettingsEntry(
                     SettingsSection.CLEANUP,
                     listOf(
-                        "Settle merged sessions", "Settle inactive sessions", "Days before settling",
-                        "Keep sessions with a pull request", "Auto-settle", "pull request",
+                        "Settle merged sessions", SETTLE_MERGED_DETAIL,
+                        "Settle inactive sessions", SETTLE_INACTIVE_DETAIL,
+                        "Days before settling", SETTLE_DAYS_DETAIL,
+                        "Keep sessions with a pull request", SETTLE_KEEP_PR_DETAIL,
                     ),
                 ) { AutoSettleSettings(model) },
             )
@@ -181,7 +196,14 @@ internal fun SettingsPage(
     Column(Modifier.fillMaxSize()) {
         SettingsTopBar(
             title = open?.title ?: "Settings",
-            onBack = { if (open != null) section = null else onClose() },
+            // The same order as system Back: leave a section, then a search, then Settings.
+            onBack = {
+                when {
+                    open != null -> section = null
+                    query.isNotEmpty() -> query = ""
+                    else -> onClose()
+                }
+            },
         )
         Column(
             Modifier
