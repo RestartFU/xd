@@ -434,17 +434,29 @@ fn claude_idle_line(line: &str) -> IdleLine {
 /// clears it, so a process that never starts one just waits longer. A
 /// foreground command finishing does not: the turn that ran it goes on.
 fn report_due_after(line: &str, due: bool, tasks: &crate::background_tasks::Tasks) -> bool {
-    if !line.contains("task_notification") && !line.contains("init") {
+    if !line.contains("task_notification")
+        && !line.contains("task_updated")
+        && !line.contains("init")
+    {
         return due;
     }
     let Ok(root) = serde_json::from_str::<Value>(line) else {
         return due;
     };
+    let task_id = root["task_id"].as_str();
     match (root["type"].as_str(), root["subtype"].as_str()) {
         (Some("system"), Some("task_notification")) => {
-            due || !root["task_id"]
+            due || !task_id.is_some_and(|id| tasks.runs_in_foreground(id))
+        }
+        // Another way a task ends. Only one still running in the background
+        // counts: a late update for one already finished must not make the
+        // turn reporting on it owe another.
+        (Some("system"), Some("task_updated")) => {
+            let ended = root["patch"]["status"]
                 .as_str()
-                .is_some_and(|id| tasks.runs_in_foreground(id))
+                .and_then(crate::subagent::SubagentStatus::from_wire)
+                .is_some_and(|status| status != crate::subagent::SubagentStatus::Running);
+            due || (ended && task_id.is_some_and(|id| tasks.runs_in_background(id)))
         }
         (Some("system"), Some("init")) => false,
         _ => due,
@@ -6236,6 +6248,22 @@ read next"#,
             tasks.track(line);
         }
         assert!(due);
+
+        // As is one that ends with an update rather than a notification, but
+        // not by an update for a task that has already finished.
+        let mut due = false;
+        for line in [
+            r#"{"type":"system","subtype":"task_started","task_id":"b5","tool_use_id":"toolu_upd","description":"Watch","is_backgrounded":true,"task_type":"local_bash"}"#,
+            r#"{"type":"system","subtype":"task_updated","task_id":"b5","patch":{"status":"running"}}"#,
+        ] {
+            due = report_due_after(line, due, &tasks);
+            tasks.track(line);
+        }
+        assert!(!due, "a task still running owes nothing yet");
+        let failed = r#"{"type":"system","subtype":"task_updated","task_id":"b5","patch":{"status":"failed"}}"#;
+        assert!(report_due_after(failed, false, &tasks));
+        tasks.track(failed);
+        assert!(!report_due_after(failed, false, &tasks));
 
         // As is one started in the background.
         let mut due = false;

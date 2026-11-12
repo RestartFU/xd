@@ -49,6 +49,11 @@ impl Tasks {
     pub(crate) fn runs_in_foreground(&self, id: &str) -> bool {
         self.live.get(id).is_some_and(|task| !task.backgrounded)
     }
+    /// Whether task `id` still runs in the background, so its ending leaves
+    /// the agent a turn to take on it.
+    pub(crate) fn runs_in_background(&self, id: &str) -> bool {
+        self.live.get(id).is_some_and(|task| task.backgrounded)
+    }
     pub(crate) fn clear(&mut self) {
         self.live.clear();
         self.tools.clear();
