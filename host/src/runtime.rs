@@ -456,7 +456,12 @@ fn report_due_after(line: &str, due: bool, tasks: &crate::background_tasks::Task
                 .as_str()
                 .and_then(crate::subagent::SubagentStatus::from_wire)
                 .is_some_and(|status| status != crate::subagent::SubagentStatus::Running);
-            due || (ended && task_id.is_some_and(|id| tasks.runs_in_background(id)))
+            // The same update may be the one that sends it to the background.
+            let backgrounded = root["patch"]["is_backgrounded"] == true;
+            due || (ended
+                && task_id.is_some_and(|id| {
+                    tasks.runs_in_background(id) || (backgrounded && tasks.runs_in_foreground(id))
+                }))
         }
         (Some("system"), Some("init")) => false,
         _ => due,
@@ -6264,6 +6269,15 @@ read next"#,
         assert!(report_due_after(failed, false, &tasks));
         tasks.track(failed);
         assert!(!report_due_after(failed, false, &tasks));
+
+        // Or by the update that sends it to the background.
+        let started = r#"{"type":"system","subtype":"task_started","task_id":"b6","tool_use_id":"toolu_both","description":"Build","is_backgrounded":false,"task_type":"local_bash"}"#;
+        let both = r#"{"type":"system","subtype":"task_updated","task_id":"b6","patch":{"is_backgrounded":true,"status":"completed"}}"#;
+        assert!(!report_due_after(started, false, &tasks));
+        tasks.track(started);
+        assert!(report_due_after(both, false, &tasks));
+        tasks.track(both);
+        assert!(tasks.is_empty());
 
         // As is one started in the background.
         let mut due = false;
