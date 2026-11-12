@@ -656,7 +656,7 @@ private fun MinimalProjectsHome(
     var deletingFolderId by rememberSaveable { mutableStateOf<String?>(null) }
     var movingId by rememberSaveable { mutableStateOf<String?>(null) }
     val collapsed by settings.collapsedFolders.collectAsStateWithLifecycle()
-    val foldedSessions by settings.collapsedSessions.collectAsStateWithLifecycle()
+    val expandedSessions by settings.expandedSessions.collectAsStateWithLifecycle()
     // An earlier project or folder is still being made; another waits rather than being dropped.
     val creatingWorkspace by model.creatingWorkspace.collectAsStateWithLifecycle()
     val ownerIcons by model.client.ownerIcons.collectAsStateWithLifecycle()
@@ -820,7 +820,7 @@ private fun MinimalProjectsHome(
                                         signalOf = signalOf,
                                         open = { session -> open(project, session) },
                                         actions = actions,
-                                        folded = foldedSessions,
+                                        expanded = expandedSessions,
                                         fold = { session, folded -> settings.setSessionsFolded(listOf(session.id), folded) },
                                         toggle = toggle,
                                         onNewSession = { newSessionIn(project.id) },
@@ -2011,8 +2011,8 @@ private fun OpenDrawer(
     signalOf: (MinimalSession) -> SessionSignal,
     open: (MinimalSession) -> Unit,
     actions: SessionActions,
-    /** Sessions folded over the sessions their agents started. */
-    folded: Set<String>,
+    /** Sessions unfolded to show the sessions their agents started; the rest list folded. */
+    expanded: Set<String>,
     fold: (MinimalSession, Boolean) -> Unit,
     /** Closes the project. */
     toggle: () -> Unit,
@@ -2048,12 +2048,13 @@ private fun OpenDrawer(
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
-        // A folded session hides the run of sessions below it that its agent started.
+        // A folded session hides the run of sessions below it that its agent started,
+        // and every such session starts folded until the user unfolds it.
         var hiddenUntil = 0
         sessions.forEachIndexed { index, session ->
             if (index < hiddenUntil) return@forEachIndexed
             val workers = sessions.startedBelow(index)
-            val isFolded = workers > 0 && session.id in folded
+            val isFolded = workers > 0 && session.id !in expanded
             if (isFolded) hiddenUntil = index + 1 + workers
             // Keyed so a row's open menu stays with its session when others come and go.
             key(session.id) {

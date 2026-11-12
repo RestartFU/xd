@@ -329,14 +329,15 @@ class ProjectsScreenshotTest {
     @Test fun workersLight() = workers("workers-light", MinimalThemePreset.LIGHT)
 
     /**
-     * Two sessions Reconnect backoff's agent started list right below it,
-     * indented, though the host lists them first as the newest; Usage page,
-     * which nobody started, stays level with it.
+     * Two sessions Reconnect backoff's agent started list right below it once
+     * it is unfolded, indented, though the host lists them first as the
+     * newest; Usage page, which nobody started, stays level with it.
      */
     private fun workers(name: String, theme: MinimalThemePreset) {
         withWorkers = true
         try {
             shoot(name, theme) {
+                click("Show the agents Reconnect backoff started")
                 val lead = bounds { hasText("Reconnect backoff") }
                 val first = bounds { hasText("Retry jitter") }
                 val second = bounds { hasText("Backoff tests") }
@@ -354,22 +355,23 @@ class ProjectsScreenshotTest {
     }
 
     /**
-     * Folding Reconnect backoff hides the two sessions its agent started and
-     * says how many it holds; unfolding brings them back.
+     * Reconnect backoff starts folded over the two sessions its agent started
+     * and says how many it holds.
      */
-    @Test fun foldingASessionHidesTheAgentsItStarted() = withWorkerSessions("workers-folded-dark") {
-        check(shows("Retry jitter") && shows("Backoff tests"))
-        click("Hide the agents Reconnect backoff started")
-        check(!shows("Retry jitter") && !shows("Backoff tests")) { "the folded session still shows its agents" }
+    @Test fun agentsStartFoldedUnderTheSessionThatStartedThem() = withWorkerSessions("workers-folded-dark") {
+        check(!shows("Retry jitter") && !shows("Backoff tests")) { "the session's agents show before it is unfolded" }
         check(shows("Show the agents Reconnect backoff started") && shows("Usage page"))
         // The count of what it holds sits on the folded row itself.
         bounds { hasText("Reconnect backoff") and hasText("2") }
     }
 
+    /** Unfolding shows the agents it started; folding it again hides them. */
     @Test fun unfoldingASessionShowsTheAgentsItStarted() = withWorkerSessions("workers-unfolded-dark") {
-        click("Hide the agents Reconnect backoff started")
         click("Show the agents Reconnect backoff started")
-        check(shows("Retry jitter") && shows("Backoff tests")) { "unfolding did not bring the agents back" }
+        check(shows("Retry jitter") && shows("Backoff tests")) { "unfolding did not show the agents" }
+        click("Hide the agents Reconnect backoff started")
+        check(!shows("Retry jitter") && !shows("Backoff tests")) { "folding again did not hide the agents" }
+        click("Show the agents Reconnect backoff started")
     }
 
     private fun withWorkerSessions(name: String, steps: Screen.() -> Unit) {
