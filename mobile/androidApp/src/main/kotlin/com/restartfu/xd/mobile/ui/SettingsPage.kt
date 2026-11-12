@@ -201,8 +201,10 @@ internal fun SettingsPage(
     LaunchedEffect(Unit) {
         pageFocus.requestFocus()
         keyboard?.hide()
-        // Search reads the quota's current share, so read it now rather than
-        // only once its row is shown.
+    }
+    // Search reads the quota's current share, so read it as soon as the host
+    // says it has quotas, rather than only once its row is shown.
+    LaunchedEffect(tree.chatQuotas) {
         if (tree.chatQuotas) model.loadChatQuota()
     }
 

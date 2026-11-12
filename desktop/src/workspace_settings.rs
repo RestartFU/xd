@@ -115,6 +115,13 @@ pub(super) struct SettingRow {
 }
 
 impl SettingRow {
+    /// Adds words a row shows outside its description, such as a stepper's
+    /// value, to what search reads.
+    fn searchable(mut self, shown: impl std::fmt::Display) -> Self {
+        self.description = format!("{} {shown}", self.description).into();
+        self
+    }
+
     /// A row drawn some other way than [`setting`], such as the theme cards.
     fn custom(
         title: impl Into<SharedString>,
@@ -546,21 +553,24 @@ impl XdDesktop {
         };
         let fewer = step("settle-days-fewer", "\u{2212}", days - 1, cx);
         let more = step("settle-days-more", "+", days + 1, cx);
-        rows.push(setting(
-            "workspace-settings-settle-days",
-            "Days before settling",
-            "How long a session sits without activity before it settles.",
-            colors,
-            |row| {
-                row.child(settings_stepper(
-                    fewer,
-                    days.to_string(),
-                    more,
-                    28.0,
-                    colors,
-                ))
-            },
-        ));
+        rows.push(
+            setting(
+                "workspace-settings-settle-days",
+                "Days before settling",
+                "How long a session sits without activity before it settles.",
+                colors,
+                |row| {
+                    row.child(settings_stepper(
+                        fewer,
+                        days.to_string(),
+                        more,
+                        28.0,
+                        colors,
+                    ))
+                },
+            )
+            .searchable(days),
+        );
         rows.push(setting(
             "workspace-settings-settle-keep-pr",
             "Keep sessions with a pull request",
@@ -634,7 +644,8 @@ impl XdDesktop {
             "A worktree with uncommitted changes keeps its session until you commit or clean it up.",
             colors,
             |row| row.child(settings_stepper(fewer, days.to_string(), more, 28.0, colors)),
-        ));
+        )
+        .searchable(days));
         rows
     }
 
@@ -687,21 +698,24 @@ impl XdDesktop {
         };
         let fewer = step("chat-quota-smaller", "\u{2212}", false, cx);
         let more = step("chat-quota-larger", "+", true, cx);
-        rows.push(setting(
-            "workspace-settings-chat-quota-percent",
-            "Quota per chat",
-            "A chat's own quota, chosen when it stops, takes the place of this one.",
-            colors,
-            |row| {
-                row.child(settings_stepper(
-                    fewer,
-                    format!("{percent}%"),
-                    more,
-                    40.0,
-                    colors,
-                ))
-            },
-        ));
+        rows.push(
+            setting(
+                "workspace-settings-chat-quota-percent",
+                "Quota per chat",
+                "A chat's own quota, chosen when it stops, takes the place of this one.",
+                colors,
+                |row| {
+                    row.child(settings_stepper(
+                        fewer,
+                        format!("{percent}%"),
+                        more,
+                        40.0,
+                        colors,
+                    ))
+                },
+            )
+            .searchable(format_args!("{percent}%")),
+        );
         rows
     }
 

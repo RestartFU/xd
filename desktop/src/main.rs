@@ -27367,6 +27367,21 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].1[0].title.as_ref(), "Accounts");
         });
+        // A stepper's value is searchable, so its control shows up with the
+        // switch that names the same share.
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.chat_quotas_supported = true;
+            desktop.chat_quota = Some(ChatQuotaSettings { percent: Some(10) });
+            let colors = desktop.settings.theme.colors();
+            let words = workspace_settings::settings_query_words("10%");
+            let found = desktop.settings_search_results(&words, 680.0, colors, cx);
+            let titles = found
+                .iter()
+                .flat_map(|(_, rows)| rows.iter().map(|row| row.title.to_string()))
+                .collect::<Vec<_>>();
+            assert_eq!(titles, ["Limit each chat's usage", "Quota per chat"]);
+            desktop.chat_quota = None;
+        });
         // Leaving for pairing or another host takes no search along.
         desktop.update(cx, |desktop, cx| {
             desktop.leave_settings(cx);
