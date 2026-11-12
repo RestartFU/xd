@@ -59,6 +59,8 @@ class ChatScreenshotTest {
 
     @Test fun phoneModern() = shoot("phone-modern", MinimalThemePreset.MODERN)
 
+    @Test fun phoneModernLight() = shoot("phone-modern-light", MinimalThemePreset.MODERN_LIGHT)
+
     /** The height left with the keyboard open. */
     @Config(qualifiers = "w412dp-h560dp-420dpi")
     @Test fun phoneKeyboard() = shoot("phone-keyboard-dark", MinimalThemePreset.DARK)
@@ -103,18 +105,19 @@ class ChatScreenshotTest {
         )
         compose.mainClock.autoAdvance = false
         compose.setContent {
-            CompositionLocalProvider(LocalXdSignals provides xdSignals(theme)) {
-                MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography) {
-                    Surface(Modifier.fillMaxSize()) {
-                        ChatScreen(
-                            model = chat,
-                            goBack = {},
-                            sessionTitle = "reconnect-backoff",
-                            projectName = "xd",
-                            backgroundTasks = backgroundTasks,
-                            sessionChats = SessionChats(chats, "chat", {}, {}, {}, {}, {}),
-                        )
-                    }
+            XdTheme(theme) {
+                Surface(
+                    Modifier.fillMaxSize().glassBackdrop(xdGlass(theme)),
+                    color = glassPage(MaterialTheme.colorScheme.surface),
+                ) {
+                    ChatScreen(
+                        model = chat,
+                        goBack = {},
+                        sessionTitle = "reconnect-backoff",
+                        projectName = "xd",
+                        backgroundTasks = backgroundTasks,
+                        sessionChats = SessionChats(chats, "chat", {}, {}, {}, {}, {}),
+                    )
                 }
             }
         }

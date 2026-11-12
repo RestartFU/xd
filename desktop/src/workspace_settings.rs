@@ -676,13 +676,21 @@ impl XdDesktop {
                                             .p_3()
                                             .flex()
                                             .gap(px(10.0))
-                                            .bg(rgb(swatch.background))
+                                            .relative()
+                                            .bg(crate::glass::window(swatch))
+                                            .when_some(
+                                                crate::glass::glow(swatch),
+                                                |preview, glow| {
+                                                    preview
+                                                        .child(div().absolute().inset_0().bg(glow))
+                                                },
+                                            )
                                             .child(
                                                 div()
                                                     .w(px(28.0))
                                                     .h_full()
                                                     .rounded(px(5.0))
-                                                    .bg(rgb(swatch.sidebar)),
+                                                    .bg(crate::glass::pane(swatch, swatch.sidebar)),
                                             )
                                             .child(
                                                 div()

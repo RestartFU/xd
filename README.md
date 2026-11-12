@@ -68,7 +68,7 @@ work going while the app is closed.
 - **Usage and limits** (<kbd>Ctrl</kbd>+<kbd>U</kbd>): cost and tokens by provider,
   model, and day, plus your Codex and Claude subscription limits across accounts.
 - **Uses your own tools.** xd discovers your installed CLIs and reuses their
-  authentication and configuration. Dark, Light and Modern themes included.
+  authentication and configuration. Dark and Light themes, plus glassy Modern and Modern Light.
 
 <table align="center">
   <tr>

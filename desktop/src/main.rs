@@ -72,6 +72,7 @@ mod chat_quota;
 mod composer;
 mod editor;
 mod files;
+mod glass;
 mod image_preview;
 mod input;
 mod minimal;
@@ -8175,9 +8176,9 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap_1()
-            .bg(rgb(colors.chrome))
+            .bg(glass::pane(colors, colors.chrome))
             .border_b_1()
-            .border_color(rgb(colors.border))
+            .border_color(glass::edge(colors))
             .child(
                 div()
                     .id("session-chat-tab-scroll")
@@ -13868,9 +13869,9 @@ impl XdDesktop {
             } else {
                 16.0
             }))
-            .bg(rgb(colors.chrome))
+            .bg(glass::pane(colors, colors.chrome))
             .border_b_1()
-            .border_color(rgb(colors.border))
+            .border_color(glass::edge(colors))
             .when(titlebar, |bar| {
                 bar.on_mouse_down(MouseButton::Left, |event, window, _| {
                     if event.click_count >= 2 {
@@ -14035,7 +14036,7 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .bg(rgb(colors.chrome))
+            .bg(glass::pane(colors, colors.chrome))
             .child(
                 div()
                     .min_w_0()
@@ -16077,12 +16078,12 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(rgb(if self.catalog_drag.is_some() {
-                colors.accent
+            .border_color(if self.catalog_drag.is_some() {
+                rgb(colors.accent)
             } else {
-                colors.border
-            }))
-            .bg(rgb(colors.sidebar))
+                glass::edge(colors)
+            })
+            .bg(glass::pane(colors, colors.sidebar))
             .child(
                 div()
                     .h(px(40.0))
@@ -16345,7 +16346,7 @@ impl XdDesktop {
             .min_w_0()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(rgb(colors.background))
+            .bg(glass::canvas(colors))
             .child(
                 div()
                     .w_full()
@@ -18487,7 +18488,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgb(colors.background))
+                .bg(glass::canvas(colors))
                 .text_size(px(13.0))
                 .text_color(rgb(colors.muted))
                 .child("This agent's record is not loaded. Scroll the chat back to it and open it again.")
@@ -18811,7 +18812,7 @@ impl XdDesktop {
                     } else {
                         colors.border
                     }))
-                    .bg(rgb(colors.composer))
+                    .bg(glass::composer(colors))
                     .shadow_md()
                     .child(
                         div()
@@ -18850,7 +18851,7 @@ impl XdDesktop {
             .flex_col()
             .items_center()
             .px(px(24.0))
-            .bg(rgb(colors.background))
+            .bg(glass::canvas(colors))
             .child(
                 div()
                     .id("agent-view-scroll")
@@ -20095,7 +20096,7 @@ impl XdDesktop {
             .items_center()
             .when(empty_ready, |chat| chat.justify_center())
             .px(px(24.0))
-            .bg(rgb(colors.background))
+            .bg(glass::canvas(colors))
             // Files dropped anywhere on the chat join the draft.
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let Some(chat) = this.model.selected_chat.clone() else {
@@ -20570,7 +20571,7 @@ impl XdDesktop {
                     .child(
                         div()
                             .h(px(browser::TAB_BAR_HEIGHT))
-                            .bg(rgb(colors.chrome))
+                            .bg(glass::pane(colors, colors.chrome))
                             .flex_none()
                             .pl_2()
                             .pr_3()
@@ -20695,7 +20696,7 @@ impl XdDesktop {
                     .child(
                         div()
                             .h(px(browser::TAB_BAR_HEIGHT))
-                            .bg(rgb(colors.chrome))
+                            .bg(glass::pane(colors, colors.chrome))
                             .flex_none()
                             .pl_3()
                             .pr_2()
@@ -20914,7 +20915,7 @@ impl XdDesktop {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(colors.background))
+            .bg(glass::canvas(colors))
             .child(
                 div()
                     .flex_1()
@@ -20922,7 +20923,7 @@ impl XdDesktop {
                     .flex_col()
                     .min_w_0()
                     .min_h_0()
-                    .bg(rgb(colors.background))
+                    .bg(glass::canvas(colors))
                     .child(content),
             )
             .into_any_element()
@@ -20940,7 +20941,7 @@ impl XdDesktop {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(colors.background))
+            .bg(glass::canvas(colors))
             .child(
                 div()
                     .h(px(52.0))
@@ -22509,7 +22510,11 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .key_context("XdDesktop")
-            .bg(rgb(colors.background))
+            .bg(glass::window(colors))
+            // First, so everything else paints over it.
+            .when_some(glass::glow(colors), |root, glow| {
+                root.child(div().absolute().inset_0().bg(glow))
+            })
             .font_family(UI_FONT)
             .on_mouse_move(
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {

@@ -30,7 +30,7 @@ xd does not ship its own model or agent. It wraps the user's own CLIs, authentic
 ## Capabilities and Constraints
 
 - Desktop UI is GPUI: no CSS, no web components; everything is drawn in Rust in `desktop/src/main.rs` and its siblings. The palette lives in `desktop/src/theme.rs` as semantic roles.
-- Themes: Dark, Light and Modern (Dark and Light confirmed 2026-10-23; Modern added 2026-11-12). Saved legacy theme names load as Dark.
+- Themes: Dark, Light, Modern and Modern Light (Dark and Light confirmed 2026-10-23). Modern and Modern Light are a glassy, macOS-style look drawn inside the app; the window stays opaque (confirmed 2026-11-12). Saved legacy theme names load as Dark.
 - The Linux browser pane is Chromium (through CEF) over X11.
 - Redesign scope (confirmed 2026-10-23): the whole UI, including navigation and flows, on both desktop and Android. Existing capabilities stay available; sessions gain separate chat tabs sharing their workspace.
 

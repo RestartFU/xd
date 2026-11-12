@@ -354,7 +354,7 @@ impl XdDesktop {
             } else {
                 colors.border
             }))
-            .bg(rgb(colors.composer))
+            .bg(crate::glass::composer(colors))
             .shadow_md()
             .drag_over::<ExternalPaths>(move |style, _, _, _| {
                 style.border_color(rgb(colors.accent))

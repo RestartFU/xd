@@ -396,7 +396,7 @@ internal fun ChatScreen(
     }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.surface,
+        containerColor = glassPage(MaterialTheme.colorScheme.surface),
         topBar = {
             if (sessionChats != null) {
                 Column {
@@ -510,7 +510,7 @@ internal fun ChatScreen(
                 sessionTabs(agents, showPullRequests)
                 TabRow(
                     selectedTabIndex = pane.ordinal,
-                    containerColor = MaterialTheme.colorScheme.surface,
+                    containerColor = glassPane(MaterialTheme.colorScheme.surface),
                     contentColor = MaterialTheme.colorScheme.onSurface,
                     divider = { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) },
                 ) {
@@ -980,8 +980,8 @@ private fun Composer(
         // reader on top, then the message, then attach and send.
         Surface(
             shape = RoundedCornerShape(20.dp),
-            color = MaterialTheme.colorScheme.surfaceContainer,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            color = glassComposer(MaterialTheme.colorScheme.surfaceContainer),
+            border = BorderStroke(1.dp, glassEdge(MaterialTheme.colorScheme.outlineVariant)),
         ) {
             Column {
                 prompt.section?.invoke()
@@ -1155,8 +1155,8 @@ private fun CompactComposerRow(
     val faint = LocalXdSignals.current.faint
     Surface(
         shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        color = glassComposer(MaterialTheme.colorScheme.surfaceContainer),
+        border = BorderStroke(1.dp, glassEdge(MaterialTheme.colorScheme.outlineVariant)),
     ) {
         Column {
             prompt.section?.invoke()

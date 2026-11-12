@@ -54,32 +54,74 @@ colors:
   light-backdrop: "#18181b66"
   light-chrome: "#f1f1f1"
   light-composer: "#ffffff"
-  modern-background: "#0e1016"
-  modern-sidebar: "#12141c"
-  modern-surface: "#191c26"
-  modern-surface-high: "#222633"
-  modern-border: "#2a2e3c"
-  modern-selected-surface: "#252a3a"
+  modern-background: "#11141d"
+  modern-sidebar: "#1e2236"
+  modern-surface: "#1b1f2f"
+  modern-surface-high: "#252a3d"
+  modern-border: "#2e3348"
+  modern-selected-surface: "#2a3049"
   modern-selected-border: "#7178e6"
   modern-text: "#edeff5"
-  modern-muted: "#a6acbd"
-  modern-faint: "#8d93a6"
+  modern-codex-icon: "#ffffff"
+  modern-claude-icon: "#d97757"
+  modern-muted: "#b0b6c9"
+  modern-faint: "#959cb2"
   modern-accent: "#8b8ff8"
-  modern-accent-ink: "#a3a7ff"
+  modern-accent-ink: "#a9adff"
   modern-accent-hover: "#a6a9ff"
   modern-accent-text: "#0e1016"
-  modern-rule: "#262a37"
-  modern-working: "#5fd3a3"
+  modern-rule: "#2a2e42"
+  modern-working: "#63d8a8"
   modern-waiting: "#f0c06a"
-  modern-done: "#a3a7ff"
-  modern-danger: "#ff8f9d"
+  modern-done: "#a9adff"
+  modern-danger: "#ff94a2"
   modern-danger-surface: "#2c1520"
   modern-diff-added: "#173328"
   modern-diff-removed: "#3b1d28"
   modern-selection: "#8b8ff840"
   modern-backdrop: "#05060ab3"
-  modern-chrome: "#171a23"
-  modern-composer: "#1d2130"
+  modern-chrome: "#1e2236"
+  modern-composer: "#252a42"
+  modern-glass-wash-from: "#1d1b4d"
+  modern-glass-wash-to: "#0a2229"
+  modern-glass-glow: "#6a2e8059"
+  modern-glass-pane: "#2a2f528c"
+  modern-glass-composer: "#30365cc7"
+  modern-glass-edge: "#ffffff24"
+  modern-light-background: "#eef0f9"
+  modern-light-sidebar: "#f3f4fb"
+  modern-light-surface: "#f8f9fd"
+  modern-light-surface-high: "#eceef7"
+  modern-light-border: "#d3d7e6"
+  modern-light-selected-surface: "#dfe2f4"
+  modern-light-selected-border: "#6366e0"
+  modern-light-text: "#1b1e2c"
+  modern-light-codex-icon: "#1b1e2c"
+  modern-light-claude-icon: "#b85c3f"
+  modern-light-muted: "#4b5165"
+  modern-light-faint: "#5a6074"
+  modern-light-accent: "#5257d9"
+  modern-light-accent-ink: "#4045bb"
+  modern-light-accent-hover: "#4347c4"
+  modern-light-accent-text: "#ffffff"
+  modern-light-rule: "#dadde9"
+  modern-light-working: "#17603f"
+  modern-light-waiting: "#6c490a"
+  modern-light-done: "#4045bb"
+  modern-light-danger: "#97203a"
+  modern-light-danger-surface: "#fbe9ed"
+  modern-light-diff-added: "#dff2e6"
+  modern-light-diff-removed: "#f8e1e6"
+  modern-light-selection: "#5257d933"
+  modern-light-backdrop: "#1b1e2c66"
+  modern-light-chrome: "#f3f4fb"
+  modern-light-composer: "#ffffff"
+  modern-light-glass-wash-from: "#dcdcfb"
+  modern-light-glass-wash-to: "#d3ebf3"
+  modern-light-glass-glow: "#f7d6ee99"
+  modern-light-glass-pane: "#ffffff8c"
+  modern-light-glass-composer: "#ffffffd0"
+  modern-light-glass-edge: "#1b1e2c1f"
 typography:
   display:
     fontFamily: "Inter"
@@ -148,21 +190,21 @@ components:
 
 xd uses neutral charcoal to frame a generous conversation area. Projects contain sessions; each session contains separate chat tabs sharing one workspace. The sidebar stays compact, chat controls sit beside the conversation, and workspace tools remain available alongside it.
 
-Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Modern uses cool slate surfaces with an indigo accent for the primary action, links, focus and selection. Every desktop surface is opaque, so the wallpaper and other windows never show through the app. Android carries the same palette and hierarchy through native Material 3 layouts.
+Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Modern and Modern Light are frosted glass in the manner of macOS, with an indigo accent for the primary action, links, focus and selection. Their glass is painted inside the app, so the window stays opaque and the wallpaper and other windows never show through it. Android carries the same palette and hierarchy through native Material 3 layouts.
 
 **Key Characteristics:**
 
-- Three themes: Dark, Light and Modern. Retired saved names load as Dark.
+- Four themes: Dark, Light, Modern and Modern Light. Retired saved names load as Dark.
 - Inter for prose and controls; JetBrains Mono for code and terminal text.
 - Separate chat tabs share a session workspace and terminal.
 - Real platform window controls; no decorative traffic lights.
-- Neutral selection and focus, with color reserved for meaningful status. Modern alone tints selection and focus with its indigo accent.
+- Neutral selection and focus, with color reserved for meaningful status. The Modern themes alone tint selection and focus with their indigo accent.
 
 ## Colors
 
-The normative desktop values above come from `desktop/src/theme.rs`. Roles pair by the `dark-`, `light-` and `modern-` prefixes. `selection` and `backdrop` include alpha as `#RRGGBBAA`; other values are opaque.
+The normative desktop values above come from `desktop/src/theme.rs`. Roles pair by the `dark-`, `light-`, `modern-` and `modern-light-` prefixes. `selection`, `backdrop` and the glass `glow`, `pane`, `composer` and `edge` include alpha as `#RRGGBBAA`; other values are opaque.
 
-Neutral surfaces distinguish canvas, sidebar, panels, hover and selection. Primary actions use a silver fill with dark ink in Dark, and charcoal with white ink in Light. Links and focus stay neutral in both. Modern is the one theme with a hue outside status: an indigo fill with dark ink for the primary action, and a lighter indigo for links, focus, the caret, selection and the selected-row border. Working is green, waiting is amber, and destructive actions are rose. Desktop marks questions and approvals with a steady hollow amber circle and ‘Waiting on you’ in session rows and the chat header. Chat tabs use the same ring. On desktop, a question, approval or quota stop docks inside the composer as a section above a hairline, marked only by the ring, with numbered choices; Send submits the editor's text as a typed answer. Once answered, the reply carries the question above its bubble in faint text after a reply arrow, on desktop and mobile. Status also has text or an icon.
+Neutral surfaces distinguish canvas, sidebar, panels, hover and selection. Primary actions use a silver fill with dark ink in Dark, and charcoal with white ink in Light. Links and focus stay neutral in both. The Modern themes are the only ones with a hue outside status: an indigo fill for the primary action (dark ink in Modern, white in Modern Light), and indigo for links, focus, the caret, selection and the selected-row border. Working is green, waiting is amber, and destructive actions are rose. Desktop marks questions and approvals with a steady hollow amber circle and ‘Waiting on you’ in session rows and the chat header. Chat tabs use the same ring. On desktop, a question, approval or quota stop docks inside the composer as a section above a hairline, marked only by the ring, with numbered choices; Send submits the editor's text as a typed answer. Once answered, the reply carries the question above its bubble in faint text after a reply arrow, on desktop and mobile. Status also has text or an icon.
 
 Android uses complete Material color roles in `ui/Theme.kt`, with small platform-specific surface adjustments. Its charcoal conversation surface matches the desktop canvas; silver action, text and signal colors follow the same roles. Legacy accent preferences remain readable but do not recolor the main workspace.
 
@@ -182,9 +224,9 @@ Outside an open chat, Android phones show a floating bar of icon tabs (Projects,
 
 ## Elevation & Depth
 
-Desktop requests an opaque native window and paints the title, sidebar, composer and reading surfaces with opaque roles; nothing behind the window shows through. Only text selection and the modal backdrop use alpha, and they blend over the app itself. Native OS decorations remain responsible for window controls where provided. Floating menus and dialogs retain their existing shadows.
+Desktop requests an opaque native window; nothing behind the window shows through. Dark and Light paint the title, sidebar, composer and reading surfaces with opaque roles, and only text selection and the modal backdrop use alpha. The Modern themes are glass drawn inside that opaque window: it paints a diagonal wash (`glass-wash-from` to `glass-wash-to`) with a `glass-glow` fading in from the top right corner; page canvases (the chat, a project's page, the session column) leave it showing; and the sidebar, title bars, tab rows and composer are translucent panes (`glass-pane`, `glass-composer`) over it, edged with a `glass-edge` hairline. Cards, code blocks, the terminal, menus and dialogs keep opaque roles. Every alpha blends over the app itself. Native OS decorations remain responsible for window controls where provided. Floating menus and dialogs retain their existing shadows.
 
-Android expresses the material through opaque layered neutral surfaces and restrained outlines, without compositor blur. It retains native dialogs, ripples and navigation behavior.
+Android expresses the material through opaque layered neutral surfaces and restrained outlines, without compositor blur. Its Modern themes paint the same wash, glow and translucent panes (headers, the floating tab bar, the navigation rail and the composer) inside the app. It retains native dialogs, ripples and navigation behavior.
 
 ## Shapes
 
@@ -198,17 +240,17 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 
 **Delegated agents.** While a chat's agents work, one quiet line above the composer says how many and what they are doing, with a single pulsing dot; opened, it lists each agent's task and elapsed time. A row, or Open on an agent's card, opens that agent as a temporary tab after the chat tabs (on phones, in place of the chat, listed in the title menu). The tab shows the task, the steps, the latest message or report, and the messages sent to it, over a box to message it. A message goes to the lead as an ordinary chat message that asks it to pass the words on; the chat shows it as the user's words under "To" and the agent's name, and the agent's tab under "Sent through the main chat". Agent tabs last only as long as the window and close without affecting the agent.
 
-**Composer.** A bordered opaque surface, using Material on Android, holds the editor, attachments, agent options and send action. On desktop, attached images are 64px cover-cropped tiles above the editor, each with an overlaid remove button. A tile opens a full-window viewer over a black 75% backdrop that fits the image, zooms by click, wheel or keyboard, pans by drag or arrow keys, steps through the draft's images, and closes on Escape or a click outside the image. With nothing typed after a turn was cut short, the send action becomes a filled play button that continues the chat. Empty-state text uses natural height and a clear gap above it. While another chat's metadata loads, its editor waits for the correct saved draft. On phones the composer is one row: attach, the message growing upward to six lines, the agent and model chip that opens the model picker, and send or stop.
+**Composer.** A bordered surface (opaque, or a glass pane in the Modern themes), using Material on Android, holds the editor, attachments, agent options and send action. On desktop, attached images are 64px cover-cropped tiles above the editor, each with an overlaid remove button. A tile opens a full-window viewer over a black 75% backdrop that fits the image, zooms by click, wheel or keyboard, pans by drag or arrow keys, steps through the draft's images, and closes on Escape or a click outside the image. With nothing typed after a turn was cut short, the send action becomes a filled play button that continues the chat. Empty-state text uses natural height and a clear gap above it. While another chat's metadata loads, its editor waits for the correct saved draft. On phones the composer is one row: attach, the message growing upward to six lines, the agent and model chip that opens the model picker, and send or stop.
 
 **Host notices.** Warnings sit directly in the conversation with a small warning icon and muted, proportional text. They have no card, colored background, border, or heading. Keep the explanation selectable and allow it to wrap.
 
 **Workspace tools.** Files, Changes, Browser and Terminal retain session scope across sibling chat switches. Agent history, options, approvals and drafts retain chat scope. Hosts without grouped-session support remain usable with singleton sessions and show an update message when adding a sibling chat.
 
-**Settings.** Desktop groups Appearance, General, Agents, Devices and Shortcuts in one panel using existing capabilities. Android preserves its native settings dialog. Both offer Dark, Light and Modern.
+**Settings.** Desktop groups Appearance, General, Agents, Devices and Shortcuts in one panel using existing capabilities. Android preserves its native settings dialog. Both offer Dark, Light, Modern and Modern Light. Android lays the choices out four across, two to a row, or as full-width rows, whichever lets every name fit.
 
 **Usage.** The chart icon opens a 348px flyout just above the sidebar footer, without dimming the work behind it. Tabs switch between Limits, Cost and Tokens. Each limit compares what is left with the time left as two thin bars, and stays neutral until it needs attention: amber when spending ahead of pace, rose when spent. Pooled accounts nest under their total, and pressing a row opens its details and reset credit. Cost and Tokens show a total, small period bars and ranked models, in neutral shades. The maximize button or a model row opens the full page, a large panel holding filters, model prices, charts and breakdowns.
 
-**Buttons and fields.** Primary actions use the action role, neutral in Dark and Light and indigo in Modern; secondary and ghost controls use tonal hover and focus feedback. Destructive actions use the danger role and explicit confirmation where data is removed. Search and text fields retain visible focus and readable hints.
+**Buttons and fields.** Primary actions use the action role, neutral in Dark and Light and indigo in the Modern themes; secondary and ghost controls use tonal hover and focus feedback. Destructive actions use the danger role and explicit confirmation where data is removed. Search and text fields retain visible focus and readable hints.
 
 ## Do's and Don'ts
 
@@ -219,7 +261,7 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 - Do center the empty-state context and heading over the composer, allowing natural text height.
 - Do preserve independent chat histories, drafts and agent settings when switching tabs.
 - Do retain native window, keyboard, touch and system inset behavior.
-- Do keep opaque reading surfaces beneath prose, code and terminal output.
+- Do keep opaque reading surfaces beneath code and terminal output; prose may sit on the Modern themes' wash.
 
 ### Don't:
 

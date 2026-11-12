@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -340,7 +341,7 @@ internal fun MinimalMobileApp(
         model.consumeSettledNotice(notice)
     }
     Box(Modifier.fillMaxSize()) {
-    Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    Row(Modifier.fillMaxSize().background(glassPage(MaterialTheme.colorScheme.background))) {
         if (expanded) {
             XdNavigationRail(mobileDestination, showProjects, showTerminal, showUsage)
         }
@@ -351,7 +352,7 @@ internal fun MinimalMobileApp(
                         model, settings, link, showProjects, barInset,
                     )
                     mobileDestination == MobileDestination.USAGE -> Column(
-                        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+                        Modifier.fillMaxSize().background(glassPage(MaterialTheme.colorScheme.background)),
                     ) {
                         ProductHeader(link = link, title = "Usage", onSettings = { settingsOpen = true })
                         // Kept with the other per-host stores, so leaving Usage keeps what it read.
@@ -719,7 +720,7 @@ private fun MinimalProjectsHome(
     Column(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(glassPage(MaterialTheme.colorScheme.background))
             .navigationBarsPadding(),
     ) {
         val pausingAll by model.pausingAll.collectAsStateWithLifecycle()
@@ -1060,7 +1061,7 @@ private fun MinimalGlobalTerminal(
     Column(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(glassPage(MaterialTheme.colorScheme.background))
             .navigationBarsPadding(),
     ) {
         ProductHeader(link = link, title = "Terminal", onSettings = { settingsOpen = true })
@@ -1272,7 +1273,7 @@ private fun ProductHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
+            .background(glassPane(MaterialTheme.colorScheme.surface))
             .statusBarsPadding()
             .height(56.dp)
             .padding(start = 16.dp, end = 4.dp),
@@ -1373,8 +1374,8 @@ private fun XdNavigationBar(
     Surface(
         modifier = modifier.navigationBarsPadding().padding(bottom = 16.dp).height(FloatingBarHeight),
         shape = CircleShape,
-        color = colors.surfaceContainer,
-        border = BorderStroke(1.dp, colors.outlineVariant),
+        color = glassPane(colors.surfaceContainer),
+        border = BorderStroke(1.dp, glassEdge(colors.outlineVariant)),
         shadowElevation = 6.dp,
     ) {
         Row(
@@ -1429,7 +1430,7 @@ private fun XdNavigationRail(
     onTerminal: () -> Unit,
     onUsage: () -> Unit,
 ) {
-    NavigationRail(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+    NavigationRail(containerColor = glassPane(MaterialTheme.colorScheme.surfaceContainerLow)) {
         Spacer(Modifier.height(16.dp))
         listOf(
             Triple(MobileDestination.PROJECTS, "Projects", R.drawable.ic_projects) to onProjects,
@@ -2480,8 +2481,9 @@ private fun NewProjectDialog(
 
 /**
  * The theme choices as cards with the swatch over the name, like the
- * desktop's, three across. When the names cannot fit that way, as on a narrow
- * phone with enlarged text, the choices stack as full-width rows instead.
+ * desktop's: all in one row when the names fit, else two to a row. When even
+ * that cannot fit them, as on a narrow phone with enlarged text, the choices
+ * stack as full-width rows instead.
  */
 @Composable
 private fun ThemePicker(theme: MinimalThemePreset, choose: (MinimalThemePreset) -> Unit) {
@@ -2491,26 +2493,44 @@ private fun ThemePicker(theme: MinimalThemePreset, choose: (MinimalThemePreset) 
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val gap = 8.dp
         val padding = 10.dp
-        val cell = (maxWidth - gap * (presets.size - 1)) / presets.size - padding * 2
         val widest = with(LocalDensity.current) {
             presets.maxOf { measurer.measure(it.label, style).size.width }.toDp()
         }
-        val across = widest <= cell
-        val choices: @Composable (Modifier) -> Unit = { modifier ->
-            presets.forEach { preset ->
-                ThemeChoice(preset, chosen = theme == preset, across = across, padding = padding, modifier = modifier) {
-                    choose(preset)
+        val fits = { columns: Int -> (maxWidth - gap * (columns - 1)) / columns - padding * 2 >= widest }
+        val columns = listOf(presets.size, 2).firstOrNull(fits) ?: 1
+        val card = columns > 1
+        Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(gap)) {
+            presets.chunked(columns).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                    row.forEach { preset ->
+                        ThemeChoice(
+                            preset,
+                            chosen = theme == preset,
+                            card = card,
+                            padding = padding,
+                            modifier = Modifier.weight(1f),
+                        ) { choose(preset) }
+                    }
+                    repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
         }
-        if (across) {
-            Row(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(gap)) {
-                choices(Modifier.weight(1f))
-            }
-        } else {
-            Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(gap)) {
-                choices(Modifier.fillMaxWidth())
-            }
+    }
+}
+
+/** The theme's ground at a glance: its glass wash under a frosted strip, or its canvas. */
+@Composable
+private fun ThemeSwatch(preset: MinimalThemePreset, modifier: Modifier) {
+    val glass = xdGlass(preset)
+    val shape = RoundedCornerShape(4.dp)
+    Box(
+        modifier
+            .clip(shape)
+            .then(if (glass != null) Modifier.background(glass.wash()) else Modifier.background(preset.preview))
+            .border(1.dp, MaterialTheme.colorScheme.outline, shape),
+    ) {
+        if (glass != null) {
+            Box(Modifier.fillMaxHeight().fillMaxWidth(0.35f).background(glass.pane))
         }
     }
 }
@@ -2519,13 +2539,13 @@ private fun ThemePicker(theme: MinimalThemePreset, choose: (MinimalThemePreset) 
 private fun ThemeChoice(
     preset: MinimalThemePreset,
     chosen: Boolean,
-    across: Boolean,
+    card: Boolean,
     padding: Dp,
     modifier: Modifier,
     choose: () -> Unit,
 ) {
     val shape = RoundedCornerShape(8.dp)
-    val card = modifier
+    val frame = modifier
         .heightIn(min = 48.dp)
         .clip(shape)
         .border(
@@ -2535,10 +2555,6 @@ private fun ThemeChoice(
         )
         .selectable(selected = chosen, role = Role.RadioButton, onClick = choose)
         .padding(padding)
-    val swatch = Modifier
-        .clip(RoundedCornerShape(4.dp))
-        .background(preset.preview)
-        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(4.dp))
     val label: @Composable () -> Unit = {
         Text(
             preset.label,
@@ -2546,22 +2562,22 @@ private fun ThemeChoice(
             textAlign = TextAlign.Center,
         )
     }
-    if (across) {
+    if (card) {
         Column(
-            card,
+            frame,
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(swatch.fillMaxWidth().height(20.dp))
+            ThemeSwatch(preset, Modifier.fillMaxWidth().height(20.dp))
             label()
         }
     } else {
         Row(
-            card,
+            frame,
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Box(swatch.size(width = 28.dp, height = 20.dp))
+            ThemeSwatch(preset, Modifier.size(width = 28.dp, height = 20.dp))
             label()
         }
     }

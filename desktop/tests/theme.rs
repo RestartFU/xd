@@ -1,15 +1,21 @@
-use xd_desktop::theme::ThemePreset;
+use xd_desktop::theme::{Glass, ThemePreset};
 
 #[test]
 fn theme_presets_have_stable_names_and_default_to_dark() {
     assert_eq!(ThemePreset::default(), ThemePreset::Dark);
     assert_eq!(
         ThemePreset::ALL,
-        [ThemePreset::Dark, ThemePreset::Light, ThemePreset::Modern]
+        [
+            ThemePreset::Dark,
+            ThemePreset::Light,
+            ThemePreset::Modern,
+            ThemePreset::ModernLight
+        ]
     );
     assert_eq!(ThemePreset::Dark.label(), "Dark");
     assert_eq!(ThemePreset::Light.label(), "Light");
     assert_eq!(ThemePreset::Modern.label(), "Modern");
+    assert_eq!(ThemePreset::ModernLight.label(), "Modern Light");
 
     assert_eq!(
         serde_json::to_string(&ThemePreset::Dark).unwrap(),
@@ -26,6 +32,14 @@ fn theme_presets_have_stable_names_and_default_to_dark() {
     assert_eq!(
         serde_json::from_str::<ThemePreset>(r#""modern""#).unwrap(),
         ThemePreset::Modern
+    );
+    assert_eq!(
+        serde_json::to_string(&ThemePreset::ModernLight).unwrap(),
+        r#""modern-light""#
+    );
+    assert_eq!(
+        serde_json::from_str::<ThemePreset>(r#""modern-light""#).unwrap(),
+        ThemePreset::ModernLight
     );
 }
 
@@ -146,6 +160,87 @@ fn signal_colors_read_as_text_on_every_surface() {
         }
         assert!(contrast(colors.danger, colors.danger_surface) >= 4.5);
         assert_ne!(colors.waiting, colors.working, "{preset:?}");
+    }
+}
+
+#[test]
+fn only_the_modern_themes_are_glass() {
+    for preset in ThemePreset::ALL {
+        let glass = preset.colors().glass;
+        assert_eq!(
+            glass.is_some(),
+            matches!(preset, ThemePreset::Modern | ThemePreset::ModernLight),
+            "{preset:?}"
+        );
+        if let Some(glass) = glass {
+            // The wash is the window's own paint; only the panes over it let it through.
+            assert!(glass.wash_from <= 0xff_ffff && glass.wash_to <= 0xff_ffff);
+            for (role, fill) in [
+                ("pane", glass.pane),
+                ("composer", glass.composer),
+                ("glow", glass.glow),
+            ] {
+                let alpha = fill & 0xff;
+                assert!(
+                    alpha > 0 && alpha < 0xff,
+                    "{preset:?} {role} is not translucent"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn glass_blends_a_translucent_fill_over_what_is_beneath() {
+    assert_eq!(Glass::over(0xffffffff, 0x000000), 0xffffff);
+    assert_eq!(Glass::over(0xffffff00, 0x123456), 0x123456);
+    assert_eq!(Glass::over(0xffffff80, 0x000000), 0x808080);
+    assert_eq!(Glass::over(0x20406080, 0x604020), 0x404040);
+}
+
+/// Text sits straight on the wash in a page canvas, and on the panes and the
+/// composer laid over it, so it has to read at both ends of the wash.
+#[test]
+fn text_reads_on_every_glass_ground() {
+    for preset in ThemePreset::ALL {
+        let colors = preset.colors();
+        let Some(glass) = colors.glass else { continue };
+        // The glow can reach any part of the wash, so check with and without it.
+        for (end, wash) in [
+            ("top left", glass.wash_from),
+            ("bottom right", glass.wash_to),
+            (
+                "top left under the glow",
+                Glass::over(glass.glow, glass.wash_from),
+            ),
+            (
+                "bottom right under the glow",
+                Glass::over(glass.glow, glass.wash_to),
+            ),
+        ] {
+            for (ground, background) in [
+                ("wash", wash),
+                ("pane", Glass::over(glass.pane, wash)),
+                ("composer", Glass::over(glass.composer, wash)),
+            ] {
+                let place = format!("{preset:?} {ground} at the {end}");
+                assert!(contrast(colors.text, background) >= 7.0, "text on {place}");
+                for (role, color) in [
+                    ("muted", colors.muted),
+                    ("accent ink", colors.accent_ink),
+                    ("working", colors.working),
+                    ("waiting", colors.waiting),
+                    ("done", colors.done),
+                    ("danger", colors.danger),
+                ] {
+                    assert!(contrast(color, background) >= 4.5, "{role} on {place}");
+                }
+                assert!(
+                    contrast(colors.faint, background) >= 3.0,
+                    "faint on {place}"
+                );
+            }
+        }
     }
 }
 

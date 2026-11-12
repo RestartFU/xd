@@ -6,6 +6,13 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.foundation.background
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.font.Font
@@ -128,11 +135,13 @@ public enum class MinimalThemePreset(
     val key: String,
     val label: String,
     val preview: Color,
+    /** Dark text and system bar icons on a light ground. */
+    val isLight: Boolean,
 ) {
-    DARK("dark", "Dark", Color(0xFF1B1B1B)),
-    LIGHT("light", "Light", Color(0xFFF4F4F4)),
-    // Its canvas would read as Dark's at this size, so the swatch shows the accent.
-    MODERN("modern", "Modern", Color(0xFF8B8FF8)),
+    DARK("dark", "Dark", Color(0xFF1B1B1B), isLight = false),
+    LIGHT("light", "Light", Color(0xFFF4F4F4), isLight = true),
+    MODERN("modern", "Modern", Color(0xFF11141D), isLight = false),
+    MODERN_LIGHT("modern-light", "Modern Light", Color(0xFFEEF0F9), isLight = true),
     ;
 
     public companion object {
@@ -175,19 +184,103 @@ public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
         codexIcon = Color(0xFF202020), claudeIcon = Color(0xFFB85C3F),
     )
     MinimalThemePreset.MODERN -> XdSignals(
-        working = Color(0xFF5FD3A3), waiting = Color(0xFFF0C06A),
-        done = Color(0xFFA3A7FF), rule = Color(0xFF262A37),
-        link = Color(0xFFA3A7FF), faint = Color(0xFF8D93A6),
+        working = Color(0xFF63D8A8), waiting = Color(0xFFF0C06A),
+        done = Color(0xFFA9ADFF), rule = Color(0xFF2A2E42),
+        link = Color(0xFFA9ADFF), faint = Color(0xFF959CB2),
         diffAdded = Color(0xFF173328), diffRemoved = Color(0xFF3B1D28),
         codexIcon = Color.White, claudeIcon = Color(0xFFD97757),
+    )
+    MinimalThemePreset.MODERN_LIGHT -> XdSignals(
+        working = Color(0xFF17603F), waiting = Color(0xFF6C490A),
+        done = Color(0xFF4045BB), rule = Color(0xFFDADDE9),
+        link = Color(0xFF4045BB), faint = Color(0xFF5A6074),
+        diffAdded = Color(0xFFDFF2E6), diffRemoved = Color(0xFFF8E1E6),
+        codexIcon = Color(0xFF1B1E2C), claudeIcon = Color(0xFFB85C3F),
     )
 }
 
 public val LocalXdSignals = staticCompositionLocalOf { xdSignals(MinimalThemePreset.DARK) }
 
 /**
- * Neutral charcoal and silver (Dark, Light), or cool slate with an indigo
- * accent (Modern), expressed through complete Material color roles.
+ * Frosted glass drawn inside the app, as on the desktop: the window paints a
+ * diagonal wash, page canvases leave it showing, and headers, the tab bar and
+ * the composer are translucent panes over it. Dialogs, cards and the terminal
+ * keep their opaque roles. Nothing outside the app shows through.
+ */
+@Immutable
+public data class XdGlass(
+    val washFrom: Color,
+    val washTo: Color,
+    /** A second wash from the top right corner, fading out before the middle. */
+    val glow: Color,
+    val pane: Color,
+    val composer: Color,
+    /** The hairline along a pane: light on the dark wash, dark on the light one. */
+    val edge: Color,
+)
+
+public fun xdGlass(theme: MinimalThemePreset): XdGlass? = when (theme) {
+    MinimalThemePreset.DARK, MinimalThemePreset.LIGHT -> null
+    MinimalThemePreset.MODERN -> XdGlass(
+        washFrom = Color(0xFF1D1B4D), washTo = Color(0xFF0A2229), glow = Color(0x596A2E80),
+        pane = Color(0x8C2A2F52), composer = Color(0xC730365C), edge = Color(0x24FFFFFF),
+    )
+    MinimalThemePreset.MODERN_LIGHT -> XdGlass(
+        washFrom = Color(0xFFDCDCFB), washTo = Color(0xFFD3EBF3), glow = Color(0x99F7D6EE),
+        pane = Color(0x8CFFFFFF), composer = Color(0xD0FFFFFF), edge = Color(0x1F1B1E2C),
+    )
+}
+
+public val LocalXdGlass = staticCompositionLocalOf<XdGlass?> { null }
+
+/** The wash, top left to bottom right. */
+public fun XdGlass.wash(): Brush = Brush.linearGradient(listOf(washFrom, washTo))
+
+/** The glow, from the top right corner, gone a little past the middle. */
+public fun XdGlass.glowWash(): Brush = Brush.linearGradient(
+    0f to glow,
+    0.6f to glow.copy(alpha = 0f),
+    start = Offset(Float.POSITIVE_INFINITY, 0f),
+    end = Offset(0f, Float.POSITIVE_INFINITY),
+)
+
+/** Paints the glass wash and its glow behind everything, for the themes that have them. */
+public fun Modifier.glassBackdrop(glass: XdGlass?): Modifier =
+    if (glass == null) this else background(glass.wash()).background(glass.glowWash())
+
+/** A page canvas: clear under glass, so the wash shows; [solid] otherwise. */
+@Composable
+public fun glassPage(solid: Color): Color = if (LocalXdGlass.current != null) Color.Transparent else solid
+
+/**
+ * Everything a theme provides: Material roles, the status signals, and glass.
+ * The caller paints [glassBackdrop] behind its root.
+ */
+@Composable
+public fun XdTheme(theme: MinimalThemePreset, content: @Composable () -> Unit) {
+    CompositionLocalProvider(
+        LocalXdSignals provides xdSignals(theme),
+        LocalXdGlass provides xdGlass(theme),
+    ) {
+        MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography, content = content)
+    }
+}
+
+/** A header, tab bar or rail over the page: translucent under glass. */
+@Composable
+public fun glassPane(solid: Color): Color = LocalXdGlass.current?.pane ?: solid
+
+/** The message composer: translucent under glass. */
+@Composable
+public fun glassComposer(solid: Color): Color = LocalXdGlass.current?.composer ?: solid
+
+/** A pane's hairline: the glass edge, or [solid]. */
+@Composable
+public fun glassEdge(solid: Color): Color = LocalXdGlass.current?.edge ?: solid
+
+/**
+ * Neutral charcoal and silver (Dark, Light), or frosted slate with an indigo
+ * accent (Modern, Modern Light), expressed through complete Material color roles.
  */
 public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) {
     MinimalThemePreset.DARK -> darkColorScheme(
@@ -230,22 +323,41 @@ public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) 
     )
     MinimalThemePreset.MODERN -> darkColorScheme(
         primary = Color(0xFF8B8FF8), onPrimary = Color(0xFF0E1016),
-        primaryContainer = Color(0xFF2A2E3C), onPrimaryContainer = Color(0xFFEDEFF5),
-        secondary = Color(0xFFA6ACBD), onSecondary = Color(0xFF0E1016),
-        secondaryContainer = Color(0xFF2A2E3C), onSecondaryContainer = Color(0xFFEDEFF5),
-        tertiary = Color(0xFFA3A7FF), onTertiary = Color(0xFF0E1016),
-        tertiaryContainer = Color(0xFF2A2E3C), onTertiaryContainer = Color(0xFFEDEFF5),
-        background = Color(0xFF0A0C11), onBackground = Color(0xFFEDEFF5),
-        surface = Color(0xFF0E1016), onSurface = Color(0xFFEDEFF5),
-        surfaceVariant = Color(0xFF1D2130), onSurfaceVariant = Color(0xFFA6ACBD),
-        surfaceContainerLowest = Color(0xFF0A0C11), surfaceContainerLow = Color(0xFF12141C),
-        surfaceContainer = Color(0xFF191C26), surfaceContainerHigh = Color(0xFF1D2130),
-        surfaceContainerHighest = Color(0xFF2A2E3C), surfaceBright = Color(0xFF2A2E3C),
-        surfaceDim = Color(0xFF0E1016), inverseSurface = Color(0xFFEDEFF5),
-        inverseOnSurface = Color(0xFF12141C), inversePrimary = Color(0xFF4B4FB8),
-        outline = Color(0xFF7B8296), outlineVariant = Color(0xFF323747),
-        scrim = Color(0xFF000000), error = Color(0xFFFF8F9D), onError = Color(0xFF3B1D28),
+        primaryContainer = Color(0xFF2E3348), onPrimaryContainer = Color(0xFFEDEFF5),
+        secondary = Color(0xFFB0B6C9), onSecondary = Color(0xFF0E1016),
+        secondaryContainer = Color(0xFF2E3348), onSecondaryContainer = Color(0xFFEDEFF5),
+        tertiary = Color(0xFFA9ADFF), onTertiary = Color(0xFF0E1016),
+        tertiaryContainer = Color(0xFF2E3348), onTertiaryContainer = Color(0xFFEDEFF5),
+        background = Color(0xFF11141D), onBackground = Color(0xFFEDEFF5),
+        surface = Color(0xFF11141D), onSurface = Color(0xFFEDEFF5),
+        surfaceVariant = Color(0xFF252A42), onSurfaceVariant = Color(0xFFB0B6C9),
+        surfaceContainerLowest = Color(0xFF0B0E16), surfaceContainerLow = Color(0xFF1E2236),
+        surfaceContainer = Color(0xFF1B1F2F), surfaceContainerHigh = Color(0xFF252A3D),
+        surfaceContainerHighest = Color(0xFF2E3348), surfaceBright = Color(0xFF2E3348),
+        surfaceDim = Color(0xFF11141D), inverseSurface = Color(0xFFEDEFF5),
+        inverseOnSurface = Color(0xFF1E2236), inversePrimary = Color(0xFF4B4FB8),
+        outline = Color(0xFF7B8296), outlineVariant = Color(0xFF343A52),
+        scrim = Color(0xFF000000), error = Color(0xFFFF94A2), onError = Color(0xFF3B1D28),
         errorContainer = Color(0xFF3B1D28), onErrorContainer = Color(0xFFFFD9DE),
+    )
+    MinimalThemePreset.MODERN_LIGHT -> lightColorScheme(
+        primary = Color(0xFF5257D9), onPrimary = Color(0xFFFFFFFF),
+        primaryContainer = Color(0xFFDFE2F4), onPrimaryContainer = Color(0xFF1B1E2C),
+        secondary = Color(0xFF4B5165), onSecondary = Color(0xFFFFFFFF),
+        secondaryContainer = Color(0xFFDFE2F4), onSecondaryContainer = Color(0xFF1B1E2C),
+        tertiary = Color(0xFF4045BB), onTertiary = Color(0xFFFFFFFF),
+        tertiaryContainer = Color(0xFFDFE2F4), onTertiaryContainer = Color(0xFF1B1E2C),
+        background = Color(0xFFEEF0F9), onBackground = Color(0xFF1B1E2C),
+        surface = Color(0xFFF3F4FB), onSurface = Color(0xFF1B1E2C),
+        surfaceVariant = Color(0xFFECEEF7), onSurfaceVariant = Color(0xFF4B5165),
+        surfaceContainerLowest = Color(0xFFFFFFFF), surfaceContainerLow = Color(0xFFF3F4FB),
+        surfaceContainer = Color(0xFFF8F9FD), surfaceContainerHigh = Color(0xFFECEEF7),
+        surfaceContainerHighest = Color(0xFFE4E7F2), surfaceBright = Color(0xFFFFFFFF),
+        surfaceDim = Color(0xFFE4E7F2), inverseSurface = Color(0xFF1B1E2C),
+        inverseOnSurface = Color(0xFFF3F4FB), inversePrimary = Color(0xFFA3A7FF),
+        outline = Color(0xFF6E7488), outlineVariant = Color(0xFFD3D7E6),
+        scrim = Color(0xFF000000), error = Color(0xFF97203A), onError = Color(0xFFFFFFFF),
+        errorContainer = Color(0xFFFBE9ED), onErrorContainer = Color(0xFF6E1426),
     )
 }
 

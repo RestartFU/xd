@@ -814,7 +814,7 @@ impl Render for BrowserPane {
             .min_w_0()
             .flex()
             .flex_col()
-            .bg(rgb(colors.background))
+            .bg(crate::glass::canvas(colors))
             .child(
                 div()
                     .id("browser-tabs")
@@ -824,7 +824,7 @@ impl Render for BrowserPane {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .bg(rgb(colors.chrome))
+                    .bg(crate::glass::pane(colors, colors.chrome))
                     .child(
                         div()
                             .id("browser-tab-list")
@@ -1447,13 +1447,13 @@ impl Render for BrowserTab {
             .min_w_0()
             .flex()
             .flex_col()
-            .bg(rgb(colors.background))
+            .bg(crate::glass::canvas(colors))
             .text_color(rgb(colors.text))
             .child(
                 div()
                     .id("browser-toolbar")
                     .h(px(TAB_BAR_HEIGHT))
-                    .bg(rgb(colors.chrome))
+                    .bg(crate::glass::pane(colors, colors.chrome))
                     .flex_shrink_0()
                     .flex()
                     .items_center()

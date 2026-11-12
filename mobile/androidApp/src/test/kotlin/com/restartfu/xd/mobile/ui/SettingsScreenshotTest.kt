@@ -74,7 +74,9 @@ class SettingsScreenshotTest {
     /** Every theme is offered, and the chosen one is the one marked. */
     @Test fun settingsModern() = shoot("settings-modern", MinimalThemePreset.MODERN)
 
-    /** Three themes still fit across a narrow phone. */
+    @Test fun settingsModernLight() = shoot("settings-modern-light", MinimalThemePreset.MODERN_LIGHT)
+
+    /** The themes still fit two to a row on a narrow phone. */
     @Config(qualifiers = "w360dp-h780dp-420dpi")
     @Test fun settingsModernNarrow() = shoot("settings-modern-narrow", MinimalThemePreset.MODERN)
 
@@ -102,10 +104,11 @@ class SettingsScreenshotTest {
         compose.mainClock.autoAdvance = false
         compose.setContent {
             val link by model.client.link.collectAsStateWithLifecycle()
-            CompositionLocalProvider(LocalXdSignals provides xdSignals(theme)) {
-                MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography) {
-                    Surface(Modifier.fillMaxSize()) { MinimalMobileApp(model, link, settings) }
-                }
+            XdTheme(theme) {
+                Surface(
+                    Modifier.fillMaxSize().glassBackdrop(xdGlass(theme)),
+                    color = glassPage(MaterialTheme.colorScheme.surface),
+                ) { MinimalMobileApp(model, link, settings) }
             }
         }
         val deadline = System.currentTimeMillis() + 60_000
