@@ -579,12 +579,7 @@ class ProjectsScreenshotTest {
         compose.mainClock.autoAdvance = false
         compose.setContent {
             val link by model.client.link.collectAsStateWithLifecycle()
-            XdTheme(theme) {
-                Surface(
-                    Modifier.fillMaxSize().glassBackdrop(xdGlass(theme)),
-                    color = glassPage(MaterialTheme.colorScheme.surface),
-                ) { MinimalMobileApp(model, link, settings) }
-            }
+            XdRoot(theme) { MinimalMobileApp(model, link, settings) }
         }
         val screen = Screen(compose, activity)
         // The scripted host answers on its own threads, so wait for the tree and avatars.

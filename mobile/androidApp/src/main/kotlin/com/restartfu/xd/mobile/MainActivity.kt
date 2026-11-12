@@ -8,8 +8,6 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.LocalView
@@ -26,10 +24,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.ui.FatalScreen
 import com.restartfu.xd.mobile.ui.MinimalMobileApp
 import com.restartfu.xd.mobile.ui.ConnectScreen
-import com.restartfu.xd.mobile.ui.XdTheme
-import com.restartfu.xd.mobile.ui.glassBackdrop
-import com.restartfu.xd.mobile.ui.glassPage
-import com.restartfu.xd.mobile.ui.xdGlass
+import com.restartfu.xd.mobile.ui.XdRoot
 import com.restartfu.xd.net.Link
 
 class MainActivity : ComponentActivity() {
@@ -50,13 +45,8 @@ class MainActivity : ComponentActivity() {
                     isAppearanceLightNavigationBars = theme.isLight
                 }
             }
-            XdTheme(theme) {
-                Surface(
-                    Modifier.fillMaxSize().glassBackdrop(xdGlass(theme)),
-                    color = glassPage(MaterialTheme.colorScheme.surface),
-                ) {
-                    XdMobileApp(model, settings)
-                }
+            XdRoot(theme) {
+                XdMobileApp(model, settings)
             }
         }
     }

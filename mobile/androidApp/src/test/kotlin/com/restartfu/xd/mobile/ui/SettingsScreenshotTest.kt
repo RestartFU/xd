@@ -104,12 +104,7 @@ class SettingsScreenshotTest {
         compose.mainClock.autoAdvance = false
         compose.setContent {
             val link by model.client.link.collectAsStateWithLifecycle()
-            XdTheme(theme) {
-                Surface(
-                    Modifier.fillMaxSize().glassBackdrop(xdGlass(theme)),
-                    color = glassPage(MaterialTheme.colorScheme.surface),
-                ) { MinimalMobileApp(model, link, settings) }
-            }
+            XdRoot(theme) { MinimalMobileApp(model, link, settings) }
         }
         val deadline = System.currentTimeMillis() + 60_000
         while (model.client.tree.value.folders.isEmpty() && System.currentTimeMillis() < deadline) settle()

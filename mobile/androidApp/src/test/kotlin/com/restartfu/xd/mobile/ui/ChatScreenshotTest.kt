@@ -105,20 +105,15 @@ class ChatScreenshotTest {
         )
         compose.mainClock.autoAdvance = false
         compose.setContent {
-            XdTheme(theme) {
-                Surface(
-                    Modifier.fillMaxSize().glassBackdrop(xdGlass(theme)),
-                    color = glassPage(MaterialTheme.colorScheme.surface),
-                ) {
-                    ChatScreen(
-                        model = chat,
-                        goBack = {},
-                        sessionTitle = "reconnect-backoff",
-                        projectName = "xd",
-                        backgroundTasks = backgroundTasks,
-                        sessionChats = SessionChats(chats, "chat", {}, {}, {}, {}, {}),
-                    )
-                }
+            XdRoot(theme) {
+                ChatScreen(
+                    model = chat,
+                    goBack = {},
+                    sessionTitle = "reconnect-backoff",
+                    projectName = "xd",
+                    backgroundTasks = backgroundTasks,
+                    sessionChats = SessionChats(chats, "chat", {}, {}, {}, {}, {}),
+                )
             }
         }
         repeat(60) {

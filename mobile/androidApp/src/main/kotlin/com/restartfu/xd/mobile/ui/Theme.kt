@@ -8,6 +8,8 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.foundation.background
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
@@ -265,6 +267,21 @@ public fun XdTheme(theme: MinimalThemePreset, content: @Composable () -> Unit) {
         LocalXdGlass provides xdGlass(theme),
     ) {
         MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography, content = content)
+    }
+}
+
+/** The app's root: the theme, the glass wash behind everything, and the page over it. */
+@Composable
+public fun XdRoot(theme: MinimalThemePreset, content: @Composable () -> Unit) {
+    XdTheme(theme) {
+        Surface(
+            Modifier.fillMaxSize().glassBackdrop(xdGlass(theme)),
+            color = glassPage(MaterialTheme.colorScheme.surface),
+            // Said outright: under glass the color is clear, and Material would
+            // fall back to black for content on it.
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            content = content,
+        )
     }
 }
 

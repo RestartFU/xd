@@ -397,6 +397,7 @@ internal fun ChatScreen(
 
     Scaffold(
         containerColor = glassPage(MaterialTheme.colorScheme.surface),
+        contentColor = MaterialTheme.colorScheme.onSurface,
         topBar = {
             if (sessionChats != null) {
                 Column {
