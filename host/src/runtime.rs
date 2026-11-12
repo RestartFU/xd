@@ -33,7 +33,7 @@ const PARK_STREAMED_REPLY_EVERY: Duration = Duration::from_millis(500);
 const CUT_OFF_TURN: &str = "Stopped before this turn was saved. Its work is lost, and the agent only knows what you asked.";
 
 /// How long until a moment, as a chat notice says it: "2 h 5 min", "12 min".
-fn until(at_ms: i64) -> String {
+pub(crate) fn until(at_ms: i64) -> String {
     let minutes = ((at_ms - crate::accounts::now_ms()).max(0) + 59_999) / 60_000;
     match (minutes / (24 * 60), minutes / 60 % 24, minutes % 60) {
         (0, 0, minutes) => format!("{} min", minutes.max(1)),

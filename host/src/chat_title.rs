@@ -10,7 +10,13 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::{EventBus, StateStore, agent::AgentCommand, agent_text, storage::ChatTitleSpec};
+use crate::{
+    EventBus, StateStore,
+    agent::AgentCommand,
+    agent_text,
+    auth::{AuthManager, HelperAccount},
+    storage::ChatTitleSpec,
+};
 
 const TITLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ACTIVE_TITLES: usize = 4;
@@ -30,14 +36,20 @@ impl Drop for ActiveTitle {
 pub(crate) struct ChatTitleService {
     store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
+    auth: AuthManager,
     active: Arc<AtomicUsize>,
 }
 
 impl ChatTitleService {
-    pub(crate) fn new(store: Option<Arc<StateStore>>, events: Arc<EventBus>) -> Self {
+    pub(crate) fn new(
+        store: Option<Arc<StateStore>>,
+        events: Arc<EventBus>,
+        auth: AuthManager,
+    ) -> Self {
         Self {
             store,
             events,
+            auth,
             active: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -64,7 +76,17 @@ impl ChatTitleService {
             .name("xd-chat-title".into())
             .spawn(move || {
                 let _active = active;
-                match generate(&spec) {
+                let account = match service.auth.helper_account(&spec.backend) {
+                    Ok(account) => account,
+                    Err(reason) => {
+                        eprintln!("xd: skipping a chat title: {reason}");
+                        return;
+                    }
+                };
+                let generated = generate(&spec, &account);
+                // Nothing else runs as the account: removing it need not wait.
+                drop(account);
+                match generated {
                     Ok(title) => match store.apply_chat_title(&spec.chat_id, &title) {
                         Ok(true) => {
                             service.events.publish(json!({"event": "tree"}));
@@ -84,12 +106,11 @@ impl ChatTitleService {
     }
 }
 
-fn generate(spec: &ChatTitleSpec) -> Result<String, String> {
+fn generate(spec: &ChatTitleSpec, account: &HelperAccount) -> Result<String, String> {
     let prompt = format!(
         "Write a short title for a chat that starts with this message.\n\nMessage:\n{}",
         spec.message
     );
-    let empty_environment = Vec::new();
     let mut command = AgentCommand {
         backend: &spec.backend,
         prompt: &prompt,
@@ -100,14 +121,21 @@ fn generate(spec: &ChatTitleSpec) -> Result<String, String> {
         access: "read-only",
         fast: false,
         session_id: None,
-        environment: &empty_environment,
+        environment: &account.environment,
     }
     .build();
     // Claude's settings carry the user's hooks, which should not fire for a
     // run the user did not start.
     agent_text::keep_the_run_minimal(&mut command, &spec.backend, false);
     let input = agent_text::turn_input(&spec.backend, &prompt);
-    let output = agent_text::run(command, &spec.backend, input, TITLE_TIMEOUT, "chat titling")?;
+    let output = agent_text::run(
+        command,
+        &spec.backend,
+        input,
+        TITLE_TIMEOUT,
+        "chat titling",
+        account.stop(),
+    )?;
     parse(&output)
 }
 

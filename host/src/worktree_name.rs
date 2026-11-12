@@ -13,6 +13,7 @@ use crate::{
     EventBus, StateStore,
     agent::AgentCommand,
     agent_text,
+    auth::{AuthManager, HelperAccount},
     storage::{StorageError, WorktreeNameSpec},
 };
 
@@ -41,6 +42,7 @@ impl Drop for ActiveName {
 pub(crate) struct WorktreeNameService {
     store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
+    auth: AuthManager,
     active: Arc<AtomicUsize>,
     /// Held while renaming, as by what creates, deletes, or settles a chat's
     /// worktree, so none of them changes it partway through.
@@ -51,11 +53,13 @@ impl WorktreeNameService {
     pub(crate) fn new(
         store: Option<Arc<StateStore>>,
         events: Arc<EventBus>,
+        auth: AuthManager,
         resources: Arc<Mutex<()>>,
     ) -> Self {
         Self {
             store,
             events,
+            auth,
             active: Arc::new(AtomicUsize::new(0)),
             resources,
         }
@@ -101,6 +105,7 @@ impl WorktreeNameService {
         }
         let active = ActiveName(self.active.clone());
         let events = self.events.clone();
+        let auth = self.auth.clone();
         let resources = self.resources.clone();
         let worker = thread::Builder::new()
             .name("xd-worktree-name".into())
@@ -114,7 +119,16 @@ impl WorktreeNameService {
                         return;
                     }
                 };
-                let name = match generate(spec) {
+                let account = match auth.helper_account(&spec.backend) {
+                    Ok(account) => account,
+                    Err(reason) => {
+                        eprintln!("xd: skipping a worktree name: {reason}");
+                        return;
+                    }
+                };
+                let generated = generate(spec, &account);
+                drop(account);
+                let name = match generated {
                     Ok(name) => name,
                     Err(error) => {
                         eprintln!("xd: AI worktree naming failed: {error}");
@@ -141,12 +155,11 @@ impl WorktreeNameService {
     }
 }
 
-fn generate(spec: WorktreeNameSpec) -> Result<String, String> {
+fn generate(spec: WorktreeNameSpec, account: &HelperAccount) -> Result<String, String> {
     let prompt = format!(
         "Choose a concise name for a Git worktree for this request.\n\nUser request:\n{}",
         spec.prompt
     );
-    let empty_environment = Vec::new();
     let mut command = AgentCommand {
         backend: &spec.backend,
         prompt: &prompt,
@@ -157,7 +170,7 @@ fn generate(spec: WorktreeNameSpec) -> Result<String, String> {
         access: "read-only",
         fast: false,
         session_id: None,
-        environment: &empty_environment,
+        environment: &account.environment,
     }
     .build();
     // A name needs nothing else, so the run loads nothing else.
@@ -169,6 +182,7 @@ fn generate(spec: WorktreeNameSpec) -> Result<String, String> {
         input,
         NAME_TIMEOUT,
         "worktree naming",
+        account.stop(),
     )?;
     parse(&output)
 }

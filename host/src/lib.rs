@@ -252,12 +252,13 @@ impl Engine {
         let events = Arc::new(EventBus::default());
         let secrets = Arc::new(SecretsStore::new(None));
         let self_update = SelfUpdate::new(events.clone());
+        let auth = AuthManager::new(events.clone(), accounts::Accounts::new(None));
         Self {
             shutdown: AtomicBool::new(false),
             app_clients: Mutex::default(),
             stops_with_app: AtomicBool::new(false),
             store: None,
-            auth: AuthManager::new(events.clone(), accounts::Accounts::new(None)),
+            auth: auth.clone(),
             cli_updates: CliUpdates::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
@@ -268,11 +269,12 @@ impl Engine {
             session_resources: Arc::new(Mutex::new(())),
             restart_answer: Mutex::new(()),
             secrets,
-            git_drafts: GitDraftService::new(None, events.clone()),
-            chat_titles: ChatTitleService::new(None, events.clone()),
+            git_drafts: GitDraftService::new(None, events.clone(), auth.clone()),
+            chat_titles: ChatTitleService::new(None, events.clone(), auth.clone()),
             worktree_names: worktree_name::WorktreeNameService::new(
                 None,
                 events.clone(),
+                auth,
                 Arc::new(Mutex::new(())),
             ),
             git_actions: Arc::new(Mutex::new(())),
@@ -308,17 +310,21 @@ impl Engine {
         let runtime =
             TurnRuntime::with_auth(store.clone(), events.clone(), secrets.clone(), auth.clone());
         auth.set_releaser(runtime.releaser());
-        let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
+        let git_drafts = GitDraftService::new(Some(store.clone()), events.clone(), auth.clone());
         // Unit tests send messages on hosts with no fake assistant behind them, and
         // must not reach a real CLI. The daemon tests cover titles end to end.
-        let chat_titles =
-            ChatTitleService::new(cfg!(not(test)).then(|| store.clone()), events.clone());
+        let chat_titles = ChatTitleService::new(
+            cfg!(not(test)).then(|| store.clone()),
+            events.clone(),
+            auth.clone(),
+        );
         // Renames wait their turn with what creates, deletes, or settles a
         // chat's worktree, as everything that changes one does.
         let session_resources = Arc::new(Mutex::new(()));
         let worktree_names = worktree_name::WorktreeNameService::new(
             cfg!(not(test)).then(|| store.clone()),
             events.clone(),
+            auth.clone(),
             session_resources.clone(),
         );
         let self_update = SelfUpdate::new(events.clone());

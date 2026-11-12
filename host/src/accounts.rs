@@ -19,7 +19,10 @@ use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -28,6 +31,9 @@ use serde_json::{Value, json};
 pub(crate) const PROVIDERS: [&str; 2] = ["codex", "claude"];
 pub(crate) const DEFAULT_ACCOUNT: &str = "default";
 const FILE: &str = "accounts.json";
+/// Longer than any background run's own timeout, the longest being a Git
+/// draft's two minutes.
+const HELPER_STOP_LIMIT: Duration = Duration::from_secs(150);
 const MAX_ACCOUNTS: usize = 8;
 /// A limit at or past this share is spent: the CLI rounds, and a turn started
 /// at 99.6% fails as surely as one at 100%.
@@ -296,6 +302,11 @@ struct Inner {
     /// Probes and checks running as each added account; see [`Lease`].
     leases: Mutex<HashMap<String, usize>>,
     released: Condvar,
+    /// Background runs xd makes as each added account, such as naming a chat,
+    /// each with its stop switch; see [`HelperLease`]. Taken after `leases`
+    /// when both are held.
+    helpers: Mutex<HashMap<String, Vec<Arc<AtomicBool>>>>,
+    helpers_done: Condvar,
     /// Orders readings of logins by when they began, which a clock cannot:
     /// two can begin in the same millisecond.
     tickets: std::sync::atomic::AtomicU64,
@@ -321,6 +332,40 @@ impl Drop for Lease {
                 }
             }
             accounts.inner.released.notify_all();
+        }
+    }
+}
+
+/// Held while a background run xd makes on its own, such as naming a chat,
+/// runs a CLI as an account. Unlike a [`Lease`] it can last minutes, so
+/// nothing waits it out: removing the account stops the run first, and the
+/// user's settings are shared at a later start instead.
+pub(crate) struct HelperLease {
+    accounts: Option<Accounts>,
+    id: String,
+    stop: Arc<AtomicBool>,
+}
+
+impl HelperLease {
+    /// Set once the account is being removed: the run should stop.
+    pub(crate) fn stop(&self) -> &AtomicBool {
+        &self.stop
+    }
+}
+
+impl Drop for HelperLease {
+    fn drop(&mut self) {
+        let Some(accounts) = &self.accounts else {
+            return;
+        };
+        if let Ok(mut helpers) = accounts.inner.helpers.lock() {
+            if let Some(running) = helpers.get_mut(&self.id) {
+                running.retain(|stop| !Arc::ptr_eq(stop, &self.stop));
+                if running.is_empty() {
+                    helpers.remove(&self.id);
+                }
+            }
+            accounts.inner.helpers_done.notify_all();
         }
     }
 }
@@ -361,6 +406,8 @@ impl Accounts {
                 homes: Mutex::new(HashMap::new()),
                 leases: Mutex::new(HashMap::new()),
                 released: Condvar::new(),
+                helpers: Mutex::new(HashMap::new()),
+                helpers_done: Condvar::new(),
                 tickets: std::sync::atomic::AtomicU64::new(1),
             }),
         }
@@ -405,6 +452,51 @@ impl Accounts {
         })
     }
 
+    /// A lease for a background run as the account, or `None` once it is gone.
+    pub(crate) fn helper_lease(&self, provider: &str, id: &str) -> Option<HelperLease> {
+        let stop = Arc::new(AtomicBool::new(false));
+        if id == DEFAULT_ACCOUNT {
+            return Some(HelperLease {
+                accounts: None,
+                id: id.into(),
+                stop,
+            });
+        }
+        // Under the lease lock, as for a lease: removal takes the account out
+        // of the list under it, so a run either is stopped or never starts.
+        let _leases = self.inner.leases.lock().ok()?;
+        if !self.exists(provider, id) {
+            return None;
+        }
+        self.inner
+            .helpers
+            .lock()
+            .ok()?
+            .entry(id.to_owned())
+            .or_default()
+            .push(stop.clone());
+        Some(HelperLease {
+            accounts: Some(self.clone()),
+            id: id.into(),
+            stop,
+        })
+    }
+
+    /// Stops the background runs as the account and waits, up to `limit`,
+    /// for them to end.
+    fn stop_helpers(&self, id: &str, limit: Duration) -> bool {
+        let Ok(helpers) = self.inner.helpers.lock() else {
+            return false;
+        };
+        for stop in helpers.get(id).into_iter().flatten() {
+            stop.store(true, Ordering::Release);
+        }
+        self.inner
+            .helpers_done
+            .wait_timeout_while(helpers, limit, |helpers| helpers.contains_key(id))
+            .is_ok_and(|(_, waited)| !waited.timed_out())
+    }
+
     /// Shares the user's Claude settings with an added account while no check
     /// runs as it. Holding the lease lock keeps one from starting meanwhile;
     /// the caller makes sure no turn process runs as it.
@@ -413,7 +505,13 @@ impl Accounts {
         let Ok(leases) = self.inner.leases.lock() else {
             return false;
         };
-        if leases.contains_key(id) {
+        // A background run is not waited for: it can take minutes.
+        let helping = self
+            .inner
+            .helpers
+            .lock()
+            .map_or(true, |helpers| helpers.contains_key(id));
+        if leases.contains_key(id) || helping {
             return false;
         }
         self.share_settings(provider, id);
@@ -804,6 +902,12 @@ impl Accounts {
                 }
                 Ok(())
             });
+        }
+        // A background run is stopped rather than waited out. It ends within
+        // moments of being told, and within its own timeout at worst, which
+        // this outlasts: its home is never deleted under it.
+        if !self.stop_helpers(id, HELPER_STOP_LIMIT) {
+            eprintln!("xd: removing a {provider} account while a background run still runs as it");
         }
         // Probes time out well within this.
         if let Ok(leases) = self.inner.leases.lock() {
@@ -1757,6 +1861,35 @@ mod tests {
         assert!(!home.exists());
         assert!(accounts.environment("codex", &id).is_empty());
         assert!(!home.exists(), "a late check does not make the home again");
+    }
+
+    #[test]
+    fn removal_stops_background_runs_rather_than_waiting_them_out() {
+        let data = temp("helper");
+        let accounts = Accounts::with_homes(&data, &[]);
+        let id = added(&accounts, "claude", "b@example.com");
+        let home = accounts.home("claude", &id).unwrap();
+        let helper = accounts.helper_lease("claude", &id).unwrap();
+        // A background run takes minutes: settings are shared at a later start
+        // instead, without waiting for it.
+        let started = std::time::Instant::now();
+        assert!(!accounts.share_settings_while_idle("claude", &id));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let removing = {
+            let accounts = accounts.clone();
+            let id = id.clone();
+            std::thread::spawn(move || accounts.forget("claude", &id))
+        };
+        let asked = std::time::Instant::now();
+        while !helper.stop().load(Ordering::Acquire) {
+            assert!(asked.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(home.is_dir(), "the home stays until the run has stopped");
+        drop(helper);
+        removing.join().unwrap();
+        assert!(!home.exists());
+        assert!(accounts.helper_lease("claude", &id).is_none());
     }
 
     #[test]
