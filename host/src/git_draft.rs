@@ -9,7 +9,10 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::{EventBus, StateStore, agent::AgentCommand, agent_text, storage::GitDraftSpec};
+use crate::{
+    EventBus, StateStore, accounts::provider_name, agent::AgentCommand, agent_text,
+    auth::AuthManager, storage::GitDraftSpec,
+};
 
 const MAX_ACTIVE_DRAFTS: usize = 2;
 /// A stalled run would otherwise hold its slot until the host restarts.
@@ -28,14 +31,20 @@ impl Drop for ActiveDraft {
 pub(crate) struct GitDraftService {
     store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
+    auth: AuthManager,
     active: Arc<AtomicUsize>,
 }
 
 impl GitDraftService {
-    pub(crate) fn new(store: Option<Arc<StateStore>>, events: Arc<EventBus>) -> Self {
+    pub(crate) fn new(
+        store: Option<Arc<StateStore>>,
+        events: Arc<EventBus>,
+        auth: AuthManager,
+    ) -> Self {
         Self {
             store,
             events,
+            auth,
             active: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -64,26 +73,7 @@ impl GitDraftService {
     }
 
     fn run(&self, spec: GitDraftSpec) -> Value {
-        let empty_environment = Vec::new();
-        let mut command = AgentCommand {
-            backend: &spec.backend,
-            prompt: &spec.prompt,
-            system_prompt: Some(&spec.system_prompt),
-            workdir: &spec.workdir,
-            model: &spec.model,
-            effort: agent_text::LOW_EFFORT,
-            access: "read-only",
-            fast: false,
-            session_id: None,
-            environment: &empty_environment,
-        }
-        .build();
-        // A draft follows the repository's own conventions, so its instructions
-        // stay; nothing else the run would load helps describe a diff.
-        agent_text::keep_the_run_minimal(&mut command, &spec.backend, true);
-        let input = agent_text::turn_input(&spec.backend, &spec.prompt);
-        let result = agent_text::run(command, &spec.backend, input, DRAFT_TIMEOUT, "Git drafting")
-            .and_then(|output| parse_draft(&output));
+        let result = self.draft(&spec);
         match result {
             Ok((title, body)) => json!({
                 "event": "git-draft-finished",
@@ -103,6 +93,35 @@ impl GitDraftService {
                 "error": error,
             }),
         }
+    }
+
+    fn draft(&self, spec: &GitDraftSpec) -> Result<(String, String), String> {
+        let account = self.auth.helper_account(&spec.backend).ok_or_else(|| {
+            format!(
+                "No {} account can write a draft right now. Sign in again in Settings, \
+                 Agents, Accounts.",
+                provider_name(&spec.backend)
+            )
+        })?;
+        let mut command = AgentCommand {
+            backend: &spec.backend,
+            prompt: &spec.prompt,
+            system_prompt: Some(&spec.system_prompt),
+            workdir: &spec.workdir,
+            model: &spec.model,
+            effort: agent_text::LOW_EFFORT,
+            access: "read-only",
+            fast: false,
+            session_id: None,
+            environment: &account.environment,
+        }
+        .build();
+        // A draft follows the repository's own conventions, so its instructions
+        // stay; nothing else the run would load helps describe a diff.
+        agent_text::keep_the_run_minimal(&mut command, &spec.backend, true);
+        let input = agent_text::turn_input(&spec.backend, &spec.prompt);
+        agent_text::run(command, &spec.backend, input, DRAFT_TIMEOUT, "Git drafting")
+            .and_then(|output| parse_draft(&output))
     }
 }
 

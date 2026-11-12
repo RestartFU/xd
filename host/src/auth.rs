@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{
     EventBus,
-    accounts::{Accounts, Choice, DEFAULT_ACCOUNT, PROVIDERS, now_ms, provider_name},
+    accounts::{Accounts, Choice, DEFAULT_ACCOUNT, Lease, PROVIDERS, now_ms, provider_name},
     agent::{resolve_claude, resolve_codex},
     background_process::command as background_command,
 };
@@ -28,6 +28,13 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// Frees an account for removal: refuses while a chat is working on it, and
 /// otherwise stops the agent processes kept running as it.
 pub(crate) type Releaser = Box<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+
+/// What a short run xd makes on its own runs as. Held for the run: the
+/// account is not removed, nor its settings rewritten, while a CLI runs as it.
+pub(crate) struct HelperAccount {
+    pub environment: Vec<(String, String)>,
+    _lease: Lease,
+}
 
 #[derive(Clone)]
 pub struct AuthManager {
@@ -309,6 +316,22 @@ impl AuthManager {
             choice.unavailable = true;
         }
         choice
+    }
+
+    /// The account for a short run xd makes on its own, such as naming a chat:
+    /// the one a new chat would start on now, so the run does not fall to the
+    /// CLI's own sign-in when that one is signed out or spent. `None` when no
+    /// account can take it.
+    pub(crate) fn helper_account(&self, provider: &str) -> Option<HelperAccount> {
+        let choice = self.choose(provider, None);
+        if choice.unavailable {
+            return None;
+        }
+        let lease = self.inner.accounts.lease(provider, &choice.account)?;
+        Some(HelperAccount {
+            environment: choice.environment,
+            _lease: lease,
+        })
     }
 
     /// Reads the account's login again before a Codex session is resumed on it,
@@ -1457,6 +1480,47 @@ mod tests {
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
         unsafe { std::env::remove_var("XD_CODEX_EXECUTABLE") };
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A chat title, worktree name or Git draft runs as the account a new chat
+    /// would take, not always as the user's own sign-in to the CLI.
+    #[test]
+    fn a_helper_run_takes_the_account_a_new_chat_would() {
+        let data = std::env::temp_dir().join(format!("xd-auth-helper-{}", uuid::Uuid::new_v4()));
+        let accounts = Accounts::with_homes(&data, &[]);
+        let auth = AuthManager::new(Arc::new(EventBus::default()), accounts.clone());
+        let added = accounts.begin_adding("claude").unwrap();
+        let identity = crate::accounts::Identity {
+            email: Some("b@example.com".into()),
+            plan: None,
+            account_key: Some("key-b".into()),
+        };
+        accounts
+            .finish_adding("claude", &added, &identity)
+            .unwrap()
+            .unwrap();
+        let signed_in = AuthSnapshot {
+            state: "signed-in".into(),
+            ..Default::default()
+        };
+        auth.set_snapshot("claude", DEFAULT_ACCOUNT, signed_out());
+        auth.set_snapshot("claude", &added, signed_in.clone());
+        let home = accounts.home("claude", &added).unwrap();
+        assert_eq!(
+            auth.helper_account("claude").unwrap().environment,
+            vec![(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                home.to_string_lossy().into_owned()
+            )]
+        );
+        // With the user's own sign-in back, it runs first again, as before.
+        auth.set_snapshot("claude", DEFAULT_ACCOUNT, signed_in);
+        assert_eq!(auth.helper_account("claude").unwrap().environment, vec![]);
+        // Nobody signed in: nothing runs.
+        auth.set_snapshot("claude", DEFAULT_ACCOUNT, signed_out());
+        auth.set_snapshot("claude", &added, signed_out());
+        assert!(auth.helper_account("claude").is_none());
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
