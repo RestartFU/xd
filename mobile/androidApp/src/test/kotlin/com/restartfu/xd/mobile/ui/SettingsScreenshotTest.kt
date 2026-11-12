@@ -134,6 +134,10 @@ class SettingsScreenshotTest {
         compose.onNode(hasSetTextAction()).performTextReplacement("inactivity")
         idle()
         check(shows("Keep sessions with a pull request")) { "Descriptions are not searched" }
+        // So does the number a stepper shows: the scripted host settles after 3 days.
+        compose.onNode(hasSetTextAction()).performTextReplacement("3")
+        idle()
+        check(shows("Days before settling")) { "A stepper's value is not searched" }
         // The page's Back clears a search first, as system Back does, then leaves.
         compose.onNode(hasContentDescription("Back")).performClick()
         idle()

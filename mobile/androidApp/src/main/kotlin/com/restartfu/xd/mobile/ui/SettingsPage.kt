@@ -116,6 +116,8 @@ internal fun SettingsPage(
     val tree by model.client.tree.collectAsStateWithLifecycle()
     // The quota row says its current share, so search reads the same words.
     val quota by model.chatQuota.collectAsStateWithLifecycle()
+    // Likewise the settling rules, whose day count shows in a stepper.
+    val settleRules by model.autoSettle.collectAsStateWithLifecycle()
     var section by rememberSaveable { mutableStateOf<SettingsSection?>(null) }
     var query by rememberSaveable { mutableStateOf("") }
     var updatingHost by rememberSaveable { mutableStateOf(false) }
@@ -177,10 +179,11 @@ internal fun SettingsPage(
             add(
                 SettingsEntry(
                     SettingsSection.CLEANUP,
-                    listOf(
+                    listOfNotNull(
                         "Settle merged sessions", SETTLE_MERGED_DETAIL,
                         "Settle inactive sessions", SETTLE_INACTIVE_DETAIL,
                         "Days before settling", SETTLE_DAYS_DETAIL,
+                        settleRules?.afterDays?.toString(),
                         "Keep sessions with a pull request", SETTLE_KEEP_PR_DETAIL,
                     ),
                 ) { AutoSettleSettings(model) },
@@ -206,6 +209,9 @@ internal fun SettingsPage(
     // says it has quotas, rather than only once its row is shown.
     LaunchedEffect(tree.chatQuotas) {
         if (tree.chatQuotas) model.loadChatQuota()
+    }
+    LaunchedEffect(tree.settlement) {
+        if (tree.settlement) model.refreshAutoSettle()
     }
 
     BackHandler {
