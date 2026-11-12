@@ -7824,12 +7824,32 @@ impl XdDesktop {
                 session_of.entry(chat.as_str()).or_insert(session);
             }
         }
+        let chat_by_id = self
+            .model
+            .chats
+            .iter()
+            .map(|chat| (chat.id.as_str(), chat))
+            .collect::<HashMap<_, _>>();
+        // The agents each chat started with xd's start_agent tool that are at
+        // work. Its row waits on them as it waits on a background shell,
+        // without taking on their own state.
+        let mut agents_at_work = HashMap::<&str, u32>::new();
+        for (agent, parent) in &self.model.chat_parents {
+            if chat_by_id.get(agent.as_str()).is_some_and(|chat| {
+                chat.settled_at.is_none() && (chat.working || chat.background_tasks > 0)
+            }) {
+                *agents_at_work.entry(parent.as_str()).or_default() += 1;
+            }
+        }
         self.model
             .chats
             .iter()
             .filter_map(|chat| {
                 let Some(session) = session_of.get(chat.id.as_str()).copied() else {
-                    return Some(chat.clone());
+                    let mut row = chat.clone();
+                    row.background_tasks +=
+                        agents_at_work.get(chat.id.as_str()).copied().unwrap_or(0);
+                    return Some(row);
                 };
                 if !seen.insert(session.id.clone()) {
                     return None;
@@ -7852,9 +7872,27 @@ impl XdDesktop {
                 let mut row = selected.clone();
                 row.title = Some(session.title.clone());
                 row.branch = session.branch.clone().or(row.branch);
-                row.working = session.working;
+                // An agent started in this session's own worktree is one of
+                // its tabs, but the row only waits on it, as on the others.
+                let own = session
+                    .chats
+                    .iter()
+                    .filter(|id| {
+                        !self
+                            .model
+                            .chat_parents
+                            .get(id.as_str())
+                            .is_some_and(|parent| session.chats.contains(parent))
+                    })
+                    .filter_map(|id| chat_by_id.get(id.as_str()).copied());
+                row.working = own.clone().any(|chat| chat.working);
                 row.terminal_working = session.terminal_working;
-                row.background_tasks = session.background_tasks;
+                row.background_tasks = own.map(|chat| chat.background_tasks).sum::<u32>()
+                    + session
+                        .chats
+                        .iter()
+                        .filter_map(|id| agents_at_work.get(id.as_str()))
+                        .sum::<u32>();
                 Some(row)
             })
             .collect()
@@ -14548,23 +14586,86 @@ impl XdDesktop {
     }
 
     fn session_signal(&self, session: &SessionCard) -> SessionSignal {
+        let single = [session.id.clone()];
         let members = self
             .model
             .session_for_chat(&session.id)
-            .map(|group| group.chats.as_slice());
+            .map_or(&single[..], |group| group.chats.as_slice());
+        // An agent started in this session's own worktree is one of its tabs,
+        // but only a wait on the user passes from it to the row.
+        let own = |id: &&String| {
+            !self
+                .model
+                .chat_parents
+                .get(id.as_str())
+                .is_some_and(|parent| members.contains(parent))
+        };
         SessionSignal::of(
             session.working,
+            members.iter().any(|id| self.model.needs_user(id)),
             members
-                .map(|ids| ids.iter().any(|id| self.model.needs_user(id)))
-                .unwrap_or_else(|| self.model.needs_user(&session.id)),
-            members
-                .map(|ids| ids.iter().any(|id| self.model.unread_chats.contains(id)))
-                .unwrap_or_else(|| self.model.unread_chats.contains(&session.id)),
+                .iter()
+                .filter(own)
+                .any(|id| self.model.unread_chats.contains(id)),
             session.background_tasks,
         )
-        .or_paused(self.model.chats.iter().any(|chat| {
-            chat.paused && members.map_or(chat.id == session.id, |ids| ids.contains(&chat.id))
+        .or_paused(members.iter().filter(own).any(|id| {
+            self.model
+                .chats
+                .iter()
+                .any(|chat| &chat.id == id && chat.paused)
         }))
+    }
+
+    /// Whether the sidebar row of `chat_id` is the session of an agent a chat
+    /// started with xd's start_agent tool: a worktree session of its own, or
+    /// the chat itself on a host without sessions. An agent working in its
+    /// lead's worktree is one of that session's tabs instead.
+    fn agent_session_row(&self, chat_id: &str) -> bool {
+        match self.model.session_for_chat(chat_id) {
+            Some(session) => session.parent.is_some(),
+            None => self.model.chat_parents.contains_key(chat_id),
+        }
+    }
+
+    /// An agent's session leaves the sidebar once it is done: nothing runs,
+    /// nothing waits on the user and it is not paused. Its lead got its report
+    /// and its card still opens it, and it stays while it is the one shown.
+    fn finished_agent_row(&self, row: &ChatSummary, shown: Option<&str>) -> bool {
+        if !self.agent_session_row(&row.id)
+            || row.working
+            || row.terminal_working
+            || row.background_tasks > 0
+        {
+            return false;
+        }
+        let single = [row.id.clone()];
+        let members = self
+            .model
+            .session_for_chat(&row.id)
+            .map_or(&single[..], |session| session.chats.as_slice());
+        !members.iter().any(|id| {
+            Some(id.as_str()) == shown
+                || self.model.needs_user(id)
+                || self
+                    .model
+                    .chats
+                    .iter()
+                    .any(|chat| &chat.id == id && chat.paused)
+        })
+    }
+
+    /// What a session's row passes up to a folded or closed row above it. An
+    /// agent's session passes nothing but a wait on the user: its lead
+    /// already says it waits on its agents, and a closed project counts only
+    /// the sessions the user started.
+    fn outward_signal(&self, session: &SessionCard) -> SessionSignal {
+        let signal = self.session_signal(session);
+        if signal != SessionSignal::Waiting && self.agent_session_row(&session.id) {
+            SessionSignal::Idle
+        } else {
+            signal
+        }
     }
 
     /// `(settled, auto-settle disabled)`, when the host can settle at all.
@@ -14623,7 +14724,9 @@ impl XdDesktop {
         let active = self
             .catalog_session_chats()
             .into_iter()
-            .filter(|chat| chat.settled_at.is_none())
+            .filter(|chat| {
+                chat.settled_at.is_none() && !self.finished_agent_row(chat, Some(selected))
+            })
             .collect::<Vec<_>>();
         Some(next_active_session(
             &self.model.folders,
@@ -15649,23 +15752,30 @@ impl XdDesktop {
         active_chat_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let query = self.catalog_query.clone();
+        let finding = !query.is_empty();
         let (settled_chats, active_chats): (Vec<_>, Vec<_>) = self
             .catalog_session_chats()
             .into_iter()
             .partition(|chat| chat.settled_at.is_some());
+        // Agents' sessions list while they are at work; a search still finds
+        // the finished ones.
+        let active_chats = active_chats
+            .into_iter()
+            .filter(|chat| finding || !self.finished_agent_row(chat, active_chat_id))
+            .collect::<Vec<_>>();
         let mut settled = settled_cards(&self.model.folders, &settled_chats);
         let settled_projects = settled
             .iter()
             .map(|card| card.project_id.clone())
             .collect::<HashSet<_>>();
-        let projects = project_cards(&self.model.folders, &active_chats);
+        let projects = project_cards(&self.model.folders, &active_chats, |chat| {
+            self.agent_session_row(&chat.id)
+        });
         let current_project = self.selected_minimal_project_id();
         let mut drawers = Vec::with_capacity(projects.len());
         let mut session_instance = 0usize;
         let folders: Rc<[Folder]> = self.model.folders.clone().into();
-
-        let query = self.catalog_query.clone();
-        let finding = !query.is_empty();
         let tree = folder_tree(&folders);
         let parent_index = folders
             .iter()
@@ -15731,7 +15841,7 @@ impl XdDesktop {
                     tree_descendants(&tree, position)
                         .filter(|row| !folders[row.index].group)
                         .flat_map(|row| project_sessions(&folders[row.index].id, &active_chats))
-                        .map(|session| self.session_signal(&session))
+                        .map(|session| self.outward_signal(&session))
                         .collect()
                 };
                 drawers.push(self.render_folder_group(
@@ -15770,7 +15880,7 @@ impl XdDesktop {
             let open = self.project_open(&project.id, finding);
             let signals = sessions
                 .iter()
-                .map(|session| self.session_signal(session))
+                .map(|session| self.outward_signal(session))
                 .collect::<Vec<_>>();
             let mut cards = Vec::new();
             if open {
@@ -15937,7 +16047,7 @@ impl XdDesktop {
                         .flex_none()
                         .text_size(px(11.0))
                         .text_color(rgb(colors.faint))
-                        .child(project.sessions.to_string()),
+                        .child(project.counted.to_string()),
                 )
                 .child(div().flex_1())
                 .when(!open, |header| header.child(drawer_tabs(&signals, colors)))
@@ -28137,6 +28247,120 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[gpui::test]
+    fn a_lead_waits_on_its_agents_and_finished_agents_leave_the_sidebar(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.model.folders = vec![Folder {
+                id: "agents-project".into(),
+                name: "Agents".into(),
+                parent: None,
+                owner: None,
+                group: false,
+            }];
+            let chat = |id: &str, working: bool| -> ChatSummary {
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "folder": "agents-project",
+                    "backend": "claude",
+                    "working": working,
+                }))
+                .unwrap()
+            };
+            let session = |id: &str, chats: &[&str], parent: Option<&str>| {
+                xd_desktop::model::SessionSummary {
+                    id: id.into(),
+                    folder: "agents-project".into(),
+                    title: id.into(),
+                    chats: chats.iter().map(|chat| (*chat).into()).collect(),
+                    branch: None,
+                    working: false,
+                    terminal_working: false,
+                    background_tasks: 0,
+                    terminal_chat: format!("session:{id}"),
+                    parent: parent.map(Into::into),
+                }
+            };
+            // The lead started an agent in a worktree of its own, one in its
+            // own worktree (a tab of its session), and one that is done.
+            desktop.model.chats = vec![
+                chat("lead-chat", false),
+                chat("tab-chat", true),
+                chat("worker-chat", true),
+                chat("done-chat", false),
+            ];
+            desktop.model.sessions = vec![
+                session("lead", &["lead-chat", "tab-chat"], None),
+                session("worker", &["worker-chat"], Some("lead")),
+                session("done", &["done-chat"], Some("lead")),
+            ];
+            desktop.model.chat_parents = ["tab-chat", "worker-chat", "done-chat"]
+                .into_iter()
+                .map(|agent| (agent.to_owned(), "lead-chat".to_owned()))
+                .collect();
+            desktop.settings.session_chats.clear();
+
+            let rows = desktop.catalog_session_chats();
+            let row = |id: &str| rows.iter().find(|row| row.id == id).unwrap();
+            let card = |id: &str| {
+                minimal::project_sessions("agents-project", &rows)
+                    .into_iter()
+                    .find(|card| card.id == id)
+                    .unwrap()
+            };
+            // The lead does no work of its own: it waits on its two agents at
+            // work, as on background shells, rather than taking on their dots.
+            assert!(!row("lead-chat").working);
+            assert_eq!(
+                desktop.session_signal(&card("lead-chat")),
+                SessionSignal::Background(2)
+            );
+            assert_eq!(
+                desktop.session_signal(&card("worker-chat")),
+                SessionSignal::Working
+            );
+            assert_eq!(
+                desktop.outward_signal(&card("worker-chat")),
+                SessionSignal::Idle
+            );
+
+            // Only agents' sessions of their own leave the count and, once
+            // done, the sidebar, unless shown or waiting on the user.
+            assert!(!desktop.agent_session_row("lead-chat"));
+            assert!(desktop.agent_session_row("worker-chat"));
+            let counted = minimal::project_cards(&desktop.model.folders, &rows, |chat| {
+                desktop.agent_session_row(&chat.id)
+            })[0]
+                .counted;
+            assert_eq!(counted, 1);
+            assert!(!desktop.finished_agent_row(row("worker-chat"), None));
+            assert!(desktop.finished_agent_row(row("done-chat"), None));
+            assert!(!desktop.finished_agent_row(row("done-chat"), Some("done-chat")));
+            // A finished agent tab the user has not read leaves the lead quiet,
+            // as does a paused one; one waiting on the user still shows.
+            desktop.model.chats[1].working = false;
+            desktop.model.chats[1].paused = true;
+            desktop.model.unread_chats.insert("tab-chat".into());
+            let rows = desktop.catalog_session_chats();
+            let lead = minimal::project_sessions("agents-project", &rows)
+                .into_iter()
+                .find(|card| card.id == "lead-chat")
+                .unwrap();
+            assert_eq!(desktop.session_signal(&lead), SessionSignal::Background(1));
+            desktop.model.question_chats.insert("tab-chat".into());
+            assert_eq!(desktop.session_signal(&lead), SessionSignal::Waiting);
+            desktop.model.question_chats.insert("done-chat".into());
+            assert!(!desktop.finished_agent_row(row("done-chat"), None));
+            assert_eq!(
+                desktop.outward_signal(&card("done-chat")),
+                SessionSignal::Waiting
+            );
+        });
+    }
+
+    #[gpui::test]
     fn the_session_header_opens_the_branchs_pull_request_in_the_side_browser(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -32262,7 +32486,7 @@ Binary files /dev/null and b/image.png differ\n";
             .expect("end of catalog renderer")
             .0;
 
-        assert!(board.contains("self.model.unread_chats.contains(&session.id)"));
+        assert!(board.contains(".any(|id| self.model.unread_chats.contains(id))"));
         assert!(board.contains("signal_tab(signal, colors)"));
         assert!(board.contains("self.session_signal(&session)"));
         assert!(production.contains("Self::Done => \"Done\""));
