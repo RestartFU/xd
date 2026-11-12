@@ -99,7 +99,6 @@ const CODEX_MODELS: &[(&str, &str, i64)] = &[
     ("gpt-5.6-luna", "GPT-5.6 Luna", 272_000),
     ("gpt-5.6-terra", "GPT-5.6 Terra", 272_000),
     ("gpt-5.5", "GPT-5.5", 272_000),
-    ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128_000),
 ];
 const CLAUDE_MODELS: &[(&str, &str, i64)] = &[
     ("claude-opus-5", "Claude Opus 5", 0),
@@ -111,9 +110,11 @@ const CLAUDE_MODELS: &[(&str, &str, i64)] = &[
 const BASE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const CHAT_TITLES_ENABLED_KEY: &str = "chat_titles_enabled";
 const MAX_CHAT_TITLE_MESSAGE_CHARS: usize = 2_000;
-/// The assistants that can title chats and name worktrees, each with its
-/// low-cost models, newest first. An older one serves a CLI that does not offer
-/// the newest yet. Codex keeps to GPT-6 Luna: an older Luna writes worse names.
+/// The assistants that can title chats, name worktrees and write Git drafts,
+/// each with its low-cost models, newest first. An older one serves a CLI that
+/// does not offer the newest yet. Codex takes the newest Luna the CLI offers
+/// (see [`newest_luna`]) and otherwise GPT-6 Luna: an older Luna writes worse
+/// names.
 const CHAT_TITLE_MODELS: &[(&str, &[&str])] = &[
     ("codex", &["gpt-6-luna"]),
     (
@@ -4833,14 +4834,28 @@ impl StateStore {
                 "Git draft model must be a string.".into(),
             ));
         }
-        let model = requested_model
-            .map(str::to_owned)
-            .or_else(|| {
-                (backend == chat_backend)
+        // A draft is a few lines, so it goes to the low-cost model that titles
+        // chats unless the user chose a Git writer model the CLI still offers:
+        // a choice saved long ago, of a model since retired, should not stop
+        // the draft. Only an assistant without such models uses the chat's own.
+        let requested_model = requested_model.filter(|model| {
+            validate_model(&backend, model).is_ok() && {
+                let offered = offered_models(&backend);
+                offered.is_empty() || offered.iter().any(|known| known.id == *model)
+            }
+        });
+        let model = match requested_model {
+            Some(model) => model.to_owned(),
+            None => match chat_title_model(&self.database, &backend)?
+                .filter(|model| validate_model(&backend, model).is_ok())
+            {
+                Some(model) => model,
+                None => (backend == chat_backend)
                     .then(|| chat_model.clone())
                     .flatten()
-            })
-            .unwrap_or_else(|| awaited_default_model(&backend));
+                    .unwrap_or_else(|| awaited_default_model(&backend)),
+            },
+        };
         validate_model(&backend, &model)?;
         let repository = git_repository_root(&workdir)?;
         let context = if kind == "commit" {
@@ -8710,11 +8725,40 @@ fn chat_title_models(backend: &str) -> &'static [&'static str] {
 /// far more than a title is worth.
 fn resolve_chat_title_model(backend: &str, chosen: Option<&str>) -> Option<String> {
     let discovered = crate::model_catalog::cached_models(backend);
+    let newest = (backend == "codex")
+        .then(|| newest_luna(&discovered))
+        .flatten();
     chosen
-        .into_iter()
-        .chain(chat_title_models(backend).iter().copied())
-        .find(|model| choice_still_offered(&discovered, model))
         .map(str::to_owned)
+        .into_iter()
+        .chain(newest)
+        .chain(
+            chat_title_models(backend)
+                .iter()
+                .map(|model| (*model).to_owned()),
+        )
+        .find(|model| choice_still_offered(&discovered, model))
+}
+
+/// The newest Codex Luna the CLI offers, from GPT-6 Luna on, so a newer one is
+/// used as soon as the CLI lists it.
+fn newest_luna(discovered: &[crate::model_catalog::Model]) -> Option<String> {
+    discovered
+        .iter()
+        .filter_map(|model| Some((luna_version(&model.id)?, &model.id)))
+        .filter(|(version, _)| version.first().is_some_and(|major| *major >= 6))
+        .max_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, id)| id.clone())
+}
+
+/// `[6, 1]` for `gpt-6.1-luna`; `None` for anything that is not a Luna.
+fn luna_version(model: &str) -> Option<Vec<u32>> {
+    model
+        .strip_prefix("gpt-")?
+        .strip_suffix("-luna")?
+        .split('.')
+        .map(|part| part.parse().ok())
+        .collect()
 }
 
 fn chat_title_model(
@@ -13960,6 +14004,28 @@ mod tests {
             .unwrap();
         assert_eq!(configured.backend, "claude");
         assert_eq!(configured.model, "claude-haiku-4-5");
+        // Once the CLI lists its models, a draft goes to the newest Luna, also
+        // in place of a Git writer model the CLI no longer offers.
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("gpt-5.6-sol", true, None),
+                discovered("gpt-6-luna", false, None),
+                discovered("gpt-6.1-luna", false, None),
+            ],
+        );
+        let draft_with = |model: Option<&str>| {
+            let mut request = json!({"chat": chat, "kind": "commit", "request": "luna"});
+            if let Some(model) = model {
+                request["backend"] = json!("codex");
+                request["model"] = json!(model);
+            }
+            store.prepare_git_draft(&request).unwrap().model
+        };
+        assert_eq!(draft_with(None), "gpt-6.1-luna");
+        assert_eq!(draft_with(Some("gpt-5.3-codex-spark")), "gpt-6.1-luna");
+        assert_eq!(draft_with(Some("gpt-5.6-sol")), "gpt-5.6-sol");
+        crate::model_catalog::set_test_models("codex", Vec::new());
         assert!(
             store
                 .prepare_git_draft(&json!({
@@ -15541,6 +15607,47 @@ mod tests {
 
     fn first_message(chat: &Value) -> Value {
         json!({"chat": chat["id"], "text": "  fix the sidebar scroll  "})
+    }
+
+    #[test]
+    fn codex_names_with_the_newest_luna_it_offers() {
+        let offered = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| discovered(id, false, None))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            newest_luna(&offered(&["gpt-6-luna", "gpt-6.1-luna", "gpt-6.1-sol"])).as_deref(),
+            Some("gpt-6.1-luna")
+        );
+        assert_eq!(
+            newest_luna(&offered(&["gpt-6.10-luna", "gpt-6.9-luna", "gpt-7-luna"])).as_deref(),
+            Some("gpt-7-luna")
+        );
+        // An older Luna writes worse names, and nothing else is a Luna.
+        assert_eq!(
+            newest_luna(&offered(&["gpt-5.6-luna", "gpt-6-sol", "luna"])),
+            None
+        );
+        crate::model_catalog::set_test_models(
+            "codex",
+            offered(&["gpt-6.1-sol", "gpt-6-luna", "gpt-6.1-luna"]),
+        );
+        assert_eq!(
+            resolve_chat_title_model("codex", None).as_deref(),
+            Some("gpt-6.1-luna")
+        );
+        // A model the user chose for titles still comes first.
+        assert_eq!(
+            resolve_chat_title_model("codex", Some("gpt-6-luna")).as_deref(),
+            Some("gpt-6-luna")
+        );
+        crate::model_catalog::set_test_models("codex", Vec::new());
+        assert_eq!(
+            resolve_chat_title_model("codex", None).as_deref(),
+            Some("gpt-6-luna"),
+            "tried before discovery confirms it"
+        );
     }
 
     #[test]
