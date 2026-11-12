@@ -15621,7 +15621,11 @@ mod tests {
             Some("gpt-6.1-luna")
         );
         assert_eq!(
-            newest_luna(&offered(&["gpt-6.10-luna", "gpt-6.9-luna", "gpt-7-luna"])).as_deref(),
+            newest_luna(&offered(&["gpt-6.9-luna", "gpt-6.10-luna"])).as_deref(),
+            Some("gpt-6.10-luna")
+        );
+        assert_eq!(
+            newest_luna(&offered(&["gpt-7-luna", "gpt-6.10-luna"])).as_deref(),
             Some("gpt-7-luna")
         );
         // An older Luna writes worse names, and nothing else is a Luna.
