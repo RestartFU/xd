@@ -80,7 +80,11 @@ pub(crate) struct ProjectCard {
     /// The account whose avatar stands for this project, when the host named
     /// one for its folder.
     pub(crate) owner: Option<String>,
+    /// Every session it lists.
     pub(crate) sessions: usize,
+    /// The sessions its header counts: those no agent started with xd's
+    /// start_agent tool.
+    pub(crate) counted: usize,
     pub(crate) working: usize,
 }
 
@@ -176,7 +180,13 @@ pub(crate) fn age_label(at: i64, now: i64) -> String {
     }
 }
 
-pub(crate) fn project_cards(folders: &[Folder], chats: &[ChatSummary]) -> Vec<ProjectCard> {
+/// `started_by_agent` tells the sessions an agent started, which the header
+/// does not count.
+pub(crate) fn project_cards(
+    folders: &[Folder],
+    chats: &[ChatSummary],
+    started_by_agent: impl Fn(&ChatSummary) -> bool,
+) -> Vec<ProjectCard> {
     folders
         .iter()
         .map(|folder| {
@@ -188,6 +198,10 @@ pub(crate) fn project_cards(folders: &[Folder], chats: &[ChatSummary]) -> Vec<Pr
                 name: folder.name.clone(),
                 owner: folder.owner.clone(),
                 sessions: project_chats.clone().count(),
+                counted: project_chats
+                    .clone()
+                    .filter(|chat| !started_by_agent(chat))
+                    .count(),
                 working: project_chats
                     .filter(|chat| chat.working || chat.terminal_working)
                     .count(),
@@ -621,7 +635,7 @@ mod tests {
         let mut owned = folder("one", "Compiler");
         owned.owner = Some("RestartFU".into());
 
-        let cards = project_cards(&[owned, folder("two", "Website")], &[]);
+        let cards = project_cards(&[owned, folder("two", "Website")], &[], |_| false);
 
         assert_eq!(cards[0].owner.as_deref(), Some("RestartFU"));
         assert_eq!(cards[1].owner, None);
@@ -637,13 +651,15 @@ mod tests {
         ];
 
         assert_eq!(
-            project_cards(&folders, &chats),
+            // An agent started "b": it lists, but the header does not count it.
+            project_cards(&folders, &chats, |chat| chat.id == "b"),
             vec![
                 ProjectCard {
                     id: "one".into(),
                     name: "Compiler".into(),
                     owner: None,
                     sessions: 2,
+                    counted: 1,
                     working: 1,
                 },
                 ProjectCard {
@@ -651,6 +667,7 @@ mod tests {
                     name: "Website".into(),
                     owner: None,
                     sessions: 1,
+                    counted: 1,
                     working: 0,
                 },
             ]
@@ -773,7 +790,7 @@ mod tests {
         .unwrap();
 
         assert!(project_sessions("one", &chats)[0].working);
-        assert_eq!(project_cards(&folders, &chats)[0].working, 1);
+        assert_eq!(project_cards(&folders, &chats, |_| false)[0].working, 1);
     }
 
     #[test]
@@ -808,7 +825,7 @@ mod tests {
         assert_eq!(sessions[1].id, "b");
         assert_eq!(sessions[1].agent, AgentCli::Other);
         assert_eq!(sessions[1].agent.label(), "Assistant");
-        assert_eq!(project_cards(&folders, &chats)[0].sessions, 2);
+        assert_eq!(project_cards(&folders, &chats, |_| false)[0].sessions, 2);
         assert_eq!(
             reconcile_route(
                 &MinimalRoute::Cli {

@@ -48,6 +48,12 @@ public data class MinimalSession(
     /** The session whose agent started this one through xd's start_agent tool. */
     val parentId: String? = null,
     /**
+     * An agent started this session with xd's start_agent tool, in a worktree
+     * of its own. It lists only while it has something going on, and its
+     * project does not count it; see [finishedAgent].
+     */
+    val startedByAgent: Boolean = false,
+    /**
      * How many sessions up the line of agents that started one another this
      * one sits, as [nestedUnderParents] lists it: 0 when no listed session did.
      */
@@ -84,10 +90,11 @@ public data class SettledSession(
 
 /**
  * The projects, without the folders that hold them. Projects count only
- * active sessions: settled ones sit on the shelf instead.
+ * active sessions: settled ones sit on the shelf instead, and the ones agents
+ * started list under their leads, which already wait on them.
  */
 public fun TreeSnapshot.minimalProjects(): List<MinimalProject> = folders.filterNot(Folder::group).map { folder ->
-    val sessions = minimalSessions(folder.id).filterNot(MinimalSession::settled)
+    val sessions = minimalSessions(folder.id).filterNot { it.settled || it.startedByAgent }
     MinimalProject(
         id = folder.id,
         name = folder.name,
@@ -113,15 +120,20 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
         val orderedIds = workspace?.chatIds.orEmpty().filter { candidate ->
             grouped.any { it.id == candidate }
         }.let { ordered -> ordered + grouped.map(ChatSummary::id).filterNot { it in ordered } }
+        val ids = orderedIds.toSet()
+        // An agent started in the session's own worktree is one of its tabs,
+        // but the row only waits on it, as on the agents in worktrees of their own.
+        val own = grouped.filterNot { it.parentId != null && it.parentId in ids }
+        val agentsAtWork = chats.count { it.parentId in ids && (it.working || it.backgroundTasks > 0) }
         MinimalSession(
             id = id,
             title = (workspace?.title ?: first.title).takeIf(String::isNotBlank) ?: "New Session",
             agent = DirectAgent.fromBackend(first.backend),
             branch = (workspace?.branch ?: first.branch)?.takeIf(String::isNotBlank)
                 ?: "Project directory",
-            working = grouped.any { it.working || it.terminalWorking },
+            working = own.any { it.working } || grouped.any { it.terminalWorking },
             chatIds = orderedIds,
-            backgroundTasks = if (grouped.any { it.working }) 0 else grouped.sumOf { it.waitingOn },
+            backgroundTasks = if (own.any { it.working }) 0 else own.sumOf { it.waitingOn } + agentsAtWork,
             terminalChatId = workspace?.terminalChatId ?: first.id,
             settledAt = workspace?.settledAt,
             autoSettleDisabled = workspace?.autoSettleDisabled ?: false,
@@ -129,9 +141,28 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
             paused = grouped.any(ChatSummary::paused),
             quotaReached = grouped.any(ChatSummary::quotaReached),
             parentId = workspace?.parentId,
+            startedByAgent = if (workspace != null) workspace.parentId != null else first.parentId != null,
         )
     }
 }
+
+/**
+ * An agent's session leaves the list once it is done: nothing runs, and it is
+ * neither paused nor stopped at its quota. Its lead got its report, and its
+ * card in the lead's chat still opens it. [needsUser] tells a session that
+ * waits on the user's answer, which stays.
+ */
+public fun MinimalSession.finishedAgent(needsUser: Boolean): Boolean =
+    startedByAgent && !working && backgroundTasks == 0 && !paused && !quotaReached && !needsUser
+
+/**
+ * [activeSessions] as the projects list shows them: without the agents'
+ * sessions that are done; see [finishedAgent].
+ */
+public fun TreeSnapshot.listedSessions(
+    projectId: String,
+    needsUser: (MinimalSession) -> Boolean,
+): List<MinimalSession> = activeSessions(projectId).filterNot { it.finishedAgent(needsUser(it)) }
 
 /**
  * A project's sessions that are not settled, in the host's order, except that

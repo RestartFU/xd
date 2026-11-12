@@ -39,6 +39,7 @@ import com.restartfu.xd.credentials.StoredCredentials
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.model.DirectAgent
+import com.restartfu.xd.model.backgroundTasksLabel
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.net.PlatformSocket
 import com.restartfu.xd.net.PlatformSocketListener
@@ -329,9 +330,10 @@ class ProjectsScreenshotTest {
     @Test fun workersLight() = workers("workers-light", MinimalThemePreset.LIGHT)
 
     /**
-     * Two sessions Reconnect backoff's agent started list right below it once
-     * it is unfolded, indented, though the host lists them first as the
-     * newest; Usage page, which nobody started, stays level with it.
+     * The session Reconnect backoff's agent started that is still at work
+     * lists right below it once it is unfolded, indented, though the host
+     * lists it first as the newest; Usage page, which nobody started, stays
+     * level with it. The one that is done has left the list.
      */
     private fun workers(name: String, theme: MinimalThemePreset) {
         withWorkers = true
@@ -340,18 +342,30 @@ class ProjectsScreenshotTest {
                 click("Show the agents Reconnect backoff started")
                 val lead = bounds { hasText("Reconnect backoff") }
                 val first = bounds { hasText("Retry jitter") }
-                val second = bounds { hasText("Backoff tests") }
                 val other = bounds { hasText("Usage page") }
-                check(lead.top < first.top && first.top < second.top && second.top < other.top) {
-                    "rows run $lead, $first, $second, $other"
+                check(lead.top < first.top && first.top < other.top) { "rows run $lead, $first, $other" }
+                check(first.left > lead.left && other.left == lead.left) {
+                    "indents are ${lead.left}, ${first.left}, ${other.left}"
                 }
-                check(first.left > lead.left && second.left == first.left && other.left == lead.left) {
-                    "indents are ${lead.left}, ${first.left}, ${second.left}, ${other.left}"
+                check(!shows("Backoff tests")) { "the agent that is done still lists" }
+                // The lead waits on its agent at work, as on a background shell:
+                // the ring nearest its title is its own.
+                val rings = compose.onAllNodes(hasContentDescription(backgroundTasksLabel(1)), useUnmergedTree = true)
+                    .fetchSemanticsNodes().map { it.boundsInRoot.center.y }
+                val nearest = rings.minByOrNull { kotlin.math.abs(it - lead.center.y) }
+                check(nearest != null && kotlin.math.abs(nearest - lead.center.y) < kotlin.math.abs(nearest - first.center.y)) {
+                    "no ring on the lead's row: rings at $rings, lead at ${lead.center.y}"
                 }
             }
         } finally {
             withWorkers = false
         }
+    }
+
+    /** The sessions agents started do not count toward their project's sessions. */
+    @Test fun agentsSessionsDoNotCountTowardTheProject() = withWorkerSessions("workers-count-dark") {
+        // xd counts Reconnect backoff and Usage page, not the two sessions agents started.
+        check(shows("2") && !shows("3") && !shows("4")) { labels().toString() }
     }
 
     /**
@@ -362,13 +376,13 @@ class ProjectsScreenshotTest {
         check(!shows("Retry jitter") && !shows("Backoff tests")) { "the session's agents show before it is unfolded" }
         check(shows("Show the agents Reconnect backoff started") && shows("Usage page"))
         // The count of what it holds sits on the folded row itself.
-        bounds { hasText("Reconnect backoff") and hasText("2") }
+        bounds { hasText("Reconnect backoff") and hasText("1") }
     }
 
     /** Unfolding shows the agents it started; folding it again hides them. */
     @Test fun unfoldingASessionShowsTheAgentsItStarted() = withWorkerSessions("workers-unfolded-dark") {
         click("Show the agents Reconnect backoff started")
-        check(shows("Retry jitter") && shows("Backoff tests")) { "unfolding did not show the agents" }
+        check(shows("Retry jitter")) { "unfolding did not show the agents" }
         click("Hide the agents Reconnect backoff started")
         check(!shows("Retry jitter") && !shows("Backoff tests")) { "folding again did not hide the agents" }
         click("Show the agents Reconnect backoff started")
@@ -825,7 +839,8 @@ class ProjectsScreenshotTest {
 
         /**
          * [TREE] where Reconnect backoff's agent started two sessions of its
-         * own, which the host lists first, as the newest.
+         * own, which the host lists first, as the newest: Retry jitter waits
+         * on a background shell, and Backoff tests is done.
          */
         val TREE_WORKERS by lazy {
             val workers = listOf("w1" to "Retry jitter", "w2" to "Backoff tests")
@@ -833,7 +848,8 @@ class ProjectsScreenshotTest {
                 """{"id":"$id","folder":"xd","title":"$title","chats":["$id-c"],"terminal_chat":"session:$id","parent":"s1"}"""
             }
             val chats = workers.joinToString(",") { (id, title) ->
-                """{"id":"$id-c","folder":"xd","title":"$title","backend":"codex","working":false,"session":"$id","parent":"c1"}"""
+                val background = if (id == "w1") ""","background_tasks":1""" else ""
+                """{"id":"$id-c","folder":"xd","title":"$title","backend":"codex","working":false$background,"session":"$id","parent":"c1"}"""
             }
             TREE.replace("\"sessions\":[", "\"sessions\":[$sessions,")
                 .replace("\"chats\":[{", "\"chats\":[$chats,{")

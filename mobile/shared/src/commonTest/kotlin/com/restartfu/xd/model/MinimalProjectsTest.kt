@@ -268,4 +268,55 @@ class MinimalProjectsTest {
         // A loop of parents ends instead of going round.
         assertEquals(listOf("loopB"), snapshot.sessionsAbove("loopA"))
     }
+
+    @Test
+    fun aLeadWaitsOnItsAgentsAndFinishedAgentsLeaveTheList() {
+        fun chat(id: String, session: String, parent: String? = null, working: Boolean = false) = ChatSummary(
+            id = id,
+            folderId = "compiler",
+            title = id,
+            backend = "claude",
+            working = working,
+            sessionId = session,
+            parentId = parent,
+        )
+        // The lead started an agent in a worktree of its own, one in its own
+        // worktree (a tab of its session), and one that is done.
+        val snapshot = TreeSnapshot(
+            folders = listOf(Folder("compiler", "Compiler", null)),
+            chats = listOf(
+                chat("lead-chat", "lead"),
+                chat("tab-chat", "lead", parent = "lead-chat", working = true),
+                chat("worker-chat", "worker", parent = "lead-chat", working = true),
+                chat("done-chat", "done", parent = "lead-chat"),
+                chat("solo-chat", "solo"),
+            ),
+            sessions = listOf(
+                WorkspaceSession("lead", "compiler", "Lead", listOf("lead-chat", "tab-chat")),
+                WorkspaceSession("worker", "compiler", "Worker", listOf("worker-chat"), parentId = "lead"),
+                WorkspaceSession("done", "compiler", "Done", listOf("done-chat"), parentId = "lead"),
+                WorkspaceSession("solo", "compiler", "Solo", listOf("solo-chat")),
+            ),
+        )
+        val sessions = snapshot.minimalSessions("compiler").associateBy(MinimalSession::id)
+
+        // The lead does no work of its own: it waits on its two agents at work.
+        assertEquals(false, sessions.getValue("lead").working)
+        assertEquals(2, sessions.getValue("lead").backgroundTasks)
+        assertEquals(true, sessions.getValue("worker").working)
+        assertEquals(listOf(false, true, true, false), listOf("lead", "worker", "done", "solo").map {
+            sessions.getValue(it).startedByAgent
+        })
+        // Only the sessions the user started count.
+        assertEquals(2, snapshot.minimalProjects().single().sessions)
+        assertEquals(
+            listOf("lead", "worker", "solo"),
+            snapshot.listedSessions("compiler") { false }.map(MinimalSession::id),
+        )
+        // One waiting on the user's answer stays.
+        assertEquals(
+            listOf("lead", "worker", "done", "solo"),
+            snapshot.listedSessions("compiler") { it.id == "done" }.map(MinimalSession::id),
+        )
+    }
 }

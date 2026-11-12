@@ -239,8 +239,12 @@ A host whose agents can start agents of their own adds a top-level
 `"child_chats":true`. A chat such an agent started has `parent`, the id of the
 chat that started it, while that chat is still listed. When it works in a
 session of its own, that session's `sessions` entry has `parent`, the id of the
-parent chat's session; clients list it right below that session, indented. A
-chat started in its parent's own session is just another of its tabs. See
+parent chat's session; clients list it right below that session, indented,
+only while it is at work, paused or waiting on the user (and while it is the
+one shown), and leave it out of the project's session count. The parent's row
+waits on its agents at work as it waits on `background_tasks`, rather than
+taking on their state. A chat started in its parent's own session is just
+another of its tabs. See
 [Agents an agent starts](#agents-an-agent-starts).
 
 ### `background-task-output`

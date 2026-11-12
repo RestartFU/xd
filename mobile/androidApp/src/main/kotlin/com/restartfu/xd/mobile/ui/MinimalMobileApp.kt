@@ -133,7 +133,7 @@ import com.restartfu.xd.net.Link
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
 import com.restartfu.xd.model.SettledSession
-import com.restartfu.xd.model.activeSessions
+import com.restartfu.xd.model.listedSessions
 import com.restartfu.xd.model.settledSessions
 import com.restartfu.xd.model.sessionsAbove
 import com.restartfu.xd.model.startedBelow
@@ -710,6 +710,18 @@ private fun MinimalProjectsHome(
             else -> SessionSignal.IDLE
         }
     }
+    // An agent's session lists while it has something going on: its lead got
+    // the report of a finished one, and its card in the lead's chat opens it.
+    val listed = { projectId: String ->
+        tree.listedSessions(projectId) { session -> session.chatIds.any { it in waiting } }
+    }
+    // What a session passes up to a folded or closed row above it: an agent's
+    // session passes nothing but a wait on the user, since its lead already
+    // says it waits on its agents.
+    val outwardOf = { session: MinimalSession ->
+        signalOf(session).takeIf { !session.startedByAgent || it == SessionSignal.WAITING }
+            ?: SessionSignal.IDLE
+    }
 
     Column(
         Modifier
@@ -770,7 +782,7 @@ private fun MinimalProjectsHome(
                                 icon = ownerIcons[row.folder.owner],
                                 // A closed folder hides its projects, so it carries their signals.
                                 signals = if (row.open) emptyList() else openTree.projectsInside(row.folder.id)
-                                    .flatMap { tree.activeSessions(it).map(signalOf) },
+                                    .flatMap { listed(it).map(outwardOf) },
                                 modifier = indent,
                                 toggle = { settings.setFolderOpen(row.folder.id, !row.open) },
                                 menu = {
@@ -815,9 +827,10 @@ private fun MinimalProjectsHome(
                                     OpenDrawer(
                                         project = project,
                                         icon = ownerIcons[project.owner],
-                                        sessions = tree.activeSessions(project.id),
+                                        sessions = listed(project.id),
                                         starting = starting.filter { it.projectId == project.id && it.sessionId == null },
                                         signalOf = signalOf,
+                                        outwardOf = outwardOf,
                                         open = { session -> open(project, session) },
                                         actions = actions,
                                         expanded = expandedSessions,
@@ -832,7 +845,7 @@ private fun MinimalProjectsHome(
                                         project = project,
                                         open = false,
                                         icon = ownerIcons[project.owner],
-                                        signals = tree.activeSessions(project.id).map(signalOf),
+                                        signals = listed(project.id).map(outwardOf),
                                         onClick = toggle,
                                         pause = pauseFor(project),
                                         menu = menu,
@@ -2009,6 +2022,8 @@ private fun OpenDrawer(
     /** New sessions sent to the host and not made yet. */
     starting: List<StartingSession>,
     signalOf: (MinimalSession) -> SessionSignal,
+    /** What a session shows on a folded row above it. */
+    outwardOf: (MinimalSession) -> SessionSignal,
     open: (MinimalSession) -> Unit,
     actions: SessionActions,
     /** Sessions unfolded to show the sessions their agents started; the rest list folded. */
@@ -2066,7 +2081,7 @@ private fun OpenDrawer(
                     fold = if (workers == 0) null else SessionFold(
                         workers = workers,
                         folded = isFolded,
-                        hidden = if (isFolded) sessions.subList(index + 1, hiddenUntil).map(signalOf) else emptyList(),
+                        hidden = if (isFolded) sessions.subList(index + 1, hiddenUntil).map(outwardOf) else emptyList(),
                         toggle = { fold(session, !isFolded) },
                     ),
                 )
