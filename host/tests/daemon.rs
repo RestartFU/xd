@@ -1207,7 +1207,7 @@ fn a_first_turn_leaves_a_remembered_model_the_assistant_has_retired() {
     // Built in, so it is accepted, but the assistant does not offer it.
     assert_eq!(
         client.call(json!({"op":"set-option", "chat":earlier, "option":"model",
-            "value":"gpt-5.3-codex-spark"}))["ok"],
+            "value":"gpt-5.6-terra"}))["ok"],
         true
     );
     assert_eq!(
