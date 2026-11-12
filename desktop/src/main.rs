@@ -2615,8 +2615,9 @@ struct XdDesktop {
     sidebar_move_submitting: bool,
     sidebar_move_destination: Option<Option<String>>,
     collapsed_folders: HashSet<String>,
-    /// Sessions folded over the sessions their agents started, by session key.
-    collapsed_sessions: HashSet<String>,
+    /// Sessions the user unfolded to show the sessions their agents started,
+    /// by session key. Every other such session lists folded.
+    expanded_sessions: HashSet<String>,
     /// Drawers other than the current project that the user opened by hand.
     /// Filters the catalog to projects and sessions whose names match.
     catalog_find_input: Entity<ComposerInput>,
@@ -3291,8 +3292,8 @@ impl XdDesktop {
             .flatten()
             .cloned()
             .collect();
-        let collapsed_sessions = settings
-            .collapsed_session_sets
+        let expanded_sessions = settings
+            .expanded_session_sets
             .get(&active_connection)
             .into_iter()
             .flatten()
@@ -3452,7 +3453,7 @@ impl XdDesktop {
             sidebar_move_submitting: false,
             sidebar_move_destination: None,
             collapsed_folders,
-            collapsed_sessions,
+            expanded_sessions,
             catalog_find_input,
             catalog_query: String::new(),
             creating_workspace: false,
@@ -5458,11 +5459,11 @@ impl XdDesktop {
                         .any(|folder| &folder.id == folder_id)
                 });
                 self.persist_collapsed_folders();
-                self.collapsed_sessions.retain(|key| {
+                self.expanded_sessions.retain(|key| {
                     self.model.sessions.iter().any(|session| &session.id == key)
                         || self.model.chats.iter().any(|chat| &chat.id == key)
                 });
-                self.persist_collapsed_sessions();
+                self.persist_expanded_sessions();
                 self.prune_settle_undo();
                 if self
                     .workspace_context_folder
@@ -9452,9 +9453,9 @@ impl XdDesktop {
 
     fn restore_collapsed_folders(&mut self) {
         let key = self.current_connection_key();
-        self.collapsed_sessions = self
+        self.expanded_sessions = self
             .settings
-            .collapsed_session_sets
+            .expanded_session_sets
             .get(&key)
             .into_iter()
             .flatten()
@@ -12749,12 +12750,18 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// Whether the session `key` lists folded over the sessions its agent
+    /// started: until the user unfolds it, unless a search shows every match.
+    fn session_folded(&self, key: &str, finding: bool) -> bool {
+        !finding && !self.expanded_sessions.contains(key)
+    }
+
     /// Folds a session over the sessions its agent started, or unfolds it.
     fn toggle_session_folded(&mut self, session_key: String, cx: &mut Context<Self>) {
-        if !self.collapsed_sessions.remove(&session_key) {
-            self.collapsed_sessions.insert(session_key);
+        if !self.expanded_sessions.remove(&session_key) {
+            self.expanded_sessions.insert(session_key);
         }
-        self.persist_collapsed_sessions();
+        self.persist_expanded_sessions();
         cx.notify();
     }
 
@@ -12768,7 +12775,7 @@ impl XdDesktop {
         let mut seen = HashSet::new();
         let mut changed = false;
         while let Some(key) = parent.filter(|key| seen.insert(key.clone())) {
-            changed |= self.collapsed_sessions.remove(&key);
+            changed |= self.expanded_sessions.insert(key.clone());
             parent = self
                 .model
                 .sessions
@@ -12777,22 +12784,22 @@ impl XdDesktop {
                 .and_then(|session| session.parent.clone());
         }
         if changed {
-            self.persist_collapsed_sessions();
+            self.persist_expanded_sessions();
         }
     }
 
-    fn persist_collapsed_sessions(&mut self) {
+    fn persist_expanded_sessions(&mut self) {
         let key = self.current_connection_key();
-        let mut collapsed = self.collapsed_sessions.iter().cloned().collect::<Vec<_>>();
-        collapsed.sort();
-        let saved = self.settings.collapsed_session_sets.get(&key);
-        if saved.map_or(collapsed.is_empty(), |saved| *saved == collapsed) {
+        let mut expanded = self.expanded_sessions.iter().cloned().collect::<Vec<_>>();
+        expanded.sort();
+        let saved = self.settings.expanded_session_sets.get(&key);
+        if saved.map_or(expanded.is_empty(), |saved| *saved == expanded) {
             return;
         }
-        if collapsed.is_empty() {
-            self.settings.collapsed_session_sets.remove(&key);
+        if expanded.is_empty() {
+            self.settings.expanded_session_sets.remove(&key);
         } else {
-            self.settings.collapsed_session_sets.insert(key, collapsed);
+            self.settings.expanded_session_sets.insert(key, expanded);
         }
         if let Err(error) = self.settings.save() {
             self.model.connection_error = Some(error);
@@ -13091,7 +13098,6 @@ impl XdDesktop {
         else {
             return;
         };
-        self.reveal_started_session(chat_id);
         self.open_minimal_session(project_id, chat_id.to_owned(), agent, window, cx);
     }
 
@@ -13166,6 +13172,11 @@ impl XdDesktop {
         {
             return;
         }
+        // Agents' sessions list folded under the session that started them,
+        // so showing one (opened from its lead's chat, a notification or a
+        // search, or picked next after settling) unfolds the sessions above
+        // it and its row shows.
+        self.reveal_started_session(&chat_id);
         // Chats created and left before their state arrived, which is when
         // a chat sends its first message, send it anyway; this one still
         // sends its own when its state arrives.
@@ -15763,7 +15774,8 @@ impl XdDesktop {
                     .map(|index| started_below(&sessions, index))
                     .collect::<Vec<_>>();
                 // A folded session hides the run of sessions below it that
-                // its agent started; a search shows every match.
+                // its agent started, and every such session starts folded
+                // until the user unfolds it; a search shows every match.
                 let mut hidden_until = 0;
                 for (session_index, session) in sessions.into_iter().enumerate() {
                     let instance = session_instance;
@@ -15773,7 +15785,7 @@ impl XdDesktop {
                     }
                     let fold = (workers[session_index] > 0).then(|| {
                         let key = self.model.session_key_for_chat(&session.id);
-                        let folded = !finding && self.collapsed_sessions.contains(&key);
+                        let folded = self.session_folded(&key, finding);
                         let end = session_index + 1 + workers[session_index];
                         if folded {
                             hidden_until = end;
@@ -27986,6 +27998,90 @@ Binary files /dev/null and b/image.png differ\n";
     fn a_remote_hosts_repository_news_reaches_the_session_header() {
         assert!(XdDesktop::remote_read_event("git-state"));
         assert!(XdDesktop::remote_read_event("repository-changed"));
+    }
+
+    #[gpui::test]
+    fn agents_sessions_start_folded_under_the_session_that_started_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update_in(cx, |desktop, window, cx| {
+            desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.expanded_sessions.clear();
+            desktop.settings.expanded_session_sets.clear();
+            desktop.model.folders = vec![Folder {
+                id: "fold-project".into(),
+                name: "Fold".into(),
+                parent: None,
+                owner: None,
+                group: false,
+            }];
+            let chat = |id: &str| -> ChatSummary {
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "folder": "fold-project",
+                    "backend": "codex",
+                }))
+                .unwrap()
+            };
+            let session = |id: &str, parent: Option<&str>| xd_desktop::model::SessionSummary {
+                id: id.into(),
+                folder: "fold-project".into(),
+                title: id.into(),
+                chats: vec![format!("{id}-chat")],
+                branch: None,
+                working: false,
+                terminal_working: false,
+                background_tasks: 0,
+                terminal_chat: String::new(),
+                parent: parent.map(Into::into),
+            };
+            desktop.model.chats = vec![chat("lead-chat"), chat("worker-chat"), chat("deep-chat")];
+            desktop.model.sessions = vec![
+                session("lead", None),
+                session("worker", Some("lead")),
+                session("deep", Some("worker")),
+            ];
+
+            // Nobody has unfolded anything yet, so every lead lists folded;
+            // a search still shows every match.
+            assert!(desktop.session_folded("lead", false));
+            assert!(desktop.session_folded("worker", false));
+            assert!(!desktop.session_folded("lead", true));
+
+            desktop.toggle_session_folded("lead".into(), cx);
+            assert!(!desktop.session_folded("lead", false));
+            assert_eq!(
+                desktop.settings.expanded_session_sets.get("local"),
+                Some(&vec!["lead".to_owned()])
+            );
+            desktop.toggle_session_folded("lead".into(), cx);
+            assert!(desktop.session_folded("lead", false));
+            assert!(!desktop.settings.expanded_session_sets.contains_key("local"));
+
+            // Opening a session deep down unfolds every session above it, so
+            // its row shows; the session itself keeps its own fold.
+            desktop.open_agent_chat("deep-chat", window, cx);
+            assert!(!desktop.session_folded("lead", false));
+            assert!(!desktop.session_folded("worker", false));
+            assert!(desktop.session_folded("deep", false));
+            assert_eq!(
+                desktop.settings.expanded_session_sets.get("local"),
+                Some(&vec!["lead".to_owned(), "worker".to_owned()])
+            );
+
+            // So does a session the app picks by itself, such as the next one
+            // after settling the open session.
+            desktop.toggle_session_folded("lead".into(), cx);
+            assert!(desktop.session_folded("lead", false));
+            desktop.select_minimal_session(
+                "fold-project".into(),
+                "worker-chat".into(),
+                AgentCli::Codex,
+                cx,
+            );
+            assert!(!desktop.session_folded("lead", false));
+        });
     }
 
     #[gpui::test]
