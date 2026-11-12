@@ -203,7 +203,7 @@ public data class XdGlass(
 public fun xdGlass(theme: MinimalThemePreset): XdGlass = when (theme) {
     MinimalThemePreset.DARK -> XdGlass(
         backdrop = Color(0xFF0B0B0B),
-        pane = Color(0x08FFFFFF), composer = Color(0xD9232323), edge = Color(0x1FFFFFFF),
+        pane = Color(0x04FFFFFF), composer = Color(0xD9161616), edge = Color(0x1FFFFFFF),
     )
     MinimalThemePreset.LIGHT -> XdGlass(
         backdrop = Color(0xFFE4E7F4),
@@ -286,12 +286,12 @@ public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) 
         tertiaryContainer = Color(0xFF2A2A2A), onTertiaryContainer = Color(0xFFF2F2F2),
         background = Color(0xFF0B0B0B), onBackground = Color(0xFFF2F2F2),
         surface = Color(0xFF0B0B0B), onSurface = Color(0xFFF2F2F2),
-        surfaceVariant = Color(0xFF1F1F1F), onSurfaceVariant = Color(0xFFADADAD),
-        surfaceContainerLowest = Color(0xFF050505), surfaceContainerLow = Color(0xFF131313),
-        surfaceContainer = Color(0xFF161616), surfaceContainerHigh = Color(0xFF202020),
-        surfaceContainerHighest = Color(0xFF2A2A2A), surfaceBright = Color(0xFF2A2A2A),
+        surfaceVariant = Color(0xFF161616), onSurfaceVariant = Color(0xFFADADAD),
+        surfaceContainerLowest = Color(0xFF050505), surfaceContainerLow = Color(0xFF0F0F0F),
+        surfaceContainer = Color(0xFF111111), surfaceContainerHigh = Color(0xFF1B1B1B),
+        surfaceContainerHighest = Color(0xFF222222), surfaceBright = Color(0xFF222222),
         surfaceDim = Color(0xFF0B0B0B), inverseSurface = Color(0xFFF2F2F2),
-        inverseOnSurface = Color(0xFF131313), inversePrimary = Color(0xFF4B4FB8),
+        inverseOnSurface = Color(0xFF0F0F0F), inversePrimary = Color(0xFF4B4FB8),
         outline = Color(0xFF858585), outlineVariant = Color(0xFF333333),
         scrim = Color(0xFF000000), error = Color(0xFFFF94A2), onError = Color(0xFF351A20),
         errorContainer = Color(0xFF351A20), onErrorContainer = Color(0xFFFFD9DE),
