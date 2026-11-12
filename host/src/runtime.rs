@@ -429,9 +429,11 @@ fn claude_idle_line(line: &str) -> IdleLine {
 }
 
 /// Whether the agent owes a report on a finished task after this line of output,
-/// given whether it did before. A task finishing sets that and only the start of
-/// a turn clears it, so a process that never starts one just waits longer.
-fn report_due_after(line: &str, due: bool) -> bool {
+/// given whether it did before and the `tasks` it has going, read before the
+/// line. A background task finishing sets that and only the start of a turn
+/// clears it, so a process that never starts one just waits longer. A
+/// foreground command finishing does not: the turn that ran it goes on.
+fn report_due_after(line: &str, due: bool, tasks: &crate::background_tasks::Tasks) -> bool {
     if !line.contains("task_notification") && !line.contains("init") {
         return due;
     }
@@ -439,7 +441,11 @@ fn report_due_after(line: &str, due: bool) -> bool {
         return due;
     };
     match (root["type"].as_str(), root["subtype"].as_str()) {
-        (Some("system"), Some("task_notification")) => true,
+        (Some("system"), Some("task_notification")) => {
+            due || !root["task_id"]
+                .as_str()
+                .is_some_and(|id| tasks.runs_in_foreground(id))
+        }
         (Some("system"), Some("init")) => false,
         _ => due,
     }
@@ -1919,7 +1925,8 @@ impl TurnRuntime {
                         };
                         router.quiet_since = Instant::now();
                         router.wakes_itself |= schedules_a_wakeup(&text);
-                        router.report_due = report_due_after(&text, router.report_due);
+                        router.report_due =
+                            report_due_after(&text, router.report_due, &router.tasks);
                         let tasks_before = router.tasks.len();
                         router.tasks.track(&text);
                         router.backlog.push_back(text);
@@ -6175,17 +6182,71 @@ read next"#,
 
     #[test]
     fn a_report_is_due_from_a_task_finishing_until_a_turn_begins() {
+        let tasks = crate::background_tasks::Tasks::default();
         let finished = r#"{"type":"system","subtype":"task_notification","task_id":"t1"}"#;
         let begun = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
         let text = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"init"}]}}"#;
-        assert!(report_due_after(finished, false));
+        assert!(report_due_after(finished, false, &tasks));
         assert!(
-            report_due_after(text, true),
+            report_due_after(text, true, &tasks),
             "only a turn's start clears it"
         );
-        assert!(report_due_after("init", true));
-        assert!(!report_due_after(begun, true));
-        assert!(!report_due_after(text, false));
+        assert!(report_due_after("init", true, &tasks));
+        assert!(!report_due_after(begun, true, &tasks));
+        assert!(!report_due_after(text, false, &tasks));
+    }
+
+    /// Claude Code reports a foreground command that runs a few seconds as a
+    /// task, and says when it finishes, before the turn that ran it goes on.
+    /// Lines as Claude Code 2.1.319 sent them.
+    #[test]
+    fn a_foreground_command_finishing_leaves_no_report_due() {
+        let mut tasks = crate::background_tasks::Tasks::default();
+        let mut due = false;
+        for line in [
+            r#"{"type":"system","subtype":"task_started","task_id":"bld38oitq","tool_use_id":"toolu_fg","description":"Sleep 4 seconds then echo hi","is_backgrounded":false,"task_type":"local_bash"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"bld38oitq","tool_use_id":"toolu_fg","status":"completed","output_file":"","summary":"Sleep 4 seconds then echo hi"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_fg","type":"tool_result","content":"hi","is_error":false}]}}"#,
+        ] {
+            due = report_due_after(line, due, &tasks);
+            tasks.track(line);
+        }
+        assert!(!due, "the turn that ran the command reports on it");
+        assert!(tasks.is_empty());
+
+        // One sent to the background mid-run is owed a report like any other.
+        for line in [
+            r#"{"type":"system","subtype":"task_started","task_id":"b2","tool_use_id":"toolu_moved","description":"Build","is_backgrounded":false,"task_type":"local_bash"}"#,
+            r#"{"type":"system","subtype":"task_updated","task_id":"b2","patch":{"is_backgrounded":true}}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"b2","tool_use_id":"toolu_moved","status":"completed"}"#,
+        ] {
+            due = report_due_after(line, due, &tasks);
+            tasks.track(line);
+        }
+        assert!(due);
+
+        // As is one whose call returned while it ran on.
+        let mut due = false;
+        for line in [
+            r#"{"type":"system","subtype":"task_started","task_id":"b4","tool_use_id":"toolu_timed","description":"Long build","is_backgrounded":false,"task_type":"local_bash"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_timed","type":"tool_result","content":"Command running in background with ID: b4.","is_error":false}]}}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"b4","tool_use_id":"toolu_timed","status":"completed"}"#,
+        ] {
+            due = report_due_after(line, due, &tasks);
+            tasks.track(line);
+        }
+        assert!(due);
+
+        // As is one started in the background.
+        let mut due = false;
+        for line in [
+            r#"{"type":"system","subtype":"task_started","task_id":"b3","tool_use_id":"toolu_bg","description":"Watch","is_backgrounded":true,"task_type":"local_bash"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"b3","tool_use_id":"toolu_bg","status":"completed"}"#,
+        ] {
+            due = report_due_after(line, due, &tasks);
+            tasks.track(line);
+        }
+        assert!(due);
     }
 
     #[cfg(unix)]

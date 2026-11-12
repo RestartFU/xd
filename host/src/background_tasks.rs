@@ -23,6 +23,10 @@ struct Task {
     kind: String,
     started_at: u64,
     output_file: Option<String>,
+    /// Claude runs it in the background. Claude reports a foreground command
+    /// that runs for a few seconds as a task too, and says when it finishes,
+    /// but the turn waits for it: the agent owes no turn on it afterwards.
+    backgrounded: bool,
 }
 
 #[derive(Default)]
@@ -39,6 +43,11 @@ impl Tasks {
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.live.is_empty()
+    }
+    /// Whether task `id` is one Claude runs in the foreground of a turn, so
+    /// its finishing leaves the agent nothing to report on in a later turn.
+    pub(crate) fn runs_in_foreground(&self, id: &str) -> bool {
+        self.live.get(id).is_some_and(|task| !task.backgrounded)
     }
     pub(crate) fn clear(&mut self) {
         self.live.clear();
@@ -179,13 +188,16 @@ impl Tasks {
                                 .find(|(_, t)| !tool_id.is_empty() && t.tool_id == tool_id)
                                 .map(|(key, _)| key.clone())
                         });
-                    let mut task = alias
-                        .and_then(|key| self.live.remove(&key))
-                        .unwrap_or_else(|| new_task(id, tool_id));
+                    let alias = alias.and_then(|key| self.live.remove(&key));
+                    let alias_backgrounded = alias.as_ref().is_some_and(|task| task.backgrounded);
+                    let mut task = alias.unwrap_or_else(|| new_task(id, tool_id));
                     task.id = id.into();
                     if !tool_id.is_empty() {
                         task.tool_id = tool_id.into();
                     }
+                    // Only a start that says so is in the foreground: a tool
+                    // result that came first already found it backgrounded.
+                    task.backgrounded = alias_backgrounded || root["is_backgrounded"] != false;
                     enrich(&mut task, &root);
                     if let Some(tool) = self.tools.get(tool_id) {
                         enrich_tool(&mut task, tool);
@@ -200,6 +212,10 @@ impl Tasks {
                             enrich(task, &progress);
                         } else {
                             enrich(task, &root["patch"]);
+                            // Sent to the background mid-run.
+                            if root["patch"]["is_backgrounded"] == true {
+                                task.backgrounded = true;
+                            }
                         }
                     }
                 }
@@ -294,6 +310,9 @@ impl Tasks {
                 .live
                 .entry(id.clone())
                 .or_insert_with(|| new_task(&id, tool_id));
+            // Its call returned while it runs on, so the turn did not wait
+            // for it, whatever its start said.
+            task.backgrounded = true;
             if let Some(tool) = &tool {
                 enrich_tool(task, tool);
             }
@@ -335,6 +354,7 @@ fn new_task(id: &str, tool_id: &str) -> Task {
             .unwrap_or_default()
             .as_secs(),
         output_file: None,
+        backgrounded: true,
     }
 }
 
