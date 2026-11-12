@@ -71,19 +71,17 @@ class SettingsScreenshotTest {
     /** Replies are no longer read aloud, so Settings has no switch for it. */
     @Test fun settingsDark() = shoot("settings-dark", MinimalThemePreset.DARK)
 
-    /** Every theme is offered, and the chosen one is the one marked. */
-    @Test fun settingsModern() = shoot("settings-modern", MinimalThemePreset.MODERN)
+    /** Both themes are offered, and the chosen one is the one marked. */
+    @Test fun settingsLight() = shoot("settings-light", MinimalThemePreset.LIGHT)
 
-    @Test fun settingsModernLight() = shoot("settings-modern-light", MinimalThemePreset.MODERN_LIGHT)
-
-    /** The themes still fit two to a row on a narrow phone. */
+    /** The themes still fit side by side on a narrow phone. */
     @Config(qualifiers = "w360dp-h780dp-420dpi")
-    @Test fun settingsModernNarrow() = shoot("settings-modern-narrow", MinimalThemePreset.MODERN)
+    @Test fun settingsNarrow() = shoot("settings-narrow", MinimalThemePreset.DARK)
 
     /** With enlarged text the themes stack rather than clip their names. */
     @Config(qualifiers = "w360dp-h780dp-420dpi")
-    @Test fun settingsModernLargeText() =
-        shoot("settings-modern-large-text", MinimalThemePreset.MODERN, fontScale = 2f)
+    @Test fun settingsLargeText() =
+        shoot("settings-large-text", MinimalThemePreset.DARK, fontScale = 2f)
 
     private fun shoot(name: String, theme: MinimalThemePreset, fontScale: Float = 1f) {
         val activity = compose.activity

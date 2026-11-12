@@ -341,7 +341,7 @@ internal fun MinimalMobileApp(
         model.consumeSettledNotice(notice)
     }
     Box(Modifier.fillMaxSize()) {
-    Row(Modifier.fillMaxSize().background(glassPage(MaterialTheme.colorScheme.background))) {
+    Row(Modifier.fillMaxSize().background(GlassPage)) {
         if (expanded) {
             XdNavigationRail(mobileDestination, showProjects, showTerminal, showUsage)
         }
@@ -352,7 +352,7 @@ internal fun MinimalMobileApp(
                         model, settings, link, showProjects, barInset,
                     )
                     mobileDestination == MobileDestination.USAGE -> Column(
-                        Modifier.fillMaxSize().background(glassPage(MaterialTheme.colorScheme.background)),
+                        Modifier.fillMaxSize().background(GlassPage),
                     ) {
                         ProductHeader(link = link, title = "Usage", onSettings = { settingsOpen = true })
                         // Kept with the other per-host stores, so leaving Usage keeps what it read.
@@ -720,7 +720,7 @@ private fun MinimalProjectsHome(
     Column(
         Modifier
             .fillMaxSize()
-            .background(glassPage(MaterialTheme.colorScheme.background))
+            .background(GlassPage)
             .navigationBarsPadding(),
     ) {
         val pausingAll by model.pausingAll.collectAsStateWithLifecycle()
@@ -1061,7 +1061,7 @@ private fun MinimalGlobalTerminal(
     Column(
         Modifier
             .fillMaxSize()
-            .background(glassPage(MaterialTheme.colorScheme.background))
+            .background(GlassPage)
             .navigationBarsPadding(),
     ) {
         ProductHeader(link = link, title = "Terminal", onSettings = { settingsOpen = true })
@@ -1273,7 +1273,7 @@ private fun ProductHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(glassPane(MaterialTheme.colorScheme.surface))
+            .background(glassPane())
             .statusBarsPadding()
             .height(56.dp)
             .padding(start = 16.dp, end = 4.dp),
@@ -1374,8 +1374,8 @@ private fun XdNavigationBar(
     Surface(
         modifier = modifier.navigationBarsPadding().padding(bottom = 16.dp).height(FloatingBarHeight),
         shape = CircleShape,
-        color = glassOverlay(colors.surfaceContainer),
-        border = BorderStroke(1.dp, glassEdge(colors.outlineVariant)),
+        color = glassOverlay(),
+        border = BorderStroke(1.dp, glassEdge()),
         shadowElevation = 6.dp,
     ) {
         Row(
@@ -1430,7 +1430,7 @@ private fun XdNavigationRail(
     onTerminal: () -> Unit,
     onUsage: () -> Unit,
 ) {
-    NavigationRail(containerColor = glassPane(MaterialTheme.colorScheme.surfaceContainerLow)) {
+    NavigationRail(containerColor = glassPane()) {
         Spacer(Modifier.height(16.dp))
         listOf(
             Triple(MobileDestination.PROJECTS, "Projects", R.drawable.ic_projects) to onProjects,
@@ -2518,7 +2518,7 @@ private fun ThemePicker(theme: MinimalThemePreset, choose: (MinimalThemePreset) 
     }
 }
 
-/** The theme's ground at a glance: its glass wash under a frosted strip, or its canvas. */
+/** The theme's ground at a glance: its glass backdrop under a frosted strip. */
 @Composable
 private fun ThemeSwatch(preset: MinimalThemePreset, modifier: Modifier) {
     val glass = xdGlass(preset)
@@ -2526,12 +2526,10 @@ private fun ThemeSwatch(preset: MinimalThemePreset, modifier: Modifier) {
     Box(
         modifier
             .clip(shape)
-            .then(if (glass != null) Modifier.background(glass.wash()) else Modifier.background(preset.preview))
+            .background(glass.backdrop)
             .border(1.dp, MaterialTheme.colorScheme.outline, shape),
     ) {
-        if (glass != null) {
-            Box(Modifier.fillMaxHeight().fillMaxWidth(0.35f).background(glass.pane))
-        }
+        Box(Modifier.fillMaxHeight().fillMaxWidth(0.35f).background(glass.pane))
     }
 }
 

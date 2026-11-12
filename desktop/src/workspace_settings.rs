@@ -1,6 +1,6 @@
 use super::*;
 
-/// Room for the longest theme name ("Modern Light") and the chosen dot.
+/// Room for a theme name and the chosen dot.
 const THEME_CARD_MIN_WIDTH: f32 = 136.0;
 /// The gap between theme cards, `gap_4`.
 const THEME_CARD_GAP: f32 = 16.0;
@@ -8,7 +8,8 @@ const THEME_CARD_GAP: f32 = 16.0;
 const SETTINGS_NAV_WIDTH: f32 = 177.0;
 
 /// How many theme cards sit in a row across `room`: all of them, or two to
-/// a row, or one, whichever keeps every card wide enough for its name.
+/// a row, or one, whichever keeps every card wide enough for its name. With two
+/// themes, both sit side by side unless the panel is very narrow.
 fn theme_columns(room: f32) -> usize {
     [ThemePreset::ALL.len(), 2]
         .into_iter()
@@ -668,8 +669,8 @@ impl XdDesktop {
             0 => {
                 let card_width = theme_card_width(content_room, theme_columns(content_room));
                 content = content.child(settings_heading("Theme", colors)).child(
-                    // All across when there is room, else two to a row (or one),
-                    // so the cards never clip their names.
+                    // Side by side when there is room, else one to a row, so the
+                    // cards never clip their names.
                     div().flex().flex_wrap().gap_4().children(
                         ThemePreset::ALL
                             .into_iter()
@@ -703,21 +704,13 @@ impl XdDesktop {
                                             .p_3()
                                             .flex()
                                             .gap(px(10.0))
-                                            .relative()
                                             .bg(crate::glass::window(swatch))
-                                            .when_some(
-                                                crate::glass::glow(swatch),
-                                                |preview, glow| {
-                                                    preview
-                                                        .child(div().absolute().inset_0().bg(glow))
-                                                },
-                                            )
                                             .child(
                                                 div()
                                                     .w(px(28.0))
                                                     .h_full()
                                                     .rounded(px(5.0))
-                                                    .bg(crate::glass::pane(swatch, swatch.sidebar)),
+                                                    .bg(crate::glass::pane(swatch)),
                                             )
                                             .child(
                                                 div()
@@ -1313,10 +1306,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn theme_cards_sit_all_across_or_two_to_a_row_and_fit_their_names() {
+    fn theme_cards_sit_side_by_side_unless_their_names_would_clip() {
         // The widest panel, the panel at the window's minimum width, a compact
         // panel, and the narrowest panel.
-        assert_eq!(theme_columns(900.0 - SETTINGS_NAV_WIDTH - 64.0), 4);
+        assert_eq!(theme_columns(900.0 - SETTINGS_NAV_WIDTH - 64.0), 2);
         assert_eq!(theme_columns(712.0 - SETTINGS_NAV_WIDTH - 64.0), 2);
         assert_eq!(theme_columns(600.0 - 40.0), 2);
         assert_eq!(theme_columns(280.0 - 40.0), 1);

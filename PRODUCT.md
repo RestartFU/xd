@@ -30,14 +30,14 @@ xd does not ship its own model or agent. It wraps the user's own CLIs, authentic
 ## Capabilities and Constraints
 
 - Desktop UI is GPUI: no CSS, no web components; everything is drawn in Rust in `desktop/src/main.rs` and its siblings. The palette lives in `desktop/src/theme.rs` as semantic roles.
-- Themes: Dark, Light, Modern and Modern Light (Dark and Light confirmed 2026-10-23). Modern and Modern Light are a glassy, macOS-style look drawn inside the app; the window stays opaque (confirmed 2026-11-12). Saved legacy theme names load as Dark.
+- Themes: exactly two, Dark and Light (confirmed 2026-10-23), both a glassy, macOS-style look drawn inside the app, with no gradient (confirmed 2026-11-12). The earlier charcoal and silver looks were replaced. Saved legacy theme names load as Dark.
 - The Linux browser pane is Chromium (through CEF) over X11.
 - Redesign scope (confirmed 2026-10-23): the whole UI, including navigation and flows, on both desktop and Android. Existing capabilities stay available; sessions gain separate chat tabs sharing their workspace.
 
 ## Brand Commitments
 
 - The name is lowercase `xd`. There is an existing app icon in `desktop/assets/icons`.
-- The approved direction is a T3 Code-like workspace with neutral charcoal, plus a neutral silver Light theme. Preserve real platform window controls without decorative traffic lights (confirmed 2026-10-30). The window is opaque; the earlier clear-glass treatment was removed because seeing behind the app was unwanted (confirmed 2026-11-06). Dark and Light keep every surface opaque. Modern and Modern Light bring glass back inside that opaque window, as an opt-in theme: a soft wash and corner glow behind translucent chrome, never anything outside the app (confirmed 2026-11-12).
+- The approved direction is a T3 Code-like workspace in frosted glass: black glass for Dark, frosted white over cool grey for Light, with an indigo accent (confirmed 2026-11-12; it replaced neutral charcoal and silver). Preserve real platform window controls without decorative traffic lights (confirmed 2026-10-30). The window is opaque; the earlier clear-glass treatment was removed because seeing behind the app was unwanted (confirmed 2026-11-06). Glass returned inside that opaque window instead: translucent chrome over a flat backdrop, never anything outside the app (confirmed 2026-11-12). Gradients were tried and rejected (2026-11-12).
 
 ## Evidence on Hand
 
@@ -50,5 +50,5 @@ xd does not ship its own model or agent. It wraps the user's own CLIs, authentic
 
 1. Project, then session, then chat: the user picks a project and session, then independent chat tabs sharing its workspace. That hierarchy is the primary navigation (confirmed 2026-10-30).
 2. Work side by side: chat, diff, terminal, and browser stay visible together and resizable. Keyboard shortcuts and focus behavior do not change (confirmed).
-3. The agent's output is the content. Chrome stays calm and out of its way: no glow, gradients, or motion that competes with work (confirmed: "too flashy" is the failure). The Modern themes' wash and glow are the one exception the user opted into; they stay soft, sit behind everything, and never animate.
+3. The agent's output is the content. Chrome stays calm and out of its way: no glow, gradients, or motion that competes with work (confirmed: "too flashy" is the failure).
 4. Session activity (working, waiting on the user, unread completion, idle), tool failures, and connection state (local or remote, connected or reconnecting) remain legible (inferred from the activity and remote features).

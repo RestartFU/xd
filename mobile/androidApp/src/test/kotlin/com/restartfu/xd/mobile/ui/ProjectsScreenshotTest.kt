@@ -168,14 +168,10 @@ class ProjectsScreenshotTest {
         checkBarCentred()
     }
 
+    /** The list scrolls beneath the floating bar, which stays opaque over the glass. */
     @Test fun longListDark() = longList("long-list-dark", MinimalThemePreset.DARK)
 
     @Test fun longListLight() = longList("long-list-light", MinimalThemePreset.LIGHT)
-
-    /** The list scrolls beneath the floating bar, which stays opaque under glass. */
-    @Test fun longListModern() = longList("long-list-modern", MinimalThemePreset.MODERN)
-
-    @Test fun longListModernLight() = longList("long-list-modern-light", MinimalThemePreset.MODERN_LIGHT)
 
     @Test fun pausingAProjectStopsOnlyItsChats() = shoot("paused-dark", MinimalThemePreset.DARK) {
         // Only projects with work show the button: web runs a turn, shop waits on a task.

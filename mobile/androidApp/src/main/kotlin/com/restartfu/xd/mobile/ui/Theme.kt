@@ -13,11 +13,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -134,18 +131,15 @@ public fun xdColors(accent: AccentPreset = AccentPreset.BLUE): ColorScheme =
 /** The default desktop-matching palette for callers that do not need settings. */
 public val XdColors: ColorScheme = xdColors()
 
-/** The desktop's themes. Saved names of retired themes load as Dark. */
+/** The desktop's two themes. Saved names of retired themes load as Dark. */
 public enum class MinimalThemePreset(
     val key: String,
     val label: String,
-    val preview: Color,
     /** Dark text and system bar icons on a light ground. */
     val isLight: Boolean,
 ) {
-    DARK("dark", "Dark", Color(0xFF1B1B1B), isLight = false),
-    LIGHT("light", "Light", Color(0xFFF4F4F4), isLight = true),
-    MODERN("modern", "Modern", Color(0xFF0B0B0B), isLight = false),
-    MODERN_LIGHT("modern-light", "Modern Light", Color(0xFFEEF0F9), isLight = true),
+    DARK("dark", "Dark", isLight = false),
+    LIGHT("light", "Light", isLight = true),
     ;
 
     public companion object {
@@ -174,27 +168,13 @@ public data class XdSignals(
 
 public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
     MinimalThemePreset.DARK -> XdSignals(
-        working = Color(0xFF8DCEB0), waiting = Color(0xFFE2C28D),
-        done = Color(0xFFC2C2C2), rule = Color(0xFF393939),
-        link = Color(0xFFDEDEDE), faint = Color(0xFFABABAB),
-        diffAdded = Color(0xFF263B30), diffRemoved = Color(0xFF462C30),
-        codexIcon = Color.White, claudeIcon = Color(0xFFD97757),
-    )
-    MinimalThemePreset.LIGHT -> XdSignals(
-        working = Color(0xFF226347), waiting = Color(0xFF745319),
-        done = Color(0xFF555555), rule = Color(0xFFD4D4D4),
-        link = Color(0xFF444444), faint = Color(0xFF606060),
-        diffAdded = Color(0xFFE0EEE5), diffRemoved = Color(0xFFF4E2E5),
-        codexIcon = Color(0xFF202020), claudeIcon = Color(0xFFB85C3F),
-    )
-    MinimalThemePreset.MODERN -> XdSignals(
         working = Color(0xFF63D8A8), waiting = Color(0xFFF0C06A),
         done = Color(0xFFA9ADFF), rule = Color(0xFF262626),
         link = Color(0xFFA9ADFF), faint = Color(0xFF929292),
         diffAdded = Color(0xFF142B20), diffRemoved = Color(0xFF351A20),
         codexIcon = Color.White, claudeIcon = Color(0xFFD97757),
     )
-    MinimalThemePreset.MODERN_LIGHT -> XdSignals(
+    MinimalThemePreset.LIGHT -> XdSignals(
         working = Color(0xFF17603F), waiting = Color(0xFF6C490A),
         done = Color(0xFF4045BB), rule = Color(0xFFDADDE9),
         link = Color(0xFF4045BB), faint = Color(0xFF5A6074),
@@ -206,55 +186,38 @@ public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
 public val LocalXdSignals = staticCompositionLocalOf { xdSignals(MinimalThemePreset.DARK) }
 
 /**
- * Frosted glass drawn inside the app, as on the desktop: the window paints a
- * diagonal wash, page canvases leave it showing, and headers, the tab bar and
- * the composer are translucent panes over it. Dialogs, cards and the terminal
- * keep their opaque roles. Nothing outside the app shows through.
+ * Frosted glass drawn inside the app, as on the desktop, in both themes: the
+ * window paints one flat backdrop, page canvases leave it showing, and headers, the rail and the
+ * composer are translucent panes over it. Dialogs, cards and the terminal keep
+ * their opaque roles. Nothing outside the app shows through.
  */
 @Immutable
 public data class XdGlass(
-    val washFrom: Color,
-    val washTo: Color,
-    /** A second wash from the top right corner, fading out before the middle. */
-    val glow: Color,
+    val backdrop: Color,
     val pane: Color,
     val composer: Color,
-    /** The hairline along a pane: light on the dark wash, dark on the light one. */
+    /** The hairline along a pane: light on the dark backdrop, dark on the light one. */
     val edge: Color,
 )
 
-public fun xdGlass(theme: MinimalThemePreset): XdGlass? = when (theme) {
-    MinimalThemePreset.DARK, MinimalThemePreset.LIGHT -> null
-    MinimalThemePreset.MODERN -> XdGlass(
-        washFrom = Color(0xFF0E0E0E), washTo = Color(0xFF080808), glow = Color(0x08FFFFFF),
+public fun xdGlass(theme: MinimalThemePreset): XdGlass = when (theme) {
+    MinimalThemePreset.DARK -> XdGlass(
+        backdrop = Color(0xFF0B0B0B),
         pane = Color(0x08FFFFFF), composer = Color(0xD9232323), edge = Color(0x1FFFFFFF),
     )
-    MinimalThemePreset.MODERN_LIGHT -> XdGlass(
-        washFrom = Color(0xFFDCDCFB), washTo = Color(0xFFD3EBF3), glow = Color(0x99F7D6EE),
+    MinimalThemePreset.LIGHT -> XdGlass(
+        backdrop = Color(0xFFE4E7F4),
         pane = Color(0x8CFFFFFF), composer = Color(0xD0FFFFFF), edge = Color(0x1F1B1E2C),
     )
 }
 
-public val LocalXdGlass = staticCompositionLocalOf<XdGlass?> { null }
+public val LocalXdGlass = staticCompositionLocalOf { xdGlass(MinimalThemePreset.DARK) }
 
-/** The wash, top left to bottom right. */
-public fun XdGlass.wash(): Brush = Brush.linearGradient(listOf(washFrom, washTo))
+/** Paints the glass backdrop behind everything. */
+public fun Modifier.glassBackdrop(glass: XdGlass): Modifier = background(glass.backdrop)
 
-/** The glow, from the top right corner, gone a little past the middle. */
-public fun XdGlass.glowWash(): Brush = Brush.linearGradient(
-    0f to glow,
-    0.6f to glow.copy(alpha = 0f),
-    start = Offset(Float.POSITIVE_INFINITY, 0f),
-    end = Offset(0f, Float.POSITIVE_INFINITY),
-)
-
-/** Paints the glass wash and its glow behind everything, for the themes that have them. */
-public fun Modifier.glassBackdrop(glass: XdGlass?): Modifier =
-    if (glass == null) this else background(glass.wash()).background(glass.glowWash())
-
-/** A page canvas: clear under glass, so the wash shows; [solid] otherwise. */
-@Composable
-public fun glassPage(solid: Color): Color = if (LocalXdGlass.current != null) Color.Transparent else solid
+/** A page canvas: clear, so the backdrop shows. */
+public val GlassPage: Color = Color.Transparent
 
 /**
  * Everything a theme provides: Material roles, the status signals, and glass.
@@ -270,13 +233,13 @@ public fun XdTheme(theme: MinimalThemePreset, content: @Composable () -> Unit) {
     }
 }
 
-/** The app's root: the theme, the glass wash behind everything, and the page over it. */
+/** The app's root: the theme, the glass backdrop behind everything, and the page over it. */
 @Composable
 public fun XdRoot(theme: MinimalThemePreset, content: @Composable () -> Unit) {
     XdTheme(theme) {
         Surface(
             Modifier.fillMaxSize().glassBackdrop(xdGlass(theme)),
-            color = glassPage(MaterialTheme.colorScheme.surface),
+            color = GlassPage,
             // Said outright: under glass the color is clear, and Material would
             // fall back to black for content on it.
             contentColor = MaterialTheme.colorScheme.onSurface,
@@ -285,75 +248,36 @@ public fun XdRoot(theme: MinimalThemePreset, content: @Composable () -> Unit) {
     }
 }
 
-/** A header, tab bar or rail over the page: translucent under glass. */
+/** A header, tab bar or rail over the page: translucent. */
 @Composable
-public fun glassPane(solid: Color): Color = LocalXdGlass.current?.pane ?: solid
+public fun glassPane(): Color = LocalXdGlass.current.pane
 
 /**
  * Something that floats over content that scrolls beneath it, such as the
  * floating tab bar. Without a backdrop blur a translucent pane would show that
- * content through it, so under glass this is the pane already laid over the
- * middle of the wash: the same frosted tone, but opaque.
+ * content through it, so this is the pane already laid over the backdrop: the
+ * same frosted tone, but opaque.
  */
 @Composable
-public fun glassOverlay(solid: Color): Color = LocalXdGlass.current?.overlay() ?: solid
+public fun glassOverlay(): Color = LocalXdGlass.current.overlay()
 
-/** The pane over the middle of the wash, opaque. */
-public fun XdGlass.overlay(): Color = pane.compositeOver(lerp(washFrom, washTo, 0.5f))
+/** The pane over the backdrop, opaque. */
+public fun XdGlass.overlay(): Color = pane.compositeOver(backdrop)
 
-/** The message composer: translucent under glass. */
+/** The message composer: translucent. */
 @Composable
-public fun glassComposer(solid: Color): Color = LocalXdGlass.current?.composer ?: solid
+public fun glassComposer(): Color = LocalXdGlass.current.composer
 
-/** A pane's hairline: the glass edge, or [solid]. */
+/** A pane's hairline. */
 @Composable
-public fun glassEdge(solid: Color): Color = LocalXdGlass.current?.edge ?: solid
+public fun glassEdge(): Color = LocalXdGlass.current.edge
 
 /**
- * Neutral charcoal and silver (Dark, Light), or frosted glass with an indigo
- * accent (Modern on black, Modern Light on pastel), expressed through complete
- * Material color roles.
+ * Frosted glass with an indigo accent, black (Dark) or cool grey (Light),
+ * expressed through complete Material color roles.
  */
 public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) {
     MinimalThemePreset.DARK -> darkColorScheme(
-        primary = Color(0xFFDEDEDE), onPrimary = Color(0xFF1B1B1B),
-        primaryContainer = Color(0xFF383838), onPrimaryContainer = Color(0xFFF1F1F1),
-        secondary = Color(0xFFB1B1B1), onSecondary = Color(0xFF1B1B1B),
-        secondaryContainer = Color(0xFF383838), onSecondaryContainer = Color(0xFFF1F1F1),
-        tertiary = Color(0xFFC2C2C2), onTertiary = Color(0xFF1B1B1B),
-        tertiaryContainer = Color(0xFF383838), onTertiaryContainer = Color(0xFFF1F1F1),
-        background = Color(0xFF101010), onBackground = Color(0xFFF1F1F1),
-        surface = Color(0xFF1B1B1B), onSurface = Color(0xFFF1F1F1),
-        surfaceVariant = Color(0xFF303030), onSurfaceVariant = Color(0xFFB1B1B1),
-        surfaceContainerLowest = Color(0xFF101010), surfaceContainerLow = Color(0xFF202020),
-        surfaceContainer = Color(0xFF2A2A2A), surfaceContainerHigh = Color(0xFF303030),
-        surfaceContainerHighest = Color(0xFF383838), surfaceBright = Color(0xFF383838),
-        surfaceDim = Color(0xFF1B1B1B), inverseSurface = Color(0xFFF1F1F1),
-        inverseOnSurface = Color(0xFF202020), inversePrimary = Color(0xFF363636),
-        outline = Color(0xFF858585), outlineVariant = Color(0xFF414141),
-        scrim = Color(0xFF000000), error = Color(0xFFEFA7AD), onError = Color(0xFF462C30),
-        errorContainer = Color(0xFF462C30), onErrorContainer = Color(0xFFF6D9DC),
-    )
-    MinimalThemePreset.LIGHT -> lightColorScheme(
-        primary = Color(0xFF363636), onPrimary = Color(0xFFFFFFFF),
-        primaryContainer = Color(0xFFE4E4E4), onPrimaryContainer = Color(0xFF202020),
-        secondary = Color(0xFF5A5A5A), onSecondary = Color(0xFFFFFFFF),
-        secondaryContainer = Color(0xFFFFFFFF), onSecondaryContainer = Color(0xFF202020),
-        tertiary = Color(0xFF444444), onTertiary = Color(0xFFFFFFFF),
-        tertiaryContainer = Color(0xFFE4E4E4), onTertiaryContainer = Color(0xFF202020),
-        background = Color(0xFFF4F4F4), onBackground = Color(0xFF202020),
-        surface = Color(0xFFFAFAFA), onSurface = Color(0xFF202020),
-        surfaceVariant = Color(0xFFE4E4E4), onSurfaceVariant = Color(0xFF5A5A5A),
-        surfaceContainerLowest = Color(0xFFFFFFFF), surfaceContainerLow = Color(0xFFF1F1F1),
-        surfaceContainer = Color(0xFFFFFFFF), surfaceContainerHigh = Color(0xFFE8E8E8),
-        surfaceContainerHighest = Color(0xFFE4E4E4), surfaceBright = Color(0xFFFFFFFF),
-        surfaceDim = Color(0xFFE4E4E4), inverseSurface = Color(0xFF202020),
-        inverseOnSurface = Color(0xFFFAFAFA), inversePrimary = Color(0xFFDEDEDE),
-        outline = Color(0xFF7D7D7D), outlineVariant = Color(0xFFD0D0D0),
-        scrim = Color(0xFF000000), error = Color(0xFFA13242), onError = Color(0xFFFFFFFF),
-        errorContainer = Color(0xFFF4E2E5), onErrorContainer = Color(0xFF701D29),
-    )
-    MinimalThemePreset.MODERN -> darkColorScheme(
         primary = Color(0xFF8B8FF8), onPrimary = Color(0xFF0E1016),
         primaryContainer = Color(0xFF2A2A2A), onPrimaryContainer = Color(0xFFF2F2F2),
         secondary = Color(0xFFADADAD), onSecondary = Color(0xFF0B0B0B),
@@ -372,7 +296,7 @@ public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) 
         scrim = Color(0xFF000000), error = Color(0xFFFF94A2), onError = Color(0xFF351A20),
         errorContainer = Color(0xFF351A20), onErrorContainer = Color(0xFFFFD9DE),
     )
-    MinimalThemePreset.MODERN_LIGHT -> lightColorScheme(
+    MinimalThemePreset.LIGHT -> lightColorScheme(
         primary = Color(0xFF5257D9), onPrimary = Color(0xFFFFFFFF),
         primaryContainer = Color(0xFFDFE2F4), onPrimaryContainer = Color(0xFF1B1E2C),
         secondary = Color(0xFF4B5165), onSecondary = Color(0xFFFFFFFF),

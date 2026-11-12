@@ -5,12 +5,9 @@ use serde::{Deserialize, Serialize};
 /// Keeping the roles semantic lets GPUI views change theme without knowing
 /// which concrete color belongs to a background, divider, or text treatment.
 ///
-/// Dark and Light are a quiet neutral ground in the manner of T3 Code: near-black
-/// or near-white canvas, surfaces separated by hairline borders, neutral fill for
-/// the primary action, and signal colors reserved for session state. Modern and
-/// Modern Light are frosted glass in the manner of macOS: a soft wash behind the
-/// app (black in Modern, pastel in Modern Light), translucent panes over it, and
-/// an indigo accent. See [`Glass`].
+/// Both themes are frosted glass in the manner of macOS, drawn inside an opaque
+/// window: Dark is black glass, Light frosted white over a cool grey, both with
+/// an indigo accent and signal colors reserved for session state. See [`Glass`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemeColors {
     pub background: u32,
@@ -53,34 +50,30 @@ pub struct ThemeColors {
     pub chrome: u32,
     /// The message composer.
     pub composer: u32,
-    /// Frosted glass, for the themes that have it. The opaque roles above stay
-    /// complete, so anything that does not draw glass still looks right.
-    pub glass: Option<Glass>,
+    /// The frosted glass the window, panes and composer draw with. The opaque
+    /// roles above stay complete, so anything that does not draw glass (cards,
+    /// menus, dialogs, previews) still looks right.
+    pub glass: Glass,
 }
 
 /// Glass drawn inside the app; the window itself stays opaque, so nothing
 /// outside it ever shows through.
 ///
-/// The window paints a diagonal wash with a glow in one corner. Page canvases (the chat, a project's page,
-/// the session column) leave it showing, and the sidebar, title bars, tab rows
-/// and composer are translucent panes over it with a hairline edge. Reading
-/// surfaces such as the terminal, code blocks, cards, menus and dialogs keep
-/// their opaque roles.
+/// The window paints one flat backdrop. Page canvases (the chat, a project's
+/// page, the session column) leave it showing, and the sidebar, title bars, tab
+/// rows and composer are translucent panes over it, set apart by a hairline
+/// edge. Reading surfaces such as the terminal, code blocks, cards, menus and
+/// dialogs keep their opaque roles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Glass {
-    /// The wash runs from this color at the top left...
-    pub wash_from: u32,
-    /// ...to this one at the bottom right.
-    pub wash_to: u32,
-    /// A second wash from the top right corner, fading out before the middle,
-    /// as `0xRRGGBBAA`.
-    pub glow: u32,
+    /// What the window paints behind everything.
+    pub backdrop: u32,
     /// The sidebar, title bars and tab rows, as `0xRRGGBBAA`.
     pub pane: u32,
     /// The message composer, as `0xRRGGBBAA`.
     pub composer: u32,
     /// The hairline along a pane's edge, as `0xRRGGBBAA`: light on the dark
-    /// wash, dark on the light one.
+    /// backdrop, dark on the light one.
     pub edge: u32,
 }
 
@@ -109,87 +102,21 @@ pub enum ThemePreset {
     #[serde(alias = "warm", alias = "nord", alias = "dracula")]
     Dark,
     Light,
-    Modern,
-    ModernLight,
 }
 
 impl ThemePreset {
-    pub const ALL: [Self; 4] = [Self::Dark, Self::Light, Self::Modern, Self::ModernLight];
+    pub const ALL: [Self; 2] = [Self::Dark, Self::Light];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Dark => "Dark",
             Self::Light => "Light",
-            Self::Modern => "Modern",
-            Self::ModernLight => "Modern Light",
         }
     }
 
     pub const fn colors(self) -> ThemeColors {
         match self {
             Self::Dark => ThemeColors {
-                background: 0x1b1b1b,
-                sidebar: 0x202020,
-                surface: 0x292929,
-                surface_high: 0x333333,
-                border: 0x383838,
-                selected_surface: 0x373737,
-                selected_border: 0x858585,
-                text: 0xf1f1f1,
-                codex_icon: 0xffffff,
-                claude_icon: 0xd97757,
-                muted: 0xb1b1b1,
-                faint: 0xababab,
-                accent: 0xdedede,
-                accent_ink: 0xdedede,
-                accent_hover: 0xf2f2f2,
-                accent_text: 0x1b1b1b,
-                rule: 0x383838,
-                working: 0x8dceb0,
-                waiting: 0xe2c28d,
-                done: 0xdedede,
-                danger: 0xefa7ad,
-                danger_surface: 0x2a1616,
-                diff_added: 0x263b30,
-                diff_removed: 0x462c30,
-                selection: 0xffffff35,
-                backdrop: 0x000000b3,
-                chrome: 0x292929,
-                composer: 0x303030,
-                glass: None,
-            },
-            Self::Light => ThemeColors {
-                background: 0xfafafa,
-                sidebar: 0xe4e4e4,
-                surface: 0xffffff,
-                surface_high: 0xefefef,
-                border: 0xd0d0d0,
-                selected_surface: 0xededed,
-                selected_border: 0x7d7d7d,
-                text: 0x202020,
-                codex_icon: 0x202020,
-                claude_icon: 0xb85c3f,
-                muted: 0x5a5a5a,
-                faint: 0x606060,
-                accent: 0x363636,
-                accent_ink: 0x444444,
-                accent_hover: 0x202020,
-                accent_text: 0xffffff,
-                rule: 0xd0d0d0,
-                working: 0x226347,
-                waiting: 0x745319,
-                done: 0x444444,
-                danger: 0xa13242,
-                danger_surface: 0xfdeeee,
-                diff_added: 0xe6f5eb,
-                diff_removed: 0xfcebeb,
-                selection: 0x20202030,
-                backdrop: 0x18181b66,
-                chrome: 0xf1f1f1,
-                composer: 0xffffff,
-                glass: None,
-            },
-            Self::Modern => ThemeColors {
                 background: 0x0b0b0b,
                 sidebar: 0x131313,
                 surface: 0x161616,
@@ -218,16 +145,14 @@ impl ThemePreset {
                 backdrop: 0x000000b3,
                 chrome: 0x131313,
                 composer: 0x1f1f1f,
-                glass: Some(Glass {
-                    wash_from: 0x0e0e0e,
-                    wash_to: 0x080808,
-                    glow: 0xffffff08,
+                glass: Glass {
+                    backdrop: 0x0b0b0b,
                     pane: 0xffffff08,
                     composer: 0x232323d9,
                     edge: 0xffffff1f,
-                }),
+                },
             },
-            Self::ModernLight => ThemeColors {
+            Self::Light => ThemeColors {
                 background: 0xeef0f9,
                 sidebar: 0xf3f4fb,
                 surface: 0xf8f9fd,
@@ -256,14 +181,12 @@ impl ThemePreset {
                 backdrop: 0x1b1e2c66,
                 chrome: 0xf3f4fb,
                 composer: 0xffffff,
-                glass: Some(Glass {
-                    wash_from: 0xdcdcfb,
-                    wash_to: 0xd3ebf3,
-                    glow: 0xf7d6ee99,
+                glass: Glass {
+                    backdrop: 0xe4e7f4,
                     pane: 0xffffff8c,
                     composer: 0xffffffd0,
                     edge: 0x1b1e2c1f,
-                }),
+                },
             },
         }
     }
