@@ -328,18 +328,30 @@ impl AuthManager {
 
     /// The account for a short run xd makes on its own, such as naming a chat:
     /// the one a new chat would start on now, so the run does not fall to the
-    /// CLI's own sign-in when that one is signed out or spent. `None` when no
-    /// account can take it.
-    pub(crate) fn helper_account(&self, provider: &str) -> Option<HelperAccount> {
+    /// CLI's own sign-in when that one is signed out or spent. Says why when
+    /// no account can take it, or every one is out of usage.
+    pub(crate) fn helper_account(&self, provider: &str) -> Result<HelperAccount, String> {
         let choice = self.choose(provider, None);
         if choice.unavailable {
-            return None;
+            return Err(format!(
+                "No {} account can run it right now. Sign in again in Settings, Agents, \
+                 Accounts.",
+                provider_name(provider)
+            ));
+        }
+        if let Some(back) = choice.all_spent_until {
+            return Err(format!(
+                "Every {} account is out of usage. The first is back in {}.",
+                provider_name(provider),
+                crate::runtime::until(back)
+            ));
         }
         let lease = self
             .inner
             .accounts
-            .helper_lease(provider, &choice.account)?;
-        Some(HelperAccount {
+            .helper_lease(provider, &choice.account)
+            .ok_or_else(|| format!("The {} account was removed.", provider_name(provider)))?;
+        Ok(HelperAccount {
             environment: choice.environment,
             lease,
         })
@@ -1530,7 +1542,7 @@ mod tests {
         // Nobody signed in: nothing runs.
         auth.set_snapshot("claude", DEFAULT_ACCOUNT, signed_out());
         auth.set_snapshot("claude", &added, signed_out());
-        assert!(auth.helper_account("claude").is_none());
+        assert!(auth.helper_account("claude").is_err());
         let _ = std::fs::remove_dir_all(&data);
     }
 

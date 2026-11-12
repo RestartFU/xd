@@ -43,6 +43,9 @@ pub(crate) fn run(
     task: &str,
     stop_run: &AtomicBool,
 ) -> Result<String, String> {
+    if stop_run.load(Ordering::Acquire) {
+        return Err(format!("{task} stopped: its account was removed."));
+    }
     let mut child = command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -330,6 +333,24 @@ fn read_bounded(mut reader: impl Read) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_told_to_stop_first_never_starts() {
+        let marker = std::env::temp_dir().join(format!("xd-stopped-{}", uuid::Uuid::new_v4()));
+        let mut command = Command::new("sh");
+        command.args(["-c", &format!("touch {}", marker.display())]);
+        let error = run(
+            command,
+            "codex",
+            None,
+            Duration::from_secs(5),
+            "naming",
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+        assert_eq!(error, "naming stopped: its account was removed.");
+        assert!(!marker.exists());
+    }
 
     fn args(backend: &str, project_instructions: bool) -> Vec<String> {
         let mut command = Command::new("assistant");

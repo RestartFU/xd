@@ -31,6 +31,9 @@ use serde_json::{Value, json};
 pub(crate) const PROVIDERS: [&str; 2] = ["codex", "claude"];
 pub(crate) const DEFAULT_ACCOUNT: &str = "default";
 const FILE: &str = "accounts.json";
+/// Longer than any background run's own timeout, the longest being a Git
+/// draft's two minutes.
+const HELPER_STOP_LIMIT: Duration = Duration::from_secs(150);
 const MAX_ACCOUNTS: usize = 8;
 /// A limit at or past this share is spent: the CLI rounds, and a turn started
 /// at 99.6% fails as surely as one at 100%.
@@ -900,8 +903,10 @@ impl Accounts {
                 Ok(())
             });
         }
-        // A background run is stopped rather than waited out.
-        if !self.stop_helpers(id, Duration::from_secs(10)) {
+        // A background run is stopped rather than waited out. It ends within
+        // moments of being told, and within its own timeout at worst, which
+        // this outlasts: its home is never deleted under it.
+        if !self.stop_helpers(id, HELPER_STOP_LIMIT) {
             eprintln!("xd: removing a {provider} account while a background run still runs as it");
         }
         // Probes time out well within this.

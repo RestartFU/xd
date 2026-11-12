@@ -10,8 +10,7 @@ use std::{
 use serde_json::{Value, json};
 
 use crate::{
-    EventBus, StateStore, accounts::provider_name, agent::AgentCommand, agent_text,
-    auth::AuthManager, storage::GitDraftSpec,
+    EventBus, StateStore, agent::AgentCommand, agent_text, auth::AuthManager, storage::GitDraftSpec,
 };
 
 const MAX_ACTIVE_DRAFTS: usize = 2;
@@ -96,13 +95,7 @@ impl GitDraftService {
     }
 
     fn draft(&self, spec: &GitDraftSpec) -> Result<(String, String), String> {
-        let account = self.auth.helper_account(&spec.backend).ok_or_else(|| {
-            format!(
-                "No {} account can write a draft right now. Sign in again in Settings, \
-                 Agents, Accounts.",
-                provider_name(&spec.backend)
-            )
-        })?;
+        let account = self.auth.helper_account(&spec.backend)?;
         let mut command = AgentCommand {
             backend: &spec.backend,
             prompt: &spec.prompt,

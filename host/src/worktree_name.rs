@@ -119,9 +119,12 @@ impl WorktreeNameService {
                         return;
                     }
                 };
-                let Some(account) = auth.helper_account(&spec.backend) else {
-                    eprintln!("xd: skipping a worktree name: no account can run it");
-                    return;
+                let account = match auth.helper_account(&spec.backend) {
+                    Ok(account) => account,
+                    Err(reason) => {
+                        eprintln!("xd: skipping a worktree name: {reason}");
+                        return;
+                    }
                 };
                 let generated = generate(spec, &account);
                 drop(account);

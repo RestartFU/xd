@@ -76,11 +76,17 @@ impl ChatTitleService {
             .name("xd-chat-title".into())
             .spawn(move || {
                 let _active = active;
-                let Some(account) = service.auth.helper_account(&spec.backend) else {
-                    eprintln!("xd: skipping a chat title: no account can run it");
-                    return;
+                let account = match service.auth.helper_account(&spec.backend) {
+                    Ok(account) => account,
+                    Err(reason) => {
+                        eprintln!("xd: skipping a chat title: {reason}");
+                        return;
+                    }
                 };
-                match generate(&spec, &account) {
+                let generated = generate(&spec, &account);
+                // Nothing else runs as the account: removing it need not wait.
+                drop(account);
+                match generated {
                     Ok(title) => match store.apply_chat_title(&spec.chat_id, &title) {
                         Ok(true) => {
                             service.events.publish(json!({"event": "tree"}));
