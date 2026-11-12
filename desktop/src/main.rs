@@ -22783,7 +22783,8 @@ impl XdDesktop {
                 if this.dismiss_usage_layer(window, cx) {
                     return;
                 }
-                if !this.catalog_query.is_empty() {
+                // Settings covers the sidebar, so its own search clears first.
+                if !this.catalog_query.is_empty() && !this.minimal_theme_open {
                     this.catalog_query.clear();
                     this.catalog_find_input
                         .update(cx, |input, cx| input.set_text("", cx));
@@ -27395,6 +27396,8 @@ Binary files /dev/null and b/image.png differ\n";
                 .update(cx, |input, cx| input.set_text("shift enter", cx));
         });
 
+        // A sidebar search behind Settings waits: Escape clears what shows.
+        desktop.update(cx, |desktop, _| desktop.catalog_query = "lunar".to_owned());
         cx.dispatch_action(CloseSearch);
         cx.run_until_parked();
         desktop.update(cx, |desktop, cx| {
@@ -27404,6 +27407,7 @@ Binary files /dev/null and b/image.png differ\n";
             );
             assert!(desktop.settings_query.is_empty());
             assert!(desktop.settings_search_input.read(cx).text().is_empty());
+            assert_eq!(desktop.catalog_query, "lunar");
         });
         cx.dispatch_action(CloseSearch);
         cx.run_until_parked();

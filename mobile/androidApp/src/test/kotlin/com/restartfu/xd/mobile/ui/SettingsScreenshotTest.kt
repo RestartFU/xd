@@ -147,6 +147,22 @@ class SettingsScreenshotTest {
         check(!shows("Search settings")) { "Back did not leave Settings" }
     }
 
+    /** System Back follows the same order: a search first, then Settings. */
+    @Test fun systemBackClearsASearchThenLeaves() = shoot("settings-system-back", MinimalThemePreset.DARK) {
+        compose.onNode(hasSetTextAction()).performTextInput("settle")
+        idle()
+        check(shows("Settle merged sessions"))
+        systemBack()
+        checkHome()
+        systemBack()
+        check(!shows("Search settings")) { "System Back did not leave Settings" }
+    }
+
+    private fun systemBack() {
+        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        idle()
+    }
+
     private fun checkHome() {
         for (section in listOf("Appearance", "Chats", "Agents", "Cleanup", "Devices", "Updates")) {
             check(shows(section)) { "No $section section" }
