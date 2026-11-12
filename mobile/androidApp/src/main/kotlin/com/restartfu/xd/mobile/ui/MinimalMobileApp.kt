@@ -59,6 +59,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.ViewModel
@@ -341,7 +342,13 @@ internal fun MinimalMobileApp(
         model.consumeSettledNotice(notice)
     }
     Box(Modifier.fillMaxSize()) {
-    Row(Modifier.fillMaxSize().background(GlassPage)) {
+    Row(
+        Modifier
+            .fillMaxSize()
+            .background(GlassPage)
+            // Settings covers it; neither TalkBack nor a search should find what is beneath.
+            .then(if (settingsOpen) Modifier.clearAndSetSemantics {} else Modifier),
+    ) {
         if (expanded) {
             XdNavigationRail(mobileDestination, showProjects, showTerminal, showUsage)
         }
@@ -349,7 +356,7 @@ internal fun MinimalMobileApp(
             Box(Modifier.weight(1f)) {
                 when {
                     mobileDestination == MobileDestination.TERMINAL -> MinimalGlobalTerminal(
-                        model, settings, link, showProjects, barInset,
+                        model, link, showProjects, barInset, onSettings = { settingsOpen = true },
                     )
                     mobileDestination == MobileDestination.USAGE -> Column(
                         Modifier.fillMaxSize().background(GlassPage),
@@ -460,6 +467,7 @@ internal fun MinimalMobileApp(
                     }
                     else -> MinimalProjectsHome(
                         model, settings, link, projects, tree.loading, tree.error, showTerminal,
+                        onSettings = { settingsOpen = true },
                         listState = projectsList,
                         newSessionAboveBar = showBottomNavigation,
                         actions = sessionActions,
@@ -501,12 +509,18 @@ internal fun MinimalMobileApp(
                 },
             ),
     )
-    }
     if (settingsOpen) {
-        MinimalSettingsDialog(model, settings, onDismiss = { settingsOpen = false }, onDisconnect = {
-            settingsOpen = false
-            model.forget()
-        })
+        // Over everything, rail and bars included: Settings is its own page.
+        SettingsPage(
+            model = model,
+            settings = settings,
+            onClose = { settingsOpen = false },
+            onDisconnect = {
+                settingsOpen = false
+                model.forget()
+            },
+        )
+    }
     }
     val shortcutEditor by model.shortcutEditor.collectAsStateWithLifecycle()
     shortcutEditor?.let { editor ->
@@ -637,6 +651,7 @@ private fun MinimalProjectsHome(
     loading: Boolean,
     treeError: String?,
     onTerminal: () -> Unit,
+    onSettings: () -> Unit,
     listState: LazyListState,
     newSessionAboveBar: Boolean,
     actions: SessionActions,
@@ -702,7 +717,6 @@ private fun MinimalProjectsHome(
         pickingProject = false
         startedFromList = false
     }
-    var settingsOpen by rememberSaveable { mutableStateOf(false) }
     val waiting by model.client.waitingChats.collectAsStateWithLifecycle()
     val unread by model.client.unreadChats.collectAsStateWithLifecycle()
     val signalOf = { session: MinimalSession ->
@@ -752,7 +766,7 @@ private fun MinimalProjectsHome(
                 }
             }
         }
-        ProductHeader(link = link, title = "Projects", onSettings = { settingsOpen = true })
+        ProductHeader(link = link, title = "Projects", onSettings = onSettings)
         when {
             loading && projects.isEmpty() -> Box(
                 Modifier.fillMaxSize(),
@@ -1036,28 +1050,16 @@ private fun MinimalProjectsHome(
             },
         )
     }
-    if (settingsOpen) {
-        MinimalSettingsDialog(
-            model = model,
-            settings = settings,
-            onDismiss = { settingsOpen = false },
-            onDisconnect = {
-                settingsOpen = false
-                model.forget()
-            },
-        )
-    }
 }
 
 @Composable
 private fun MinimalGlobalTerminal(
     model: MainViewModel,
-    settings: MobileSettings,
     link: Link,
     onProjects: () -> Unit,
     bottomInset: Dp,
+    onSettings: () -> Unit,
 ) {
-    var settingsOpen by rememberSaveable { mutableStateOf(false) }
     val terminalOwner = remember { SessionViewModelOwner() }
     DisposableEffect(terminalOwner) {
         onDispose { terminalOwner.viewModelStore.clear() }
@@ -1077,7 +1079,7 @@ private fun MinimalGlobalTerminal(
             .background(GlassPage)
             .navigationBarsPadding(),
     ) {
-        ProductHeader(link = link, title = "Terminal", onSettings = { settingsOpen = true })
+        ProductHeader(link = link, title = "Terminal", onSettings = onSettings)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1104,17 +1106,6 @@ private fun MinimalGlobalTerminal(
         }
     }
 
-    if (settingsOpen) {
-        MinimalSettingsDialog(
-            model = model,
-            settings = settings,
-            onDismiss = { settingsOpen = false },
-            onDisconnect = {
-                settingsOpen = false
-                model.forget()
-            },
-        )
-    }
 }
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -2501,7 +2492,7 @@ private fun NewProjectDialog(
  * stack as full-width rows instead.
  */
 @Composable
-private fun ThemePicker(theme: MinimalThemePreset, choose: (MinimalThemePreset) -> Unit) {
+internal fun ThemePicker(theme: MinimalThemePreset, choose: (MinimalThemePreset) -> Unit) {
     val presets = MinimalThemePreset.entries
     val measurer = rememberTextMeasurer()
     val style = LocalTextStyle.current.copy(fontWeight = FontWeight.SemiBold)
@@ -2597,99 +2588,12 @@ private fun ThemeChoice(
 }
 
 /**
- * The app's settings: how it looks and behaves on this phone, and the parts of
- * the connected host it can manage, as on the desktop's Settings page.
- */
-@Composable
-private fun MinimalSettingsDialog(
-    model: MainViewModel,
-    settings: MobileSettings,
-    onDismiss: () -> Unit,
-    onDisconnect: () -> Unit,
-) {
-    val theme by settings.theme.collectAsStateWithLifecycle()
-    val allPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
-    val tree by model.client.tree.collectAsStateWithLifecycle()
-    val resumeChats by settings.resumeChats.collectAsStateWithLifecycle()
-    var updatingHost by rememberSaveable { mutableStateOf(false) }
-    var accountsOpen by rememberSaveable { mutableStateOf(false) }
-    var secretsOpen by rememberSaveable { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Settings") },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                Text("Appearance", style = MaterialTheme.typography.titleSmall)
-                ThemePicker(theme, settings::setTheme)
-                HorizontalDivider()
-                SettingSwitch(
-                    title = "All permissions",
-                    detail = "Pass the agent's unrestricted command-line flag.",
-                    checked = allPermissions,
-                    onCheckedChange = settings::setAllowAllPermissions,
-                )
-                SettingSwitch(
-                    title = "Resume chats after a restart",
-                    detail = "Continue turns a restart cut off. Agents start working without asking.",
-                    checked = resumeChats,
-                    onCheckedChange = settings::setResumeChats,
-                )
-                HorizontalDivider()
-                Text("Host", style = MaterialTheme.typography.titleSmall)
-                SettingAction(
-                    title = "Prompt shortcuts",
-                    detail = "Buttons above the composer in every project on this host.",
-                    action = "Edit",
-                ) {
-                    onDismiss()
-                    model.openShortcutEditor(null, "Prompt shortcuts")
-                }
-                ChatTitleSettings(model)
-                if (tree.settlement) AutoSettleSettings(model)
-                if (tree.chatQuotas) ChatQuotaSection(model)
-                SettingAction(
-                    title = "Assistant accounts",
-                    detail = "Manage sign-in and the installed assistant CLIs.",
-                    action = "Open",
-                ) { accountsOpen = true }
-                SettingAction(
-                    title = "Agent secrets",
-                    detail = "Environment variables the host gives every agent.",
-                    action = "Edit",
-                ) { secretsOpen = true }
-                SettingAction(
-                    title = "Host updates",
-                    detail = "Check for a new xd build on the connected machine.",
-                    action = "Check",
-                ) { updatingHost = true }
-                OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth()) {
-                    Text("Disconnect remote")
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
-    )
-    if (updatingHost) {
-        HostUpdateDialog(model = model, onDismiss = { updatingHost = false })
-    }
-    if (accountsOpen) {
-        AssistantAccountsDialog(model = model, onDismiss = { accountsOpen = false })
-    }
-    if (secretsOpen) {
-        AgentSecretsDialog(model = model, folderId = null, title = "Agent secrets", onDismiss = { secretsOpen = false })
-    }
-}
-
-/**
  * The host's rules for settling sessions by itself, with the desktop's
  * wording. They belong to the host, so they keep running while no client is
  * connected.
  */
 @Composable
-private fun AutoSettleSettings(model: MainViewModel) {
+internal fun AutoSettleSettings(model: MainViewModel) {
     val rules by model.autoSettle.collectAsStateWithLifecycle()
     val readError by model.autoSettleError.collectAsStateWithLifecycle()
     val writeError by model.autoSettleWriteError.collectAsStateWithLifecycle()
@@ -2715,15 +2619,15 @@ private fun AutoSettleSettings(model: MainViewModel) {
         return
     }
     SettingSwitch(
-        title = "Auto-settle merged sessions",
-        detail = "Settle a session when its pull request merges. A closed pull request settles it while either rule here is on.",
+        title = "Settle merged sessions",
+        detail = SETTLE_MERGED_DETAIL,
         checked = current.onMerge,
         onCheckedChange = { model.setAutoSettle(onMerge = it) },
         enabled = editable,
     )
     SettingSwitch(
-        title = "Auto-settle inactive sessions",
-        detail = "Sessions with no activity for this long settle automatically.",
+        title = "Settle inactive sessions",
+        detail = SETTLE_INACTIVE_DETAIL,
         checked = current.afterDays != null,
         onCheckedChange = { on ->
             model.setAutoSettle(afterDays = if (on) Ops.AfterDays.Days(DEFAULT_SETTLE_DAYS) else Ops.AfterDays.Off)
@@ -2734,9 +2638,9 @@ private fun AutoSettleSettings(model: MainViewModel) {
     current.afterDays?.let { days ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                Text("Days before auto-settle", fontWeight = FontWeight.SemiBold)
+                Text("Days before settling", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "Any new activity un-settles a session automatically.",
+                    SETTLE_DAYS_DETAIL,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -2753,8 +2657,8 @@ private fun AutoSettleSettings(model: MainViewModel) {
         }
     }
     SettingSwitch(
-        title = "Keep sessions with a PR",
-        detail = "Inactivity does not settle sessions with a pull request. Merge and close still do.",
+        title = "Keep sessions with a pull request",
+        detail = SETTLE_KEEP_PR_DETAIL,
         checked = current.keepPullRequests,
         onCheckedChange = { model.setAutoSettle(keepPullRequests = it) },
         enabled = editable,
@@ -2777,7 +2681,7 @@ private fun AutoSettleSettings(model: MainViewModel) {
 private const val DEFAULT_SETTLE_DAYS = 3
 
 @Composable
-private fun SettingSwitch(
+internal fun SettingSwitch(
     title: String,
     detail: String,
     checked: Boolean,
@@ -2798,7 +2702,7 @@ private fun SettingSwitch(
 }
 
 @Composable
-private fun SettingAction(
+internal fun SettingAction(
     title: String,
     detail: String,
     action: String,

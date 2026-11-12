@@ -444,7 +444,7 @@ internal fun ChatTitleSettings(model: MainViewModel) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
             Text("Generate chat titles", fontWeight = FontWeight.SemiBold)
             Text(
-                "Name a new chat from its first message, using its naming model.",
+                CHAT_TITLES_DETAIL,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -467,7 +467,7 @@ internal fun ChatTitleSettings(model: MainViewModel) {
         if (current.models.containsKey(backend)) {
             TitleModelRow(
                 label = "$name naming model",
-                detail = "Titles $name chats and names their worktrees.",
+                detail = NAMING_MODEL_DETAIL,
                 selected = current.models[backend],
                 choices = catalog.firstOrNull { it.id == backend }?.models.orEmpty().map { it.id to it.name },
                 onChoose = { model.setChatTitleModel(backend, it) },

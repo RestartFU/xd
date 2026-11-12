@@ -59,7 +59,7 @@ class ChatTitleSettingsScreenshotTest {
 
     @Test fun titlesOn() = shoot("chat-titles-on", enabled = true) {
         check(shows("Codex naming model") && shows("Claude naming model"))
-        check(shows("Titles Codex chats and names their worktrees."))
+        check(shows("Also names the worktrees new sessions get."))
     }
 
     /** Worktrees are still named with titles off, so their model rows stay shown. */
