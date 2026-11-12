@@ -6415,6 +6415,18 @@ impl XdDesktop {
                 }
                 let _ = text;
             }
+            // Taken after its chat was left: the send is over all the same, so
+            // the chat open now can send and resume again.
+            RequestKind::Send { chat_id, .. } => {
+                if self
+                    .pending_send
+                    .as_ref()
+                    .is_none_or(|pending| pending.chat_id == chat_id)
+                {
+                    self.sending = false;
+                    self.pending_send = None;
+                }
+            }
             // Queue events carry the authoritative complete queue. Mutation
             // replies are acknowledgements only, so they never refetch chat.
             RequestKind::QueueMutation { chat_id } if self.chat_is_active(&chat_id) => {}
@@ -25439,6 +25451,46 @@ Binary files /dev/null and b/image.png differ\n";
                 desktop.model.connection_error.as_deref(),
                 Some("xd is not connected to a host.")
             );
+            assert!(desktop.pending_send.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn a_send_answered_after_its_chat_was_left_frees_the_next_chat(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.model.connected = true;
+            desktop.sending = true;
+            let optimistic = desktop.apply_optimistic_send(RESUME_TEXT);
+            desktop.pending_send = Some(PendingSend {
+                chat_id: "implementation".into(),
+                text: RESUME_TEXT.into(),
+                attachments: Vec::new(),
+                restore: false,
+                optimistic,
+                agent_draft: None,
+            });
+
+            // Left for a cut-short chat before the host took the resume.
+            desktop.model.select_chat("review");
+            desktop.model.backend = "codex".into();
+            desktop.model.resumable = true;
+            desktop.set_composer_text(String::new(), cx);
+            assert!(desktop.shows_resume());
+
+            desktop.handle_reply(
+                RequestKind::Send {
+                    chat_id: "implementation".into(),
+                    text: RESUME_TEXT.into(),
+                },
+                serde_json::json!({"ok": true}).as_object().unwrap().clone(),
+                None,
+                cx,
+            );
+            assert!(!desktop.sending);
             assert!(desktop.pending_send.is_none());
         });
     }
