@@ -11,7 +11,10 @@ use std::{
 use serde_json::{Value, json};
 
 use crate::{
-    EventBus, StateStore, agent::AgentCommand, agent_text, auth::AuthManager,
+    EventBus, StateStore,
+    agent::AgentCommand,
+    agent_text,
+    auth::{AuthManager, HelperAccount},
     storage::ChatTitleSpec,
 };
 
@@ -77,7 +80,7 @@ impl ChatTitleService {
                     eprintln!("xd: skipping a chat title: no account can run it");
                     return;
                 };
-                match generate(&spec, &account.environment) {
+                match generate(&spec, &account) {
                     Ok(title) => match store.apply_chat_title(&spec.chat_id, &title) {
                         Ok(true) => {
                             service.events.publish(json!({"event": "tree"}));
@@ -97,7 +100,7 @@ impl ChatTitleService {
     }
 }
 
-fn generate(spec: &ChatTitleSpec, environment: &[(String, String)]) -> Result<String, String> {
+fn generate(spec: &ChatTitleSpec, account: &HelperAccount) -> Result<String, String> {
     let prompt = format!(
         "Write a short title for a chat that starts with this message.\n\nMessage:\n{}",
         spec.message
@@ -112,14 +115,21 @@ fn generate(spec: &ChatTitleSpec, environment: &[(String, String)]) -> Result<St
         access: "read-only",
         fast: false,
         session_id: None,
-        environment,
+        environment: &account.environment,
     }
     .build();
     // Claude's settings carry the user's hooks, which should not fire for a
     // run the user did not start.
     agent_text::keep_the_run_minimal(&mut command, &spec.backend, false);
     let input = agent_text::turn_input(&spec.backend, &prompt);
-    let output = agent_text::run(command, &spec.backend, input, TITLE_TIMEOUT, "chat titling")?;
+    let output = agent_text::run(
+        command,
+        &spec.backend,
+        input,
+        TITLE_TIMEOUT,
+        "chat titling",
+        account.stop(),
+    )?;
     parse(&output)
 }
 

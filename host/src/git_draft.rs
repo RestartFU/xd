@@ -120,8 +120,15 @@ impl GitDraftService {
         // stay; nothing else the run would load helps describe a diff.
         agent_text::keep_the_run_minimal(&mut command, &spec.backend, true);
         let input = agent_text::turn_input(&spec.backend, &spec.prompt);
-        agent_text::run(command, &spec.backend, input, DRAFT_TIMEOUT, "Git drafting")
-            .and_then(|output| parse_draft(&output))
+        agent_text::run(
+            command,
+            &spec.backend,
+            input,
+            DRAFT_TIMEOUT,
+            "Git drafting",
+            account.stop(),
+        )
+        .and_then(|output| parse_draft(&output))
     }
 }
 

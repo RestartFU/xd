@@ -2,7 +2,10 @@
 use std::{
     io::{BufRead, BufReader, Read, Write},
     process::{Child, Command, Stdio},
-    sync::mpsc::{self, TryRecvError},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, TryRecvError},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -30,13 +33,15 @@ struct AgentOutput {
 ///
 /// `input` is written to stdin as one line, which a backend that takes its turns
 /// on stdin needs; without it stdin is closed from the start. `task` names the
-/// work in error messages.
+/// work in error messages. Setting `stop_run` stops the run, and whatever it
+/// started, before this returns.
 pub(crate) fn run(
     mut command: Command,
     backend: &str,
     input: Option<String>,
     timeout: Duration,
     task: &str,
+    stop_run: &AtomicBool,
 ) -> Result<String, String> {
     let mut child = command
         .stdin(if input.is_some() {
@@ -111,6 +116,10 @@ pub(crate) fn run(
         if Instant::now() >= deadline {
             stop(&mut child);
             return Err(format!("{task} timed out."));
+        }
+        if stop_run.load(Ordering::Acquire) {
+            stop(&mut child);
+            return Err(format!("{task} stopped: its account was removed."));
         }
         thread::sleep(Duration::from_millis(10));
     };
@@ -383,7 +392,15 @@ mod tests {
                 pid_file.display()
             ))
             .process_group(0);
-        let error = run(command, "codex", None, Duration::from_millis(500), "naming").unwrap_err();
+        let error = run(
+            command,
+            "codex",
+            None,
+            Duration::from_millis(500),
+            "naming",
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
         assert_eq!(error, "naming timed out.");
         assert_helper_ends(&pid_file);
         let _ = std::fs::remove_dir_all(directory);
@@ -405,7 +422,17 @@ mod tests {
                 pid_file.display()
             ))
             .process_group(0);
-        assert!(run(command, "codex", None, Duration::from_secs(30), "naming").is_err());
+        assert!(
+            run(
+                command,
+                "codex",
+                None,
+                Duration::from_secs(30),
+                "naming",
+                &AtomicBool::new(false),
+            )
+            .is_err()
+        );
         assert_helper_ends(&pid_file);
         let _ = std::fs::remove_dir_all(directory);
     }

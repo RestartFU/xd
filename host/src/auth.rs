@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{
     EventBus,
-    accounts::{Accounts, Choice, DEFAULT_ACCOUNT, Lease, PROVIDERS, now_ms, provider_name},
+    accounts::{Accounts, Choice, DEFAULT_ACCOUNT, HelperLease, PROVIDERS, now_ms, provider_name},
     agent::{resolve_claude, resolve_codex},
     background_process::command as background_command,
 };
@@ -29,11 +29,19 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// otherwise stops the agent processes kept running as it.
 pub(crate) type Releaser = Box<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
 
-/// What a short run xd makes on its own runs as. Held for the run: the
-/// account is not removed, nor its settings rewritten, while a CLI runs as it.
+/// What a background run xd makes on its own runs as. Held for the run: the
+/// account's settings are not rewritten while a CLI runs as it, and removing
+/// the account stops the run before its home goes.
 pub(crate) struct HelperAccount {
     pub environment: Vec<(String, String)>,
-    _lease: Lease,
+    lease: HelperLease,
+}
+
+impl HelperAccount {
+    /// Set when the run should stop: its account is being removed.
+    pub(crate) fn stop(&self) -> &std::sync::atomic::AtomicBool {
+        self.lease.stop()
+    }
 }
 
 #[derive(Clone)]
@@ -327,10 +335,13 @@ impl AuthManager {
         if choice.unavailable {
             return None;
         }
-        let lease = self.inner.accounts.lease(provider, &choice.account)?;
+        let lease = self
+            .inner
+            .accounts
+            .helper_lease(provider, &choice.account)?;
         Some(HelperAccount {
             environment: choice.environment,
-            _lease: lease,
+            lease,
         })
     }
 

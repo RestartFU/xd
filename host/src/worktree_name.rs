@@ -13,7 +13,7 @@ use crate::{
     EventBus, StateStore,
     agent::AgentCommand,
     agent_text,
-    auth::AuthManager,
+    auth::{AuthManager, HelperAccount},
     storage::{StorageError, WorktreeNameSpec},
 };
 
@@ -123,7 +123,7 @@ impl WorktreeNameService {
                     eprintln!("xd: skipping a worktree name: no account can run it");
                     return;
                 };
-                let generated = generate(spec, &account.environment);
+                let generated = generate(spec, &account);
                 drop(account);
                 let name = match generated {
                     Ok(name) => name,
@@ -152,7 +152,7 @@ impl WorktreeNameService {
     }
 }
 
-fn generate(spec: WorktreeNameSpec, environment: &[(String, String)]) -> Result<String, String> {
+fn generate(spec: WorktreeNameSpec, account: &HelperAccount) -> Result<String, String> {
     let prompt = format!(
         "Choose a concise name for a Git worktree for this request.\n\nUser request:\n{}",
         spec.prompt
@@ -167,7 +167,7 @@ fn generate(spec: WorktreeNameSpec, environment: &[(String, String)]) -> Result<
         access: "read-only",
         fast: false,
         session_id: None,
-        environment,
+        environment: &account.environment,
     }
     .build();
     // A name needs nothing else, so the run loads nothing else.
@@ -179,6 +179,7 @@ fn generate(spec: WorktreeNameSpec, environment: &[(String, String)]) -> Result<
         input,
         NAME_TIMEOUT,
         "worktree naming",
+        account.stop(),
     )?;
     parse(&output)
 }
