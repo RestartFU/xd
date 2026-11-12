@@ -69,13 +69,13 @@ class ChatQuotaScreenshotTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test fun settingsOfferTheQuotaOnHostsThatHaveIt() = settings("chat-quota-settings-dark", chatQuotas = true) {
-        check(shows("Chat quota"))
+        check(shows("Limit each chat's usage"))
         check(shows("Limit each chat to 10% of its account's 5-hour usage limit. A chat that reaches it stops and asks before going on."))
         check(shows("Quota per chat"))
     }
 
     @Test fun settingsLeaveItOutOnOlderHosts() = settings("chat-quota-settings-older-host-dark", chatQuotas = false) {
-        check(!shows("Chat quota"))
+        check(!shows("Limit each chat's usage") && !shows("Quota per chat"))
     }
 
     /** Stopped at its quota with a message queued: the quota ask replaces the play button. */
@@ -201,9 +201,14 @@ class ChatQuotaScreenshotTest {
                 ShadowLooper.idleMainLooper()
                 settle()
             }
-            // The host's settings sit at the end of a long list.
+            // The quota is with the other chat settings.
+            compose.onAllNodes(hasText("Chats")).onFirst().performClick()
+            repeat(5) {
+                ShadowLooper.idleMainLooper()
+                settle()
+            }
             compose.mainClock.autoAdvance = true
-            compose.onNode(hasText("Assistant accounts")).performScrollTo()
+            compose.onNode(hasText("Prompt shortcuts")).performScrollTo()
             compose.mainClock.autoAdvance = false
             repeat(5) {
                 ShadowLooper.idleMainLooper()

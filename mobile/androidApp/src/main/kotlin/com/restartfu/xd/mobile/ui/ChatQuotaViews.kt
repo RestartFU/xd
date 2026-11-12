@@ -85,7 +85,7 @@ internal fun ChatQuotaSection(model: MainViewModel) {
     val percent = current.percent
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
-            Text("Chat quota", fontWeight = FontWeight.SemiBold)
+            Text("Limit each chat's usage", fontWeight = FontWeight.SemiBold)
             Text(
                 chatQuotaDetail(percent),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

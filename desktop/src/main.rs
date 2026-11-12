@@ -2622,6 +2622,9 @@ struct XdDesktop {
     /// Drawers other than the current project that the user opened by hand.
     /// Filters the catalog to projects and sessions whose names match.
     catalog_find_input: Entity<ComposerInput>,
+    /// The settings page's search field, and what it holds.
+    settings_search_input: Entity<ComposerInput>,
+    settings_query: String,
     catalog_query: String,
     creating_workspace: bool,
     workspace_create_kind: WorkspaceCreateKind,
@@ -3010,6 +3013,14 @@ impl XdDesktop {
         })
         .detach();
         let catalog_find_input = cx.new(|cx| ComposerInput::new(cx, "Find a session or project"));
+        let settings_search_input = cx.new(|cx| ComposerInput::new(cx, "Search settings"));
+        cx.subscribe(&settings_search_input, |this, _, event, cx| {
+            if let ComposerEvent::Changed(text) = event {
+                this.settings_query = text.clone();
+                cx.notify();
+            }
+        })
+        .detach();
         cx.subscribe(&catalog_find_input, |this, _, event, cx| {
             if let ComposerEvent::Changed(text) = event {
                 this.catalog_query = text.trim().to_lowercase();
@@ -3456,6 +3467,8 @@ impl XdDesktop {
             collapsed_folders,
             expanded_sessions,
             catalog_find_input,
+            settings_search_input,
+            settings_query: String::new(),
             catalog_query: String::new(),
             creating_workspace: false,
             workspace_create_kind: WorkspaceCreateKind::Project,
@@ -13456,6 +13469,7 @@ impl XdDesktop {
             self.request_chat_quota_settings();
             self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         } else {
+            self.clear_settings_search(cx);
             self.restore_minimal_popup_focus(window);
         }
         cx.notify();
@@ -13463,6 +13477,7 @@ impl XdDesktop {
 
     fn close_minimal_theme_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.minimal_theme_open = false;
+        self.clear_settings_search(cx);
         self.restore_minimal_popup_focus(window);
         cx.notify();
     }
@@ -21098,6 +21113,7 @@ impl XdDesktop {
         for input in [
             self.new_chat_search.clone(),
             self.catalog_find_input.clone(),
+            self.settings_search_input.clone(),
             self.sidebar_edit_input.clone(),
             self.pull_request_input.clone(),
             self.workspace_create_input.clone(),
@@ -22798,8 +22814,13 @@ impl XdDesktop {
                 } else if this.creating_chat_folder.is_some() {
                     this.cancel_chat_create(cx);
                 } else if this.minimal_theme_open {
-                    this.minimal_theme_open = false;
-                    cx.notify();
+                    // A search clears first; the next Escape leaves Settings.
+                    if this.settings_query.trim().is_empty() {
+                        this.close_minimal_theme_popup(window, cx);
+                    } else {
+                        this.clear_settings_search(cx);
+                        cx.notify();
+                    }
                 } else if matches!(
                     this.minimal_route,
                     MinimalRoute::Sessions { .. } | MinimalRoute::Cli { .. }
@@ -23466,7 +23487,7 @@ impl AssetSource for EmbeddedIcons {
             SWITCH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/arrow-left-right.svg").as_slice(),
             )),
-            _ => None,
+            _ => workspace_settings::settings_icon(path).map(Cow::Borrowed),
         })
     }
 
@@ -26828,7 +26849,7 @@ Binary files /dev/null and b/image.png differ\n";
             );
             assert_eq!(
                 desktop.chat_quota_rows(colors, cx).len(),
-                2,
+                1,
                 "off: just the switch"
             );
 
@@ -26842,7 +26863,7 @@ Binary files /dev/null and b/image.png differ\n";
                 desktop.chat_quota,
                 Some(ChatQuotaSettings { percent: Some(15) })
             );
-            assert_eq!(desktop.chat_quota_rows(colors, cx).len(), 3);
+            assert_eq!(desktop.chat_quota_rows(colors, cx).len(), 2);
 
             desktop.change_chat_quota_settings(ChatQuotaSettings { percent: None }, cx);
             // Another client's change broadcast after this request is newer
@@ -27294,6 +27315,45 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[gpui::test]
+    fn settings_search_finds_rows_across_sections_and_escape_clears_it_first(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.run_until_parked();
+        let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
+        cx.simulate_click(point(px(52.0), footer_y), gpui::Modifiers::default());
+        cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
+        // Appearance opens first, so its theme cards draw and nothing else does.
+        assert!(cx.debug_bounds("workspace-settings-back").is_some());
+
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings_query = "shift enter".to_owned();
+            desktop
+                .settings_search_input
+                .update(cx, |input, cx| input.set_text("shift enter", cx));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // The keyboard shortcut is found from the Appearance page.
+        desktop.update(cx, |desktop, _| assert_eq!(desktop.settings_section, 0));
+
+        cx.dispatch_action(CloseSearch);
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, cx| {
+            assert!(
+                desktop.minimal_theme_open,
+                "the first Escape only clears the search"
+            );
+            assert!(desktop.settings_query.is_empty());
+            assert!(desktop.settings_search_input.read(cx).text().is_empty());
+        });
+        cx.dispatch_action(CloseSearch);
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(!desktop.read(cx).minimal_theme_open));
+    }
+
+    #[gpui::test]
     fn settings_popup_responds_to_clicks(cx: &mut gpui::TestAppContext) {
         install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
@@ -27304,9 +27364,14 @@ Binary files /dev/null and b/image.png differ\n";
         cx.simulate_click(point(px(52.0), footer_y), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
 
+        // Settings is a page now: a click anywhere on it keeps it open, and
+        // Back leaves it.
         cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
-        cx.simulate_click(point(px(8.0), px(8.0)), gpui::Modifiers::default());
+        let back = cx
+            .debug_bounds("workspace-settings-back")
+            .expect("the settings page draws a Back button");
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(!desktop.read(cx).minimal_theme_open));
     }
 
@@ -27845,11 +27910,11 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[test]
-    fn minimal_settings_exposes_the_all_permissions_toggle() {
+    fn minimal_settings_exposes_the_skip_permission_prompts_toggle() {
         let settings = include_str!("workspace_settings.rs");
 
         for behavior in [
-            "\"All permissions\"",
+            "\"Skip permission prompts\"",
             "self.settings.allow_all_permissions",
             "this.toggle_minimal_all_permissions(cx)",
         ] {

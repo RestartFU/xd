@@ -35,8 +35,10 @@ use **All chats** to close or reopen it. Phone chats hide the bottom app navigat
 and inline close buttons; the header back action returns to projects. Permanent deletion is a separate action with a
 confirmation.
 
-**Settings**, the gear in the header, holds the theme, the all-permissions switch, the host's
-prompt shortcuts, host updates, and disconnecting. The shortcuts edited there appear
+**Settings**, the gear in the header, is a full-screen page with a search field and
+sections: Appearance (theme), Chats (titles, resuming after a restart, prompt shortcuts,
+the chat quota), Agents (accounts, skipping permission prompts, agent secrets), Cleanup
+(settling), Devices (disconnecting) and Updates (host updates). The shortcuts edited there appear
 in every project; a project's **⋮** menu edits the ones only that project adds.
 **New project** can browse the host's folders for the repository instead of typing
 its path.
