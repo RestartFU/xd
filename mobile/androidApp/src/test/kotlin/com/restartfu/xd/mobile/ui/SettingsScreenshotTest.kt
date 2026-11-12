@@ -18,6 +18,8 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.isNotSelected
@@ -73,7 +75,11 @@ class SettingsScreenshotTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     /** Settings opens as its own page, listing its sections. */
-    @Test fun homeDark() = shoot("settings-home-dark", MinimalThemePreset.DARK) { checkHome() }
+    @Test fun homeDark() = shoot("settings-home-dark", MinimalThemePreset.DARK) {
+        checkHome()
+        // The page takes the focus, so keys never reach the workspace beneath it.
+        compose.onNode(hasTestTag(SETTINGS_PAGE_TAG)).assertIsFocused()
+    }
 
     @Test fun homeLight() = shoot("settings-home-light", MinimalThemePreset.LIGHT) { checkHome() }
 

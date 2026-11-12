@@ -35,8 +35,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.focusable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.heading
@@ -57,6 +64,9 @@ internal enum class SettingsSection(val title: String, val subtitle: String, @Dr
     DEVICES("Devices", "Reach this workspace from other machines.", R.drawable.ic_devices),
     UPDATES("Updates", "Keep xd current.", R.drawable.ic_download),
 }
+
+/** The settings page's root, for tests. */
+internal const val SETTINGS_PAGE_TAG = "settings-page"
 
 // What the settings drawn as several rows show, shared with search so a word
 // on screen always finds its setting.
@@ -184,6 +194,18 @@ internal fun SettingsPage(
         })
     }
 
+    // The workspace stays composed beneath the page, so Settings takes the
+    // focus and the keyboard from whatever editor or terminal had them.
+    val pageFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(Unit) {
+        pageFocus.requestFocus()
+        keyboard?.hide()
+        // Search reads the quota's current share, so read it now rather than
+        // only once its row is shown.
+        if (tree.chatQuotas) model.loadChatQuota()
+    }
+
     BackHandler {
         when {
             section != null -> section = null
@@ -194,7 +216,14 @@ internal fun SettingsPage(
 
     val open = section
     // A Surface, so taps on the page never reach the workspace beneath it.
-    Surface(modifier.fillMaxSize(), color = LocalXdGlass.current.backdrop) {
+    Surface(
+        modifier
+            .fillMaxSize()
+            .testTag(SETTINGS_PAGE_TAG)
+            .focusRequester(pageFocus)
+            .focusable(),
+        color = LocalXdGlass.current.backdrop,
+    ) {
     Column(Modifier.fillMaxSize()) {
         SettingsTopBar(
             title = open?.title ?: "Settings",
