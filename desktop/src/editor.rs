@@ -1156,7 +1156,6 @@ fn text_runs(
     } else {
         input.colors.text
     };
-    let light = input.colors.background > 0x808080;
     if placeholder || range.is_empty() || input.syntax_spans.is_empty() {
         return vec![text_run(
             display_run_len(range, placeholder.then_some(input.placeholder.len())),
@@ -1180,7 +1179,11 @@ fn text_runs(
             runs.push(text_run(start - cursor, style, default_color));
         }
         if start < end {
-            runs.push(text_run(end - start, style, syntax_color(span.kind, light)));
+            runs.push(text_run(
+                end - start,
+                style,
+                syntax_color(span.kind, input.colors),
+            ));
             cursor = end;
         }
     }
@@ -1256,16 +1259,12 @@ fn text_run(len: usize, style: &gpui::TextStyle, color: u32) -> TextRun {
     }
 }
 
-fn syntax_color(kind: CodeKind, light: bool) -> u32 {
-    match (kind, light) {
-        (CodeKind::Keyword, false) => 0xc7a0e8,
-        (CodeKind::String, false) => 0xa9cf8f,
-        (CodeKind::Comment, false) => 0x8b8a85,
-        (CodeKind::Number, false) => 0xe9a07a,
-        (CodeKind::Keyword, true) => 0x7a3fa8,
-        (CodeKind::String, true) => 0x3d6d22,
-        (CodeKind::Comment, true) => 0x6e6d67,
-        (CodeKind::Number, true) => 0xa0461c,
+fn syntax_color(kind: CodeKind, colors: ThemeColors) -> u32 {
+    match kind {
+        CodeKind::Keyword => colors.syntax.keyword,
+        CodeKind::String => colors.syntax.string,
+        CodeKind::Comment => colors.syntax.comment,
+        CodeKind::Number => colors.syntax.number,
     }
 }
 

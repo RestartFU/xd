@@ -456,6 +456,8 @@ pub enum RequestKind {
     TerminalResize {
         terminal_id: String,
     },
+    /// A theme change's colours for a terminal; nothing waits on the reply.
+    TerminalColors,
     TerminalKill {
         terminal_id: String,
     },
@@ -2086,6 +2088,25 @@ impl HostHandle {
         self.send(
             RequestKind::TerminalResize { terminal_id: terminal_id.to_owned() },
             json!({"op": "terminal-resize", "terminal": terminal_id, "columns": columns, "rows": rows}),
+        )
+    }
+
+    /// Replaces the colours `terminal_id` reports to programs that ask for
+    /// them, which `terminal_open` set from the theme of the time.
+    pub fn terminal_colors(
+        &self,
+        terminal_id: &str,
+        foreground: u32,
+        background: u32,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::TerminalColors,
+            json!({
+                "op": "terminal-colors",
+                "terminal": terminal_id,
+                "foreground": foreground,
+                "background": background,
+            }),
         )
     }
 

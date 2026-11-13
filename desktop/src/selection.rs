@@ -14,7 +14,29 @@ use gpui::{
     fill, point, px, rgba,
 };
 
-const SELECTION: u32 = 0x6f97d64d;
+/// The theme's selection fill, as `0xRRGGBBAA`: the one `ThemeColors::selection`
+/// the editors use, so every selection in the app is the same colour. The
+/// window sets it each time the theme changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionColor(u32);
+
+impl Global for SelectionColor {}
+
+impl SelectionColor {
+    pub fn set(color: u32, cx: &mut App) {
+        if cx.try_global::<Self>() != Some(&Self(color)) {
+            cx.set_global(Self(color));
+        }
+    }
+
+    /// Text painted before a window has set the theme uses the default one's.
+    fn current(cx: &App) -> u32 {
+        cx.try_global::<Self>().map_or_else(
+            || crate::settings::ThemePreset::default().colors().selection,
+            |color| color.0,
+        )
+    }
+}
 
 /// The one selection in the window, keyed by the document that owns it.
 #[derive(Clone, Default)]
@@ -155,22 +177,30 @@ impl Selectable {
         let height = self.layout.line_height();
         // Wrapped text selects as a first partial line, a full-width block, and
         // a last partial line — the shape a reader expects.
+        let color = SelectionColor::current(cx);
         if start.y == end.y {
-            paint_row(window, start, point(end.x, start.y + height));
+            paint_row(window, start, point(end.x, start.y + height), color);
             return;
         }
-        paint_row(window, start, point(bounds.right(), start.y + height));
+        paint_row(
+            window,
+            start,
+            point(bounds.right(), start.y + height),
+            color,
+        );
         if end.y > start.y + height {
             paint_row(
                 window,
                 point(bounds.left(), start.y + height),
                 point(bounds.right(), end.y),
+                color,
             );
         }
         paint_row(
             window,
             point(bounds.left(), end.y),
             point(end.x, end.y + height),
+            color,
         );
     }
 
@@ -385,11 +415,11 @@ fn selection_range_in_block(
     (start < end).then(|| start - block.start..end - block.start)
 }
 
-fn paint_row(window: &mut Window, start: Point<Pixels>, end: Point<Pixels>) {
+fn paint_row(window: &mut Window, start: Point<Pixels>, end: Point<Pixels>, color: u32) {
     if end.x <= start.x || end.y <= start.y {
         return;
     }
-    window.paint_quad(fill(Bounds::from_corners(start, end), rgba(SELECTION)));
+    window.paint_quad(fill(Bounds::from_corners(start, end), rgba(color)));
 }
 
 /// The byte offset a point lands on. Dragging past the text reports the nearest
@@ -598,6 +628,20 @@ mod tests {
         Context, ListAlignment, ListState, Modifiers, Render, ScrollHandle, Styled, StyledText,
         TestAppContext, div, list, prelude::*, px,
     };
+
+    #[gpui::test]
+    fn the_selection_fill_follows_the_theme(cx: &mut TestAppContext) {
+        use crate::settings::ThemePreset;
+        cx.update(|cx| {
+            assert_eq!(
+                SelectionColor::current(cx),
+                ThemePreset::Dark.colors().selection
+            );
+            let light = ThemePreset::Light.colors().selection;
+            SelectionColor::set(light, cx);
+            assert_eq!(SelectionColor::current(cx), light);
+        });
+    }
 
     #[test]
     fn hovering_a_link_uses_an_open_hand_cursor() {

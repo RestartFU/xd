@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use xd_terminal::TerminalPalette;
+
 /// A complete set of renderer-facing colors encoded as `0xRRGGBB` values.
 ///
 /// Keeping the roles semantic lets GPUI views change theme without knowing
@@ -54,6 +56,17 @@ pub struct ThemeColors {
     /// roles above stay complete, so anything that does not draw glass (cards,
     /// menus, dialogs, previews) still looks right.
     pub glass: Glass,
+    /// Source highlighting in the file editor.
+    pub syntax: Syntax,
+}
+
+/// The colours source code is highlighted with; anything else is `text`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Syntax {
+    pub keyword: u32,
+    pub string: u32,
+    pub comment: u32,
+    pub number: u32,
 }
 
 /// Glass drawn inside the app; the window itself stays opaque, so nothing
@@ -114,6 +127,14 @@ impl ThemePreset {
         }
     }
 
+    /// The ANSI colours the terminal draws with on this theme's ground.
+    pub const fn terminal_palette(self) -> TerminalPalette {
+        match self {
+            Self::Dark => TerminalPalette::Dark,
+            Self::Light => TerminalPalette::Light,
+        }
+    }
+
     pub const fn colors(self) -> ThemeColors {
         match self {
             Self::Dark => ThemeColors {
@@ -151,6 +172,12 @@ impl ThemePreset {
                     composer: 0x161616d9,
                     edge: 0xffffff1f,
                 },
+                syntax: Syntax {
+                    keyword: 0xc7a0e8,
+                    string: 0xa9cf8f,
+                    comment: 0x8b8a85,
+                    number: 0xe9a07a,
+                },
             },
             Self::Light => ThemeColors {
                 background: 0xeef0f9,
@@ -187,6 +214,12 @@ impl ThemePreset {
                     composer: 0xffffffd0,
                     edge: 0x1b1e2c1f,
                 },
+                syntax: Syntax {
+                    keyword: 0x7a3fa8,
+                    string: 0x3d6d22,
+                    comment: 0x6e6d67,
+                    number: 0xa0461c,
+                },
             },
         }
     }
@@ -202,5 +235,45 @@ mod tests {
             let preset: ThemePreset = serde_json::from_str(&format!("\"{name}\"")).unwrap();
             assert_eq!(preset, ThemePreset::Dark);
         }
+    }
+
+    #[test]
+    fn light_terminal_colours_read_on_the_light_terminal_ground() {
+        let light = ThemePreset::Light;
+        let ground = light.colors().background;
+        for (index, color) in light.terminal_palette().colors().iter().enumerate() {
+            let ratio = xd_terminal::contrast_ratio(*color, ground);
+            assert!(ratio >= 4.5, "colour {index} #{color:06x} is {ratio:.2}:1");
+        }
+    }
+
+    #[test]
+    fn syntax_colours_read_on_the_editor_ground_in_both_themes() {
+        for theme in ThemePreset::ALL {
+            let colors = theme.colors();
+            let Syntax {
+                keyword,
+                string,
+                comment,
+                number,
+            } = colors.syntax;
+            for color in [keyword, string, comment, number] {
+                let ratio = xd_terminal::contrast_ratio(color, colors.background);
+                assert!(ratio >= 4.5, "{theme:?} #{color:06x} is {ratio:.2}:1");
+            }
+        }
+    }
+
+    #[test]
+    fn each_theme_draws_the_terminal_with_its_own_palette() {
+        assert_eq!(ThemePreset::Dark.terminal_palette(), TerminalPalette::Dark);
+        assert_eq!(
+            ThemePreset::Light.terminal_palette(),
+            TerminalPalette::Light
+        );
+        assert_ne!(
+            TerminalPalette::Dark.colors(),
+            TerminalPalette::Light.colors()
+        );
     }
 }

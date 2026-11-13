@@ -8,7 +8,7 @@ use gpui::{
     fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
-use xd_desktop::theme::ThemeColors;
+use xd_desktop::theme::{ThemeColors, ThemePreset};
 
 use crate::{
     editor::{
@@ -1025,6 +1025,11 @@ impl Element for TextElement {
             (content, style.color)
         };
         let caret_color = input.colors.map_or(0x6b8cff, |colors| colors.accent_ink);
+        let selection_color = input
+            .colors
+            .map_or(ThemePreset::Dark.colors().selection, |colors| {
+                colors.selection
+            });
         let run = TextRun {
             len: display_text.len(),
             font: style.font(),
@@ -1086,7 +1091,7 @@ impl Element for TextElement {
                         point(left + line.x_for_index(selected_range.start), bounds.top()),
                         point(left + line.x_for_index(selected_range.end), bounds.bottom()),
                     ),
-                    rgba((caret_color << 8) | 0x55),
+                    rgba(selection_color),
                 )),
                 None,
             )

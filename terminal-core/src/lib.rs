@@ -66,6 +66,38 @@ fn codex_spinner_title(title: &[u8]) -> bool {
         .any(|frame| title.starts_with(frame.as_bytes()))
 }
 
+/// The 16 ANSI colours a screen is drawn with. They are picked for the ground
+/// the terminal sits on, so each theme has its own set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TerminalPalette {
+    /// For a dark ground.
+    #[default]
+    Dark,
+    /// For a light ground: every colour is dark enough to read on it.
+    Light,
+}
+
+impl TerminalPalette {
+    /// Black, red, green, yellow, blue, magenta, cyan, white, then the bright
+    /// eight, as `0xRRGGBB`.
+    pub const fn colors(self) -> &'static [u32; 16] {
+        match self {
+            Self::Dark => &[
+                0x1f2329, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xd7dae0,
+                0x5c6370, 0xff7a85, 0xb3e180, 0xffd68a, 0x7dbaff, 0xd99bff, 0x75d5e0, 0xffffff,
+            ],
+            Self::Light => &[
+                0x1b1e2c, 0xb3202f, 0x1a6b3c, 0x7a5200, 0x2a52be, 0x8a2da5, 0x0e6471, 0x4b5165,
+                0x5a6074, 0xc4283a, 0x1f7440, 0x855600, 0x3558d6, 0x9c36b5, 0x0b6f80, 0x1b1e2c,
+            ],
+        }
+    }
+
+    fn ansi(self, index: usize) -> u32 {
+        self.colors()[index.min(15)]
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TerminalStyle {
     pub foreground: Option<u32>,
@@ -339,14 +371,19 @@ impl TerminalScreen {
     }
 
     pub fn rendered(&self) -> TerminalText {
-        self.rendered_inner(false)
+        self.rendered_inner(false, TerminalPalette::Dark)
     }
 
     pub fn rendered_with_cursor(&self) -> TerminalText {
-        self.rendered_inner(true)
+        self.rendered_inner(true, TerminalPalette::Dark)
     }
 
-    fn rendered_inner(&self, include_cursor: bool) -> TerminalText {
+    /// [`Self::rendered_with_cursor`], coloured for the given ground.
+    pub fn rendered_with_cursor_in(&self, palette: TerminalPalette) -> TerminalText {
+        self.rendered_inner(true, palette)
+    }
+
+    fn rendered_inner(&self, include_cursor: bool, palette: TerminalPalette) -> TerminalText {
         let grid = self.term.grid();
         let include_cursor = include_cursor
             && self.term.mode().contains(TermMode::SHOW_CURSOR)
@@ -412,7 +449,7 @@ impl TerminalScreen {
                     }
                     link_run = link.map(|url| (text.len(), url));
                 }
-                let style = terminal_style(cell);
+                let style = terminal_style(cell, palette);
                 if style_run.is_some_and(|(_, current)| current != style) {
                     let (start, current) = style_run.take().expect("terminal style run exists");
                     if current != TerminalStyle::default() {
@@ -849,32 +886,34 @@ fn cell_is_default_appearance(cell: &Cell) -> bool {
         )
 }
 
-fn terminal_style(cell: &Cell) -> TerminalStyle {
+fn terminal_style(cell: &Cell, palette: TerminalPalette) -> TerminalStyle {
     TerminalStyle {
-        foreground: color_rgb(cell.fg, true),
-        background: color_rgb(cell.bg, false),
+        foreground: color_rgb(cell.fg, true, palette),
+        background: color_rgb(cell.bg, false, palette),
         bold: cell.flags.contains(Flags::BOLD),
         inverse: cell.flags.contains(Flags::INVERSE),
     }
-    .resolved()
+    .resolved(palette)
 }
 
-fn color_rgb(color: Color, foreground: bool) -> Option<u32> {
+fn color_rgb(color: Color, foreground: bool, palette: TerminalPalette) -> Option<u32> {
     match color {
         Color::Spec(Rgb { r, g, b }) => {
             Some((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b))
         }
-        Color::Indexed(index) => Some(xterm_color(usize::from(index))),
-        Color::Named(named) => named_color_index(named).map(ansi_color).or_else(|| {
-            let is_default = matches!(
-                named,
-                NamedColor::Foreground
-                    | NamedColor::Background
-                    | NamedColor::BrightForeground
-                    | NamedColor::DimForeground
-            );
-            (!is_default).then_some(ansi_color(if foreground { 7 } else { 0 }))
-        }),
+        Color::Indexed(index) => Some(xterm_color(usize::from(index), palette)),
+        Color::Named(named) => named_color_index(named)
+            .map(|index| palette.ansi(index))
+            .or_else(|| {
+                let is_default = matches!(
+                    named,
+                    NamedColor::Foreground
+                        | NamedColor::Background
+                        | NamedColor::BrightForeground
+                        | NamedColor::DimForeground
+                );
+                (!is_default).then_some(palette.ansi(if foreground { 7 } else { 0 }))
+            }),
     }
 }
 
@@ -956,39 +995,64 @@ fn read_u64(bytes: &[u8], offset: &mut usize) -> Option<u64> {
 }
 
 impl TerminalStyle {
-    fn resolved(mut self) -> Self {
+    fn resolved(mut self, palette: TerminalPalette) -> Self {
         if self.inverse {
             std::mem::swap(&mut self.foreground, &mut self.background);
             self.inverse = false;
         }
-        if self.foreground.is_none()
-            && let Some(background) = self.background
-        {
-            self.foreground = Some(readable_foreground(background));
+        if let Some(background) = self.background {
+            // The light set has no light colour: its white and bright white are
+            // dark, so they read on the light ground. A program that sets both
+            // colours (black on white, white on blue) would get dark on dark,
+            // so text too close to its own background takes a readable colour.
+            let unreadable = self.foreground.is_none_or(|foreground| {
+                palette == TerminalPalette::Light
+                    && contrast_ratio(foreground, background) < MIN_CELL_CONTRAST
+            });
+            if unreadable {
+                self.foreground = Some(readable_foreground(background, palette));
+            }
         }
         self
     }
 }
 
-fn readable_foreground(background: u32) -> u32 {
+/// Below this, text on its own cell background is replaced in the light set.
+const MIN_CELL_CONTRAST: f32 = 3.0;
+
+/// The palette's darkest colour on a light background, white on a dark one.
+fn readable_foreground(background: u32, palette: TerminalPalette) -> u32 {
     let red = (background >> 16) & 0xff;
     let green = (background >> 8) & 0xff;
     let blue = background & 0xff;
     let luminance = red * 299 + green * 587 + blue * 114;
-    ansi_color(if luminance < 128_000 { 15 } else { 0 })
+    if luminance < 128_000 {
+        0xffffff
+    } else {
+        palette.ansi(0)
+    }
 }
 
-fn ansi_color(index: usize) -> u32 {
-    const COLORS: [u32; 16] = [
-        0x1f2329, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xd7dae0, 0x5c6370,
-        0xff7a85, 0xb3e180, 0xffd68a, 0x7dbaff, 0xd99bff, 0x75d5e0, 0xffffff,
-    ];
-    COLORS[index.min(15)]
+/// The WCAG contrast ratio between two `0xRRGGBB` colours, from 1 to 21.
+pub fn contrast_ratio(first: u32, second: u32) -> f32 {
+    fn luminance(color: u32) -> f32 {
+        let channel = |shift: u32| {
+            let value = ((color >> shift) & 0xff) as f32 / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+    let (first, second) = (luminance(first), luminance(second));
+    (first.max(second) + 0.05) / (first.min(second) + 0.05)
 }
 
-fn xterm_color(index: usize) -> u32 {
+fn xterm_color(index: usize, palette: TerminalPalette) -> u32 {
     match index.min(255) {
-        0..=15 => ansi_color(index),
+        0..=15 => palette.ansi(index),
         16..=231 => {
             const LEVELS: [u32; 6] = [0, 95, 135, 175, 215, 255];
             let value = index - 16;
@@ -1055,13 +1119,76 @@ mod tests {
         assert!(rendered.text.contains("red X 界e\u{301} link"));
         assert!(rendered.spans.iter().any(|span| {
             &rendered.text[span.range.clone()] == "red"
-                && span.style.foreground == Some(ansi_color(1))
+                && span.style.foreground == Some(TerminalPalette::Dark.ansi(1))
         }));
         assert!(rendered.spans.iter().any(|span| {
             &rendered.text[span.range.clone()] == "X" && span.style.foreground == Some(0x010203)
         }));
         assert_eq!(rendered.links.len(), 1);
         assert_eq!(rendered.links[0].url, "https://example.com");
+    }
+
+    fn style_of(rendered: &TerminalText, text: &str) -> TerminalStyle {
+        rendered
+            .spans
+            .iter()
+            .find(|span| &rendered.text[span.range.clone()] == text)
+            .map(|span| span.style)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_light_palette_colours_the_same_cells_for_a_light_ground() {
+        let mut screen = TerminalScreen::new(40, 4);
+        screen.feed(b"\x1b[31mred\x1b[0m \x1b[92mgreen\x1b[0m \x1b[38;5;4mblue\x1b[0m");
+        let dark = screen.rendered_with_cursor_in(TerminalPalette::Dark);
+        let light = screen.rendered_with_cursor_in(TerminalPalette::Light);
+        assert_eq!(dark.text, light.text);
+        assert_eq!(style_of(&dark, "red").foreground, Some(0xe06c75));
+        assert_eq!(style_of(&light, "red").foreground, Some(0xb3202f));
+        assert_eq!(style_of(&dark, "green").foreground, Some(0xb3e180));
+        assert_eq!(style_of(&light, "green").foreground, Some(0x1f7440));
+        assert_eq!(style_of(&dark, "blue").foreground, Some(0x61afef));
+        assert_eq!(style_of(&light, "blue").foreground, Some(0x2a52be));
+        // The default rendering is the dark one, as before.
+        assert_eq!(screen.rendered_with_cursor().spans, dark.spans);
+    }
+
+    #[test]
+    fn light_cells_with_their_own_background_stay_readable() {
+        let mut screen = TerminalScreen::new(60, 4);
+        // Black on white, white on blue, a bare red background, and a pair
+        // that already reads: red on bright white is left alone.
+        screen.feed(b"\x1b[30;47mbar\x1b[0m \x1b[37;44mdir\x1b[0m \x1b[41mbad\x1b[0m");
+        screen.feed(b" \x1b[38;2;255;255;255;48;2;10;10;10mrgb\x1b[0m");
+        let light = screen.rendered_with_cursor_in(TerminalPalette::Light);
+        for text in ["bar", "dir", "bad", "rgb"] {
+            let style = style_of(&light, text);
+            let (foreground, background) = (style.foreground.unwrap(), style.background.unwrap());
+            assert!(
+                contrast_ratio(foreground, background) >= MIN_CELL_CONTRAST,
+                "{text}: {foreground:06x} on {background:06x}"
+            );
+        }
+        assert_eq!(style_of(&light, "bar").background, Some(0x4b5165));
+        assert_eq!(style_of(&light, "rgb").foreground, Some(0xffffff));
+
+        // The dark set keeps what the program asked for.
+        let dark = screen.rendered_with_cursor_in(TerminalPalette::Dark);
+        assert_eq!(style_of(&dark, "bar").foreground, Some(0x1f2329));
+        assert_eq!(style_of(&dark, "bar").background, Some(0xd7dae0));
+        assert_eq!(style_of(&dark, "dir").foreground, Some(0xd7dae0));
+        assert_eq!(style_of(&dark, "bad").foreground, Some(0x1f2329));
+    }
+
+    #[test]
+    fn contrast_ratio_matches_the_wcag_extremes() {
+        assert!((contrast_ratio(0x000000, 0xffffff) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(0x777777, 0x777777) - 1.0).abs() < 0.001);
+        assert_eq!(
+            contrast_ratio(0x1b1e2c, 0xeef0f9),
+            contrast_ratio(0xeef0f9, 0x1b1e2c)
+        );
     }
 
     #[test]

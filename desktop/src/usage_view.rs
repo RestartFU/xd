@@ -45,7 +45,6 @@ const FLYOUT_WIDTH: f32 = 348.0;
 const FLYOUT_LEFT: f32 = 8.0;
 const FLYOUT_BOTTOM: f32 = 46.0;
 const FLYOUT_BARS_HEIGHT: f32 = 44.0;
-const CLAUDE_COLOR: u32 = 0xd97757;
 const PRICE_FIELDS: [(&str, bool); 4] = [
     ("Input", false),
     ("Output", false),
@@ -82,9 +81,18 @@ fn environment_label(index: usize) -> &'static str {
     if index == 0 { "Local" } else { "Remote" }
 }
 
+/// Steps the refresh icon takes to come round to how it started. Its two
+/// arrows look the same after half a turn.
+const REFRESH_STEPS: usize = 4;
+
+/// How far round the refresh icon is on a pulse step, as a share of a turn.
+pub(super) fn refresh_turn(frame: usize) -> f32 {
+    (frame % REFRESH_STEPS) as f32 / (REFRESH_STEPS * 2) as f32
+}
+
 fn provider_color(provider: &str, colors: ThemeColors) -> u32 {
     if provider == "claude" {
-        CLAUDE_COLOR
+        colors.claude_icon
     } else {
         colors.text
     }

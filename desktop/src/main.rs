@@ -123,10 +123,12 @@ use minimal::{
     nest_sessions, next_active_session, project_cards, project_sessions, reconcile_route,
     resumable_session, settled_cards, started_below, tree_descendants,
 };
-use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
+use selection::{
+    SelectionColor, TextSelection, selectable_in_document, selectable_links_in_document,
+};
 use settings::{AppSettings, BrowserState, ThemePreset};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
-use terminal::{TerminalScreen, TerminalText};
+use terminal::{TerminalPalette, TerminalScreen, TerminalText};
 use usage_view::{
     ALERT_ICON, INFO_ICON, PLUS_ICON, REFRESH_ICON, ROTATE_CCW_ICON, SLIDERS_ICON, TICKET_ICON,
     USAGE_ICON, UsagePage,
@@ -1379,11 +1381,12 @@ fn terminal_runtime_event(event: SessionEvent) -> (ChatEndpoint, &'static str, V
     (endpoint, name, body)
 }
 
-/// The shown terminal's text, colours and links, kept until its screen
-/// changes. Rebuilding them walks the whole scrollback, so a redraw for
-/// anything else (a blink, a token in the chat) reuses them instead.
+/// The shown terminal's text, colours and links, kept until its screen or the
+/// theme's palette changes. Rebuilding them walks the whole scrollback, so a
+/// redraw for anything else (a blink, a token in the chat) reuses them instead.
 struct TerminalRenderCache {
     revision: u64,
+    palette: TerminalPalette,
     text: SharedString,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     cursor: Option<Range<usize>>,
@@ -1391,7 +1394,7 @@ struct TerminalRenderCache {
 }
 
 impl TerminalRenderCache {
-    fn new(revision: u64, rendered: TerminalText) -> Self {
+    fn new(revision: u64, palette: TerminalPalette, rendered: TerminalText) -> Self {
         let mut links = rendered
             .links
             .into_iter()
@@ -1424,6 +1427,7 @@ impl TerminalRenderCache {
             .collect();
         Self {
             revision,
+            palette,
             text: rendered.text.into(),
             highlights,
             cursor: rendered.cursor,
@@ -4796,6 +4800,11 @@ impl XdDesktop {
             &mut kind
         {
             *chat_id = self.model.canonical_terminal_key(chat_id);
+        }
+        if matches!(kind, RequestKind::TerminalColors) {
+            // A host from before the operation refuses it; there is nothing to
+            // tell the user, and its terminals keep the colours they opened with.
+            return;
         }
         let value = Value::Object(body);
         if let RequestKind::BackgroundTaskOutput {
@@ -13461,12 +13470,41 @@ impl XdDesktop {
     }
 
     fn choose_minimal_theme(&mut self, theme: ThemePreset, cx: &mut Context<Self>) {
+        let changed = self.settings.theme != theme;
         self.settings.theme = theme;
         self.minimal_theme_open = false;
         if let Err(error) = self.settings.save() {
             self.model.connection_error = Some(error);
         }
+        if changed {
+            self.send_terminal_colors();
+        }
         cx.notify();
+    }
+
+    /// Tells the host the theme's colours for every terminal this window
+    /// holds. A terminal answers a program's colour queries (OSC 10 and 11)
+    /// with the pair it was opened with, so after a theme change a program
+    /// started in it would otherwise still pick colours for the old ground.
+    fn send_terminal_colors(&self) {
+        let colors = self.settings.theme.colors();
+        let shown = self
+            .terminal_panel
+            .iter()
+            .map(|panel| (self.active_endpoint, panel));
+        let cached = self
+            .terminal_panel_cache
+            .iter()
+            .map(|((endpoint, _), panel)| (*endpoint, panel));
+        for (endpoint, panel) in shown.chain(cached) {
+            let Some(host) = self.endpoint_host(endpoint) else {
+                continue;
+            };
+            for session in &panel.sessions {
+                // Fails only without a connection, when there is no one to tell.
+                let _ = host.terminal_colors(&session.id, colors.text, colors.background);
+            }
+        }
     }
 
     fn toggle_minimal_theme_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -13504,19 +13542,22 @@ impl XdDesktop {
         cx.notify();
     }
 
-    /// The selected terminal's rendering, rebuilt only once its screen has
-    /// changed since the last frame.
+    /// The selected terminal's rendering, rebuilt only once its screen or the
+    /// theme has changed since the last frame.
     fn selected_terminal_render(&mut self) -> Option<Rc<TerminalRenderCache>> {
         let session = self.terminal_panel.as_ref()?.selected()?;
         let revision = session.screen.revision();
+        let palette = self.settings.theme.terminal_palette();
         if let Some(cached) = &self.terminal_render_cache
             && cached.revision == revision
+            && cached.palette == palette
         {
             return Some(cached.clone());
         }
         let cached = Rc::new(TerminalRenderCache::new(
             revision,
-            session.screen.rendered_with_cursor(),
+            palette,
+            session.screen.rendered_with_cursor_in(palette),
         ));
         self.terminal_render_cache = Some(cached.clone());
         Some(cached)
@@ -21111,9 +21152,11 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    /// Hand the current palette to every text input, so carets, selections,
-    /// and placeholders follow the theme instead of a fixed dark scheme.
+    /// Hand the current palette to every text input and to selectable text, so
+    /// carets, selections, and placeholders follow the theme instead of a
+    /// fixed dark scheme.
     fn sync_input_colors(&mut self, colors: ThemeColors, cx: &mut Context<Self>) {
+        SelectionColor::set(colors.selection, cx);
         for editor in [
             self.new_chat_input.clone(),
             self.composer_input.clone(),
@@ -29133,6 +29176,81 @@ Binary files /dev/null and b/image.png differ\n";
         let changed = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
         assert!(!Rc::ptr_eq(&first, &changed));
         assert!(changed.text.contains("second") && changed.text.contains("third"));
+    }
+
+    #[gpui::test]
+    fn the_terminal_is_recoloured_when_the_theme_changes(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.theme = ThemePreset::Dark;
+            desktop.model.selected_chat = Some("dock-chat".into());
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            let mut shell =
+                XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({"id": "shell"})).unwrap();
+            shell.screen.feed(b"\x1b[31mred\x1b[0m");
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            panel.loading = false;
+            panel.sessions.push(shell);
+            panel.selected = Some("shell".into());
+        });
+        cx.run_until_parked();
+        let red = |render: &TerminalRenderCache| render.highlights[0].1.color;
+        let dark = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
+        assert_eq!(red(&dark), Some(rgb(0xe06c75).into()));
+        let light = desktop.update(cx, |desktop, _| {
+            desktop.settings.theme = ThemePreset::Light;
+            desktop.selected_terminal_render().unwrap()
+        });
+        assert!(!Rc::ptr_eq(&dark, &light), "the same screen, new colours");
+        assert_eq!(red(&light), Some(rgb(0xb3202f).into()));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_theme_change_tells_each_terminal_its_new_colours(cx: &mut gpui::TestAppContext) {
+        use std::io::BufRead;
+        let (host, mut requests) = socket_host("terminal-colours-test");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.host = Some(host.clone());
+            desktop.model.selected_chat = Some("dock-chat".into());
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            for id in ["shell", "build"] {
+                panel.sessions.push(
+                    XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({"id": id})).unwrap(),
+                );
+            }
+            desktop.settings.theme = ThemePreset::Light;
+            desktop.send_terminal_colors();
+        });
+        let light = ThemePreset::Light.colors();
+        let mut told = Vec::new();
+        while told.len() < 2 {
+            let mut line = String::new();
+            requests.read_line(&mut line).expect("a colours request");
+            let request: Value = serde_json::from_str(&line).unwrap();
+            if request["op"] == "terminal-colors" {
+                assert_eq!(request["foreground"], light.text);
+                assert_eq!(request["background"], light.background);
+                told.push(request["terminal"].as_str().unwrap().to_owned());
+            }
+        }
+        assert_eq!(told, ["shell", "build"]);
+
+        // A host from before the operation refuses it; that is not an error
+        // worth showing.
+        desktop.update(cx, |desktop, cx| {
+            let refused = serde_json::json!({"ok": false, "error": "not implemented"});
+            desktop.handle_reply(
+                RequestKind::TerminalColors,
+                refused.as_object().unwrap().clone(),
+                None,
+                cx,
+            );
+            assert_eq!(desktop.model.connection_error, None);
+            assert_eq!(desktop.terminal_panel.as_ref().unwrap().error, None);
+        });
     }
 
     #[gpui::test]
