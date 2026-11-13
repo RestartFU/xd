@@ -326,7 +326,7 @@ private fun FileEditor(
                         "Large file · optimized view"
                     },
                     modifier = Modifier.weight(1f),
-                    color = MaterialTheme.colorScheme.outline,
+                    color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.labelSmall,
                 )
                 TextButton(onClick = { editingLargeFile = !editingLargeFile }) {

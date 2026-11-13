@@ -98,7 +98,7 @@ internal fun PipelineCard(
             ) {
                 Text(
                     "Workflow",
-                    color = MaterialTheme.colorScheme.outline,
+                    color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                 )
@@ -135,7 +135,7 @@ internal fun PipelineCard(
                     )?.let { elapsed ->
                         Text(
                             elapsed,
-                            color = MaterialTheme.colorScheme.outline,
+                            color = LocalXdSignals.current.faint,
                             style = MaterialTheme.typography.labelMedium,
                         )
                         Spacer(Modifier.width(8.dp))
@@ -165,7 +165,7 @@ internal fun PipelineCard(
                 ) {
                     Text(
                         "${run.repository} · #${run.id}",
-                        color = MaterialTheme.colorScheme.outline,
+                        color = LocalXdSignals.current.faint,
                         style = MaterialTheme.typography.labelSmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -174,7 +174,7 @@ internal fun PipelineCard(
                         if (status.jobs.isEmpty()) {
                             Text(
                                 "No jobs reported yet",
-                                color = MaterialTheme.colorScheme.outline,
+                                color = LocalXdSignals.current.faint,
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         } else {
@@ -233,7 +233,7 @@ private fun PipelineJob(job: WorkflowJobReply) {
             elapsedText(job.startedAt, job.completedAt, terminal)?.let { elapsed ->
                 Text(
                     elapsed,
-                    color = MaterialTheme.colorScheme.outline,
+                    color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.labelSmall,
                 )
                 Spacer(Modifier.width(8.dp))
@@ -249,7 +249,7 @@ private fun PipelineJob(job: WorkflowJobReply) {
         job.log?.takeIf(String::isNotBlank)?.let { activity ->
             Text(
                 activity,
-                color = MaterialTheme.colorScheme.outline,
+                color = LocalXdSignals.current.faint,
                 fontFamily = XdMonoFamily,
                 style = MaterialTheme.typography.bodySmall,
                 maxLines = 1,
@@ -307,5 +307,5 @@ private fun workflowIcon(conclusion: String?): String = when (conclusion) {
 private fun workflowColour(conclusion: String?) = when (conclusion) {
     "success" -> LocalXdSignals.current.working
     "failure", "timed_out", "startup_failure" -> MaterialTheme.colorScheme.error
-    else -> MaterialTheme.colorScheme.outline
+    else -> LocalXdSignals.current.faint
 }

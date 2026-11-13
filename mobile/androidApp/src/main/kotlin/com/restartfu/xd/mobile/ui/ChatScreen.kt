@@ -1655,7 +1655,7 @@ private fun QueuedMessageDialog(
                     Text(
                         "Update the host to change queued messages from here.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 if (working) {
@@ -1663,7 +1663,7 @@ private fun QueuedMessageDialog(
                     Text(
                         "Steering stops the running turn and starts this instead.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }

@@ -61,7 +61,7 @@ internal fun SubagentCard(
         SubagentState.RUNNING -> signals.working
         SubagentState.SUCCESS -> signals.faint
         SubagentState.FAILURE -> MaterialTheme.colorScheme.error
-        SubagentState.FINISHED -> MaterialTheme.colorScheme.outline
+        SubagentState.FINISHED -> signals.faint
     }
     val shape = MaterialTheme.shapes.medium
     val preview = if (running) {

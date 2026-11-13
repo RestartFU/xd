@@ -152,7 +152,7 @@ internal fun MessageImage(
                 current.message,
                 modifier = Modifier.padding(12.dp),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 

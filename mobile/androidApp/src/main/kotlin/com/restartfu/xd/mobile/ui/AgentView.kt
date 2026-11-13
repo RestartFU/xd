@@ -267,7 +267,7 @@ internal fun AgentView(
         SubagentState.RUNNING -> signals.working
         SubagentState.SUCCESS -> signals.faint
         SubagentState.FAILURE -> MaterialTheme.colorScheme.error
-        SubagentState.FINISHED -> MaterialTheme.colorScheme.outline
+        SubagentState.FINISHED -> signals.faint
     }
     val now = rememberNow(running && run.startedAtMillis != null)
     val stats = run.statsAt(if (running) now else null)

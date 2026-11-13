@@ -87,7 +87,7 @@ internal fun HostUpdateDialog(
                             current.latest?.let { append(" · latest ").append(it) }
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 if (restartable) {
@@ -96,7 +96,7 @@ internal fun HostUpdateDialog(
                         "Restarting drops every attached device and loses any " +
                             "running turn.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }

@@ -146,7 +146,7 @@ internal fun ModelPicker(
                             Text(
                                 DisplayLabels.backend(currentAssistant.id, catalog),
                                 style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.outline,
+                                color = LocalXdSignals.current.faint,
                             )
                         }
                         HorizontalDivider()
@@ -182,7 +182,7 @@ internal fun ModelPicker(
                                     Text(
                                         "${entry.contextWindow / 1000}k context",
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.outline,
+                                        color = LocalXdSignals.current.faint,
                                     )
                                 }
                             }

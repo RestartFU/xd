@@ -125,7 +125,7 @@ private fun BlockContent(block: Block, depth: Int = 0) {
                     Text(
                         if (block.ordered) "${block.start + index}." else "•",
                         modifier = Modifier.width(24.dp),
-                        color = MaterialTheme.colorScheme.outline,
+                        color = LocalXdSignals.current.faint,
                     )
                     Column(
                         modifier = Modifier.weight(1f),
