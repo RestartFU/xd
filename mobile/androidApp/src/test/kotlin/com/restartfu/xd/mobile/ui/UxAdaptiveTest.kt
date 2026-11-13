@@ -234,7 +234,9 @@ class UxAdaptiveTest {
             }
             await { shows("That is the whole change.") }
             idle()
-            val drawn = labels()
+            // Each piece of text drawn on its own: a message is one merged
+            // stop for a screen reader, so its blocks are read unmerged.
+            val drawn = drawnTexts()
             // Each block as Markdown draws it, none left as its source.
             assertTrue(drawn.toString(), "What changed" in drawn)
             assertTrue("Backoff starts at 2 s and doubles." in drawn)
@@ -375,6 +377,14 @@ class UxAdaptiveTest {
     }
 
     private fun labels(): List<String> = screen().labels()
+
+    /** Every text drawn, one entry per text, without merging. */
+    private fun drawnTexts(): List<String> =
+        compose.onAllNodes(androidx.compose.ui.test.isRoot(), useUnmergedTree = true).fetchSemanticsNodes().flatMap { root ->
+            fun walk(node: androidx.compose.ui.semantics.SemanticsNode): List<androidx.compose.ui.semantics.SemanticsNode> =
+                listOf(node) + node.children.flatMap(::walk)
+            walk(root)
+        }.mapNotNull { node -> node.config.getOrNull(SemanticsProperties.Text)?.joinToString { it.text } }
 
     private fun role(role: Role) = SemanticsMatcher.expectValue(SemanticsProperties.Role, role)
 
