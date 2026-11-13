@@ -7,19 +7,41 @@ use std::path::{Path, PathBuf};
 
 /// Set the per-user directories before GPUI or host threads start. Existing
 /// overrides remain available for custom installations and CI fixtures.
+///
+/// Windows is asked where the signed-in user's folders are. The environment
+/// usually says the same, but it is whatever the starting program passed on:
+/// the installer opens xd from a system service, whose own profile is not the
+/// user's.
 #[cfg(target_os = "windows")]
 pub fn configure_environment() {
     use std::env;
 
-    let home = env::var_os("USERPROFILE").map(PathBuf::from);
+    use ::windows::Win32::UI::Shell::{
+        FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData,
+    };
+
+    let folder = |known, variable: &str| {
+        native::known_folder(known).or_else(|| {
+            env::var_os(variable)
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        })
+    };
+    let home = folder(&FOLDERID_Profile, "USERPROFILE");
     if let Some(home) = home {
-        let roaming = env::var_os("APPDATA").map(PathBuf::from);
-        let local = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let roaming = folder(&FOLDERID_RoamingAppData, "APPDATA");
+        let local = folder(&FOLDERID_LocalAppData, "LOCALAPPDATA");
         for (key, path) in profile_paths(&home, roaming.as_deref(), local.as_deref()) {
             set_default(key, path);
         }
         set_default("HOME", home);
     }
+    // GPUI normally draws through DirectComposition, in a layer above every
+    // child window of its own. The browser pane is such a child window, so its
+    // pages loaded, titled their tabs and stayed invisible under the app. Drawn
+    // straight to the window instead, the app is under its children as Windows
+    // means it to be. The window is opaque, so nothing else is lost.
+    set_default("GPUI_DISABLE_DIRECT_COMPOSITION", "1");
     set_default(
         "XD_UPDATE_CHANNEL",
         if xd_desktop::channel::nightly() {
@@ -140,6 +162,7 @@ mod native {
                 GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
             },
             System::{
+                Com::CoTaskMemFree,
                 Console::{ATTACH_PARENT_PROCESS, AttachConsole},
                 Recovery::{REGISTER_APPLICATION_RESTART_FLAGS, RegisterApplicationRestart},
                 Threading::{
@@ -149,7 +172,8 @@ mod native {
             },
             UI::{
                 Shell::{
-                    DefSubclassProc, SetCurrentProcessExplicitAppUserModelID, SetWindowSubclass,
+                    DefSubclassProc, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+                    SetCurrentProcessExplicitAppUserModelID, SetWindowSubclass,
                 },
                 WindowsAndMessaging::{
                     ENDSESSION_CLOSEAPP, EnumWindows, GetWindowThreadProcessId, IDYES, IsIconic,
@@ -181,6 +205,16 @@ mod native {
     pub fn attach_parent_console() {
         // Failing means there is no parent console, which is the usual case.
         let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
+
+    /// One of the signed-in user's folders, as Windows itself resolves it.
+    pub(super) fn known_folder(folder: &windows::core::GUID) -> Option<PathBuf> {
+        let path = unsafe { SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT, None) }.ok()?;
+        // SAFETY: on success Windows returns a NUL-terminated string that this
+        // caller owns and frees.
+        let resolved = unsafe { path.to_string() }.ok().map(PathBuf::from);
+        unsafe { CoTaskMemFree(Some(path.0 as _)) };
+        resolved.filter(|path| !path.as_os_str().is_empty())
     }
 
     /// The primary monitor and the part of it the taskbar leaves free, each

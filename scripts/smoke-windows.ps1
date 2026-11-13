@@ -167,5 +167,40 @@ if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
 }
 if (@(Get-InstalledProduct).Count -ne 1) { throw 'Installing xd over itself listed it twice.' }
 
-Write-Host 'Windows installer: checksum, files, icon, version, shortcut, and reinstall passed'
+# Someone who double-clicks the installer sees a progress bar and then xd
+# itself. The installer opens it from a system service, so it must still come
+# up as the signed-in user's xd, with its files in their profile, and close
+# like one.
+$running = Join-Path $env:LOCALAPPDATA "$name\running"
+$passive = Start-Process -FilePath msiexec.exe -Wait -PassThru `
+    -ArgumentList '/i', "`"$installerPath`"", '/passive', '/norestart'
+if ($passive.ExitCode -ne 0) { throw "Installing xd with a progress bar failed with exit code $($passive.ExitCode)." }
+$app = $null
+for ($attempt = 0; $attempt -lt 150 -and $null -eq $app; $attempt++) {
+    Start-Sleep -Milliseconds 200
+    $app = Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $executable } | Select-Object -First 1
+}
+if ($null -eq $app) { throw 'The installer did not open xd when it finished.' }
+try {
+    for ($attempt = 0; $attempt -lt 150; $attempt++) {
+        $app.Refresh()
+        if ($app.HasExited -or ((Test-Path -LiteralPath $running) -and
+                $app.MainWindowHandle -ne [IntPtr]::Zero)) { break }
+        Start-Sleep -Milliseconds 200
+    }
+    if ($app.HasExited) { throw "xd opened by the installer ended with code $($app.ExitCode)." }
+    if (-not (Test-Path -LiteralPath $running)) {
+        throw "xd opened by the installer does not keep its files under $env:LOCALAPPDATA."
+    }
+    if ($app.MainWindowHandle -eq [IntPtr]::Zero) { throw 'xd opened by the installer showed no window.' }
+} finally {
+    if (-not $app.HasExited) {
+        [void]$app.CloseMainWindow()
+        if (-not $app.WaitForExit(15000)) { $app.Kill() }
+    }
+}
+if (Test-Path -LiteralPath $running) { throw 'Closing xd left the mark of a run that never finished.' }
+
+Write-Host 'Windows installer: checksum, files, icon, version, shortcut, reinstall, and first launch passed'
 if (-not $Keep) { Remove-Installation }
