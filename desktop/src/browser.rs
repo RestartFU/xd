@@ -1917,14 +1917,18 @@ impl NativeBrowser {
                 });
             });
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            if let Some((view, _)) = self.entry.borrow().as_ref() {
-                return apply(view);
-            }
-            #[cfg(target_os = "windows")]
-            if let Some(pending) = self.pending.borrow_mut().as_mut() {
-                pending.push(Box::new(apply));
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        if let Some((view, _)) = self.entry.borrow().as_ref() {
+            apply(view);
+        }
+        #[cfg(target_os = "windows")]
+        match self.entry.borrow().as_ref() {
+            Some((view, _)) => apply(view),
+            // Still being created: kept for when it exists.
+            None => {
+                if let Some(pending) = self.pending.borrow_mut().as_mut() {
+                    pending.push(Box::new(apply));
+                }
             }
         }
     }

@@ -40,6 +40,9 @@ exec "$payload" --version
 /// form, and said only that the directory did not exist. A Linux path, and
 /// anything else, is passed on as typed.
 ///
+/// Asking WSL takes running a program, so callers ask [`is_windows_path`]
+/// first and call this off the UI thread only when it says so.
+///
 /// WSL is asked only when the answer matters. `host_distribution` tells which
 /// distribution xd's host runs in: a folder named in another one is refused,
 /// because the same path there is a different folder, or none, and agents
@@ -105,6 +108,51 @@ pub fn linux_path(
     Ok(typed.to_owned())
 }
 
+/// Whether `typed` names a folder the way Windows does, so that
+/// [`linux_path`] has something to ask WSL about.
+pub fn is_windows_path(typed: &str) -> bool {
+    // Nothing is asked for a path that would come back as it was typed.
+    linux_path(typed, || None, |_| None).as_deref() != Ok(typed)
+}
+
+/// How long WSL gets to answer a question about a path. It answers in well
+/// under a second once it is running; a distribution still starting takes a
+/// few.
+#[cfg(windows)]
+const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// What a short WSL command printed, or `None` if it failed or took longer
+/// than [`ANSWER_WAIT`], in which case it is stopped.
+#[cfg(windows)]
+fn answer(mut command: std::process::Command) -> Option<String> {
+    use std::{io::Read as _, process::Stdio, time::Instant};
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + ANSWER_WAIT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    // A path is far smaller than a pipe holds, so it is all there to read.
+    let mut printed = String::new();
+    child.stdout.take()?.read_to_string(&mut printed).ok()?;
+    status.success().then(|| printed.trim().to_owned())
+}
+
 /// The WSL distribution xd's host runs in, as WSL itself names it there.
 ///
 /// Asked of WSL once and remembered; a failure is asked again next time, in
@@ -116,13 +164,8 @@ pub fn host_distribution() -> Option<String> {
     static NAME: Mutex<Option<String>> = Mutex::new(None);
     let mut name = NAME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if name.is_none() {
-        let output = command(r#"printf '%s' "$WSL_DISTRO_NAME""#, &[])
-            .output()
-            .ok()?;
-        let reported = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if output.status.success() && !reported.is_empty() {
-            *name = Some(reported);
-        }
+        *name = answer(command(r#"printf '%s' "$WSL_DISTRO_NAME""#, &[]))
+            .filter(|reported| !reported.is_empty());
     }
     name.clone()
 }
@@ -131,16 +174,13 @@ pub fn host_distribution() -> Option<String> {
 /// that distribution's own `wslpath`.
 #[cfg(windows)]
 pub fn mounted_path(windows: &str) -> Option<String> {
-    let output = command(r#"wslpath -u "$1""#, &[windows.to_owned()])
-        .output()
-        .ok()?;
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let path = answer(command(r#"wslpath -u "$1""#, &[windows.to_owned()]))?;
     // `/mnt/c/` for a drive's root: the folder without the slash.
     let path = match path.trim_end_matches('/') {
         "" => path,
         trimmed => trimmed.to_owned(),
     };
-    (output.status.success() && path.starts_with('/')).then_some(path)
+    path.starts_with('/').then_some(path)
 }
 
 pub(crate) fn executable() -> PathBuf {
@@ -272,6 +312,30 @@ mod tests {
             (r"  C:\Users\me  ", "/mnt/c/Users/me"),
         ] {
             assert_eq!(in_ubuntu(typed).as_deref(), Ok(linux), "{typed}");
+        }
+    }
+
+    #[test]
+    fn only_a_windows_name_for_a_folder_is_worth_asking_wsl_about() {
+        for windows in [
+            r"C:\Users\me\project",
+            "d:/work",
+            "C:",
+            r"\\wsl.localhost\Ubuntu\home\me",
+            r"\\wsl$\Debian\srv",
+            r#""C:\Users\A Person\my project""#,
+        ] {
+            assert!(is_windows_path(windows), "{windows}");
+        }
+        for linux in [
+            "/home/me/project",
+            "~/project",
+            "project",
+            "",
+            "c:project",
+            r"\\server\share\project",
+        ] {
+            assert!(!is_windows_path(linux), "{linux}");
         }
     }
 

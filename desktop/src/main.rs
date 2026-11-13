@@ -7745,21 +7745,52 @@ impl XdDesktop {
         }
     }
 
-    /// A path typed for the host, in the form the host can open.
+    /// Have a repository path typed the way Windows names a folder turned
+    /// into the path the host can open, then submit the form with it.
     ///
-    /// The Windows app's own host runs inside WSL, where a folder is known
-    /// by its Linux path however Explorer names it. A paired host is another
-    /// machine, and is sent what was typed.
-    fn host_path(&self, typed: &str) -> Result<String, String> {
-        #[cfg(target_os = "windows")]
-        if self.active_endpoint == ChatEndpoint::Local {
-            return xd_desktop::wsl::linux_path(
-                typed,
-                xd_desktop::wsl::host_distribution,
-                xd_desktop::wsl::mounted_path,
-            );
-        }
-        Ok(typed.to_owned())
+    /// The Windows app's own host runs inside WSL, which is the only one that
+    /// knows where it mounts a drive or which distribution it is. Asking it
+    /// means running a program, so `resolve` runs off the UI thread: the
+    /// window keeps answering even if WSL is slow to. The answer is put in
+    /// the field, where the user can see what will be opened.
+    #[cfg(any(target_os = "windows", test))]
+    fn resolve_workspace_repo(
+        &mut self,
+        typed: String,
+        resolve: impl FnOnce(&str) -> Result<String, String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        // Nothing else can be submitted while this one is being looked up.
+        self.workspace_create_submitting = true;
+        cx.notify();
+        let lookup = cx.background_spawn({
+            let typed = typed.clone();
+            async move { resolve(&typed) }
+        });
+        cx.spawn(async move |this, cx| {
+            let resolved = lookup.await;
+            let _ = this.update(cx, |this, cx| {
+                // The form was cancelled or changed meanwhile: not its answer.
+                if !this.creating_workspace
+                    || !this.workspace_create_submitting
+                    || this.workspace_create_repo.trim() != typed.trim()
+                {
+                    return;
+                }
+                this.workspace_create_submitting = false;
+                match resolved {
+                    Ok(path) => {
+                        this.workspace_create_repo = path.clone();
+                        this.workspace_repo_input
+                            .update(cx, |input, cx| input.set_text(path, cx));
+                        this.save_workspace_create(cx);
+                    }
+                    Err(error) => this.model.connection_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn workspace_repo_changed(&mut self, text: String, cx: &mut Context<Self>) {
@@ -7864,18 +7895,28 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        let repo = match optional_trimmed(&self.workspace_create_repo)
+        let repo = optional_trimmed(&self.workspace_create_repo)
             .filter(|_| project)
-            .map(|typed| self.host_path(typed))
-            .transpose()
+            .map(str::to_owned);
+        // A paired host is another machine, and is sent what was typed.
+        #[cfg(target_os = "windows")]
+        if let Some(typed) = repo.as_deref()
+            && self.active_endpoint == ChatEndpoint::Local
+            && xd_desktop::wsl::is_windows_path(typed)
         {
-            Ok(repo) => repo,
-            Err(error) => {
-                self.model.connection_error = Some(error);
-                cx.notify();
-                return;
-            }
-        };
+            self.resolve_workspace_repo(
+                typed.to_owned(),
+                |typed| {
+                    xd_desktop::wsl::linux_path(
+                        typed,
+                        xd_desktop::wsl::host_distribution,
+                        xd_desktop::wsl::mounted_path,
+                    )
+                },
+                cx,
+            );
+            return;
+        }
         let repo_url = optional_trimmed(&self.workspace_create_clone)
             .filter(|_| project)
             .map(str::to_owned);
@@ -25797,6 +25838,83 @@ Binary files /dev/null and b/image.png differ\n";
             desktop.startup_notice = None;
             desktop.recover_from_failed_run(&recovery::FailedRun::default());
             assert_eq!(desktop.startup_notice, None);
+        });
+    }
+
+    #[gpui::test]
+    fn a_windows_folder_is_looked_up_off_the_ui_thread_then_submitted_as_its_linux_path(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        let begin = |desktop: &mut XdDesktop| {
+            desktop.creating_workspace = true;
+            desktop.workspace_create_kind = WorkspaceCreateKind::Project;
+            desktop.workspace_create_name = "site".into();
+            desktop.workspace_create_repo = r"C:\work\site".into();
+            desktop.workspace_create_submitting = false;
+            desktop.model.connection_error = None;
+        };
+
+        // WSL answers: the field shows the Linux path and the form goes on.
+        desktop.update(cx, |desktop, cx| {
+            begin(desktop);
+            desktop.resolve_workspace_repo(
+                r"C:\work\site".into(),
+                |typed| {
+                    assert_eq!(typed, r"C:\work\site");
+                    Ok("/mnt/c/work/site".into())
+                },
+                cx,
+            );
+            // Held until the answer comes, with the window still drawing.
+            assert!(desktop.workspace_create_submitting);
+            assert_eq!(desktop.workspace_create_repo, r"C:\work\site");
+        });
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert_eq!(desktop.workspace_create_repo, "/mnt/c/work/site");
+            // Submitted with it: this fixture has no host to send it to.
+            assert_eq!(
+                desktop.model.connection_error.as_deref(),
+                Some("xd is not connected to a host.")
+            );
+            assert!(!desktop.workspace_create_submitting);
+        });
+
+        // WSL refuses: the reason is shown and the form is the user's again.
+        desktop.update(cx, |desktop, cx| {
+            begin(desktop);
+            desktop.resolve_workspace_repo(
+                r"C:\work\site".into(),
+                |_| Err("That folder is in the WSL distribution Debian.".into()),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert_eq!(desktop.workspace_create_repo, r"C:\work\site");
+            assert_eq!(
+                desktop.model.connection_error.as_deref(),
+                Some("That folder is in the WSL distribution Debian.")
+            );
+            assert!(!desktop.workspace_create_submitting);
+        });
+
+        // The form is cancelled while WSL thinks: its answer goes nowhere.
+        desktop.update(cx, |desktop, cx| {
+            begin(desktop);
+            desktop.resolve_workspace_repo(
+                r"C:\work\site".into(),
+                |_| Ok("/mnt/c/work/site".into()),
+                cx,
+            );
+            desktop.cancel_workspace_create(cx);
+        });
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert!(!desktop.creating_workspace);
+            assert_eq!(desktop.workspace_create_repo, "");
+            assert_eq!(desktop.model.connection_error, None);
         });
     }
 

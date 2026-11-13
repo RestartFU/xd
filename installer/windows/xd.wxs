@@ -3,9 +3,9 @@
   The Windows installer, built by scripts/build-windows.ps1 with WiX 3.
 
   It installs for the signed-in user only, under %LOCALAPPDATA%\Programs, so
-  it never asks for an administrator and xd can replace itself with a newer
-  version later. Every component is therefore keyed on a value under HKCU, as
-  Windows Installer requires of files in a user's profile.
+  neither it nor a later version's installer ever asks for an administrator.
+  Every component is therefore keyed on a value under HKCU, as Windows
+  Installer requires of files in a user's profile.
 
   Stable and nightly are separate products with separate folders, shortcuts
   and upgrade codes, the way they keep separate settings and chats, so both
