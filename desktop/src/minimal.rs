@@ -187,12 +187,24 @@ pub(crate) fn project_cards(
     chats: &[ChatSummary],
     started_by_agent: impl Fn(&ChatSummary) -> bool,
 ) -> Vec<ProjectCard> {
+    // Each project's sessions, gathered in one pass over the chats.
+    let mut by_folder = std::collections::HashMap::<&str, Vec<&ChatSummary>>::new();
+    for chat in chats {
+        if AgentCli::from_backend(&chat.backend).is_some() {
+            by_folder
+                .entry(chat.folder.as_str())
+                .or_default()
+                .push(chat);
+        }
+    }
     folders
         .iter()
         .map(|folder| {
-            let project_chats = chats.iter().filter(|chat| {
-                chat.folder == folder.id && AgentCli::from_backend(&chat.backend).is_some()
-            });
+            let project_chats = by_folder
+                .get(folder.id.as_str())
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .copied();
             ProjectCard {
                 id: folder.id.clone(),
                 name: folder.name.clone(),
@@ -222,7 +234,11 @@ pub(crate) struct TreeRow {
 /// The folders in sidebar order: each one followed by what it holds, siblings
 /// in the host's order. A folder whose parent is not listed sits at the top.
 pub(crate) fn folder_tree(folders: &[Folder]) -> Vec<TreeRow> {
-    let listed = |id: &str| folders.iter().any(|folder| folder.id == id);
+    let ids = folders
+        .iter()
+        .map(|folder| folder.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let listed = |id: &str| ids.contains(id);
     let mut children = std::collections::HashMap::<&str, Vec<usize>>::new();
     let mut roots = Vec::new();
     for (index, folder) in folders.iter().enumerate() {

@@ -3103,6 +3103,37 @@ fn terminal_runtime_event(event: SessionEvent) -> (ChatEndpoint, &'static str, V
     (endpoint, name, body)
 }
 
+/// How many delegated agents' reports stay parsed between frames.
+const REPORT_CACHE_SIZE: usize = 64;
+
+thread_local! {
+    /// Reports and latest messages of delegated agents, parsed once for each
+    /// text. Their cards redraw with every pulse while agents work, and a
+    /// report seldom changes between two.
+    static PARSED_REPORTS: RefCell<HashMap<String, Rc<markdown::Document>>> =
+        RefCell::new(HashMap::new());
+    /// How many reports were parsed, which the tests count.
+    static REPORT_PARSES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// A delegated agent's report, parsed as markdown once for each text.
+fn parsed_report(report: &str) -> Rc<markdown::Document> {
+    PARSED_REPORTS.with(|cache| {
+        if let Some(document) = cache.borrow().get(report) {
+            return document.clone();
+        }
+        REPORT_PARSES.with(|parses| parses.set(parses.get() + 1));
+        let document = Rc::new(markdown::parse_assistant(report));
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= REPORT_CACHE_SIZE {
+            // Reports from long ago are cheap to parse again.
+            cache.clear();
+        }
+        cache.insert(report.to_owned(), document.clone());
+        document
+    })
+}
+
 /// The shown terminal's text, colours and links, kept until its screen or the
 /// theme's palette changes. Rebuilding them walks the whole scrollback, so a
 /// redraw for anything else (a blink, a token in the chat) reuses them instead.
@@ -4007,6 +4038,43 @@ struct SidebarContextMenu {
     moving: bool,
 }
 
+/// The sidebar's folders as a tree: their order on screen, where each one's
+/// parent is, and how many each holds. Worked out in time linear in the
+/// folders, once for each tree.
+struct FolderIndex {
+    folders: Rc<[Folder]>,
+    tree: Vec<minimal::TreeRow>,
+    /// Each folder's parent, by its place in `folders`.
+    parent_index: Vec<Option<usize>>,
+    /// How many folders and projects each one directly holds.
+    children: Vec<usize>,
+}
+
+impl FolderIndex {
+    fn new(folders: Rc<[Folder]>) -> Self {
+        let tree = folder_tree(&folders);
+        let place = folders
+            .iter()
+            .enumerate()
+            .map(|(index, folder)| (folder.id.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        let parent_index = folders
+            .iter()
+            .map(|folder| place.get(folder.parent.as_deref()?).copied())
+            .collect::<Vec<_>>();
+        let mut children = vec![0; folders.len()];
+        for parent in parent_index.iter().flatten() {
+            children[*parent] += 1;
+        }
+        Self {
+            folders,
+            tree,
+            parent_index,
+            children,
+        }
+    }
+}
+
 /// A place Move to… offers: a folder, or the top level.
 struct MoveDestination {
     folder: Option<String>,
@@ -4383,6 +4451,9 @@ struct XdDesktop {
     key_stop: Option<SharedString>,
     /// What had the keyboard before the ring took it, to give it back.
     key_stop_return: Option<gpui::WeakFocusHandle>,
+    /// The sidebar's tree of folders, worked out once for each tree the
+    /// host sends rather than on every frame.
+    folder_index: RefCell<Option<Rc<FolderIndex>>>,
     /// The ring moved to a row being scrolled into view, which the frame
     /// before did not draw.
     key_stop_scrolling: bool,
@@ -5285,6 +5356,7 @@ impl XdDesktop {
             stop_focus: cx.focus_handle(),
             key_stop: None,
             key_stop_return: None,
+            folder_index: RefCell::new(None),
             key_stop_scrolling: false,
             settings_scroll: ScrollHandle::new(),
             settings_scroll_key: None,
@@ -17982,21 +18054,16 @@ impl XdDesktop {
         let current_project = self.selected_minimal_project_id();
         let mut drawers = Vec::with_capacity(projects.len());
         let mut session_instance = 0usize;
-        let folders: Rc<[Folder]> = self.model.folders.clone().into();
-        let tree = folder_tree(&folders);
-        let parent_index = folders
-            .iter()
-            .map(|folder| {
-                let parent = folder.parent.as_deref()?;
-                folders.iter().position(|candidate| candidate.id == parent)
-            })
-            .collect::<Vec<_>>();
+        let index = self.folder_index();
+        let folders = index.folders.clone();
+        let tree = &index.tree;
+        let parent_index = &index.parent_index;
         // While finding, a folder whose name matches shows everything in it,
         // and a folder is shown when anything inside it is.
         let mut named = vec![false; folders.len()];
         let mut shown = vec![false; folders.len()];
         if finding {
-            for row in &tree {
+            for row in tree {
                 let folder = &folders[row.index];
                 named[row.index] = folder.name.to_lowercase().contains(&query)
                     || parent_index[row.index].is_some_and(|parent| named[parent]);
@@ -18036,16 +18103,13 @@ impl XdDesktop {
                 if !open {
                     hidden_below = Some(row.depth);
                 }
-                let held = parent_index
-                    .iter()
-                    .filter(|parent| **parent == Some(project_index))
-                    .count();
+                let held = index.children[project_index];
                 // A closed folder hides its projects, so it carries their
                 // signals the way a closed project carries its sessions'.
                 let signals = if open {
                     Vec::new()
                 } else {
-                    tree_descendants(&tree, position)
+                    tree_descendants(tree, position)
                         .filter(|row| !folders[row.index].group)
                         .flat_map(|row| project_sessions(&folders[row.index].id, &active_chats))
                         .map(|session| self.outward_signal(&session))
@@ -20531,7 +20595,7 @@ impl XdDesktop {
                 ("Latest message", view.latest.as_str())
             };
             if !report.is_empty() {
-                let document = markdown::parse_assistant(report);
+                let document = parsed_report(report);
                 let scope = format!("native-subagent-report:{card_id}");
                 details.push(section(report_label.into()).into_any_element());
                 details.push(
@@ -21331,7 +21395,7 @@ impl XdDesktop {
             ("Latest message", view.latest.as_str())
         };
         if !report.is_empty() {
-            let document = markdown::parse_assistant(report);
+            let document = parsed_report(report);
             let scope = format!("agent-view-report:{key}");
             body.push(
                 div()
@@ -23305,6 +23369,19 @@ impl XdDesktop {
                     .when(detail_open, |split| split.child(detail)),
             )
             .into_any_element()
+    }
+
+    /// The sidebar's tree for the folders the model holds now: the same one
+    /// as last frame's while the host has sent no other.
+    fn folder_index(&self) -> Rc<FolderIndex> {
+        if let Some(index) = &*self.folder_index.borrow()
+            && *index.folders == *self.model.folders
+        {
+            return index.clone();
+        }
+        let index = Rc::new(FolderIndex::new(self.model.folders.clone().into()));
+        *self.folder_index.borrow_mut() = Some(index.clone());
+        index
     }
 
     /// Opens the folder the Files pane's list is in.
@@ -36856,6 +36933,68 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         outcomes.insert(local, None::<String>);
         outcomes.insert(remote, Some("remote clone failed".to_owned()));
         assert_eq!(outcomes.len(), 2);
+    }
+
+    #[gpui::test]
+    fn the_sidebar_tree_is_worked_out_once_for_each_tree(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        desktop.update(cx, |desktop, _| {
+            let folder = |id: &str, parent: Option<&str>, group: bool| Folder {
+                id: id.into(),
+                parent: parent.map(Into::into),
+                name: id.into(),
+                owner: None,
+                group,
+            };
+            desktop.model.folders = vec![
+                folder("clients", None, true),
+                folder("acme", Some("clients"), true),
+                folder("atlas", Some("acme"), false),
+                folder("website", Some("clients"), false),
+                folder("loose", None, false),
+            ];
+            let index = desktop.folder_index();
+            assert_eq!(index.parent_index, [None, Some(0), Some(1), Some(0), None]);
+            assert_eq!(index.children, [2, 1, 0, 0, 0]);
+            assert_eq!(
+                index
+                    .tree
+                    .iter()
+                    .map(|row| (row.index, row.depth))
+                    .collect::<Vec<_>>(),
+                [(0, 0), (1, 1), (2, 2), (3, 1), (4, 0)]
+            );
+            // Frames with the same tree share it.
+            assert!(Rc::ptr_eq(&index, &desktop.folder_index()));
+            desktop.model.folders.pop();
+            let changed = desktop.folder_index();
+            assert!(!Rc::ptr_eq(&index, &changed));
+            assert_eq!(changed.tree.len(), 4);
+        });
+        redraw(cx);
+    }
+
+    #[test]
+    fn a_report_is_parsed_once_for_each_text() {
+        let parses = || REPORT_PARSES.with(Cell::get);
+        let before = parses();
+        let first = parsed_report("## Done\n\nThe **palette** loads.");
+        for _ in 0..5 {
+            let again = parsed_report("## Done\n\nThe **palette** loads.");
+            assert!(Rc::ptr_eq(&first, &again));
+        }
+        assert_eq!(parses(), before + 1, "redraws reuse the parsed report");
+        parsed_report("## Done\n\nThe palette loads and saves.");
+        assert_eq!(parses(), before + 2, "a changed report is parsed again");
+        // Both card builders read it through the cache.
+        let source = include_str!("main.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        assert_eq!(
+            production
+                .matches("let document = parsed_report(report);")
+                .count(),
+            2
+        );
     }
 
     #[test]
