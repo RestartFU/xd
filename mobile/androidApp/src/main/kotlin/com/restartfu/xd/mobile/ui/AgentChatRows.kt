@@ -1,5 +1,10 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.runtime.remember
+import androidx.compose.material3.ripple
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -168,16 +173,18 @@ internal fun AgentReportLine(report: AgentReport, chat: ChatSummary?, onOpen: ()
         AgentOutcome.FAILED -> "stopped with an error" to MaterialTheme.colorScheme.error
         AgentOutcome.WAITING -> "is asking a question" to signals.waiting
     }
+    // No padding of its own: the pill's 48dp target already spaces the line.
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Box(Modifier.weight(1f).height(1.dp).background(signals.rule))
+        val press = remember { MutableInteractionSource() }
         Row(
             modifier = Modifier
-                .clip(CircleShape)
-                .clickable(role = Role.Button, onClickLabel = "Open chat", onClick = onOpen)
+                .pillTarget(press, onOpen)
+                .indication(press, ripple())
                 .heightIn(min = 32.dp)
                 .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -197,16 +204,28 @@ internal fun AgentReportLine(report: AgentReport, chat: ChatSummary?, onOpen: ()
     }
 }
 
+/**
+ * A small pill's touch target: a full 48dp, with the pill drawn at its own
+ * size in the middle and the press shown on the pill alone. Follow it with
+ * the pill's border and `indication(press, ripple())`.
+ */
+private fun Modifier.pillTarget(press: MutableInteractionSource, onOpen: () -> Unit): Modifier = this
+    .heightIn(min = 48.dp)
+    .clickable(press, indication = null, role = Role.Button, onClickLabel = "Open chat", onClick = onOpen)
+    .wrapContentHeight()
+    .clip(CircleShape)
+
 /** The one way back from an agent's chat to the chat that started it. */
 @Composable
 internal fun StartedByPill(parent: ChatSummary, onOpen: () -> Unit) {
     val signals = LocalXdSignals.current
-    Box(Modifier.fillMaxWidth().padding(bottom = 8.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        val press = remember { MutableInteractionSource() }
         Row(
             modifier = Modifier
-                .clip(CircleShape)
+                .pillTarget(press, onOpen)
                 .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
-                .clickable(role = Role.Button, onClickLabel = "Open chat", onClick = onOpen)
+                .indication(press, ripple())
                 .heightIn(min = 32.dp)
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
