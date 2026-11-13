@@ -14,12 +14,17 @@ import com.restartfu.xd.terminal.TerminalKeys
 import com.restartfu.xd.terminal.TerminalScreen
 import com.restartfu.xd.terminal.TerminalWire
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 public data class TerminalPane(
     val id: String? = null,
@@ -38,6 +43,11 @@ public data class TerminalPane(
  * screen, so opening attaches to an existing terminal rather than starting a
  * second one. Replay is applied before live output, which is why the emulator
  * is fed from this one place and in order.
+ *
+ * The emulator runs on [emulation], one task at a time and never on the main
+ * thread: a build can print thousands of lines a second, and each one moves
+ * the grid. What it has drawn is copied out for the screen at most once per
+ * [FRAME_MILLIS], however much arrived in between.
  */
 class TerminalViewModel(
     private val session: ChatSession,
@@ -45,22 +55,36 @@ class TerminalViewModel(
     private val closeSessionOnClear: Boolean = false,
     private val client: XdClient? = null,
 ) : ViewModel() {
+    /** Where the emulator runs: off the main thread, one task at a time, so its grid needs no lock. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val emulation: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1)
+
+    /** Only touched on [emulation]. */
     private var screen = TerminalScreen(COLUMNS, ROWS)
+
+    /** Rung when the grid changed; however often, the screen is copied out once for all of it. */
+    private val redraw = Channel<Unit>(Channel.CONFLATED)
 
     // What the phone can show, once it has measured itself. Until then the
     // usual default, which is what a pty is given when nobody says otherwise.
-    private var columns = COLUMNS
-    private var rows = ROWS
+    @Volatile private var columns = COLUMNS
+    @Volatile private var rows = ROWS
     private val _state = MutableStateFlow(TerminalPane())
     val state: StateFlow<TerminalPane> = _state.asStateFlow()
 
     init {
+        viewModelScope.launch(emulation) {
+            for (request in redraw) {
+                publish()
+                delay(FRAME_MILLIS)
+            }
+        }
         client?.let { connected ->
             // Keep interpreting output while another chat or workspace pane is visible.
-            // Every terminal's output reaches every pane, so reading the events
-            // and decoding their bytes is done away from the main thread.
-            viewModelScope.launch {
-                connected.terminalEvents.flowOn(Dispatchers.Default).collect(::onEvent)
+            // Every terminal's output reaches every pane, so reading the events,
+            // decoding their bytes and emulating them is done away from the main thread.
+            viewModelScope.launch(emulation) {
+                connected.terminalEvents.collect(::onEvent)
             }
             viewModelScope.launch {
                 var wasConnected = connected.link.value is Link.Up
@@ -79,25 +103,30 @@ class TerminalViewModel(
             try {
                 val existing = session.terminals().firstOrNull { it.agent == null }
                 val id = existing?.id ?: session.openTerminal(columns, rows, reuse = true)
-                screen = TerminalScreen(columns, rows)
-                // A terminal opened elsewhere already has scrollback. Replay
-                // rebuilds it, resize frames included and in order, so older
-                // output is interpreted at the geometry that produced it.
-                existing?.let { reply ->
-                    TerminalWire.frames(reply).forEach { frame ->
-                        when (frame) {
-                            is ReplayFrame.Output -> screen.write(frame.data)
-                            is ReplayFrame.Resize -> screen.resize(frame.columns, frame.rows)
+                // In one step on the emulator's thread: output that arrives
+                // from here on finds the new screen, after the replay.
+                withContext(emulation) {
+                    val fresh = TerminalScreen(columns, rows)
+                    // A terminal opened elsewhere already has scrollback. Replay
+                    // rebuilds it, resize frames included and in order, so older
+                    // output is interpreted at the geometry that produced it.
+                    existing?.let { reply ->
+                        TerminalWire.frames(reply).forEach { frame ->
+                            when (frame) {
+                                is ReplayFrame.Output -> fresh.write(frame.data)
+                                is ReplayFrame.Resize -> fresh.resize(frame.columns, frame.rows)
+                            }
                         }
+                        fresh.resize(columns, rows)
                     }
-                    screen.resize(columns, rows)
+                    screen = fresh
+                    _state.value = TerminalPane(
+                        id = id,
+                        rows = fresh.snapshot(),
+                        cursorRow = fresh.cursorRow,
+                        cursorColumn = fresh.cursorColumn,
+                    )
                 }
-                _state.value = TerminalPane(
-                    id = id,
-                    rows = screen.snapshot(),
-                    cursorRow = screen.cursorRow,
-                    cursorColumn = screen.cursorColumn,
-                )
                 session.resizeTerminal(id, columns, rows)
             } catch (error: CancellationException) {
                 throw error
@@ -109,19 +138,24 @@ class TerminalViewModel(
         }
     }
 
-    fun onEvent(event: TerminalEvent) {
+    /** Runs on [emulation]. */
+    private fun onEvent(event: TerminalEvent) {
         if (event.chatId != chatId || event.terminalId != _state.value.id) return
         when (event) {
             is TerminalEvent.Output -> {
                 screen.write(event.data)
-                _state.value = _state.value.copy(
-                    rows = screen.snapshot(),
-                    cursorRow = screen.cursorRow,
-                    cursorColumn = screen.cursorColumn,
-                )
+                redraw.trySend(Unit)
             }
-            is TerminalEvent.Closed -> _state.value = _state.value.copy(closed = true)
+            is TerminalEvent.Closed -> _state.update { it.copy(closed = true) }
         }
+    }
+
+    /** Copies the grid out for the screen. Runs on [emulation]. */
+    private fun publish() {
+        val rows = screen.snapshot()
+        val cursorRow = screen.cursorRow
+        val cursorColumn = screen.cursorColumn
+        _state.update { it.copy(rows = rows, cursorRow = cursorRow, cursorColumn = cursorColumn) }
     }
 
     /**
@@ -139,12 +173,10 @@ class TerminalViewModel(
 
         this.columns = width
         this.rows = height
-        screen.resize(width, height)
-        _state.value = _state.value.copy(
-            rows = screen.snapshot(),
-            cursorRow = screen.cursorRow,
-            cursorColumn = screen.cursorColumn,
-        )
+        viewModelScope.launch(emulation) {
+            screen.resize(width, height)
+            publish()
+        }
 
         val id = _state.value.id ?: return
         viewModelScope.launch {
@@ -207,6 +239,8 @@ class TerminalViewModel(
     }
 
     private companion object {
+        /** A display frame at 60 Hz: the screen is copied out no more often than it can be drawn. */
+        const val FRAME_MILLIS = 16L
         const val COLUMNS = 80
         const val ROWS = 24
         // A phone in portrait measures somewhere near 40 columns; the bounds
