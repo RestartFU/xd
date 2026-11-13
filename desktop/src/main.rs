@@ -23657,21 +23657,13 @@ impl XdDesktop {
         }
         if working {
             actions.push(
-                div()
-                    .id("native-cancel-turn")
-                    .size(px(32.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(rgb(colors.surface_high))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.danger_surface)))
-                    .tooltip(pane_tooltip(format!("Stop ({MOD_KEY}+.)"), colors))
-                    .on_click(cx.listener(|this, _, _, cx| this.cancel_turn(cx)))
-                    .child(icon(STOP_ICON, 13.0, colors.text))
-                    .into_any_element(),
+                composer::composer_stop_button(
+                    "native-cancel-turn",
+                    format!("Stop ({MOD_KEY}+.)"),
+                    colors,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.cancel_turn(cx)))
+                .into_any_element(),
             );
         }
         if !working || can_send || answering {

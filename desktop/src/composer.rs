@@ -332,8 +332,43 @@ pub(super) fn context_row(project: String, colors: ThemeColors) -> gpui::Div {
         .child(div().flex_none().px_2().child(project))
 }
 
-/// The round send button at the end of the composer's controls. It is an
-/// icon alone, so `label` names it under the pointer.
+/// The side of the round buttons at the end of the composer's controls.
+const COMPOSER_ROUND_BUTTON: f32 = 32.0;
+
+/// A round button at the end of the composer's controls, Send or Stop. It is
+/// an icon alone, so `label` names it under the pointer.
+fn composer_round_button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .tooltip(pane_tooltip(label, colors))
+        .size(px(COMPOSER_ROUND_BUTTON))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+}
+
+/// Stop, beside Send while a turn runs: the quiet fill, warming to the
+/// danger tint under the pointer.
+pub(super) fn composer_stop_button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    composer_round_button(id, label, colors)
+        .bg(rgb(colors.surface_high))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(colors.danger_surface)))
+        .child(icon(STOP_ICON, 13.0, colors.text))
+}
+
+/// The round send button at the end of the composer's controls.
 pub(super) fn composer_send_button(
     id: &'static str,
     label: &'static str,
@@ -341,16 +376,7 @@ pub(super) fn composer_send_button(
     icon_path: &'static str,
     colors: ThemeColors,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .debug_selector(move || id.into())
-        .tooltip(pane_tooltip(label, colors))
-        .size(px(32.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
+    composer_round_button(id, label, colors)
         .bg(rgb(if enabled {
             colors.accent
         } else {
