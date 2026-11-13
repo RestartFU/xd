@@ -1020,16 +1020,14 @@ impl TerminalStyle {
 /// Below this, text on its own cell background is replaced in the light set.
 const MIN_CELL_CONTRAST: f32 = 3.0;
 
-/// The palette's darkest colour on a light background, white on a dark one.
+/// Whichever of white and the palette's darkest colour reads better on
+/// `background`. One of the two always clears 4:1, whatever the background.
 fn readable_foreground(background: u32, palette: TerminalPalette) -> u32 {
-    let red = (background >> 16) & 0xff;
-    let green = (background >> 8) & 0xff;
-    let blue = background & 0xff;
-    let luminance = red * 299 + green * 587 + blue * 114;
-    if luminance < 128_000 {
+    let dark = palette.ansi(0);
+    if contrast_ratio(0xffffff, background) >= contrast_ratio(dark, background) {
         0xffffff
     } else {
-        palette.ansi(0)
+        dark
     }
 }
 
@@ -1179,6 +1177,29 @@ mod tests {
         assert_eq!(style_of(&dark, "bar").background, Some(0xd7dae0));
         assert_eq!(style_of(&dark, "dir").foreground, Some(0xd7dae0));
         assert_eq!(style_of(&dark, "bad").foreground, Some(0x1f2329));
+    }
+
+    #[test]
+    fn readable_ink_follows_the_real_contrast_on_mid_tones() {
+        // A mid grey and a mid blue sit close to the old luminance cut-off,
+        // where white alone stayed under 3:1.
+        let mut screen = TerminalScreen::new(40, 2);
+        screen.feed(b"\x1b[38;2;20;20;20;48;2;118;118;118mgrey\x1b[0m ");
+        screen.feed(b"\x1b[48;2;90;110;200mblue\x1b[0m");
+        for palette in [TerminalPalette::Light, TerminalPalette::Dark] {
+            let rendered = screen.rendered_with_cursor_in(palette);
+            for text in ["grey", "blue"] {
+                let style = style_of(&rendered, text);
+                let (foreground, background) =
+                    (style.foreground.unwrap(), style.background.unwrap());
+                if palette == TerminalPalette::Light || text == "blue" {
+                    assert!(
+                        contrast_ratio(foreground, background) >= 4.0,
+                        "{palette:?} {text}: {foreground:06x} on {background:06x}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
