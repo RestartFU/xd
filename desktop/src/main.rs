@@ -7753,7 +7753,11 @@ impl XdDesktop {
     fn host_path(&self, typed: &str) -> Result<String, String> {
         #[cfg(target_os = "windows")]
         if self.active_endpoint == ChatEndpoint::Local {
-            return xd_desktop::wsl::linux_path(typed, xd_desktop::wsl::host_distribution);
+            return xd_desktop::wsl::linux_path(
+                typed,
+                xd_desktop::wsl::host_distribution,
+                xd_desktop::wsl::mounted_path,
+            );
         }
         Ok(typed.to_owned())
     }

@@ -42,6 +42,52 @@ fn wsl_host_stdio_round_trip() {
     assert!(body.get("folders").is_some_and(|value| value.is_array()));
 }
 
+/// A repository named the way Explorer names it is looked up by the
+/// distribution itself: which one it is, and where it mounts a drive.
+#[test]
+#[ignore = "requires an initialized WSL distribution with git and tmux"]
+fn wsl_says_where_windows_folders_are() {
+    use xd_desktop::wsl::{host_distribution, linux_path, mounted_path};
+
+    let distribution = host_distribution().expect("WSL names the distribution it runs");
+    if let Ok(selected) = std::env::var("XD_WSL_DISTRIBUTION") {
+        assert_eq!(distribution, selected);
+    }
+    // The Windows folder is certain to exist; how it is mounted is WSL's say.
+    let windows = std::env::var("SystemRoot").expect("Windows sets SystemRoot");
+    let mounted = mounted_path(&windows).expect("WSL mounts the system drive");
+    assert!(
+        mounted.starts_with('/') && !mounted.ends_with('/'),
+        "{mounted}"
+    );
+    assert!(
+        mounted.to_ascii_lowercase().ends_with("/windows"),
+        "{mounted}"
+    );
+    assert_eq!(
+        linux_path(&format!("\"{windows}\\\""), host_distribution, mounted_path).as_deref(),
+        Ok(mounted.as_str())
+    );
+    // A folder inside this distribution, and one in a distribution that is not.
+    assert_eq!(
+        linux_path(
+            &format!(r"\\wsl.localhost\{distribution}\etc"),
+            host_distribution,
+            mounted_path
+        )
+        .as_deref(),
+        Ok("/etc")
+    );
+    assert!(
+        linux_path(
+            r"\\wsl.localhost\xd-no-such-distribution\etc",
+            host_distribution,
+            mounted_path
+        )
+        .is_err()
+    );
+}
+
 #[test]
 #[ignore = "requires an initialized WSL distribution with git and tmux"]
 fn wsl_terminal_streams_input_and_updates_its_geometry() {

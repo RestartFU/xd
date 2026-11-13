@@ -40,13 +40,16 @@ exec "$payload" --version
 /// form, and said only that the directory did not exist. A Linux path, and
 /// anything else, is passed on as typed.
 ///
-/// `host_distribution` tells which distribution xd's host runs in, and is
-/// only asked when the answer matters. A folder named in another one is
-/// refused: the same path there is a different folder, or none, and agents
-/// would be set to work on the wrong files.
+/// WSL is asked only when the answer matters. `host_distribution` tells which
+/// distribution xd's host runs in: a folder named in another one is refused,
+/// because the same path there is a different folder, or none, and agents
+/// would be set to work on the wrong files. `mounted` tells where that
+/// distribution mounts a Windows path: under `/mnt` unless its
+/// `/etc/wsl.conf` says elsewhere, so it is not for xd to guess.
 pub fn linux_path(
     typed: &str,
     host_distribution: impl FnOnce() -> Option<String>,
+    mounted: impl FnOnce(&str) -> Option<String>,
 ) -> Result<String, String> {
     let trimmed = typed.trim();
     let path = trimmed
@@ -79,15 +82,24 @@ pub fn linux_path(
         }
     }
 
-    // X:\... is mounted at /mnt/x in every distribution.
+    // X:\... is a Windows drive, mounted somewhere inside the distribution.
     let mut characters = slashed.chars();
     if let (Some(drive), Some(':')) = (characters.next(), characters.next())
         && drive.is_ascii_alphabetic()
     {
         let rest = characters.as_str();
         if rest.is_empty() || rest.starts_with('/') {
-            let rest = rest.trim_end_matches('/');
-            return Ok(format!("/mnt/{}{rest}", drive.to_ascii_lowercase()));
+            let windows = format!("{drive}:{}", rest.replace('/', "\\"));
+            // A bare drive is its root, not the directory last used on it.
+            let windows = if rest.is_empty() {
+                format!("{windows}\\")
+            } else {
+                windows
+            };
+            return mounted(&windows).ok_or_else(|| {
+                "xd could not ask WSL where that Windows folder is. Enter its Linux path instead, such as /mnt/c/Users/you/project."
+                    .to_owned()
+            });
         }
     }
     Ok(typed.to_owned())
@@ -113,6 +125,22 @@ pub fn host_distribution() -> Option<String> {
         }
     }
     name.clone()
+}
+
+/// Where the distribution xd's host runs in mounts a Windows path, asked of
+/// that distribution's own `wslpath`.
+#[cfg(windows)]
+pub fn mounted_path(windows: &str) -> Option<String> {
+    let output = command(r#"wslpath -u "$1""#, &[windows.to_owned()])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    // `/mnt/c/` for a drive's root: the folder without the slash.
+    let path = match path.trim_end_matches('/') {
+        "" => path,
+        trimmed => trimmed.to_owned(),
+    };
+    (output.status.success() && path.starts_with('/')).then_some(path)
 }
 
 pub(crate) fn executable() -> PathBuf {
@@ -203,6 +231,21 @@ pub(crate) fn version_command(path: &std::path::Path) -> std::process::Command {
 mod tests {
     use super::*;
 
+    /// How a distribution with the default settings mounts a Windows path.
+    fn under_mnt(windows: &str) -> Option<String> {
+        let (drive, rest) = windows.split_once(':')?;
+        let rest = rest.replace('\\', "/");
+        Some(format!(
+            "/mnt/{}{}",
+            drive.to_ascii_lowercase(),
+            rest.trim_end_matches('/')
+        ))
+    }
+
+    fn in_ubuntu(typed: &str) -> Result<String, String> {
+        linux_path(typed, || Some("Ubuntu".into()), under_mnt)
+    }
+
     #[test]
     fn windows_names_for_a_folder_become_the_path_linux_knows_it_by() {
         for (typed, linux) in [
@@ -216,7 +259,7 @@ mod tests {
             ("//wsl.localhost/Ubuntu/home/me", "/home/me"),
             (r"\\wsl.localhost\Ubuntu", "/"),
             (r"\\wsl.localhost\Ubuntu\", "/"),
-            // On a Windows drive, which WSL mounts under /mnt.
+            // On a Windows drive, where the distribution mounts it.
             (r"C:\Users\me\project", "/mnt/c/Users/me/project"),
             ("d:/work/site/", "/mnt/d/work/site"),
             (r"C:\", "/mnt/c"),
@@ -228,34 +271,49 @@ mod tests {
             ),
             (r"  C:\Users\me  ", "/mnt/c/Users/me"),
         ] {
-            assert_eq!(
-                linux_path(typed, || Some("Ubuntu".into())).as_deref(),
-                Ok(linux),
-                "{typed}"
-            );
+            assert_eq!(in_ubuntu(typed).as_deref(), Ok(linux), "{typed}");
         }
+    }
+
+    #[test]
+    fn a_drive_is_wherever_the_distribution_mounts_it() {
+        // WSL is asked with the path as Windows writes it, whatever was typed.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let custom_root = |windows: &str| {
+            asked.borrow_mut().push(windows.to_owned());
+            // `[automount] root = /` in /etc/wsl.conf.
+            Some("/c/Users/me/project".to_owned())
+        };
+        assert_eq!(
+            linux_path(
+                "\"c:/Users/me/project/\"",
+                || panic!("a drive needs no distribution"),
+                custom_root
+            )
+            .as_deref(),
+            Ok("/c/Users/me/project")
+        );
+        assert_eq!(*asked.borrow(), [r"c:\Users\me\project\"]);
+        // A bare drive is asked about as its root.
+        let root = |windows: &str| (windows == r"D:\").then(|| "/mnt/d".to_owned());
+        assert_eq!(linux_path("D:", || None, root).as_deref(), Ok("/mnt/d"));
+        // No answer is no licence to guess /mnt.
+        let error = linux_path(r"C:\work", || None, |_| None).unwrap_err();
+        assert!(error.contains("/mnt/c/Users/you/project"), "{error}");
     }
 
     #[test]
     fn a_folder_in_another_distribution_is_refused_not_looked_up_in_this_one() {
         // /home/me/project in Debian is not /home/me/project in Ubuntu.
-        let error = linux_path(r"\\wsl.localhost\Debian\home\me\project", || {
-            Some("Ubuntu".into())
-        })
-        .unwrap_err();
+        let error = in_ubuntu(r"\\wsl.localhost\Debian\home\me\project").unwrap_err();
         assert!(
             error.contains("Debian") && error.contains("Ubuntu"),
             "{error}"
         );
         assert!(error.contains("XD_WSL_DISTRIBUTION"), "{error}");
         // Not knowing where xd runs is no licence to guess.
-        let error = linux_path(r"\\wsl$\Ubuntu\home\me", || None).unwrap_err();
+        let error = linux_path(r"\\wsl$\Ubuntu\home\me", || None, under_mnt).unwrap_err();
         assert!(error.contains("/home/you/project"), "{error}");
-        // A drive is the same folder from every distribution.
-        assert_eq!(
-            linux_path(r"C:\work", || panic!("a drive needs no distribution")).as_deref(),
-            Ok("/mnt/c/work")
-        );
     }
 
     #[test]
@@ -275,7 +333,12 @@ mod tests {
             r"\\server\share\project",
         ] {
             assert_eq!(
-                linux_path(typed, || panic!("a Linux path needs no distribution")).as_deref(),
+                linux_path(
+                    typed,
+                    || panic!("a Linux path needs no distribution"),
+                    |_| panic!("a Linux path is mounted nowhere")
+                )
+                .as_deref(),
                 Ok(typed),
                 "{typed}"
             );
