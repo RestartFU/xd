@@ -1619,6 +1619,10 @@ enum MarkerEdge {
 const SELECTION_MARKER: f32 = 2.0;
 /// How far the marker stays from its item's corners.
 const SELECTION_MARKER_INSET: f32 = 8.0;
+/// How far left of a sidebar row its marker stands, in the gutter its list
+/// keeps: clear of the chevron that folds a session's agents, which sits
+/// at the row's leading edge.
+const SIDEBAR_MARKER_GUTTER: f32 = 6.0;
 
 /// What says an item is the selected one, beside its quiet fill: a 2px bar
 /// in the selection colour, which stands at 3:1 or more against every
@@ -18963,8 +18967,10 @@ impl XdDesktop {
                 .gap(px(8.0))
                 .rounded(px(RADIUS_TAB))
                 .when(emphasized, |row| {
-                    row.bg(rgb(colors.selected_surface))
-                        .child(selection_marker(MarkerEdge::Leading, colors))
+                    row.bg(rgb(colors.selected_surface)).child(
+                        selection_marker(MarkerEdge::Leading, colors)
+                            .left(px(-SIDEBAR_MARKER_GUTTER)),
+                    )
                 })
                 .cursor_pointer()
                 .hover(|style| {
@@ -19215,8 +19221,10 @@ impl XdDesktop {
                 .gap(px(8.0))
                 .rounded(px(RADIUS_TAB))
                 .when(selected, |row| {
-                    row.bg(rgb(colors.selected_surface))
-                        .child(selection_marker(MarkerEdge::Leading, colors))
+                    row.bg(rgb(colors.selected_surface)).child(
+                        selection_marker(MarkerEdge::Leading, colors)
+                            .left(px(-SIDEBAR_MARKER_GUTTER)),
+                    )
                 })
                 .cursor_pointer()
                 .hover(|style| {
