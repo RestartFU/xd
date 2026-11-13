@@ -246,18 +246,20 @@ private fun MinimalMobileWorkspace(
     var chatSelections by rememberSaveable(stateSaver = ChatSelectionsSaver) { mutableStateOf(emptyMap()) }
     var hiddenChatIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var mobileDestination by rememberSaveable { mutableStateOf(MobileDestination.PROJECTS) }
-    var createChatIn by remember { mutableStateOf<MinimalSession?>(null) }
+    // These four are saved by id, so a rotation does not close a form or a question half answered.
+    var createChatInId by rememberSaveable { mutableStateOf<String?>(null) }
     // Saved by id, so a chat rename survives rotating the phone.
     var renameChatId by rememberSaveable { mutableStateOf<String?>(null) }
     val renameChat = tree.chats.firstOrNull { it.id == renameChatId }
-    var deleteChat by remember { mutableStateOf<ChatSummary?>(null) }
+    var deleteChatId by rememberSaveable { mutableStateOf<String?>(null) }
+    val deleteChat = tree.chats.firstOrNull { it.id == deleteChatId }
     val deleting by model.deletingChat.collectAsStateWithLifecycle()
     val renamingChats by model.renamingChat.collectAsStateWithLifecycle()
     // Saved by id, so a rename in progress survives rotating the phone.
     var renamingSessionId by rememberSaveable { mutableStateOf<String?>(null) }
-    var deletingSession by remember { mutableStateOf<MinimalSession?>(null) }
+    var deletingSessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var renamingProjectId by rememberSaveable { mutableStateOf<String?>(null) }
-    var deletingProject by remember { mutableStateOf<MinimalProject?>(null) }
+    var deletingProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     val settledNotice by model.settledNotice.collectAsStateWithLifecycle()
     // Held here, not in the projects list, so Back from a chat returns to the same place in it.
     val projectsList = rememberLazyListState()
@@ -267,7 +269,7 @@ private fun MinimalMobileWorkspace(
         unsettle = { model.unsettleSession(it.id) },
         setAutoSettle = { session, enabled -> model.setSessionAutoSettle(session.id, enabled) },
         rename = { renamingSessionId = it.id },
-        delete = { deletingSession = it },
+        delete = { deletingSessionId = it.id },
     )
     // Worked out once per tree, not on every recomposition of the app.
     val projects = remember(tree) { tree.minimalProjects() }
@@ -325,7 +327,7 @@ private fun MinimalMobileWorkspace(
     val addChat: (MinimalSession) -> Unit = { session ->
         if (session.terminalChatId.startsWith("session:")) {
             model.stopOpeningStartingSessions()
-            createChatIn = session
+            createChatInId = session.id
         } else {
             scope.launch { snackbar.showSnackbar("Update the connected host to add chats inside a session.") }
         }
@@ -415,7 +417,7 @@ private fun MinimalMobileWorkspace(
                                 closeTab = closeTab,
                                 addTab = { addChat(activeSession) },
                                 renameChat = { renameChatId = it.id },
-                                deleteChat = { deleteChat = it },
+                                deleteChat = { deleteChatId = it.id },
                                 session = activeSession,
                                 actions = sessionActions,
                                 agents = agents,
@@ -450,7 +452,7 @@ private fun MinimalMobileWorkspace(
                                         add = { addChat(activeSession) },
                                         close = closeTab,
                                         rename = { renameChatId = it.id },
-                                        delete = { deleteChat = it },
+                                        delete = { deleteChatId = it.id },
                                         settleSession = { sessionActions.settle(activeSession) }
                                             .takeIf { sessionActions.settlement && !activeSession.settled },
                                         renameSession = { sessionActions.rename(activeSession) },
@@ -494,7 +496,7 @@ private fun MinimalMobileWorkspace(
                         newSessionAboveBar = showBottomNavigation,
                         actions = sessionActions,
                         onRenameProject = { renamingProjectId = it.id },
-                        onDeleteProject = { deletingProject = it },
+                        onDeleteProject = { deletingProjectId = it.id },
                         open = { _, session ->
                             model.stopOpeningStartingSessions()
                             activeSessionId = session.id
@@ -573,15 +575,15 @@ private fun MinimalMobileWorkspace(
             },
         )
     }
-    deletingSession?.let { session ->
+    sessions.firstOrNull { it.id == deletingSessionId }?.let { session ->
         ConfirmDeleteDialog(
             title = "Delete session?",
             busy = !session.grouped && deleting,
             text = "This permanently removes ${session.title} and all its chats from xd. Project files are kept.",
             confirm = "Delete session",
-            onDismiss = { deletingSession = null },
+            onDismiss = { deletingSessionId = null },
             onConfirm = {
-                deletingSession = null
+                deletingSessionId = null
                 if (session.id == activeSessionId) mobileDestination = MobileDestination.PROJECTS
                 if (session.grouped) model.deleteSession(session.id) else model.deleteChat(session.id)
             },
@@ -600,14 +602,14 @@ private fun MinimalMobileWorkspace(
             },
         )
     }
-    deletingProject?.let { project ->
+    projects.firstOrNull { it.id == deletingProjectId }?.let { project ->
         ConfirmDeleteDialog(
             title = "Delete project?",
             text = "This removes ${project.name} and all its sessions from xd. Its files will be moved to the workspace trash.",
             confirm = "Delete project",
-            onDismiss = { deletingProject = null },
+            onDismiss = { deletingProjectId = null },
             onConfirm = {
-                deletingProject = null
+                deletingProjectId = null
                 if (activeProject?.id == project.id) mobileDestination = MobileDestination.PROJECTS
                 model.deleteProject(project.id)
             },
@@ -630,7 +632,7 @@ private fun MinimalMobileWorkspace(
     }
     deleteChat?.let { chat ->
         AlertDialog(
-            onDismissRequest = { if (!deleting) deleteChat = null },
+            onDismissRequest = { if (!deleting) deleteChatId = null },
             title = { Text("Delete chat?") },
             text = {
                 Text(
@@ -639,14 +641,14 @@ private fun MinimalMobileWorkspace(
                 )
             },
             confirmButton = {
-                TextButton(onClick = { model.deleteChat(chat.id); deleteChat = null }, enabled = !deleting) {
+                TextButton(onClick = { model.deleteChat(chat.id); deleteChatId = null }, enabled = !deleting) {
                     Text("Delete chat", color = MaterialTheme.colorScheme.error)
                 }
             },
-            dismissButton = { TextButton(onClick = { deleteChat = null }, enabled = !deleting) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { deleteChatId = null }, enabled = !deleting) { Text("Cancel") } },
         )
     }
-    createChatIn?.let { session ->
+    sessions.firstOrNull { it.id == createChatInId }?.let { session ->
         LaunchedEffect(session.id) { model.loadCreationCatalog() }
         NewSessionDialog(
             projectName = session.title,
@@ -655,9 +657,9 @@ private fun MinimalMobileWorkspace(
             catalogError = model.hostCatalogError.collectAsStateWithLifecycle().value,
             retryCatalog = model::loadCreationCatalog,
             chatTab = true,
-            onDismiss = { createChatIn = null },
+            onDismiss = { createChatInId = null },
             onCreate = { request ->
-                createChatIn = null
+                createChatInId = null
                 activeProject?.let { project ->
                     model.createDirectSession(
                         project.id, request.title, request.agent, session.id,
