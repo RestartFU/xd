@@ -13,7 +13,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -145,7 +144,7 @@ internal fun QuotaAsk(
     var typed by rememberSaveable(quota?.percent) { mutableStateOf(ChatQuota.nextPercent(quota?.percent).toString()) }
     val chosen = ChatQuota.typedPercent(typed)
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    val small = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, lineHeight = 19.sp)
+    val small = MaterialTheme.typography.bodyMedium
     AskFrame {
         AskHeader(QUOTA_REACHED_TITLE)
         if (quota != null) {
@@ -154,7 +153,6 @@ internal fun QuotaAsk(
                     "${quota.usedLabel}%",
                     modifier = Modifier.alignByBaseline(),
                     style = MaterialTheme.typography.titleLarge.copy(
-                        fontSize = 22.sp,
                         fontWeight = FontWeight.SemiBold,
                         fontFeatureSettings = "tnum",
                     ),

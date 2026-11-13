@@ -114,7 +114,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
@@ -2588,7 +2587,7 @@ private fun AgentPill(agent: DirectAgent) {
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         BackendIcon(agent.wire, size = 15.dp)
-        Text(agent.wire, fontFamily = XdMonoFamily, fontSize = 11.sp)
+        Text(agent.wire, fontFamily = XdMonoFamily, style = MaterialTheme.typography.labelSmall)
     }
 }
 

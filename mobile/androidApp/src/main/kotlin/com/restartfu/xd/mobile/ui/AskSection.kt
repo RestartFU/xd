@@ -63,7 +63,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.restartfu.xd.mobile.R
 import com.restartfu.xd.model.Ask
 import com.restartfu.xd.model.AskBlock
@@ -167,10 +166,7 @@ internal fun AskHeader(title: String, counter: String? = null) {
                 heading()
                 liveRegion = LiveRegionMode.Polite
             },
-            style = MaterialTheme.typography.titleMedium.copy(
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = (-0.08).sp,
-            ),
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
         )
         counter?.let {
             Text(
@@ -215,13 +211,13 @@ internal fun AskOptionRow(number: Int, label: String, enabled: Boolean, onPick: 
             "$number",
             // The answer is what a screen reader reads; the number is only a mark.
             modifier = Modifier.widthIn(min = 10.dp).clearAndSetSemantics {},
-            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, fontFeatureSettings = "tnum"),
+            style = MaterialTheme.typography.bodyMedium.copy(fontFeatureSettings = "tnum"),
             color = faint,
         )
         Text(
             label,
             modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 21.sp),
+            style = MaterialTheme.typography.bodyLarge,
             color = if (enabled) MaterialTheme.colorScheme.onSurface else faint,
         )
         Icon(
@@ -354,7 +350,7 @@ internal fun ApprovalAsk(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             fontFamily = XdMonoFamily,
-            style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5.sp, lineHeight = 19.sp),
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface,
         )
         request.reason?.let {
@@ -362,7 +358,7 @@ internal fun ApprovalAsk(
                 it,
                 modifier = Modifier.padding(horizontal = AskInset),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, lineHeight = 19.sp),
+                style = MaterialTheme.typography.bodyMedium,
             )
         }
         request.patch?.let { patch -> Box(Modifier.padding(horizontal = AskInset)) { DiffText(patch) } }
