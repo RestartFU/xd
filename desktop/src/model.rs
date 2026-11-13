@@ -899,8 +899,8 @@ pub struct AppModel {
 /// [`AppModel::sessions`], by the chat's id: built once for each list the
 /// host sends, so the sidebar's rows find a chat without scanning them all
 /// for every row. A place found is checked against the list before it is
-/// used, so a list changed some other way is never misread: it is looked up
-/// by a scan, and built again.
+/// used, and a chat the index does not know is looked for by a scan, so a
+/// list changed in place is never misread.
 #[derive(Debug, Default)]
 pub struct ChatLookup(std::cell::RefCell<Option<ChatIndex>>);
 
@@ -1188,11 +1188,13 @@ impl AppModel {
 
     pub fn session_for_chat(&self, chat_id: &str) -> Option<&SessionSummary> {
         let (_, place) = self.lookup.places(&self.chats, &self.sessions, chat_id);
-        let session = self.sessions.get(place?)?;
-        if session.chats.iter().any(|id| id == chat_id) {
+        if let Some(session) = place.and_then(|place| self.sessions.get(place))
+            && session.chats.iter().any(|id| id == chat_id)
+        {
             return Some(session);
         }
-        // The list changed in place since the index was built.
+        // Not where the index says, or not in it: the list may have changed in
+        // place since the index was built, so a miss is never trusted.
         self.sessions
             .iter()
             .find(|session| session.chats.iter().any(|id| id == chat_id))
@@ -1201,11 +1203,13 @@ impl AppModel {
     /// The summary of the chat `chat_id`, found through [`ChatLookup`].
     pub fn chat(&self, chat_id: &str) -> Option<&ChatSummary> {
         let (place, _) = self.lookup.places(&self.chats, &self.sessions, chat_id);
-        let chat = self.chats.get(place?)?;
-        if chat.id == chat_id {
+        if let Some(chat) = place.and_then(|place| self.chats.get(place))
+            && chat.id == chat_id
+        {
             return Some(chat);
         }
-        // The list changed in place since the index was built.
+        // Not where the index says, or not in it: the list may have changed in
+        // place since the index was built, so a miss is never trusted.
         self.chats.iter().find(|chat| chat.id == chat_id)
     }
 
@@ -4625,6 +4629,22 @@ mod background_output_tests {
             model.chat("lead").map(|chat| chat.id.as_str()),
             Some("lead")
         );
+        // A chat replaced where it lies, under a new id, is found though the
+        // index never saw it; so is a chat moved into another session.
+        model.chats[1].id = "renamed".into();
+        assert_eq!(
+            model.chat("renamed").map(|chat| chat.id.as_str()),
+            Some("renamed")
+        );
+        model.sessions[1].chats.push("tab".into());
+        model.sessions[0].chats.retain(|id| id != "tab");
+        assert_eq!(
+            model
+                .session_for_chat("tab")
+                .map(|session| session.id.as_str()),
+            Some("solo")
+        );
+        model.chats[1].id = "tab".into();
         // A new list is indexed afresh.
         model.chats = vec![model.chats[1].clone()];
         assert!(model.chat("lead").is_none());
