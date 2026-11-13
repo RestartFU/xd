@@ -152,6 +152,14 @@ pub(crate) const CONTROL_HEIGHT: f32 = 30.0;
 /// The height of a control set into a toolbar or a row, and the side of an
 /// icon button.
 pub(crate) const CONTROL_HEIGHT_COMPACT: f32 = 28.0;
+/// The height of a row picked from a list: a menu's rows, the landing
+/// page's sessions, a panel's list of links. A menu row grows for a second
+/// line.
+pub(crate) const ROW_HEIGHT: f32 = 32.0;
+/// The height of a row in a dense list, such as the Files pane's.
+pub(crate) const ROW_HEIGHT_COMPACT: f32 = 28.0;
+/// The height of a dialog's text field.
+pub(crate) const DIALOG_FIELD_HEIGHT: f32 = 36.0;
 /// The least a pointer target measures on either side. The glyph inside may
 /// be smaller.
 pub(crate) const HIT_MIN: f32 = 24.0;

@@ -1910,7 +1910,7 @@ impl XdDesktop {
         });
         let filtered = self.usage_filtered().then(|| {
             div()
-                .h(px(32.0))
+                .h(px(ROW_HEIGHT))
                 .flex_none()
                 .pl_3()
                 .pr_1()

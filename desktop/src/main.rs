@@ -122,10 +122,10 @@ use input::{
     Suspend as TerminalSuspend, Tab, Undo, Up, WordLeft, WordRight, terminal_paste_bytes,
 };
 use metrics::{
-    CONTROL_HEIGHT, CONTROL_HEIGHT_COMPACT, DIALOG_RADIUS, HIT_MIN, RADIUS_COMPOSER,
-    RADIUS_CONTROL, RADIUS_PANEL, RADIUS_TAB, REM, TEXT_BODY, TEXT_CAPTION, TEXT_CONTROL,
-    TEXT_HEADING, TEXT_LABEL, TEXT_MONO, TEXT_PROSE_H2, TEXT_TITLE, hit_px, logical, px, text_px,
-    window_px,
+    CONTROL_HEIGHT, CONTROL_HEIGHT_COMPACT, DIALOG_FIELD_HEIGHT, DIALOG_RADIUS, HIT_MIN,
+    RADIUS_COMPOSER, RADIUS_CONTROL, RADIUS_PANEL, RADIUS_TAB, REM, ROW_HEIGHT, ROW_HEIGHT_COMPACT,
+    TEXT_BODY, TEXT_CAPTION, TEXT_CONTROL, TEXT_HEADING, TEXT_LABEL, TEXT_MONO, TEXT_PROSE_H2,
+    TEXT_TITLE, hit_px, logical, px, text_px, window_px,
 };
 use minimal::{
     AgentCli, MinimalRoute, ProjectCard, SessionCard, SettledCard, age_label, folder_tree,
@@ -227,8 +227,11 @@ const CATALOG_MAX_WIDTH: f32 = 480.0;
 const CATALOG_UPDATE_LABEL_MIN_WIDTH: f32 = 256.0;
 /// Width the catalog always leaves for the session beside it.
 const CATALOG_SESSION_MIN_WIDTH: f32 = 384.0;
-/// Every session row shares one height and baseline.
+/// Every row of the sidebar shares one height and baseline: sessions,
+/// projects, folders and the Settled shelf's header.
 const CARD_HEIGHT: f32 = 30.0;
+/// A row of the agents tray: an agent's name over what it is doing.
+const TRAY_ROW_HEIGHT: f32 = 36.0;
 /// How far the sidebar indents a project or folder for each folder it is in.
 const CATALOG_INDENT: f32 = 12.0;
 /// How far a session another session's agent started sits in from that one.
@@ -1554,7 +1557,7 @@ fn menu_row(id: impl Into<gpui::ElementId>, colors: ThemeColors) -> gpui::Statef
     div()
         .id(id)
         .w_full()
-        .min_h(px(32.0))
+        .min_h(px(ROW_HEIGHT))
         .px(px(10.0))
         .flex_none()
         .flex()
@@ -1640,7 +1643,7 @@ fn menu_under(corner: gpui::Corner, control_height: f32, menu: impl IntoElement)
 /// scrolls.
 fn menu_under_max_height(control_height: f32, most: f32) -> f32 {
     let window = FRAME_VIEWPORT.with(Cell::get).1;
-    (window / 2.0 - control_height - 2.0 * MENU_GAP).clamp(3.0 * 32.0, most)
+    (window / 2.0 - control_height - 2.0 * MENU_GAP).clamp(3.0 * ROW_HEIGHT, most)
 }
 
 /// [`menu_popover`] at a point in the window, such as where the pointer was.
@@ -14800,7 +14803,7 @@ impl XdDesktop {
                 div()
                     .id("native-background-tasks")
                     .w_full()
-                    .min_h(px(28.0))
+                    .min_h(px(ROW_HEIGHT_COMPACT))
                     .px(px(2.0))
                     .flex()
                     .items_center()
@@ -16633,7 +16636,7 @@ impl XdDesktop {
                 div()
                     .id(("pull-request-panel-row", index))
                     .debug_selector(move || format!("pull-request-panel-row-{index}"))
-                    .h(px(32.0))
+                    .h(px(ROW_HEIGHT))
                     .pl_2()
                     .pr_1()
                     .flex()
@@ -17478,7 +17481,7 @@ impl XdDesktop {
                     .left(px(-10.0))
                     .top_0()
                     .bottom_0()
-                    .w(px(24.0))
+                    .w(px(HIT_MIN))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -17768,7 +17771,7 @@ impl XdDesktop {
                 .child(
                     div()
                         .id("minimal-settled-header")
-                        .h(px(30.0))
+                        .h(px(CARD_HEIGHT))
                         .w_full()
                         .flex_none()
                         .pl(px(4.0))
@@ -17895,7 +17898,7 @@ impl XdDesktop {
         let header = div()
             .id(("catalog-folder-header", index))
             .relative()
-            .h(px(30.0))
+            .h(px(CARD_HEIGHT))
             .w_full()
             .pl(px(4.0))
             .pr(px(2.0))
@@ -18396,7 +18399,7 @@ impl XdDesktop {
                 .id(("minimal-session-group-header", project_index))
                 .relative()
                 .children(key_menu_mark)
-                .h(px(30.0))
+                .h(px(CARD_HEIGHT))
                 .w_full()
                 .pl(px(4.0))
                 .pr(px(2.0))
@@ -18734,7 +18737,7 @@ impl XdDesktop {
                                 div()
                                     .id("catalog-drop-end")
                                     .flex_1()
-                                    .min_h(px(24.0))
+                                    .min_h(px(HIT_MIN))
                                     .can_drop(move |value, _, _| {
                                         value.downcast_ref::<ProjectDragPayload>().is_some_and(
                                             |drag| {
@@ -19213,7 +19216,7 @@ impl XdDesktop {
             "home",
             div()
                 .id(("home-session", index))
-                .h(px(32.0))
+                .h(px(ROW_HEIGHT))
                 .px_2()
                 .rounded(px(RADIUS_CONTROL))
                 .flex()
@@ -19844,7 +19847,7 @@ impl XdDesktop {
             div()
                 .id(("agents-tray-worker", index))
                 .w_full()
-                .h(px(36.0))
+                .h(px(TRAY_ROW_HEIGHT))
                 .px(px(12.0))
                 .flex()
                 .items_center()
@@ -19898,7 +19901,7 @@ impl XdDesktop {
             div()
                 .id(("agents-tray-row", index))
                 .w_full()
-                .h(px(36.0))
+                .h(px(TRAY_ROW_HEIGHT))
                 .px(px(12.0))
                 .flex()
                 .items_center()
@@ -23304,7 +23307,7 @@ impl XdDesktop {
         };
         let note = |text: &'static str| {
             div()
-                .h(px(28.0))
+                .h(px(ROW_HEIGHT_COMPACT))
                 .mx(px(6.0))
                 .px_2()
                 .flex_none()
@@ -23332,7 +23335,7 @@ impl XdDesktop {
                         div()
                             .id(("native-file", index))
                             .w_full()
-                            .h(px(28.0))
+                            .h(px(ROW_HEIGHT_COMPACT))
                             .px_2()
                             .flex()
                             .items_center()
@@ -26178,7 +26181,7 @@ impl XdDesktop {
     ) -> gpui::Div {
         div()
             .relative()
-            .h(px(36.0))
+            .h(px(DIALOG_FIELD_HEIGHT))
             .px_3()
             .flex_none()
             .flex()

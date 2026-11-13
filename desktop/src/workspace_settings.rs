@@ -440,7 +440,7 @@ fn settings_step_button(
     run: Option<impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static>,
 ) -> gpui::Stateful<gpui::Div> {
     let button = ui_button_when(run.is_some(), id, ButtonKind::Secondary, colors)
-        .w(px(30.0))
+        .w(px(CONTROL_HEIGHT))
         .px_0()
         .child(label);
     match run {
