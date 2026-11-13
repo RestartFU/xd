@@ -9,6 +9,8 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::metrics::{TEXT_CONTROL, TEXT_LABEL, TEXT_MONO};
+
 use xd_desktop::markdown::{self, CodeKind, CodeSpan};
 
 use crate::{
@@ -118,6 +120,16 @@ impl EventEmitter<EditorEvent> for FileEditor {}
 
 impl FileEditor {
     const LINE_HEIGHT: f32 = 20.0;
+
+    /// A message is written in the size of a control's words, a file in the
+    /// monospace size.
+    fn font_size(&self) -> f32 {
+        if self.composer {
+            TEXT_CONTROL
+        } else {
+            TEXT_MONO
+        }
+    }
 
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
@@ -921,7 +933,7 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> PrepaintState {
         let input = self.input.read(cx);
-        let font_size = px(13.);
+        let font_size = px(input.font_size());
         let style = window.text_style();
         let text_width = input.text_width(bounds.size.width);
         let ranges = if input.composer {
@@ -981,7 +993,7 @@ impl Element for EditorElement {
                 let runs = vec![text_run(number.len(), &style, input.colors.faint)];
                 let layout = window
                     .text_system()
-                    .shape_line(number, px(12.0), &runs, None);
+                    .shape_line(number, px(TEXT_LABEL), &runs, None);
                 PaintedLineNumber {
                     origin: point(
                         bounds.left() + gutter_width - px(10.0) - layout.width,
@@ -1357,7 +1369,13 @@ fn visual_line_ranges(
         let runs = text_runs(input, range, style, false);
         let wrapped = window
             .text_system()
-            .shape_text(text, px(13.), &runs, Some(width.max(px(1.))), None)
+            .shape_text(
+                text,
+                px(input.font_size()),
+                &runs,
+                Some(width.max(px(1.))),
+                None,
+            )
             .expect("shape message editor line");
         let offsets = wrapped
             .first()

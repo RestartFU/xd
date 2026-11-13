@@ -5,6 +5,10 @@
 //! open chat shows them as they are.
 
 use super::*;
+use crate::metrics::{
+    CONTROL_HEIGHT, CONTROL_HEIGHT_COMPACT, RADIUS_COMPOSER, RADIUS_PANEL, TEXT_BODY, TEXT_CONTROL,
+    TEXT_DISPLAY, TEXT_HEADING, TEXT_LABEL,
+};
 use image_preview::DraftOwner;
 
 /// The shell's border and padding, and the editor's own padding, on each side.
@@ -87,7 +91,7 @@ pub(super) fn ask_header(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(15.0))
+                .text_size(px(TEXT_HEADING))
                 .line_height(px(22.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(colors.text))
@@ -101,7 +105,7 @@ pub(super) fn ask_header(
                     .flex()
                     .items_center()
                     .debug_selector(|| "composer-ask-counter".into())
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_LABEL))
                     .text_color(rgb(colors.faint))
                     .child(counter),
             )
@@ -130,8 +134,8 @@ pub(super) fn ask_choice(
         .flex()
         .items_start()
         .gap(px(14.0))
-        .rounded(px(8.0))
-        .text_size(px(14.0))
+        .rounded(px(RADIUS_PANEL))
+        .text_size(px(TEXT_BODY))
         .line_height(px(20.0))
         // Waiting on the host, a choice reads as one that cannot be picked.
         .text_color(rgb(if enabled {
@@ -150,7 +154,7 @@ pub(super) fn ask_choice(
             div()
                 .flex_none()
                 .w(px(10.0))
-                .text_size(px(12.0))
+                .text_size(px(TEXT_LABEL))
                 .text_color(rgb(colors.faint))
                 .child((index + 1).to_string()),
         )
@@ -166,7 +170,7 @@ pub(super) fn ask_choice(
                     text.child(
                         div()
                             .min_w_0()
-                            .text_size(px(13.0))
+                            .text_size(px(TEXT_CONTROL))
                             .text_color(rgb(if enabled {
                                 colors.muted
                             } else {
@@ -231,14 +235,14 @@ pub(super) fn chat_heading(
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .text_size(px(12.0))
+                .text_size(px(TEXT_LABEL))
                 .text_color(rgb(colors.muted))
                 .child(workspace_icon(avatar, 14.0, colors.muted))
                 .child(project),
         )
         .child(
             div()
-                .text_size(px(28.0))
+                .text_size(px(TEXT_DISPLAY))
                 .debug_selector(|| "empty-chat-heading".into())
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(colors.text))
@@ -246,7 +250,7 @@ pub(super) fn chat_heading(
         )
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(px(TEXT_CONTROL))
                 .debug_selector(|| "empty-chat-description".into())
                 .text_color(rgb(colors.muted))
                 .child(description),
@@ -268,7 +272,7 @@ pub(super) fn context_chip(
     } else {
         div()
             .id(id)
-            .h(px(30.0))
+            .h(px(CONTROL_HEIGHT))
             .px_2()
             .flex_none()
             .flex()
@@ -292,7 +296,7 @@ pub(super) fn context_row(project: String, colors: ThemeColors) -> gpui::Div {
         .flex_wrap()
         .items_center()
         .gap_2()
-        .text_size(px(12.0))
+        .text_size(px(TEXT_LABEL))
         .text_color(rgb(colors.muted))
         .child(div().px_2().child(project))
 }
@@ -347,10 +351,10 @@ pub(super) fn composer_option(
     colors: ThemeColors,
 ) -> gpui::Stateful<gpui::Div> {
     ui_button(id, ButtonKind::Ghost, colors)
-        .h(px(28.0))
+        .h(px(CONTROL_HEIGHT_COMPACT))
         .px(px(8.0))
         .gap(px(5.0))
-        .text_size(px(12.0))
+        .text_size(px(TEXT_LABEL))
         .max_w(px(max_width))
         .min_w_0()
         .children(leading)
@@ -406,7 +410,7 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .gap_1()
-            .rounded(px(16.0))
+            .rounded(px(RADIUS_COMPOSER))
             .border_1()
             .border_color(rgb(if focus.is_focused(window) {
                 colors.selected_border
@@ -463,7 +467,7 @@ impl XdDesktop {
                     .max_h(px(200.0))
                     .px(px(8.0))
                     .py_1()
-                    .text_size(px(14.0))
+                    .text_size(px(TEXT_BODY))
                     .text_color(rgb(colors.text))
                     // A message past the tenth line scrolls inside the
                     // composer; without this it paints over the chat.

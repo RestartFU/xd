@@ -1,4 +1,8 @@
 use super::*;
+use crate::metrics::{
+    CONTROL_HEIGHT, RADIUS_CONTROL, RADIUS_PANEL, RADIUS_TAB, TEXT_CAPTION, TEXT_CONTROL,
+    TEXT_DISPLAY, TEXT_LABEL, TEXT_TITLE,
+};
 
 /// Room for a theme name and the chosen dot.
 const THEME_CARD_MIN_WIDTH: f32 = 136.0;
@@ -332,7 +336,7 @@ fn settings_row(
                 .min_w_0()
                 .child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(px(TEXT_CONTROL))
                         .text_color(rgb(colors.text))
                         .child(title.into()),
                 )
@@ -340,7 +344,7 @@ fn settings_row(
                     body.child(
                         div()
                             .mt(px(3.0))
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_LABEL))
                             .line_height(px(17.0))
                             .text_color(rgb(colors.muted))
                             .child(description),
@@ -371,7 +375,7 @@ fn settings_card(rows: Vec<SettingRow>, colors: ThemeColors) -> gpui::Div {
         .w_full()
         .flex()
         .flex_col()
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_PANEL))
         .overflow_hidden()
         .border_1()
         .border_color(crate::glass::edge(colors))
@@ -392,7 +396,7 @@ fn settings_group_label(label: impl Into<SharedString>, colors: ThemeColors) -> 
         .mt(px(28.0))
         .mb(px(8.0))
         .px(px(2.0))
-        .text_size(px(12.0))
+        .text_size(px(TEXT_LABEL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(colors.muted))
         .child(label.into())
@@ -468,7 +472,7 @@ fn settings_stepper(
                 .w(px(width))
                 .flex()
                 .justify_center()
-                .text_size(px(13.0))
+                .text_size(px(TEXT_CONTROL))
                 .text_color(rgb(colors.text))
                 .child(value),
         )
@@ -1032,7 +1036,7 @@ impl XdDesktop {
                 let card = div()
                     .id(("minimal-theme-choice", index))
                     .w(px(card_width))
-                    .rounded(px(10.0))
+                    .rounded(px(RADIUS_PANEL))
                     .overflow_hidden()
                     .border_1()
                     .border_color(rgb(if selected {
@@ -1058,7 +1062,7 @@ impl XdDesktop {
                                 div()
                                     .w(px(28.0))
                                     .h_full()
-                                    .rounded(px(5.0))
+                                    .rounded(px(RADIUS_CONTROL))
                                     .bg(crate::glass::pane(swatch)),
                             )
                             .child(
@@ -1095,7 +1099,7 @@ impl XdDesktop {
                                             .mt_2()
                                             .w_full()
                                             .h(px(22.0))
-                                            .rounded(px(7.0))
+                                            .rounded(px(RADIUS_TAB))
                                             .border_1()
                                             .border_color(crate::glass::edge(swatch))
                                             .bg(crate::glass::composer(swatch)),
@@ -1109,7 +1113,7 @@ impl XdDesktop {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .text_size(px(13.0))
+                            .text_size(px(TEXT_CONTROL))
                             .text_color(rgb(colors.text))
                             .child(theme.label())
                             .when(selected, |label| {
@@ -1133,13 +1137,15 @@ impl XdDesktop {
                 .flex_col()
                 .gap(px(12.0))
                 .child(
-                    div().child(div().text_size(px(13.0)).child("Theme")).child(
-                        div()
-                            .mt(px(3.0))
-                            .text_size(px(12.0))
-                            .text_color(rgb(colors.muted))
-                            .child("Dark or Light. Both are frosted glass."),
-                    ),
+                    div()
+                        .child(div().text_size(px(TEXT_CONTROL)).child("Theme"))
+                        .child(
+                            div()
+                                .mt(px(3.0))
+                                .text_size(px(TEXT_LABEL))
+                                .text_color(rgb(colors.muted))
+                                .child("Dark or Light. Both are frosted glass."),
+                        ),
                 )
                 // Side by side when there is room, else one to a row, so the
                 // cards never clip their names.
@@ -1276,11 +1282,11 @@ impl XdDesktop {
                 .gap(px(12.0))
                 .child(
                     div()
-                        .child(div().text_size(px(13.0)).child("Build from source"))
+                        .child(div().text_size(px(TEXT_CONTROL)).child("Build from source"))
                         .child(
                             div()
                                 .mt(px(3.0))
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_LABEL))
                                 .line_height(px(17.0))
                                 .text_color(rgb(colors.muted))
                                 .child(description),
@@ -1296,15 +1302,15 @@ impl XdDesktop {
                                 .relative()
                                 .flex_1()
                                 .min_w_0()
-                                .h(px(32.0))
+                                .h(px(CONTROL_HEIGHT))
                                 .px_3()
                                 .flex()
                                 .items_center()
-                                .rounded(px(8.0))
+                                .rounded(px(RADIUS_CONTROL))
                                 .border_1()
                                 .border_color(self.field_frame(&self.source_build_input, cx))
                                 .bg(rgb(colors.surface))
-                                .text_size(px(12.5))
+                                .text_size(px(TEXT_CONTROL))
                                 .child(self.source_build_input.clone())
                                 .child(keys.mark(
                                     KeyLayer::Overlay,
@@ -1370,7 +1376,7 @@ impl XdDesktop {
                 .when_some(self.source_build_panel.message.clone(), |body, message| {
                     body.child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_LABEL))
                             .line_height(px(17.0))
                             .text_color(rgb(colors.muted))
                             .child(message),
@@ -1383,10 +1389,10 @@ impl XdDesktop {
                             .max_h(px(180.0))
                             .overflow_y_scroll()
                             .p_3()
-                            .rounded(px(8.0))
+                            .rounded(px(RADIUS_PANEL))
                             .bg(rgb(colors.surface))
                             .font_family(MONO)
-                            .text_size(px(11.5))
+                            .text_size(px(TEXT_LABEL))
                             .line_height(px(17.0))
                             .child(
                                 self.source_build_panel
@@ -1430,11 +1436,11 @@ impl XdDesktop {
                             .flex_none()
                             .px(px(7.0))
                             .py(px(2.0))
-                            .rounded(px(5.0))
+                            .rounded(px(RADIUS_CONTROL))
                             .border_1()
                             .border_color(rgb(colors.border))
                             .font_family(MONO)
-                            .text_size(px(11.5))
+                            .text_size(px(TEXT_LABEL))
                             .text_color(rgb(colors.muted))
                             .child(keys),
                     ),
@@ -1587,7 +1593,7 @@ impl XdDesktop {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_LABEL))
                         .text_color(rgb(if self.model.connected {
                             colors.working
                         } else {
@@ -1853,7 +1859,7 @@ impl XdDesktop {
                         .child(icon(CHEVRON_LEFT_ICON, 14.0, colors.muted))
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(px(TEXT_CONTROL))
                                 .text_color(rgb(colors.muted))
                                 .child("Back"),
                         ),
@@ -1862,7 +1868,7 @@ impl XdDesktop {
                     div()
                         .mt(px(14.0))
                         .px(px(6.0))
-                        .text_size(px(20.0))
+                        .text_size(px(TEXT_TITLE))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(colors.text))
                         .child("Settings"),
@@ -1871,13 +1877,13 @@ impl XdDesktop {
                     div()
                         .relative()
                         .mt(px(14.0))
-                        .h(px(32.0))
+                        .h(px(CONTROL_HEIGHT))
                         .px(px(9.0))
                         .flex_none()
                         .flex()
                         .items_center()
                         .gap_2()
-                        .rounded(px(8.0))
+                        .rounded(px(RADIUS_CONTROL))
                         .child(self.key_targets.mark(
                             KeyLayer::Overlay,
                             KeyStop::Field(self.settings_search_input.read(cx).focus_handle(cx)),
@@ -1893,7 +1899,7 @@ impl XdDesktop {
                             },
                         )
                         .bg(rgb(colors.surface))
-                        .text_size(px(12.5))
+                        .text_size(px(TEXT_CONTROL))
                         .child(icon(SEARCH_ICON, 13.0, colors.faint))
                         .child(
                             div()
@@ -1937,8 +1943,8 @@ impl XdDesktop {
                             .flex()
                             .items_center()
                             .gap(px(10.0))
-                            .rounded(px(7.0))
-                            .text_size(px(13.0))
+                            .rounded(px(RADIUS_TAB))
+                            .text_size(px(TEXT_CONTROL))
                             .font_weight(if selected {
                                 FontWeight::MEDIUM
                             } else {
@@ -1967,7 +1973,7 @@ impl XdDesktop {
                                 item.child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(11.5))
+                                        .text_size(px(TEXT_CAPTION))
                                         .text_color(rgb(colors.faint))
                                         .child(count.to_string()),
                                 )
@@ -1986,7 +1992,7 @@ impl XdDesktop {
         if searching {
             page = page.child(
                 div()
-                    .text_size(px(28.0))
+                    .text_size(px(TEXT_DISPLAY))
                     .font_weight(FontWeight::MEDIUM)
                     .child("Search"),
             );
@@ -1994,7 +2000,7 @@ impl XdDesktop {
                 page = page.child(
                     div()
                         .mt(px(10.0))
-                        .text_size(px(13.0))
+                        .text_size(px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child(format!(
                             "No settings match \u{201c}{}\u{201d}.",
@@ -2014,7 +2020,7 @@ impl XdDesktop {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .text_size(px(13.0))
+                            .text_size(px(TEXT_CONTROL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(colors.muted))
                             .cursor_pointer()
@@ -2032,14 +2038,14 @@ impl XdDesktop {
             page = page
                 .child(
                     div()
-                        .text_size(px(28.0))
+                        .text_size(px(TEXT_DISPLAY))
                         .font_weight(FontWeight::MEDIUM)
                         .child(entry.name),
                 )
                 .child(
                     div()
                         .mt(px(6.0))
-                        .text_size(px(13.0))
+                        .text_size(px(TEXT_CONTROL))
                         .line_height(px(20.0))
                         .text_color(rgb(colors.muted))
                         .child(entry.summary),
@@ -2049,7 +2055,7 @@ impl XdDesktop {
                 page = page.child(
                     div()
                         .mt(px(28.0))
-                        .text_size(px(13.0))
+                        .text_size(px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child("This host does not offer these settings."),
                 );

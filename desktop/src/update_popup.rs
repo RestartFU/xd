@@ -1,4 +1,5 @@
 use super::*;
+use crate::metrics::{TEXT_CONTROL, TEXT_LABEL};
 
 /// One thing the popup says will change, or has just changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -330,7 +331,7 @@ impl XdDesktop {
                         .child(
                             div()
                                 .min_w_0()
-                                .text_size(px(13.0))
+                                .text_size(px(TEXT_CONTROL))
                                 .text_color(rgb(colors.text))
                                 .child(row.name),
                         )
@@ -339,7 +340,7 @@ impl XdDesktop {
                                 div()
                                     .flex_none()
                                     .font_family(MONO)
-                                    .text_size(px(12.0))
+                                    .text_size(px(TEXT_LABEL))
                                     .text_color(rgb(colors.muted))
                                     .child(change),
                             )
@@ -348,7 +349,7 @@ impl XdDesktop {
                 .when_some(row.status, |body, status| {
                     body.child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_LABEL))
                             .line_height(px(18.0))
                             .text_color(rgb(if row.failed {
                                 colors.danger
@@ -369,7 +370,7 @@ impl XdDesktop {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(12.5))
+                            .text_size(px(TEXT_LABEL))
                             .line_height(px(19.0))
                             .text_color(rgb(colors.muted))
                             .child(panel.update_summary()),
@@ -387,7 +388,7 @@ impl XdDesktop {
                                     body.child(
                                         div()
                                             .mt_3()
-                                            .text_size(px(12.0))
+                                            .text_size(px(TEXT_LABEL))
                                             .line_height(px(18.0))
                                             .text_color(rgb(colors.danger))
                                             .child(error),

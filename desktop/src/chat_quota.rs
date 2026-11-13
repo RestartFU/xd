@@ -2,6 +2,9 @@
 //! chat may use, and what a chat's composer shows once it has used its share.
 
 use super::*;
+use crate::metrics::{
+    CONTROL_HEIGHT, RADIUS_CONTROL, TEXT_CAPTION, TEXT_CONTROL, TEXT_LABEL, TEXT_TITLE,
+};
 use xd_desktop::model::{parse_quota_percent, quota_points};
 
 /// What the open chat's quota card holds between frames.
@@ -151,7 +154,7 @@ impl XdDesktop {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(22.0))
+                        .text_size(px(TEXT_TITLE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!("{}%", quota_points(quota.used))),
                 )
@@ -189,7 +192,7 @@ impl XdDesktop {
                 .flex()
                 .flex_col()
                 .gap(px(12.0))
-                .text_size(px(13.0))
+                .text_size(px(TEXT_CONTROL))
                 .text_color(rgb(colors.text))
                 .child(
                     composer::ask_header("This chat reached its quota", None, colors)
@@ -207,13 +210,13 @@ impl XdDesktop {
                             div()
                                 .id("chat-quota-input")
                                 .w(px(70.0))
-                                .h(px(30.0))
+                                .h(px(CONTROL_HEIGHT))
                                 .px(px(10.0))
                                 .flex()
                                 .items_center()
                                 .gap_1()
                                 .cursor_text()
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_CONTROL))
                                 .border_1()
                                 .border_color(rgb(field_border))
                                 .bg(rgb(colors.background))
@@ -259,7 +262,7 @@ impl XdDesktop {
                     card.child(
                         div()
                             .debug_selector(|| "chat-quota-invalid".into())
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_LABEL))
                             .text_color(rgb(colors.danger))
                             .child("Enter a whole number from 1 to 100."),
                     )
@@ -284,7 +287,7 @@ impl XdDesktop {
                 .debug_selector(|| "native-quota-meter".into())
                 .flex_none()
                 .mr_2()
-                .text_size(px(11.0))
+                .text_size(px(TEXT_CAPTION))
                 .text_color(rgb(tone))
                 .tooltip(move |_, cx| {
                     cx.new(|_| PaneTooltip {

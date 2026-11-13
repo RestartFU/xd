@@ -2,6 +2,10 @@
 //! order turns use them in, signing in without a terminal, and the notice a
 //! chat shows when it moves to another account.
 use super::*;
+use crate::metrics::{
+    CONTROL_HEIGHT, RADIUS_CONTROL, RADIUS_PANEL, TEXT_CAPTION, TEXT_CONTROL, TEXT_LABEL,
+    TEXT_TITLE,
+};
 use serde_json::json;
 
 pub(super) const CHEVRON_UP_ICON: &str = "icons/chevron-up.svg";
@@ -121,7 +125,7 @@ pub(super) fn render_switch_notice(sentence: &str, colors: ThemeColors) -> gpui:
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(13.0))
+                .text_size(px(TEXT_CONTROL))
                 .line_height(px(20.0))
                 .text_color(rgb(colors.muted))
                 .child(sentence.to_owned()),
@@ -363,7 +367,7 @@ fn account_meters(account: &AuthAccount, colors: ThemeColors) -> Option<gpui::Di
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_CAPTION))
                     .child(
                         div()
                             .w(px(30.0))
@@ -474,7 +478,7 @@ impl XdDesktop {
             .gap(px(22.0))
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_LABEL))
                     .line_height(px(18.0))
                     .text_color(rgb(colors.muted))
                     .child(ACCOUNTS_EXPLANATION),
@@ -482,7 +486,7 @@ impl XdDesktop {
             .when(loading, |body| {
                 body.child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_LABEL))
                         .text_color(rgb(colors.faint))
                         .child("Checking sign-ins…"),
                 )
@@ -492,7 +496,7 @@ impl XdDesktop {
                     div()
                         .flex()
                         .gap(px(8.0))
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_LABEL))
                         .line_height(px(18.0))
                         .text_color(rgb(colors.danger))
                         .child(div().mt(px(2.0)).child(icon(
@@ -572,7 +576,7 @@ impl XdDesktop {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(13.0))
+                            .text_size(px(TEXT_CONTROL))
                             .font_weight(FontWeight::MEDIUM)
                             .child(name.clone()),
                     )
@@ -616,7 +620,7 @@ impl XdDesktop {
             )
             .child(
                 div()
-                    .rounded(px(8.0))
+                    .rounded(px(RADIUS_PANEL))
                     .border_1()
                     .border_color(rgb(colors.border))
                     .bg(rgb(colors.surface))
@@ -629,7 +633,7 @@ impl XdDesktop {
             .when_some(provider.notice.clone(), |block, notice| {
                 block.child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_LABEL))
                         .line_height(px(18.0))
                         .text_color(rgb(colors.muted))
                         .child(notice),
@@ -654,13 +658,13 @@ impl XdDesktop {
                                 .min_w_0()
                                 .child(
                                     div()
-                                        .text_size(px(13.0))
+                                        .text_size(px(TEXT_CONTROL))
                                         .child("Switch accounts when one runs out"),
                                 )
                                 .child(
                                     div()
                                         .mt(px(4.0))
-                                        .text_size(px(12.0))
+                                        .text_size(px(TEXT_LABEL))
                                         .line_height(px(18.0))
                                         .text_color(rgb(colors.muted))
                                         .child(if id == "codex" {
@@ -915,7 +919,7 @@ impl XdDesktop {
                     div()
                         .w(px(12.0))
                         .flex_none()
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_LABEL))
                         .text_color(rgb(colors.faint))
                         .child((index + 1).to_string()),
                 )
@@ -936,14 +940,14 @@ impl XdDesktop {
                             .child(
                                 truncating_label(account.label.clone())
                                     .min_w_0()
-                                    .text_size(px(13.0))
+                                    .text_size(px(TEXT_CONTROL))
                                     .text_color(rgb(colors.text)),
                             )
                             .when(!facts.is_empty(), |line| {
                                 line.child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(12.0))
+                                        .text_size(px(TEXT_LABEL))
                                         .text_color(rgb(colors.faint))
                                         .child(facts.join(" · ")),
                                 )
@@ -955,7 +959,7 @@ impl XdDesktop {
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_LABEL))
                             .line_height(px(17.0))
                             .when(dot, |line| {
                                 line.child(
@@ -1019,14 +1023,14 @@ impl XdDesktop {
                     .gap(px(4.0))
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(px(TEXT_CONTROL))
                             .font_weight(FontWeight::MEDIUM)
                             .child(title),
                     )
                     .when(account.pending, |heading| {
                         heading.child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_LABEL))
                                 .line_height(px(18.0))
                                 .text_color(rgb(colors.muted))
                                 .child(
@@ -1039,7 +1043,7 @@ impl XdDesktop {
             .when(waiting, |steps| {
                 steps.child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_LABEL))
                         .text_color(rgb(colors.faint))
                         .child(account.detail.clone().unwrap_or_else(|| "Starting sign-in…".into())),
                 )
@@ -1055,12 +1059,12 @@ impl XdDesktop {
                             div()
                                 .px(px(14.0))
                                 .py(px(8.0))
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_CONTROL))
                                 .border_1()
                                 .border_color(rgb(colors.border))
                                 .bg(rgb(colors.surface))
                                 .font_family(MONO)
-                                .text_size(px(20.0))
+                                .text_size(px(TEXT_TITLE))
                                 .line_height(px(26.0))
                                 .text_color(rgb(colors.text))
                                 .child(code),
@@ -1099,7 +1103,7 @@ impl XdDesktop {
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_LABEL))
                                 .text_color(rgb(colors.faint))
                                 .child(if account.device_code.is_some() {
                                     "Enter the code on that page."
@@ -1121,11 +1125,11 @@ impl XdDesktop {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .h(px(34.0))
+                                .h(px(CONTROL_HEIGHT))
                                 .px(px(10.0))
                                 .flex()
                                 .items_center()
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_CONTROL))
                                 .border_1()
                                 .border_color(self.field_frame(&self.auth_input, cx))
                                 .bg(rgb(colors.surface))

@@ -1,4 +1,8 @@
 use super::*;
+use crate::metrics::{
+    CONTROL_HEIGHT, HIT_MIN, RADIUS_COMPOSER, RADIUS_PANEL, RADIUS_TAB, TEXT_BODY, TEXT_CAPTION,
+    TEXT_CONTROL, TEXT_LABEL,
+};
 use serde_json::json;
 
 /// Between the heading and the composer, as an empty chat has them.
@@ -319,7 +323,7 @@ impl XdDesktop {
                                     .child(label)
                                     .child(
                                         div()
-                                            .text_size(px(11.0))
+                                            .text_size(px(TEXT_CAPTION))
                                             .text_color(rgb(colors.muted))
                                             .child(if new {
                                                 "Create an isolated branch and checkout"
@@ -504,7 +508,7 @@ impl XdDesktop {
                                                 colors,
                                             )
                                             .flex_1()
-                                            .h(px(30.0))
+                                            .h(px(CONTROL_HEIGHT))
                                             .text_color(rgb(colors.text))
                                             .when(agent == self.minimal_new_session_agent, |tab| {
                                                 tab.bg(rgb(colors.surface_high))
@@ -790,7 +794,7 @@ impl XdDesktop {
                 div()
                     .size(px(64.0))
                     .flex_none()
-                    .rounded(px(8.0))
+                    .rounded(px(RADIUS_PANEL))
                     .overflow_hidden()
                     .bg(rgb(colors.surface_high))
                     .children(thumbnail.map(|image| {
@@ -809,7 +813,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(icon(FILE_ICON, 13.0, colors.muted))
                     .child(attachment.name.clone())
@@ -850,12 +854,12 @@ impl XdDesktop {
                                 .max_w(px(600.0))
                                 .px(px(14.0))
                                 .py(px(9.0))
-                                .rounded(px(18.0))
+                                .rounded(px(RADIUS_COMPOSER))
                                 .bg(rgb(colors.surface_high))
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .text_size(px(14.0))
+                                .text_size(px(TEXT_BODY))
                                 .text_color(rgb(colors.text))
                                 .when(!prompt.trim().is_empty(), |bubble| bubble.child(prompt))
                                 .children(files),
@@ -869,7 +873,7 @@ impl XdDesktop {
                     .items_center()
                     .gap(px(8.0))
                     .px(px(2.0))
-                    .text_size(px(12.5))
+                    .text_size(px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(
                         div()
@@ -1854,7 +1858,7 @@ impl XdDesktop {
         let agent = self.minimal_new_session_agent;
         let chip = || {
             div()
-                .h(px(22.0))
+                .h(px(HIT_MIN))
                 .px(px(8.0))
                 .min_w_0()
                 .flex_shrink()
@@ -1863,7 +1867,7 @@ impl XdDesktop {
                 .gap(px(6.0))
                 .rounded_full()
                 .bg(rgb(colors.surface_high))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_LABEL))
                 .text_color(rgb(colors.muted))
         };
         div()
@@ -1881,7 +1885,7 @@ impl XdDesktop {
                 truncating_label(title)
                     .min_w_0()
                     .flex_shrink()
-                    .text_size(px(14.0))
+                    .text_size(px(TEXT_BODY))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(colors.text)),
             )
@@ -2008,7 +2012,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .rounded(px(7.0))
+                    .rounded(px(RADIUS_TAB))
                     .when(selected, |row| row.bg(rgb(colors.selected_surface)))
                     .cursor_pointer()
                     .when(!selected, |row| {
@@ -2032,14 +2036,14 @@ impl XdDesktop {
                     .child(
                         truncating_label(label)
                             .flex_1()
-                            .text_size(px(13.0))
+                            .text_size(px(TEXT_CONTROL))
                             .text_color(rgb(if selected { colors.text } else { colors.muted }))
                             .when(selected, |title| title.font_weight(FontWeight::MEDIUM)),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_CAPTION))
                             .text_color(rgb(colors.faint))
                             .child("Draft"),
                     )
@@ -2084,7 +2088,7 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_TAB))
             .when(selected, |row| row.bg(rgb(colors.selected_surface)))
             .cursor_pointer()
             .when(!selected, |row| {
@@ -2104,7 +2108,7 @@ impl XdDesktop {
             .child(
                 truncating_label(label)
                     .flex_1()
-                    .text_size(px(13.0))
+                    .text_size(px(TEXT_CONTROL))
                     .text_color(rgb(if selected { colors.text } else { colors.muted }))
                     .when(selected, |title| title.font_weight(FontWeight::MEDIUM)),
             )
@@ -2114,7 +2118,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_CAPTION))
                     .text_color(rgb(colors.working))
                     .child(
                         div()
