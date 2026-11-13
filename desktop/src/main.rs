@@ -242,6 +242,8 @@ const SESSION_NEST_INDENT: f32 = 10.0;
 const UNDO_LIFETIME: Duration = Duration::from_secs(30);
 /// The height of a line of a message's prose.
 const MESSAGE_LINE_HEIGHT: f32 = 23.0;
+/// The room a message's Copy takes under it.
+const COPY_ROW_HEIGHT: f32 = 26.0;
 
 /// How long after a change on the Settings page a failed save is still
 /// that change's: the background writer reports within a moment.
@@ -21788,7 +21790,7 @@ impl XdDesktop {
                     copy.invisible()
                         .group_hover("native-message", |style| style.visible())
                 })
-                .mt(px(2.0))
+                .mt(px(COPY_ROW_HEIGHT - HIT_MIN))
                 .px(px(6.0))
                 .h(hit_px(HIT_MIN))
                 .flex()
@@ -23660,6 +23662,8 @@ impl XdDesktop {
                     format!("Stop ({MOD_KEY}+.)"),
                     colors,
                 )
+                // A short window keeps it to the options' compact height.
+                .when(short, |button| button.size(px(CONTROL_HEIGHT_COMPACT)))
                 .on_click(cx.listener(|this, _, _, cx| this.cancel_turn(cx)))
                 .into_any_element(),
             );
@@ -23677,6 +23681,7 @@ impl XdDesktop {
                     if shows_resume { PLAY_ICON } else { SEND_ICON },
                     colors,
                 )
+                .when(short, |button| button.size(px(CONTROL_HEIGHT_COMPACT)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if can_send {
                         this.send_composer(cx)
@@ -23872,7 +23877,7 @@ impl XdDesktop {
             })
             .child(composer::composer_room(self.composer_room.clone()))
             .child(composer.mb(px(if short {
-                6.0
+                4.0
             } else if context_row.is_some() {
                 8.0
             } else {
@@ -34988,6 +34993,31 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         redraw(cx);
         assert_eq!(dots(), 0);
         set_reduce_motion(false);
+    }
+
+    #[gpui::test]
+    fn the_terminal_cursor_holds_steady_with_motion_reduced(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        let notes = Rc::new(Cell::new(0));
+        cx.update(|_, cx| {
+            let counted = notes.clone();
+            cx.observe(&desktop, move |_, _| counted.set(counted.get() + 1))
+                .detach();
+        });
+        let blink = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.update(cx, |desktop, cx| {
+                // A focused terminal's cursor was drawn in place.
+                desktop.terminal_cursor_drawn = true;
+                desktop.blink_tick(cx);
+            });
+            cx.run_until_parked();
+        };
+        set_reduce_motion(true);
+        blink(&desktop, cx);
+        assert_eq!(notes.get(), 0, "a steady cursor asks for no redraw");
+        set_reduce_motion(false);
+        blink(&desktop, cx);
+        assert_eq!(notes.get(), 1, "a blinking one redraws its window");
     }
 
     #[gpui::test]

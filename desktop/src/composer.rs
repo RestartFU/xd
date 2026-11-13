@@ -61,8 +61,8 @@ pub(super) fn ask_max_height(window: f32) -> f32 {
 }
 
 /// The least of the conversation a docked ask leaves in sight: two lines of
-/// the last message.
-pub(super) const TRANSCRIPT_MIN_HEIGHT: f32 = 2.0 * MESSAGE_LINE_HEIGHT;
+/// the last message, over the Copy under it.
+pub(super) const TRANSCRIPT_MIN_HEIGHT: f32 = 2.0 * MESSAGE_LINE_HEIGHT + COPY_ROW_HEIGHT;
 
 /// What differs between the composers. Everything else is drawn the same.
 pub(super) struct ComposerParts {
@@ -98,7 +98,7 @@ pub(super) fn ask_header(
         // Centred on the title's first line, however many lines it takes.
         .child(
             div()
-                .h(px(if short_window() { 20.0 } else { 22.0 }))
+                .h(px(if short_window() { 19.0 } else { 22.0 }))
                 .flex()
                 .items_center()
                 .child(waiting_ring(colors)),
@@ -108,7 +108,7 @@ pub(super) fn ask_header(
                 .flex_1()
                 .min_w_0()
                 .text_size(text_px(TEXT_HEADING))
-                .line_height(px(if short_window() { 20.0 } else { 22.0 }))
+                .line_height(px(if short_window() { 19.0 } else { 22.0 }))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(colors.text))
                 .child(title.into()),
@@ -131,7 +131,7 @@ pub(super) fn ask_header(
 /// The room between the parts of a docked ask: less in a short window,
 /// where its question and first answer must fit above the editor.
 pub(super) fn ask_gap() -> f32 {
-    if short_window() { 8.0 } else { 12.0 }
+    if short_window() { 6.0 } else { 12.0 }
 }
 
 /// One of a question's choices in the docked ask: a faint number, which is
@@ -154,7 +154,7 @@ pub(super) fn ask_choice(
         .px(px(10.0))
         // In a short window a row is a line and a little, so the first
         // answer fits whole under the question.
-        .py(px(if short_window() { 5.0 } else { 9.0 }))
+        .py(px(if short_window() { 4.0 } else { 9.0 }))
         .flex()
         .items_start()
         .gap(px(14.0))
@@ -500,8 +500,8 @@ impl XdDesktop {
             })
             .w_full()
             .max_w(width)
-            .pt(px(if compact { 6.0 } else { 10.0 }))
-            .pb(px(if compact { 6.0 } else { 8.0 }))
+            .pt(px(if compact { 4.0 } else { 10.0 }))
+            .pb(px(if compact { 4.0 } else { 8.0 }))
             .px(px(8.0))
             .flex()
             .flex_col()
@@ -541,9 +541,9 @@ impl XdDesktop {
                             // Choice rows reach into its padding; patches and
                             // commands scroll inside their own boxes.
                             .overflow_x_hidden()
-                            .pt(px(if compact { 2.0 } else { 6.0 }))
+                            .pt(px(if compact { 0.0 } else { 6.0 }))
                             .px(px(10.0))
-                            .pb(px(if compact { 4.0 } else { 6.0 }))
+                            .pb(px(if compact { 2.0 } else { 6.0 }))
                             // Its buttons and fields keep the focus they take,
                             // rather than the box handing it to the editor.
                             .on_click(|_, _, cx| cx.stop_propagation())
@@ -563,7 +563,7 @@ impl XdDesktop {
                 div()
                     .id(editor_id)
                     .debug_selector(move || editor_id.into())
-                    .min_h(px(if compact { 32.0 } else { 48.0 }))
+                    .min_h(px(if compact { 28.0 } else { 48.0 }))
                     .max_h(px(200.0))
                     .px(px(8.0))
                     .py_1()
