@@ -320,7 +320,11 @@ mod native {
             if process != 0
                 && process != search.own_process
                 && unsafe { IsWindowVisible(window) }.as_bool()
-                && executable_of(process).is_some_and(|path| path == search.executable)
+                && executable_of(process).is_some_and(|path| {
+                    // Windows file names ignore case.
+                    path.as_os_str()
+                        .eq_ignore_ascii_case(search.executable.as_os_str())
+                })
             {
                 search.found = Some(window);
                 return false.into();
@@ -421,12 +425,14 @@ mod native {
         }));
     }
 
-    /// Mark the run as started. Returns the notice to show if the last one
-    /// never finished.
-    pub fn begin_run() -> Option<String> {
+    /// Mark the run as started, and report the last one if it never finished.
+    pub fn begin_run() -> Option<recovery::FailedRun> {
         let directory = state_directory();
         let log = recovery::crash_log(&directory);
-        let reported = log.metadata().and_then(|metadata| metadata.modified()).ok();
+        let reported = log
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
         if !recovery::begin(&directory) {
             return None;
         }
@@ -436,7 +442,9 @@ mod native {
                 .elapsed()
                 .is_ok_and(|age| age < std::time::Duration::from_secs(7 * 24 * 60 * 60))
         });
-        Some(recovery::notice(recent.then_some(log.as_path())))
+        Some(recovery::FailedRun {
+            crash_log: recent.then_some(log),
+        })
     }
 
     /// Leave when Windows says the session is ending or an installer needs

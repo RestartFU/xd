@@ -3732,8 +3732,8 @@ impl XdDesktop {
     /// Whatever ended that run, this one must not walk straight back into it:
     /// a browser pane left open is created again as soon as the window draws.
     /// Call before the first frame.
-    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-    fn recover_from_failed_run(&mut self, notice: String) {
+    #[cfg(any(target_os = "windows", test))]
+    fn recover_from_failed_run(&mut self, failed_run: &recovery::FailedRun) {
         let mut closed = false;
         for state in self.settings.browser_sessions.values_mut() {
             closed |= std::mem::replace(&mut state.open, false);
@@ -3741,7 +3741,7 @@ impl XdDesktop {
         if closed {
             let _ = self.settings.save();
         }
-        self.startup_notice = Some(notice);
+        self.startup_notice = failed_run.notice(closed);
     }
 
     fn window_bounds_changed(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -25765,7 +25765,7 @@ Binary files /dev/null and b/image.png differ\n";
                 .browser_sessions
                 .insert("local/chat/review".into(), open());
 
-            desktop.recover_from_failed_run("xd did not close properly last time.".into());
+            desktop.recover_from_failed_run(&recovery::FailedRun::default());
 
             // Closed, so nothing recreates the views, but not forgotten.
             for state in desktop.settings.browser_sessions.values() {
@@ -25773,10 +25773,17 @@ Binary files /dev/null and b/image.png differ\n";
                 assert_eq!(state.session, open().session);
             }
             assert!(!desktop.browser_is_open());
-            assert_eq!(
-                desktop.startup_notice.as_deref(),
-                Some("xd did not close properly last time.")
+            assert!(
+                desktop
+                    .startup_notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains("browser panes were left closed"))
             );
+
+            // A second failed run finds nothing left to close or to say.
+            desktop.startup_notice = None;
+            desktop.recover_from_failed_run(&recovery::FailedRun::default());
+            assert_eq!(desktop.startup_notice, None);
         });
     }
 
@@ -33641,13 +33648,11 @@ fn main() {
         return;
     };
     #[cfg(target_os = "windows")]
-    let recovery_notice = {
+    let failed_run = {
         windows::install_crash_handler(desktop_version());
         windows::set_app_identity();
         windows::begin_run()
     };
-    #[cfg(not(target_os = "windows"))]
-    let recovery_notice: Option<String> = None;
     Application::new()
         .with_assets(EmbeddedIcons)
         .run(|cx: &mut App| {
@@ -33893,9 +33898,11 @@ fn main() {
                             windows::close_with_the_session(handle.hwnd.get());
                         }
                         cx.new(|cx| {
+                            #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
                             let mut desktop = XdDesktop::new(window, cx);
-                            if let Some(notice) = recovery_notice {
-                                desktop.recover_from_failed_run(notice);
+                            #[cfg(target_os = "windows")]
+                            if let Some(failed_run) = failed_run {
+                                desktop.recover_from_failed_run(&failed_run);
                             }
                             desktop
                         })

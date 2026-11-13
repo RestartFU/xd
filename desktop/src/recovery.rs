@@ -99,15 +99,31 @@ impl CrashReport<'_> {
     }
 }
 
-/// What the app says once, after a launch that follows a failed run.
-pub fn notice(crash_log: Option<&Path>) -> String {
-    let mut notice = String::from(
-        "xd did not close properly last time, so the browser panes were left closed. Reopen one from the title bar.",
-    );
-    if let Some(path) = crash_log {
-        notice.push_str(&format!(" A crash report is in {}.", path.display()));
+/// What is known, at the next launch, about a run that did not finish.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FailedRun {
+    /// The crash log, when it was written recently enough to be about that run.
+    pub crash_log: Option<PathBuf>,
+}
+
+impl FailedRun {
+    /// What to tell the user once, if there is anything worth telling: that
+    /// their browser panes were left closed, or where a crash report is. A run
+    /// that merely lost power changed nothing they would look for.
+    pub fn notice(&self, closed_browser_panes: bool) -> Option<String> {
+        let mut notice = String::new();
+        if closed_browser_panes {
+            notice.push_str(
+                "xd did not close properly last time, so its browser panes were left closed. Reopen one from the title bar.",
+            );
+        } else if self.crash_log.is_some() {
+            notice.push_str("xd did not close properly last time.");
+        }
+        if let Some(path) = &self.crash_log {
+            notice.push_str(&format!(" A crash report is in {}.", path.display()));
+        }
+        (!notice.is_empty()).then_some(notice)
     }
-    notice
 }
 
 #[cfg(test)]
@@ -193,12 +209,23 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_points_at_a_crash_report_only_when_there_is_one() {
-        assert!(!notice(None).contains("crash report"));
-        let path = Path::new("C:/Users/me/AppData/Local/xd/crash.log");
-        assert!(
-            notice(Some(path))
-                .ends_with("A crash report is in C:/Users/me/AppData/Local/xd/crash.log.")
+    fn the_notice_says_what_changed_and_where_the_report_is() {
+        let log = PathBuf::from("C:/Users/me/AppData/Local/xd/crash.log");
+        let crashed = FailedRun {
+            crash_log: Some(log),
+        };
+        let killed = FailedRun::default();
+
+        assert_eq!(
+            crashed.notice(true).unwrap(),
+            "xd did not close properly last time, so its browser panes were left closed. Reopen one from the title bar. A crash report is in C:/Users/me/AppData/Local/xd/crash.log."
         );
+        assert_eq!(
+            crashed.notice(false).unwrap(),
+            "xd did not close properly last time. A crash report is in C:/Users/me/AppData/Local/xd/crash.log."
+        );
+        assert!(killed.notice(true).unwrap().ends_with("Reopen one from the title bar."));
+        // Nothing was closed and nothing was written: nothing to say.
+        assert_eq!(killed.notice(false), None);
     }
 }

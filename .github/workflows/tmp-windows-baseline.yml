@@ -32,17 +32,23 @@ jobs:
           foreach ($profile in 'release', 'nightly') {
             ./scripts/build-windows.ps1 -Profile $profile -HostPayload (Join-Path $stub 'xd-host-linux') -Executable (Join-Path $stub 'xd.exe')
           }
-          Get-ChildItem dist/windows | Select-Object Name, Length
+          Get-ChildItem dist/windows | Select-Object Name, Length | Out-String | Write-Host
           foreach ($name in 'xd', 'xd-nightly') {
             $msi = (Resolve-Path "dist/windows/$name-windows-x86_64.msi").Path
             $log = Join-Path $env:RUNNER_TEMP "$name-install.log"
             $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`""
             if ($process.ExitCode -ne 0) { Get-Content $log -Tail 80; throw "install of $name failed: $($process.ExitCode)" }
+            Select-String -Path $log -Pattern 'ALLUSERS|MSIINSTALLPERUSER|INSTALLFOLDER|LocalAppDataFolder|ProgramMenuFolder|Privileged|Product: ' | Select-Object -First 30 | ForEach-Object { $_.Line } | Write-Host
           }
-          Get-ChildItem -Recurse (Join-Path $env:LOCALAPPDATA 'Programs') | Select-Object FullName
-          Get-ChildItem ([Environment]::GetFolderPath('Programs')) -Filter 'xd*' | Select-Object FullName
-          Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object Publisher -eq 'RestartFU' | Format-List DisplayName, DisplayVersion, DisplayIcon, InstallLocation, UninstallString
-          Get-ChildItem -Recurse 'HKCU:\Software\RestartFU' | Format-List
+          Write-Host "LOCALAPPDATA=$env:LOCALAPPDATA USERNAME=$env:USERNAME"
+          Get-ChildItem -Recurse (Join-Path $env:LOCALAPPDATA 'Programs') -ErrorAction SilentlyContinue | ForEach-Object FullName | Write-Host
+          Get-ChildItem ([Environment]::GetFolderPath('Programs')) -Filter 'xd*' | ForEach-Object FullName | Write-Host
+          foreach ($root in 'HKCU:', 'HKLM:') {
+            foreach ($view in 'Software\Microsoft\Windows\CurrentVersion\Uninstall', 'Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall') {
+              Get-ChildItem "$root\$view" -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object Publisher -eq 'RestartFU' | ForEach-Object { "$root\$view : $($_.DisplayName) $($_.DisplayVersion) icon=$($_.DisplayIcon) at=$($_.InstallLocation) key=$($_.PSChildName)" } | Write-Host
+            }
+          }
+          Get-ChildItem -Recurse 'HKCU:\Software\RestartFU' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name): $(($_ | Get-ItemProperty | Out-String).Trim())" } | Write-Host
           foreach ($name in 'xd', 'xd-nightly') {
             $msi = (Resolve-Path "dist/windows/$name-windows-x86_64.msi").Path
             $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/x', "`"$msi`"", '/qn', '/norestart'
