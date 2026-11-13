@@ -4,14 +4,12 @@ import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.platform.LocalView
-import androidx.core.view.WindowCompat
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -22,6 +20,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.ui.FatalScreen
+import com.restartfu.xd.mobile.ui.MinimalThemePreset
+import com.restartfu.xd.mobile.ui.systemBarStyle
 import com.restartfu.xd.mobile.ui.MinimalMobileApp
 import com.restartfu.xd.mobile.ui.ConnectScreen
 import com.restartfu.xd.mobile.ui.XdRoot
@@ -34,21 +34,26 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Before the first frame: the app draws behind the system bars on every
+        // Android version, as Android 15 already makes it, in the saved theme.
+        enableEdgeToEdge(settings.theme.value)
         super.onCreate(savedInstanceState)
         setContent {
             val theme by settings.theme.collectAsStateWithLifecycle()
-            val view = LocalView.current
-            SideEffect {
-                // System bar icons follow the theme, not the system setting.
-                WindowCompat.getInsetsController(window, view).apply {
-                    isAppearanceLightStatusBars = theme.isLight
-                    isAppearanceLightNavigationBars = theme.isLight
-                }
+            // The bars' icons follow the app's theme, not the system setting.
+            DisposableEffect(theme) {
+                enableEdgeToEdge(theme)
+                onDispose {}
             }
             XdRoot(theme) {
                 XdMobileApp(model, settings)
             }
         }
+    }
+
+    private fun enableEdgeToEdge(theme: MinimalThemePreset) {
+        val style = theme.systemBarStyle()
+        enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
     }
 }
 

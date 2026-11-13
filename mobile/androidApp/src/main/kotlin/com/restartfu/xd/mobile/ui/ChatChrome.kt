@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -136,7 +135,7 @@ internal fun CompactChatBar(
             Box(Modifier.weight(1f)) {
                 Column(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(MaterialTheme.shapes.small)
                         .clickable(onClickLabel = "Switch chat", role = Role.DropdownList) { choosingChat = true }
                         .heightIn(min = 48.dp)
                         .padding(horizontal = 6.dp),
@@ -254,7 +253,7 @@ internal fun CompactChatBar(
                 // swaps the whole screen for Changes, Files or Terminal.
                 Surface(
                     onClick = { choosingPane = true },
-                    shape = RoundedCornerShape(8.dp),
+                    shape = MaterialTheme.shapes.small,
                     color = if (pane == Pane.CHAT) Color.Transparent else MaterialTheme.colorScheme.secondaryContainer,
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                     modifier = Modifier.semantics { contentDescription = "Workspace view: ${pane.label}" },

@@ -8,6 +8,17 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ThemeTest {
+    @Test fun cornersComeFromTheThemesShapes() {
+        // Material's own scale, so its components keep their shapes.
+        assertEquals(androidx.compose.material3.Shapes().small, XdShapes.small)
+        assertEquals(androidx.compose.material3.Shapes().extraLarge, XdShapes.extraLarge)
+        // No radius is written out where a surface is drawn: only here and in Theme.kt.
+        val sources = java.io.File("src/main/kotlin").walkTopDown().filter { it.extension == "kt" }.toList()
+        assertTrue("run from the androidApp module", sources.size > 20)
+        val literal = sources.filter { it.name != "Theme.kt" && "RoundedCornerShape(" in it.readText() }
+        assertEquals("corner radii outside ui/Theme.kt", emptyList<String>(), literal.map { it.name })
+    }
+
     @Test fun savedThemeNamesLoadTheirPreset() {
         assertEquals(MinimalThemePreset.DARK, MinimalThemePreset.fromKey("dark"))
         assertEquals(MinimalThemePreset.LIGHT, MinimalThemePreset.fromKey("light"))

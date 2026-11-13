@@ -27,7 +27,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TextField
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -932,7 +931,7 @@ private fun Composer(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = 160.dp),
-                shape = RoundedCornerShape(14.dp),
+                shape = MaterialTheme.shapes.medium,
                 color = MaterialTheme.colorScheme.surfaceContainer,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             ) {
@@ -1051,7 +1050,7 @@ private fun Composer(
         // One rounded box, the way the desktop draws it: what waits on the
         // reader on top, then the message, then attach and send.
         Surface(
-            shape = RoundedCornerShape(20.dp),
+            shape = MaterialTheme.shapes.large,
             color = glassComposer(),
             border = BorderStroke(1.dp, glassEdge()),
         ) {
@@ -1226,7 +1225,7 @@ private fun CompactComposerRow(
     val catalog by model.catalog.collectAsStateWithLifecycle()
     val faint = LocalXdSignals.current.faint
     Surface(
-        shape = RoundedCornerShape(24.dp),
+        shape = MaterialTheme.shapes.extraLarge,
         color = glassComposer(),
         border = BorderStroke(1.dp, glassEdge()),
     ) {
@@ -1290,7 +1289,7 @@ private fun CompactComposerRow(
                     modifier = Modifier
                         .height(ComposerSlot)
                         .widthIn(min = ComposerSlot)
-                        .clip(RoundedCornerShape(16.dp))
+                        .clip(MaterialTheme.shapes.large)
                         .clickable(role = Role.Button, onClickLabel = "Choose model", onClick = onModel)
                         .semantics { if (!nameShown) contentDescription = modelLabel }
                         .padding(horizontal = 10.dp),
@@ -1638,7 +1637,7 @@ private fun AnalysisDisclosure(
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
-        shape = RoundedCornerShape(14.dp),
+        shape = MaterialTheme.shapes.medium,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column {
@@ -1763,7 +1762,7 @@ private fun ToolGroupRow(row: TranscriptRow.Tools) {
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
-        shape = RoundedCornerShape(14.dp),
+        shape = MaterialTheme.shapes.medium,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(Modifier.fillMaxWidth()) {
@@ -1809,7 +1808,7 @@ private fun ToolRow(item: TranscriptItem, nested: Boolean = false) {
 
     Surface(
         color = if (nested) Color.Transparent else MaterialTheme.colorScheme.surfaceContainer,
-        shape = RoundedCornerShape(if (nested) 8.dp else 14.dp),
+        shape = if (nested) MaterialTheme.shapes.small else MaterialTheme.shapes.medium,
         border = if (nested) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(Modifier.fillMaxWidth()) {
@@ -1972,7 +1971,7 @@ private fun TranscriptRow(
                 // the bubble has to carry the distinction on its own.
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 contentColor = MaterialTheme.colorScheme.onSurface,
-                shape = RoundedCornerShape(20.dp),
+                shape = MaterialTheme.shapes.large,
             ) {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                     SelectableMessageBody(shown, model)

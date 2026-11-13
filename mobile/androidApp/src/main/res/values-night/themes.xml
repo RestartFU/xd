@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark's backdrop, for the frames before Compose paints while the system is in night mode. -->
+    <color name="xd_ground">#0B0B0B</color>
+    <bool name="xd_ground_is_light">false</bool>
+</resources>

@@ -1,6 +1,10 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.activity.SystemBarStyle
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.Shapes
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -15,6 +19,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -236,6 +242,74 @@ public fun terminalPalette(theme: MinimalThemePreset): List<Color> = when (theme
 
 public val LocalXdTerminalPalette = staticCompositionLocalOf { terminalPalette(MinimalThemePreset.DARK) }
 
+/** Below this, text on its own cell background is replaced in the Light set, as on the desktop. */
+public const val MIN_CELL_CONTRAST: Float = 3f
+
+/** The WCAG contrast ratio between two colours, from 1 to 21. */
+public fun contrastRatio(first: Color, second: Color): Float {
+    val (a, b) = first.luminance() to second.luminance()
+    return (maxOf(a, b) + 0.05f) / (minOf(a, b) + 0.05f)
+}
+
+/**
+ * The colours one terminal cell is drawn in, by the desktop's rule
+ * (`TerminalStyle::resolved` in terminal-core). [foreground] and [background]
+ * are what the program set, already swapped for an inverse cell or the caret,
+ * and null where it left the terminal's own.
+ *
+ * A cell with a background of its own and no text colour takes one that reads
+ * on it. In the Light set that also goes for text under [MIN_CELL_CONTRAST]
+ * against its background: that set has no light colour, so a program that
+ * sets both (black on white, white on blue) would otherwise draw dark on dark.
+ * Text that reads on a dark background is white; on a light one it is the
+ * set's black.
+ */
+public fun terminalCellInk(
+    foreground: Color?,
+    background: Color?,
+    palette: List<Color>,
+    light: Boolean,
+): Color? {
+    background ?: return foreground
+    val unreadable = foreground == null || (light && contrastRatio(foreground, background) < MIN_CELL_CONTRAST)
+    if (!unreadable) return foreground
+    val argb = background.toArgb()
+    val weighted = ((argb shr 16) and 0xff) * 299 + ((argb shr 8) and 0xff) * 587 + (argb and 0xff) * 114
+    return if (weighted < 128_000) Color.White else palette[0]
+}
+
+/**
+ * The theme in force, for the few things that follow it outside Material's
+ * roles: the system bars' icons over the app's own surfaces.
+ */
+public val LocalXdTheme = staticCompositionLocalOf { MinimalThemePreset.DARK }
+
+/**
+ * The app's corner radii, by Material role. They are Material's own values,
+ * so its components keep their shapes; the app's surfaces take theirs from
+ * the same scale instead of radii written out where they are drawn:
+ * a swatch or avatar (extra small), a row highlight or small control (small),
+ * a card or frame (medium), a bubble or the wide composer (large), and the
+ * one-row composer (extra large). Pills and dots are circles.
+ */
+public val XdShapes: Shapes = Shapes(
+    extraSmall = RoundedCornerShape(4.dp),
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(16.dp),
+    extraLarge = RoundedCornerShape(28.dp),
+)
+
+/**
+ * How the system bars are drawn over the app in this theme: clear, so the
+ * app's own backdrop shows behind them, with icons dark on Light and light on
+ * Dark. It follows the app's theme, not the system's night mode.
+ */
+public fun MinimalThemePreset.systemBarStyle(): SystemBarStyle {
+    val clear = Color.Transparent.toArgb()
+    return if (isLight) SystemBarStyle.light(clear, clear) else SystemBarStyle.dark(clear)
+}
+
 /** Paints the glass backdrop behind everything. */
 public fun Modifier.glassBackdrop(glass: XdGlass): Modifier = background(glass.backdrop)
 
@@ -252,8 +326,14 @@ public fun XdTheme(theme: MinimalThemePreset, content: @Composable () -> Unit) {
         LocalXdSignals provides xdSignals(theme),
         LocalXdGlass provides xdGlass(theme),
         LocalXdTerminalPalette provides terminalPalette(theme),
+        LocalXdTheme provides theme,
     ) {
-        MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography, content = content)
+        MaterialTheme(
+            colorScheme = minimalColors(theme),
+            typography = XdTypography,
+            shapes = XdShapes,
+            content = content,
+        )
     }
 }
 

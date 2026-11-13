@@ -36,7 +36,6 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -1138,8 +1137,8 @@ private fun MinimalGlobalTerminal(
                 .fillMaxSize()
                 .padding(bottom = bottomInset)
                 .padding(10.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp)),
+                .clip(MaterialTheme.shapes.medium)
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium),
         ) {
             TerminalPaneContent(terminal, showSessionBar = false)
         }
@@ -1188,7 +1187,7 @@ private fun SessionTabStrip(
                 }
                 Surface(
                     modifier = Modifier.bringIntoViewRequester(reveal),
-                    shape = RoundedCornerShape(12.dp),
+                    shape = MaterialTheme.shapes.medium,
                     color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
                     border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
                 ) {
@@ -1285,7 +1284,7 @@ private fun AgentTabChip(agent: AgentTab, selected: Boolean, agents: AgentTabs) 
     }
     Surface(
         modifier = Modifier.bringIntoViewRequester(reveal),
-        shape = RoundedCornerShape(12.dp),
+        shape = MaterialTheme.shapes.medium,
         color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
         border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
     ) {
@@ -1587,7 +1586,7 @@ private fun DrawerRow(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.small)
             .clickable(
                 role = Role.Button,
                 onClickLabel = if (open) "Close project" else "Open project",
@@ -1856,7 +1855,7 @@ private fun FolderRow(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.small)
             .clickable(
                 role = Role.Button,
                 onClickLabel = if (open) "Close folder" else "Open folder",
@@ -2099,7 +2098,7 @@ private fun MoveRow(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .clip(MaterialTheme.shapes.small)
             .clickable(role = Role.RadioButton, onClick = onClick)
             .padding(start = (depth * 12).dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -2279,7 +2278,7 @@ private fun SessionRow(
                 },
             )
             .heightIn(min = 64.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.small)
             .clickable(role = Role.Button, onClickLabel = "Open session", onClick = onClick)
             .padding(start = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -2437,7 +2436,7 @@ private fun SettledShelf(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 48.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .clip(MaterialTheme.shapes.small)
                 .disclosure(expanded, onToggle = toggle)
                 .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -2483,7 +2482,7 @@ private fun SettledShelf(
 private fun AgentPill(agent: DirectAgent) {
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(50))
+            .clip(CircleShape)
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -2504,8 +2503,8 @@ private fun EmptyCard(text: String) {
         text,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
+            .clip(MaterialTheme.shapes.medium)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium)
             .padding(20.dp),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -2622,7 +2621,7 @@ internal fun ThemePicker(theme: MinimalThemePreset, choose: (MinimalThemePreset)
 @Composable
 private fun ThemeSwatch(preset: MinimalThemePreset, modifier: Modifier) {
     val glass = xdGlass(preset)
-    val shape = RoundedCornerShape(4.dp)
+    val shape = MaterialTheme.shapes.extraSmall
     Box(
         modifier
             .clip(shape)
@@ -2642,7 +2641,7 @@ private fun ThemeChoice(
     modifier: Modifier,
     choose: () -> Unit,
 ) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = MaterialTheme.shapes.small
     val frame = modifier
         .heightIn(min = 48.dp)
         .clip(shape)

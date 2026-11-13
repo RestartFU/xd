@@ -37,7 +37,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -333,7 +332,6 @@ private fun ProjectStep(
     }
 }
 
-private val GROUP_RADIUS = 14.dp
 
 @Composable
 private fun ProjectChoiceRow(
@@ -599,7 +597,7 @@ private fun FormSection(label: String, content: @Composable ColumnScope.() -> Un
 /** A grouped surface for rows that belong together. */
 @Composable
 private fun Group(content: @Composable ColumnScope.() -> Unit) {
-    val shape = RoundedCornerShape(GROUP_RADIUS)
+    val shape = MaterialTheme.shapes.medium
     Column(
         Modifier
             .fillMaxWidth()
@@ -663,7 +661,7 @@ private fun AgentTiles(selected: DirectAgent, onSelect: (DirectAgent) -> Unit) {
     Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         DirectAgent.entries.forEach { candidate ->
             val chosen = candidate == selected
-            val shape = RoundedCornerShape(GROUP_RADIUS)
+            val shape = MaterialTheme.shapes.medium
             Box(
                 Modifier
                     .weight(1f)
@@ -1078,7 +1076,7 @@ private fun ActionBar(label: String, blocker: String?, busy: Boolean, onClick: (
             Button(
                 onClick = onClick,
                 enabled = blocker == null,
-                shape = RoundedCornerShape(GROUP_RADIUS),
+                shape = MaterialTheme.shapes.medium,
                 modifier = Modifier.fillMaxWidth().height(52.dp),
             ) { Text(label, style = MaterialTheme.typography.labelLarge) }
         }

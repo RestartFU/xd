@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -379,7 +378,7 @@ private fun SettingsSearchField(query: String, onQuery: (String) -> Unit) {
                 }
             }
         },
-        shape = RoundedCornerShape(12.dp),
+        shape = MaterialTheme.shapes.medium,
         colors = OutlinedTextFieldDefaults.colors(
             focusedContainerColor = glassPane(),
             unfocusedContainerColor = glassPane(),
@@ -410,7 +409,7 @@ private fun SettingsSectionList(
                 Box(
                     Modifier
                         .size(32.dp)
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(MaterialTheme.shapes.small)
                         .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -469,7 +468,7 @@ private fun SettingsCard(entries: List<SettingsEntry>) {
 
 @Composable
 private fun SettingsCardFrame(content: @Composable () -> Unit) {
-    val shape = RoundedCornerShape(12.dp)
+    val shape = MaterialTheme.shapes.medium
     Column(
         Modifier
             .fillMaxWidth()

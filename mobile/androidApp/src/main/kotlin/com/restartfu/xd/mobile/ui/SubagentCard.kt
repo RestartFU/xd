@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -64,7 +63,7 @@ internal fun SubagentCard(
         SubagentState.FAILURE -> MaterialTheme.colorScheme.error
         SubagentState.FINISHED -> MaterialTheme.colorScheme.outline
     }
-    val shape = RoundedCornerShape(14.dp)
+    val shape = MaterialTheme.shapes.medium
     val preview = if (running) {
         run.activity
     } else {
@@ -198,7 +197,7 @@ internal fun SubagentCard(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
+                            .clip(MaterialTheme.shapes.small)
                             .background(MaterialTheme.colorScheme.background)
                             .heightIn(max = 240.dp)
                             .verticalScroll(rememberScrollState())

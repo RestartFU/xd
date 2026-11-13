@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -121,7 +120,7 @@ internal fun AgentChatRow(run: SubagentRun, chat: ChatSummary?, onOpen: () -> Un
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 2.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.small)
             .clickable(role = Role.Button, onClickLabel = "Open chat", onClick = onOpen)
             .heightIn(min = 56.dp)
             .padding(horizontal = 8.dp, vertical = 8.dp),

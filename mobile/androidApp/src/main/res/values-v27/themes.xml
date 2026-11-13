@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- From Android 8.1 the navigation bar's buttons can be dark too, so it is clear like the status bar. -->
+    <style name="Theme.Xd" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/xd_ground</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">@bool/xd_ground_is_light</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightNavigationBar">@bool/xd_ground_is_light</item>
+    </style>
+</resources>

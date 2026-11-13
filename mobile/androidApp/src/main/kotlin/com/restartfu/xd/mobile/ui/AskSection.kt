@@ -26,7 +26,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -199,7 +198,7 @@ internal fun AskOptionRow(number: Int, label: String, enabled: Boolean, onPick: 
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 50.dp)
-            .clip(RoundedCornerShape(14.dp))
+            .clip(MaterialTheme.shapes.medium)
             .background(if (lit) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent)
             .clickable(
                 interactionSource = source,
@@ -350,7 +349,7 @@ internal fun ApprovalAsk(
                 .padding(horizontal = AskInset)
                 .fillMaxWidth()
                 .heightIn(max = 140.dp)
-                .clip(RoundedCornerShape(8.dp))
+                .clip(MaterialTheme.shapes.small)
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp, vertical = 10.dp),
