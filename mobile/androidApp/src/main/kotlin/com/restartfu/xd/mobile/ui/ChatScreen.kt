@@ -228,10 +228,11 @@ internal fun ChatScreen(
     )
     workspacePane.chat = model.session
     var pane by workspacePane::pane
-    // On a phone the workspace views replace the chat under one header, so
-    // Back returns to the chat before it leaves the session. Beside the chat
-    // on a wide window, Back closes the tool first, for the same reason.
-    androidx.activity.compose.BackHandler(enabled = (sessionChats != null || sideBySide) && pane != Pane.CHAT) {
+    // Wherever a workspace view replaces the chat (a phone, or a tablet too
+    // narrow for two panes, where the tab row switches them), Back returns to
+    // the chat before it leaves the session. Beside the chat on a wide window,
+    // Back closes the tool first, for the same reason.
+    androidx.activity.compose.BackHandler(enabled = pane != Pane.CHAT) {
         pane = Pane.CHAT
     }
     // The conversation is on screen: always beside a tool, otherwise while no tool has taken its place.
