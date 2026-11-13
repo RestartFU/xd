@@ -1,5 +1,13 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.Role
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -94,6 +102,17 @@ internal fun TerminalPaneContent(
     val state by model.state.collectAsStateWithLifecycle()
     val focus = remember { FocusRequester() }
     var control by remember { mutableStateOf(false) }
+    // Saved, so turning the phone keeps the question up.
+    var confirmingStop by rememberSaveable { mutableStateOf(false) }
+    if (confirmingStop) {
+        StopTerminalDialog(
+            onStop = {
+                confirmingStop = false
+                model.kill()
+            },
+            onDismiss = { confirmingStop = false },
+        )
+    }
     val terminalBackground = MaterialTheme.colorScheme.surface
     val terminalForeground = MaterialTheme.colorScheme.onSurface
     // The theme's sixteen ANSI colours: Dark's pastels would wash out on Light's ground.
@@ -123,13 +142,17 @@ internal fun TerminalPaneContent(
                 if (state.closed) "Terminal closed" else "Shared terminal",
                 modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             // A terminal that failed to open says Try again under its error instead.
             if (state.closed) {
                 TextButton(onClick = model::open) { Text("Reopen") }
             } else if (state.error == null) {
-                TextButton(onClick = model::kill) { Text("Stop") }
+                // The shell is shared: Stop asks first, since it ends it everywhere.
+                TextButton(
+                    onClick = { confirmingStop = true },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Stop") }
             }
         }
 
@@ -245,19 +268,25 @@ internal fun TerminalPaneContent(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            val live = state.id != null && !state.closed
+            // Ctrl is the one key that stays down until the next: a switch that says whether it is on.
             FilterChip(
                 selected = control,
                 onClick = { control = !control },
                 label = { Text("Ctrl") },
-                enabled = state.id != null && !state.closed,
-                modifier = Modifier.semantics { contentDescription = "Control, for the next key" },
+                enabled = live,
+                modifier = Modifier.semantics {
+                    contentDescription = "Control, for the next key"
+                    role = Role.Switch
+                    toggleableState = ToggleableState(control)
+                },
             )
+            // The rest are pressed and let go: buttons, not choices.
             KEY_BAR.forEach { (label, name, key) ->
-                FilterChip(
-                    selected = false,
+                AssistChip(
                     onClick = { model.press(key) },
                     label = { Text(label) },
-                    enabled = state.id != null && !state.closed,
+                    enabled = live,
                     modifier = Modifier.semantics { contentDescription = name },
                 )
             }
@@ -337,19 +366,44 @@ private fun List<Cell>.render(
 ): AnnotatedString = buildAnnotatedString {
     val trailing = indexOfLast { it.char != ' ' || it.background != null } + 1
     val visible = maxOf(trailing, if (caret >= 0) caret + 1 else 0)
+    // One span for each run of cells drawn alike, not one per character:
+    // a row of plain output is a single span.
+    var run: SpanStyle? = null
+    val text = StringBuilder()
+    fun flush() {
+        val style = run ?: return
+        withStyle(style) { append(text.toString()) }
+        text.setLength(0)
+    }
     for (column in 0 until visible) {
         val cell = getOrNull(column) ?: Cell()
         val (ink, ground) = cell.colours(column == caret, defaultForeground, defaultBackground, palette, light)
-        withStyle(
-            SpanStyle(
-                color = ink,
-                background = ground ?: Color.Unspecified,
-                fontWeight = if (cell.bold) FontWeight.Bold else null,
-            ),
-        ) {
-            append(cell.char)
+        val style = SpanStyle(
+            color = ink,
+            background = ground ?: Color.Unspecified,
+            fontWeight = if (cell.bold) FontWeight.Bold else null,
+        )
+        if (style != run) {
+            flush()
+            run = style
         }
+        text.append(cell.char)
     }
+    flush()
+}
+
+/** Asks before the shared shell is stopped, here and on every other device. */
+@Composable
+internal fun StopTerminalDialog(onStop: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Stop this terminal?") },
+        text = { Text("It closes the shell on every device, and anything running in it.") },
+        confirmButton = {
+            TextButton(onClick = onStop) { Text("Stop", color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /**

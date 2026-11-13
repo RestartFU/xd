@@ -1194,6 +1194,17 @@ private fun MinimalGlobalTerminal(
         ),
     )
     val state by terminal.state.collectAsStateWithLifecycle()
+    // Saved, so turning the phone keeps the question up.
+    var confirmingStop by rememberSaveable { mutableStateOf(false) }
+    if (confirmingStop) {
+        StopTerminalDialog(
+            onStop = {
+                confirmingStop = false
+                terminal.kill()
+            },
+            onDismiss = { confirmingStop = false },
+        )
+    }
 
     Column(
         Modifier
@@ -1208,8 +1219,9 @@ private fun MinimalGlobalTerminal(
             if (state.closed) {
                 TextButton(onClick = terminal::open) { Text("Reopen") }
             } else if (state.error == null) {
+                // The shell is shared: Stop asks first, since it ends it everywhere.
                 TextButton(
-                    onClick = terminal::kill,
+                    onClick = { confirmingStop = true },
                     enabled = state.id != null,
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) { Text("Stop") }
