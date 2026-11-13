@@ -330,12 +330,17 @@ fn settings_row(
         .px(px(SETTINGS_CARD_PADDING))
         .py(px(11.0))
         .flex()
+        // In a column too narrow for both, as the smallest window's is at
+        // the largest Interface sizes, the control goes under the words
+        // instead of squeezing them to a letter a line.
+        .flex_wrap()
         .items_center()
-        .gap_4()
+        .gap_x_4()
+        .gap_y_2()
         .child(
             div()
                 .flex_1()
-                .min_w_0()
+                .min_w(px(SETTINGS_ROW_TEXT_MIN))
                 .child(
                     div()
                         .text_size(px(TEXT_CONTROL))
@@ -423,6 +428,10 @@ fn settings_step_button(
         None => button,
     }
 }
+
+/// The least width a setting's title and description keep beside its
+/// control.
+const SETTINGS_ROW_TEXT_MIN: f32 = 150.0;
 
 /// The list the arrow keys are in while a Settings dropdown is open.
 const SETTINGS_MENU: &str = "settings-menu";

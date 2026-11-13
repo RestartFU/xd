@@ -53,13 +53,13 @@ pub(super) fn composer_room(room: Rc<Cell<Option<Pixels>>>) -> impl IntoElement 
 
 /// The most of the window a docked ask takes before it scrolls: half the
 /// window's height, and less in a window too short for that to leave the
-/// editor and its options in sight under it, down to room for the question
-/// and a choice.
+/// editor and its options in sight under it, down to room for the question.
 pub(super) fn ask_max_height(window: f32) -> f32 {
-    /// What the title bar, the session's header and tabs, and the editor and
-    /// options under the ask take of the window.
-    const AROUND: f32 = 280.0;
-    (window * 0.5).min(window - AROUND).max(96.0)
+    /// What the title bar, the session's header and tabs, and the editor,
+    /// two rows of options and the worktree row under the ask take of the
+    /// window.
+    const AROUND: f32 = 320.0;
+    (window * 0.5).min(window - AROUND).max(72.0)
 }
 
 /// What differs between the composers. Everything else is drawn the same.

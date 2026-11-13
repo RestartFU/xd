@@ -204,10 +204,11 @@ const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
-/// The least height of window, in logical pixels, that shows the worktree
-/// and branch under a chat's composer. The smallest window is taller than
-/// this at 100 %.
-const CONTEXT_ROW_MIN_WINDOW: f32 = 480.0;
+/// A window under this height, in logical pixels, is short: the smallest
+/// window at 130 % and 150 %, and never at 100 %. A chat in it leaves out
+/// the worktree and branch under its composer, and scrolls as a whole where
+/// even then the composer does not fit, so Send is never out of reach.
+const SHORT_WINDOW: f32 = 480.0;
 /// The smallest the window can be made, in its own pixels. At a larger
 /// Interface size the same window holds less, so the layout's breakpoints,
 /// which are in logical pixels, fold it down sooner.
@@ -22392,10 +22393,9 @@ impl XdDesktop {
                         }
                     }))
             });
-        // A window too short for it, as the smallest is at the largest
-        // Interface sizes, gives the row's height to the composer above it.
-        let context_row = (metadata_ready
-            && FRAME_VIEWPORT.with(Cell::get).1 >= CONTEXT_ROW_MIN_WINDOW)
+        // A short window gives the row's height to the composer above it.
+        let short = FRAME_VIEWPORT.with(Cell::get).1 < SHORT_WINDOW;
+        let context_row = (metadata_ready && !short)
             .then(|| self.render_chat_context_row(colors))
             .flatten();
         div()
@@ -22404,6 +22404,8 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .items_center()
+            // See [`SHORT_WINDOW`].
+            .when(short, |chat| chat.overflow_y_scroll())
             .when(empty_ready, |chat| chat.justify_center())
             .px(px(24.0))
             .bg(glass::canvas())
@@ -32587,14 +32589,15 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
 
     #[test]
     fn a_docked_ask_leaves_the_editor_in_sight_in_a_short_window() {
-        // From the smallest window at 100 % up, half the window as before.
-        for window in [560.0, 780.0, 1200.0] {
+        // Half of a window with the height to spare.
+        for window in [640.0, 780.0, 1200.0] {
             assert_eq!(composer::ask_max_height(window), window * 0.5);
         }
-        // The smallest window at 150 % is 373 logical pixels high.
-        let short = f32::from(MIN_WINDOW_HEIGHT) / 1.5;
-        assert_eq!(composer::ask_max_height(short), 96.0);
-        assert!(composer::ask_max_height(450.0) < 225.0);
+        // The smallest window keeps what is under the ask in sight.
+        let smallest = f32::from(MIN_WINDOW_HEIGHT);
+        assert_eq!(composer::ask_max_height(smallest), smallest - 320.0);
+        // At 150 % it is 373 logical pixels high: the question's own lines.
+        assert_eq!(composer::ask_max_height(smallest / 1.5), 72.0);
     }
 
     #[gpui::test]
