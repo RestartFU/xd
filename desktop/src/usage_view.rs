@@ -1856,12 +1856,9 @@ impl XdDesktop {
                 )
         });
         let details = (!showing_limits).then(|| {
-            ui_button("usage-all-details", ButtonKind::Ghost, colors)
-                .w(px(26.0))
-                .h(px(26.0))
-                .px_0()
-                .tooltip(usage_tooltip(vec!["All details".to_owned()], colors))
-                .child(icon(MAXIMIZE_ICON, 13.0, colors.muted))
+            icon_button("usage-all-details", "All details", MAXIMIZE_ICON, colors)
+                .glyph(13.0)
+                .build()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.usage.full_page = true;
                     cx.notify();
@@ -2376,12 +2373,9 @@ impl XdDesktop {
             )
             .child(self.render_usage_refresh(28.0, colors, cx))
             .child(
-                ui_button("usage-close", ButtonKind::Ghost, colors)
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .px_0()
-                    .tooltip(usage_tooltip(vec!["Close".to_owned()], colors))
-                    .child(icon(CLOSE_ICON, 15.0, colors.muted))
+                icon_button("usage-close", "Close", CLOSE_ICON, colors)
+                    .glyph(15.0)
+                    .build()
                     .on_click(cx.listener(|this, _, window, cx| this.close_usage(window, cx))),
             )
             .into_any_element()
@@ -3742,11 +3736,9 @@ impl XdDesktop {
                             .child(small_muted(description, colors)),
                     )
                     .child(
-                        ui_button("usage-model-close", ButtonKind::Ghost, colors)
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .px_0()
-                            .child(icon(CLOSE_ICON, 15.0, colors.muted))
+                        icon_button("usage-model-close", "Close", CLOSE_ICON, colors)
+                            .glyph(15.0)
+                            .build()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.usage.model = None;
                                 cx.notify();
@@ -3942,20 +3934,14 @@ impl XdDesktop {
                                 })
                             })
                             .child(
-                                ui_button(
+                                icon_button(
                                     ("usage-price-reset", id as usize),
-                                    ButtonKind::Ghost,
+                                    tooltip,
+                                    if is_new { CLOSE_ICON } else { ROTATE_CCW_ICON },
                                     colors,
                                 )
-                                .w(px(24.0))
-                                .h(px(24.0))
-                                .px_0()
-                                .tooltip(usage_tooltip(vec![tooltip.to_owned()], colors))
-                                .child(icon(
-                                    if is_new { CLOSE_ICON } else { ROTATE_CCW_ICON },
-                                    14.0,
-                                    colors.muted,
-                                ))
+                                .size(HIT_MIN)
+                                .build()
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         if let Some(dialog) = &mut this.usage.price {
@@ -4003,12 +3989,9 @@ impl XdDesktop {
                     .child(head("Map to", 0.18))
                     .children(PRICE_FIELDS.map(|(label, _)| div().flex_1().min_w_0().child(label)))
                     .child(
-                        ui_button("usage-price-add", ButtonKind::Ghost, colors)
-                            .w(px(24.0))
-                            .h(px(24.0))
-                            .px_0()
-                            .tooltip(usage_tooltip(vec!["Add model price".to_owned()], colors))
-                            .child(icon(PLUS_ICON, 14.0, colors.muted))
+                        icon_button("usage-price-add", "Add model price", PLUS_ICON, colors)
+                            .size(HIT_MIN)
+                            .build()
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.usage_add_price_row(
                                     "",

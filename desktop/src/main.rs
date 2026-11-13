@@ -979,9 +979,12 @@ fn icon_button(
         label: label.into(),
         path,
         colors,
-        size: 28.0,
+        size: CONTROL_HEIGHT_COMPACT,
         glyph: None,
+        drawn: None,
         ink: None,
+        wash: None,
+        named: true,
         active: false,
         enabled: true,
     }
@@ -994,7 +997,10 @@ struct IconButton {
     colors: ThemeColors,
     size: f32,
     glyph: Option<f32>,
+    drawn: Option<fn(u32) -> gpui::AnyElement>,
     ink: Option<u32>,
+    wash: Option<gpui::Rgba>,
+    named: bool,
     active: bool,
     enabled: bool,
 }
@@ -1011,10 +1017,32 @@ impl IconButton {
         self
     }
 
+    /// A mark drawn in code in place of one from the icon set, such as the
+    /// plus, in the ink it is handed.
+    fn drawn(mut self, drawn: fn(u32) -> gpui::AnyElement) -> Self {
+        self.drawn = Some(drawn);
+        self
+    }
+
     /// For a button drawn over a picture, not on the theme's ground: the
-    /// icon's ink, with the fill under the pointer left to the caller.
+    /// icon's ink, with the fill under the pointer left to the caller unless
+    /// [`Self::wash`] names one.
     fn ink(mut self, ink: u32) -> Self {
         self.ink = Some(ink);
+        self
+    }
+
+    /// The fill under the pointer, for a button on a ground the usual fill
+    /// would not show on: a row that is itself lit, or a tinted banner.
+    fn wash(mut self, wash: impl Into<gpui::Rgba>) -> Self {
+        self.wash = Some(wash.into());
+        self
+    }
+
+    /// Whether the button shows its name under the pointer. A button holds
+    /// it back while the menu it opened is up, which the name would cover.
+    fn named(mut self, named: bool) -> Self {
+        self.named = named;
         self
     }
 
@@ -1037,12 +1065,19 @@ impl IconButton {
             colors,
             size,
             glyph,
+            drawn,
             ink,
+            wash,
+            named,
             active,
             enabled,
         } = self;
         // 16px in the 28px button, 14px in a smaller one.
-        let glyph = glyph.unwrap_or(if size < 28.0 { 14.0 } else { 16.0 });
+        let glyph = glyph.unwrap_or(if size < CONTROL_HEIGHT_COMPACT {
+            14.0
+        } else {
+            16.0
+        });
         let button = div()
             .id(id)
             .size(px(size))
@@ -1050,23 +1085,28 @@ impl IconButton {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(6.0))
-            .tooltip(pane_tooltip(label, colors));
+            .rounded(px(RADIUS_CONTROL))
+            .when(named, |button| button.tooltip(pane_tooltip(label, colors)));
+        let mark = |ink: u32| match drawn {
+            Some(drawn) => drawn(ink),
+            None => icon(path, glyph, ink),
+        };
         if !enabled {
-            return button.child(icon(path, glyph, disabled_ink(colors)));
+            return button.child(mark(disabled_ink(colors)));
         }
         let button = button.cursor_pointer();
         if let Some(ink) = ink {
-            return button.child(icon(path, glyph, ink));
+            return button
+                .when_some(wash, |button, wash| {
+                    button.hover(move |style| style.bg(wash))
+                })
+                .child(mark(ink));
         }
+        let wash = wash.unwrap_or(rgb(colors.surface_high));
         button
             .when(active, |button| button.bg(rgb(colors.selected_surface)))
-            .hover(|style| style.bg(rgb(colors.surface_high)))
-            .child(icon(
-                path,
-                glyph,
-                if active { colors.text } else { colors.muted },
-            ))
+            .hover(move |style| style.bg(wash))
+            .child(mark(if active { colors.text } else { colors.muted }))
     }
 }
 
@@ -9347,21 +9387,21 @@ impl XdDesktop {
                     }))
                     .when(can_close, |tab| {
                         tab.child(
-                            div()
-                                .id(("close-session-chat-tab", index))
-                                .size(px(24.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(5.0))
-                                .hover(|style| style.bg(rgb(colors.surface_high)))
-                                .tooltip(pane_tooltip("Close chat tab", colors))
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                            icon_button(
+                                ("close-session-chat-tab", index),
+                                "Close chat tab",
+                                CLOSE_ICON,
+                                colors,
+                            )
+                            .size(HIT_MIN)
+                            .glyph(11.0)
+                            .build()
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
                                     cx.stop_propagation();
                                     this.close_session_chat_tab(close_id.clone(), window, cx);
-                                }))
-                                .child(icon(CLOSE_ICON, 11.0, colors.muted)),
+                                },
+                            )),
                         )
                     })
             })
@@ -9436,21 +9476,19 @@ impl XdDesktop {
                         )
                     })
                     .child(
-                        div()
-                            .id(("close-session-agent-tab", index))
-                            .size(px(24.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(5.0))
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .tooltip(pane_tooltip("Close agent tab", colors))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.close_agent_tab(&close, cx);
-                            }))
-                            .child(icon(CLOSE_ICON, 11.0, colors.muted)),
+                        icon_button(
+                            ("close-session-agent-tab", index),
+                            "Close agent tab",
+                            CLOSE_ICON,
+                            colors,
+                        )
+                        .size(HIT_MIN)
+                        .glyph(11.0)
+                        .build()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.close_agent_tab(&close, cx);
+                        })),
                     )
                     .into_any_element()
             })
@@ -9504,16 +9542,17 @@ impl XdDesktop {
                 )
             })
             .child(
-                ui_button("add-session-chat", ButtonKind::Ghost, colors)
-                    .size(px(28.0))
-                    .px_0()
-                    .tooltip(pane_tooltip(format!("New chat ({MOD_KEY}+T)"), colors))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.begin_session_chat_create(window, cx)
-                        }),
-                    )
-                    .child(plus_icon(colors.muted)),
+                icon_button(
+                    "add-session-chat",
+                    format!("New chat ({MOD_KEY}+T)"),
+                    PLUS_ICON,
+                    colors,
+                )
+                .drawn(plus_icon)
+                .build()
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.begin_session_chat_create(window, cx)),
+                ),
             )
             .into_any_element()
     }
@@ -14935,26 +14974,21 @@ impl XdDesktop {
                     }))
                     .child(session.title.clone())
                     .child(
-                        div()
-                            .id(("minimal-close-terminal", index))
-                            .size(px(24.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_sm()
-                            .tooltip(pane_tooltip("Close terminal", colors))
-                            .text_color(rgb(colors.faint))
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(colors.surface_high))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                        icon_button(
+                            ("minimal-close-terminal", index),
+                            "Close terminal",
+                            CLOSE_ICON,
+                            colors,
+                        )
+                        .size(HIT_MIN)
+                        .glyph(11.0)
+                        .build()
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.close_terminal_tab(close_id.clone(), window, cx);
-                            }))
-                            .child(icon(CLOSE_ICON, 12.0, colors.faint)),
+                            },
+                        )),
                     )
             })
             .collect::<Vec<_>>();
@@ -15063,22 +15097,13 @@ impl XdDesktop {
                             .children(tabs),
                     )
                     .child(
-                        div()
-                            .id("minimal-new-terminal")
-                            .tooltip(pane_tooltip("New terminal", colors))
-                            .size(px(26.0))
-                            .flex_shrink_0()
+                        icon_button("minimal-new-terminal", "New terminal", PLUS_ICON, colors)
+                            .drawn(plus_icon)
+                            .build()
                             .mr_2()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_minimal_terminal_tab(None, window, cx)
-                            }))
-                            .child(plus_icon(colors.text)),
+                            })),
                     ),
             )
             .when(panel_loading && panel_is_empty, |pane| {
@@ -15751,29 +15776,22 @@ impl XdDesktop {
                         )
                     })
                     .child(
-                        div()
-                            .id(("pull-request-panel-remove", index))
-                            .debug_selector(move || format!("pull-request-panel-remove-{index}"))
-                            .size(px(24.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(5.0))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.selected_surface)))
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| PaneTooltip {
-                                    label: "Remove".into(),
-                                    colors,
-                                })
-                                .into()
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.unlink_pull_request(&remove_url, cx);
-                            }))
-                            .child(icon(CLOSE_ICON, 12.0, colors.muted)),
+                        icon_button(
+                            ("pull-request-panel-remove", index),
+                            "Remove",
+                            CLOSE_ICON,
+                            colors,
+                        )
+                        .size(HIT_MIN)
+                        .glyph(11.0)
+                        // The row under it already takes the usual fill.
+                        .wash(rgb(colors.selected_surface))
+                        .build()
+                        .debug_selector(move || format!("pull-request-panel-remove-{index}"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.unlink_pull_request(&remove_url, cx);
+                        })),
                     )
             })
             .collect::<Vec<_>>();
@@ -16739,40 +16757,34 @@ impl XdDesktop {
         let ready = !self.pause_all_pending;
         let resume = action == PauseAllAction::Resume;
         let folder_id = folder_id.to_owned();
-        div()
-            .id(("minimal-project-pause", project_index))
-            // The open session's project keeps its actions in sight.
-            .when(!resume && !current, |button| {
-                button
-                    .invisible()
-                    .group_hover("catalog-project", |style| style.visible())
-            })
-            .size(px(24.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(5.0))
-            .tooltip(pane_tooltip(label, colors))
-            .when(ready, |button| {
-                button
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.border)))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.pause_folder(&folder_id, resume, cx)
-                    }))
-            })
-            .child(icon(
-                path,
-                10.0,
-                match action {
-                    _ if !ready => colors.faint,
-                    PauseAllAction::Resume => colors.accent,
-                    PauseAllAction::Pause => colors.faint,
-                },
-            ))
-            .into_any_element()
+        icon_button(
+            ("minimal-project-pause", project_index),
+            label,
+            path,
+            colors,
+        )
+        .size(HIT_MIN)
+        .glyph(10.0)
+        .ink(match action {
+            PauseAllAction::Resume => colors.accent,
+            PauseAllAction::Pause => colors.faint,
+        })
+        .wash(rgb(colors.border))
+        .enabled(ready)
+        .build()
+        // The open session's project keeps its actions in sight.
+        .when(!resume && !current, |button| {
+            button
+                .invisible()
+                .group_hover("catalog-project", |style| style.visible())
+        })
+        .when(ready, |button| {
+            button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.pause_folder(&folder_id, resume, cx)
+            }))
+        })
+        .into_any_element()
     }
 
     fn pause_folder(&mut self, folder_id: &str, resume: bool, cx: &mut Context<Self>) {
@@ -17050,26 +17062,26 @@ impl XdDesktop {
             .child(div().flex_1())
             .when(!open, |header| header.child(drawer_tabs(signals, colors)))
             .child(
-                div()
-                    .id(("catalog-folder-add", index))
-                    .when(!current, |button| {
-                        button
-                            .invisible()
-                            .group_hover("catalog-folder", |style| style.visible())
-                    })
-                    .size(px(24.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.0))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.border)))
-                    // A tooltip would linger over the menu it opens.
-                    .when(!self.minimal_popup_is_open(), |button| {
-                        button.tooltip(pane_tooltip("New project or folder here", colors))
-                    })
-                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                icon_button(
+                    ("catalog-folder-add", index),
+                    "New project or folder here",
+                    PLUS_ICON,
+                    colors,
+                )
+                .size(HIT_MIN)
+                .drawn(plus_icon)
+                .ink(colors.faint)
+                .wash(rgb(colors.border))
+                // A tooltip would linger over the menu it opens.
+                .named(!self.minimal_popup_is_open())
+                .build()
+                .when(!current, |button| {
+                    button
+                        .invisible()
+                        .group_hover("catalog-folder", |style| style.visible())
+                })
+                .on_click(cx.listener(
+                    move |this, event: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         this.open_project_add_menu(
                             Some(add_parent.clone()),
@@ -17572,27 +17584,26 @@ impl XdDesktop {
                     ))
                 })
                 .child(
-                    div()
-                        .id(("minimal-session-group-add", project_index))
-                        .when(!current, |button| {
-                            button
-                                .invisible()
-                                .group_hover("catalog-project", |style| style.visible())
-                        })
-                        .size(px(24.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(5.0))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(colors.border)))
-                        .tooltip(pane_tooltip("New session", colors))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.begin_chat_create(create_project.clone(), window, cx);
-                        }))
-                        .child(plus_icon(colors.faint)),
+                    icon_button(
+                        ("minimal-session-group-add", project_index),
+                        "New session",
+                        PLUS_ICON,
+                        colors,
+                    )
+                    .size(HIT_MIN)
+                    .drawn(plus_icon)
+                    .ink(colors.faint)
+                    .wash(rgb(colors.border))
+                    .build()
+                    .when(!current, |button| {
+                        button
+                            .invisible()
+                            .group_hover("catalog-project", |style| style.visible())
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.begin_chat_create(create_project.clone(), window, cx);
+                    })),
                 );
 
             drawers.push(
@@ -17731,23 +17742,21 @@ impl XdDesktop {
                             .child("Projects"),
                     )
                     .child(
-                        div()
-                            .id("minimal-new-project")
-                            .size(px(26.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(5.0))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                            // A tooltip would linger over the menu it opens.
-                            .when(!self.minimal_popup_is_open(), |button| {
-                                button.tooltip(pane_tooltip("New project or folder", colors))
-                            })
-                            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                        icon_button(
+                            "minimal-new-project",
+                            "New project or folder",
+                            PLUS_ICON,
+                            colors,
+                        )
+                        .drawn(plus_icon)
+                        // A tooltip would linger over the menu it opens.
+                        .named(!self.minimal_popup_is_open())
+                        .build()
+                        .on_click(cx.listener(
+                            |this, event: &ClickEvent, window, cx| {
                                 this.open_project_add_menu(None, event.position(), window, cx)
-                            }))
-                            .child(plus_icon(colors.muted)),
+                            },
+                        )),
                     ),
             )
             .child(
@@ -21673,22 +21682,16 @@ impl XdDesktop {
                         )
                     })
                     .child(
-                        div()
-                            .id(("native-drop-queued", index))
-                            .tooltip(pane_tooltip("Remove from queue", colors))
-                            .size(px(26.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .text_sm()
-                            .text_color(rgb(colors.muted))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.background)))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.drop_queued(index, cx)),
-                            )
-                            .child(icon(CLOSE_ICON, 13.0, colors.muted)),
+                        icon_button(
+                            ("native-drop-queued", index),
+                            "Remove from queue",
+                            CLOSE_ICON,
+                            colors,
+                        )
+                        .glyph(13.0)
+                        .wash(rgb(colors.background))
+                        .build()
+                        .on_click(cx.listener(move |this, _, _, cx| this.drop_queued(index, cx))),
                     )
                     .into_any_element()
             })
@@ -24127,20 +24130,13 @@ impl XdDesktop {
                     )
                 })
                 .child(
-                    div()
-                        .id("error-banner-close")
-                        .size(px(26.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .cursor_pointer()
+                    icon_button("error-banner-close", "Dismiss", CLOSE_ICON, colors)
+                        .glyph(13.0)
+                        .ink(colors.danger)
+                        .wash(rgba((colors.danger << 8) | 0x24))
+                        .build()
                         .debug_selector(|| "error-banner-close".into())
-                        .hover(|style| style.bg(rgba((colors.danger << 8) | 0x24)))
-                        .tooltip(pane_tooltip("Dismiss", colors))
-                        .on_click(cx.listener(|this, _, _, cx| this.dismiss_error(cx)))
-                        .child(icon(CLOSE_ICON, 13.0, colors.danger)),
+                        .on_click(cx.listener(|this, _, _, cx| this.dismiss_error(cx))),
                 )
                 .into_any_element()
         });

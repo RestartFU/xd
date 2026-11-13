@@ -873,14 +873,17 @@ impl Render for BrowserPane {
                     )
                     .when_some(tools, |bar, tools| bar.children(tools))
                     .child(
-                        crate::ui_button("browser-new-tab", crate::ButtonKind::Ghost, colors)
-                            .size(px(28.))
-                            .px_0()
-                            .tooltip(crate::pane_tooltip("New browser tab", colors))
-                            .on_click(
-                                cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
-                            )
-                            .child(crate::plus_icon(colors.muted)),
+                        crate::icon_button(
+                            "browser-new-tab",
+                            "New browser tab",
+                            crate::PLUS_ICON,
+                            colors,
+                        )
+                        .drawn(crate::plus_icon)
+                        .build()
+                        .on_click(
+                            cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
+                        ),
                     ),
             )
             .when(self.auxiliary.is_none(), |pane| {
@@ -929,17 +932,10 @@ fn tab_close(
     label: &'static str,
     colors: ThemeColors,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .tooltip(crate::pane_tooltip(label, colors))
-        .size(px(24.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(5.))
-        .hover(|style| style.bg(rgb(colors.surface_high)))
-        .child(crate::icon(crate::CLOSE_ICON, 11., colors.muted))
+    crate::icon_button(id, label, crate::CLOSE_ICON, colors)
+        .size(HIT_MIN)
+        .glyph(11.)
+        .build()
 }
 
 struct BrowserTab {

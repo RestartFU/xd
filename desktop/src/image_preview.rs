@@ -655,23 +655,20 @@ impl XdDesktop {
                     ),
             )
             .child(
-                div()
-                    .id(("remove-draft-file", index))
-                    .debug_selector(move || format!("remove-draft-file-{index}"))
-                    .tooltip(pane_tooltip("Remove file", colors))
-                    .size(px(24.0))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.remove_draft_attachment(owner, id, window, cx);
-                    }))
-                    .child(icon(CLOSE_ICON, 13.0, colors.muted)),
+                icon_button(
+                    ("remove-draft-file", index),
+                    "Remove file",
+                    CLOSE_ICON,
+                    colors,
+                )
+                .size(HIT_MIN)
+                .glyph(13.0)
+                .build()
+                .debug_selector(move || format!("remove-draft-file-{index}"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.remove_draft_attachment(owner, id, window, cx);
+                })),
             )
     }
 
