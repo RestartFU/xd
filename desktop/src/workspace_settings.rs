@@ -1846,9 +1846,8 @@ impl XdDesktop {
         if !at_home {
             return false;
         }
-        let count = SETTINGS_SECTIONS.len();
-        let at = self.settings_section.min(count - 1);
-        self.open_settings_section(if down { at + 1 } else { at + count - 1 } % count, cx);
+        let next = stepped_section(self.settings_section, SETTINGS_SECTIONS.len(), down);
+        self.open_settings_section(next, cx);
         true
     }
 
@@ -2188,9 +2187,30 @@ impl XdDesktop {
     }
 }
 
+/// The section after `at`, or before it, going round at either end.
+fn stepped_section(at: usize, count: usize, down: bool) -> usize {
+    let at = at.min(count - 1);
+    if down {
+        (at + 1) % count
+    } else {
+        (at + count - 1) % count
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_sections_step_round_at_both_ends() {
+        let count = SETTINGS_SECTIONS.len();
+        assert_eq!(stepped_section(0, count, true), 1);
+        assert_eq!(stepped_section(count - 1, count, true), 0);
+        assert_eq!(stepped_section(0, count, false), count - 1);
+        assert_eq!(stepped_section(3, count, false), 2);
+        // A stale index past the end steps from the last section.
+        assert_eq!(stepped_section(count + 4, count, true), 0);
+    }
 
     #[test]
     fn theme_cards_sit_side_by_side_unless_their_names_would_clip() {
