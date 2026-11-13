@@ -37,9 +37,10 @@ use gpui::{
     Decorations, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, HighlightStyle, Image,
     KeyBinding, ListAlignment, ListHorizontalSizingBehavior, ListOffset, ListState, MouseButton,
     MouseDownEvent, Pixels, Point, Render, ResizeEdge, ScrollHandle, ScrollWheelEvent,
-    SharedString, StyledText, TextRun, Timer, TitlebarOptions, WeakFocusHandle, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowDecorations, WindowOptions,
-    canvas, div, img, list, point, prelude::*, relative, rgb, rgba, size, svg, uniform_list,
+    SharedString, StyledText, TextRun, Timer, TitlebarOptions, UniformListScrollHandle,
+    WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*, relative, rgb,
+    rgba, size, svg, uniform_list,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -105,6 +106,7 @@ use editor::{
     Up as EditorUp, WordLeft as EditorWordLeft, WordRight as EditorWordRight,
 };
 use input::{
+    AltDown as TerminalAltDown, AltShiftDown as TerminalAltShiftDown, AltUp as TerminalAltUp,
     Backspace, ClearScreen as TerminalClearScreen, ComposerEvent, ComposerInput,
     ControlA as TerminalControlA, ControlB as TerminalControlB, ControlE as TerminalControlE,
     ControlF as TerminalControlF, ControlG as TerminalControlG, ControlH as TerminalControlH,
@@ -230,8 +232,10 @@ const CARD_HEIGHT: f32 = 30.0;
 const CATALOG_INDENT: f32 = 12.0;
 /// How far a session another session's agent started sits in from that one.
 const SESSION_NEST_INDENT: f32 = 10.0;
-/// How long the sidebar offers to undo a settle.
-const SETTLE_UNDO_LIFETIME: Duration = Duration::from_secs(5);
+/// How long the sidebar offers to undo a settle, a discarded draft or a
+/// removed message: long enough to notice what went and come back for it
+/// with the keyboard, and the next of those replaces it sooner.
+const UNDO_LIFETIME: Duration = Duration::from_secs(30);
 /// Rows of the Settled shelf shown at first, and how many Show more adds.
 const SETTLED_INITIAL_ROWS: usize = 10;
 const SETTLED_MORE_ROWS: usize = 25;
@@ -1925,7 +1929,12 @@ gpui::actions!(
         OpenContextMenu,
         InterfaceLarger,
         InterfaceSmaller,
-        InterfaceReset
+        InterfaceReset,
+        ScrollPageUp,
+        ScrollPageDown,
+        ScrollToTop,
+        ScrollToBottom,
+        UndoLast
     ]
 );
 
@@ -1935,7 +1944,7 @@ gpui::actions!(
 /// Settings › Keyboard lists them from [`APP_SHORTCUTS`].
 fn app_key_bindings() -> Vec<KeyBinding> {
     let context = Some("XdDesktop");
-    vec![
+    let mut bindings = vec![
         KeyBinding::new("ctrl-t", NewChatTab, context),
         KeyBinding::new("cmd-t", NewChatTab, context),
         KeyBinding::new("ctrl-tab", NextChatTab, context),
@@ -1974,7 +1983,54 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("space", KeyPress, Some(KEY_STOP_CONTEXT)),
         KeyBinding::new("shift-f10", OpenContextMenu, context),
         KeyBinding::new("menu", OpenContextMenu, context),
-    ]
+        // The reading pane: the transcript, the Changes patch, an open file,
+        // Usage or Settings. The terminal keeps Page Up and Page Down for its
+        // scrollback; no text box has a use for any of these.
+        KeyBinding::new("pageup", ScrollPageUp, context),
+        KeyBinding::new("pagedown", ScrollPageDown, context),
+        KeyBinding::new("ctrl-home", ScrollToTop, context),
+        KeyBinding::new("ctrl-end", ScrollToBottom, context),
+        // Takes back the footer's last settle, discard or removal. A text
+        // box and the terminal bind these keys deeper and keep them.
+        KeyBinding::new("ctrl-z", UndoLast, context),
+        KeyBinding::new("cmd-z", UndoLast, context),
+    ];
+    if cfg!(target_os = "macos") {
+        bindings.push(KeyBinding::new("cmd-up", ScrollToTop, context));
+        bindings.push(KeyBinding::new("cmd-down", ScrollToBottom, context));
+    }
+    bindings
+}
+
+/// How far a key scrolls the reading pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageScroll {
+    Up,
+    Down,
+    Top,
+    Bottom,
+}
+
+/// What a page of [`PageScroll`] keeps in sight of the page before it.
+const PAGE_SCROLL_OVERLAP: f32 = 40.0;
+
+/// Scrolls a scroll area by a page, or to an end. Says whether it scrolls.
+fn page_scroll(handle: &ScrollHandle, scroll: PageScroll) -> bool {
+    let max = handle.max_offset().height;
+    if max <= gpui::px(0.0) {
+        return false;
+    }
+    let page = (handle.bounds().size.height - px(PAGE_SCROLL_OVERLAP)).max(px(PAGE_SCROLL_OVERLAP));
+    let mut offset = handle.offset();
+    offset.y = match scroll {
+        PageScroll::Up => offset.y + page,
+        PageScroll::Down => offset.y - page,
+        PageScroll::Top => gpui::px(0.0),
+        PageScroll::Bottom => -max,
+    }
+    .clamp(-max, gpui::px(0.0));
+    handle.set_offset(offset);
+    true
 }
 
 /// The key context of the handle that has the keyboard while the Tab ring is
@@ -4154,6 +4210,13 @@ struct XdDesktop {
     key_cursor: Option<(&'static str, usize)>,
     /// Scrolls the open picker's list, to keep that row in view.
     key_scroll: ScrollHandle,
+    /// The Changes patch's and the Files list's scroll, which the page keys
+    /// and the arrow keys move.
+    diff_scroll: UniformListScrollHandle,
+    files_scroll: UniformListScrollHandle,
+    /// The pointer last pressed in the side pane rather than the chat, so
+    /// the page keys scroll the side pane.
+    reading_side: bool,
     /// What has the keyboard as this frame is drawn, for the frames of text
     /// fields, which show it.
     frame_focus: Option<FocusHandle>,
@@ -5042,6 +5105,9 @@ impl XdDesktop {
             key_targets: KeyTargets::default(),
             key_cursor: None,
             key_scroll: ScrollHandle::new(),
+            diff_scroll: UniformListScrollHandle::new(),
+            files_scroll: UniformListScrollHandle::new(),
+            reading_side: false,
             frame_focus: None,
             find_focused: false,
             pause_all_pending: false,
@@ -16438,8 +16504,10 @@ impl XdDesktop {
         if !undo.sessions.iter().any(|session| session == session_id) {
             undo.sessions.push(session_id.to_owned());
         }
+        // The executor's timer, which a test's clock moves.
+        let lifetime = cx.background_executor().timer(UNDO_LIFETIME);
         cx.spawn(async move |this, cx| {
-            Timer::after(SETTLE_UNDO_LIFETIME).await;
+            lifetime.await;
             let _ = this.update(cx, |this, cx| {
                 if this
                     .settle_undo
@@ -16505,8 +16573,10 @@ impl XdDesktop {
         self.settle_undo_generation += 1;
         let generation = self.settle_undo_generation;
         self.discard_undo = Some(DiscardUndo { what, generation });
+        // The executor's timer, which a test's clock moves.
+        let lifetime = cx.background_executor().timer(UNDO_LIFETIME);
         cx.spawn(async move |this, cx| {
-            Timer::after(SETTLE_UNDO_LIFETIME).await;
+            lifetime.await;
             let _ = this.update(cx, |this, cx| {
                 if this
                     .discard_undo
@@ -18310,7 +18380,8 @@ impl XdDesktop {
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .overflow_hidden()
+                            // The words truncate themselves; nothing clips
+                            // here, so the ring around Undo shows whole.
                             .text_size(px(TEXT_CAPTION))
                             .text_color(rgb(colors.faint))
                             .when_some(settle_notice, |notice, summary| {
@@ -18318,18 +18389,32 @@ impl XdDesktop {
                                 notice.child(truncating_label(summary)).child(
                                     div()
                                         .id("minimal-settle-undo")
+                                        .debug_selector(|| "minimal-settle-undo".into())
+                                        .relative()
                                         .flex_none()
+                                        .h(px(HIT_MIN))
+                                        .px_1()
                                         .flex()
                                         .items_center()
                                         .gap(px(3.0))
+                                        .rounded(px(RADIUS_CONTROL))
                                         .text_color(rgb(colors.muted))
                                         .cursor_pointer()
-                                        .hover(|style| style.text_color(rgb(colors.text)))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.undo_last(cx);
-                                        }))
+                                        .hover(|style| {
+                                            style
+                                                .bg(rgb(colors.surface_high))
+                                                .text_color(rgb(colors.text))
+                                        })
                                         .child(icon(UNDO_ICON, 12.0, colors.muted))
-                                        .child("Undo"),
+                                        .child("Undo")
+                                        .key_stop(
+                                            &self.key_targets,
+                                            KeyLayer::Page,
+                                            "minimal-settle-undo",
+                                            colors,
+                                            cx,
+                                            |this, _, cx| this.undo_last(cx),
+                                        ),
                                 )
                             }),
                     )
@@ -22694,7 +22779,13 @@ impl XdDesktop {
             NativePane::Files => Some(self.render_files_pane(colors, window, cx)),
             NativePane::Diff => Some(self.render_changes_pane(colors, window, cx)),
         };
-        pane_content.unwrap_or_else(|| div().into_any_element())
+        // A press anywhere in the pane sends the page keys there.
+        div()
+            .size_full()
+            .debug_selector(|| "native-side-pane".into())
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.reading_side = true))
+            .children(pane_content)
+            .into_any_element()
     }
 
     /// One folder's entries. Only the rows in view are built, and a frame
@@ -22795,6 +22886,7 @@ impl XdDesktop {
                     .collect::<Vec<_>>()
             }),
         )
+        .track_scroll(self.files_scroll.clone())
         .flex_1()
         .min_h_0()
         .px(px(6.0));
@@ -22857,9 +22949,13 @@ impl XdDesktop {
                         ),
                 )
                 .child(
+                    // The editor is as tall as the file; this box scrolls it.
                     div()
+                        .id("native-file-preview")
                         .flex_1()
                         .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.file_editor.read(cx).scroll_handle())
                         .p_2()
                         .text_size(px(TEXT_MONO))
                         .child(self.file_editor.clone()),
@@ -22998,6 +23094,7 @@ impl XdDesktop {
         })
         .with_width_from_item(patch.widest)
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+        .track_scroll(self.diff_scroll.clone())
         .flex_1()
         .min_h_0()
         .py_2();
@@ -24705,6 +24802,33 @@ impl XdDesktop {
             .on_action(cx.listener(|this, _: &OpenContextMenu, window, cx| {
                 this.open_context_menu_from_keys(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &UndoLast, _, cx| {
+                if this.shortcuts_blocked() || this.undo_notice().is_none() {
+                    cx.propagate();
+                    return;
+                }
+                this.undo_last(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ScrollPageUp, window, cx| {
+                if !this.scroll_reading_pane(PageScroll::Up, window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ScrollPageDown, window, cx| {
+                if !this.scroll_reading_pane(PageScroll::Down, window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ScrollToTop, window, cx| {
+                if !this.scroll_reading_pane(PageScroll::Top, window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ScrollToBottom, window, cx| {
+                if !this.scroll_reading_pane(PageScroll::Bottom, window, cx) {
+                    cx.propagate();
+                }
+            }))
             // A pointer press anywhere ends the ring: the pointer has taken over.
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 if this.key_stop.is_some() {
@@ -24878,7 +25002,17 @@ impl XdDesktop {
                             .when_some(toolbar, |column, toolbar| column.child(toolbar))
                             .child(
                                 div().w_full().flex_1().min_h_0().flex().child(
-                                    div().flex_1().min_w_0().min_h_0().h_full().child(content),
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .min_h_0()
+                                        .h_full()
+                                        // A press in the chat sends the page
+                                        // keys back to the transcript.
+                                        .capture_any_mouse_down(cx.listener(|this, _, _, _| {
+                                            this.reading_side = false;
+                                        }))
+                                        .child(content),
                                 ),
                             ),
                     )
@@ -25699,6 +25833,111 @@ impl XdDesktop {
         };
         let position = point(bounds.left() + px(24.0), bounds.bottom());
         self.open_sidebar_context_menu(target, title, position, window, cx);
+    }
+
+    /// The side pane's tool the page keys can scroll, while it shows.
+    fn shown_side_reader(&self) -> Option<NativePane> {
+        (self.browser_is_open() && self.native_side_tools_enabled())
+            .then_some(self.native_pane)
+            .filter(|pane| matches!(pane, NativePane::Files | NativePane::Diff))
+    }
+
+    /// Page Up, Page Down, Ctrl+Home and Ctrl+End: scrolls the reading pane
+    /// the keyboard is in, or else the one the pointer last pressed in, or
+    /// else the transcript. Usage and Settings scroll while they are open; a
+    /// dialog or a menu takes nothing. Says whether anything scrolled.
+    fn scroll_reading_pane(
+        &mut self,
+        scroll: PageScroll,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.usage_open {
+            if self.usage_layer_open() {
+                return false;
+            }
+            let scrolled = page_scroll(&self.usage.scroll, scroll);
+            cx.notify();
+            return scrolled;
+        }
+        if self.minimal_theme_open {
+            if self.settings_menu.is_some() {
+                return false;
+            }
+            let scrolled = page_scroll(&self.settings_scroll, scroll);
+            cx.notify();
+            return scrolled;
+        }
+        if self.dialog_open() || self.menu_open() {
+            return false;
+        }
+        let side = self.shown_side_reader();
+        let in_editor = self
+            .file_editor
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let in_commit = self
+            .git_commit_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let target = match side {
+            Some(NativePane::Files) if in_editor || self.reading_side => Some(NativePane::Files),
+            Some(NativePane::Diff) if in_commit || self.reading_side => Some(NativePane::Diff),
+            _ => None,
+        };
+        let scrolled = match target {
+            Some(NativePane::Files) => {
+                let preview = self.file_editor.read(cx).scroll_handle();
+                page_scroll(&preview, scroll)
+                    || page_scroll(&self.files_scroll.0.borrow().base_handle, scroll)
+            }
+            Some(_) => page_scroll(&self.diff_scroll.0.borrow().base_handle, scroll),
+            None => self.page_transcript(scroll, cx),
+        };
+        cx.notify();
+        scrolled
+    }
+
+    /// Scrolls the open chat's transcript by a page or to an end, asking
+    /// for the page of older or newer messages there as a wheel would.
+    fn page_transcript(&mut self, scroll: PageScroll, cx: &mut Context<Self>) -> bool {
+        if !matches!(self.minimal_route, MinimalRoute::Cli { .. })
+            || self.creating_chat_folder.is_some()
+            || self.transcript.item_count() == 0
+        {
+            return false;
+        }
+        let page = (self.transcript.viewport_bounds().size.height - px(PAGE_SCROLL_OVERLAP))
+            .max(px(PAGE_SCROLL_OVERLAP));
+        // A list pinned to its end keeps its scroll top past the last row;
+        // a page is measured from where its top really is.
+        let logical = -self.transcript.scroll_px_offset_for_scrollbar().y;
+        let max = self.transcript.max_offset_for_scrollbar().height;
+        let actual = logical.min(max);
+        match scroll {
+            PageScroll::Up => self.transcript.scroll_by(actual - logical - page),
+            PageScroll::Down if actual + page >= max => self.pin_transcript(),
+            PageScroll::Down => self.transcript.scroll_by(actual - logical + page),
+            PageScroll::Top => self.transcript.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: gpui::px(0.0),
+            }),
+            PageScroll::Bottom => {
+                self.jump_to_latest(cx);
+                return true;
+            }
+        }
+        let top = self.transcript.logical_scroll_top().item_ix;
+        if matches!(scroll, PageScroll::Up | PageScroll::Top) && top <= 8 {
+            self.request_older_messages();
+        } else if scroll == PageScroll::Down
+            && top.saturating_add(8) >= self.transcript.item_count()
+        {
+            self.request_newer_messages();
+        }
+        true
     }
 
     /// Forgets where the arrow keys were once their list is no longer the
@@ -31433,7 +31672,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         before.extend(undo_key_bindings());
         let before = gpui::Keymap::new(before);
         let after = gpui::Keymap::new(all_key_bindings());
-        let keys = [
+        let mut keys = vec![
             "ctrl-t",
             "cmd-t",
             "ctrl-tab",
@@ -31466,7 +31705,16 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             "shift-tab",
             "shift-f10",
             "menu",
+            "pageup",
+            "pagedown",
+            "ctrl-home",
+            "ctrl-end",
+            "ctrl-z",
+            "cmd-z",
         ];
+        if cfg!(target_os = "macos") {
+            keys.extend(["cmd-up", "cmd-down"]);
+        }
         assert_eq!(
             // Space is the one shortcut bound deeper than the window.
             keys.len() + 1,
@@ -31492,7 +31740,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                 "space in {context:?}"
             );
         }
-        for key in keys {
+        for key in keys.iter().copied() {
             // Alone in the window, the key is the window's.
             let window = key_action(&after, key, &["XdDesktop"]).unwrap();
             assert!(window.starts_with("xd::"), "{key} reaches {window}");
@@ -31519,9 +31767,16 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             ("ctrl-b", "ControlB"),
             ("ctrl-l", "ClearScreen"),
             ("ctrl-k", "ControlK"),
+            ("ctrl-z", "Suspend"),
             ("up", "Up"),
             ("tab", "Tab"),
             ("enter", "Submit"),
+            ("pageup", "PageUp"),
+            // Programs read Alt with an arrow; the window steps sessions
+            // with these only outside the terminal.
+            ("alt-up", "AltUp"),
+            ("alt-down", "AltDown"),
+            ("alt-shift-down", "AltShiftDown"),
         ] {
             let is = key_action(&after, key, &["XdDesktop", "TerminalInput"]).unwrap();
             assert!(
@@ -31536,7 +31791,6 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             "ctrl-`",
             "ctrl-,",
             "shift-escape",
-            "alt-down",
             "ctrl-=",
             "ctrl--",
             "ctrl-0",
@@ -31566,7 +31820,11 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             if modifiers.shift {
                 words.push("Shift".into());
             }
-            let mut key = keystroke.key.clone();
+            let mut key = match keystroke.key.as_str() {
+                "pageup" => "Page Up".to_owned(),
+                "pagedown" => "Page Down".to_owned(),
+                key => key.to_owned(),
+            };
             if let Some(first) = key.get_mut(..1) {
                 first.make_ascii_uppercase();
             }
@@ -31587,8 +31845,12 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                 continue;
             }
             let keys = match shown(keystroke).as_str() {
-                // Ctrl+Tab and Ctrl+` are Ctrl on every platform.
-                keys if keys.ends_with(" Tab") || keys.ends_with(" `") => {
+                // Ctrl+Tab, Ctrl+` and Ctrl+Home or End are Ctrl on every platform.
+                keys if keys.ends_with(" Tab")
+                    || keys.ends_with(" `")
+                    || keys.ends_with(" Home")
+                    || keys.ends_with(" End") =>
+                {
                     keys.replace("Cmd", "Ctrl")
                 }
                 keys => keys.to_owned(),
@@ -32230,6 +32492,213 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             desktop.discard_project_draft("website", cx);
             assert_eq!(desktop.undo_notice(), None);
         });
+    }
+
+    /// An open chat of sixty messages, far taller than the window, with
+    /// xd's real keys.
+    fn long_chat_window(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<XdDesktop>, &mut gpui::VisualTestContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        cx.update(|cx| cx.bind_keys(all_key_bindings()));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.model.connected = true;
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_snapshot.messages = Arc::new(
+                (1..=60)
+                    .map(|index| {
+                        let role = if index % 2 == 0 { "user" } else { "assistant" };
+                        let text = format!(
+                            "Message {index}.\n\nA paragraph long enough to take a few lines of the \
+                             column, so sixty of them make a chat much taller than the window."
+                        );
+                        Message::new(Some(index), role, &text, None)
+                    })
+                    .collect(),
+            );
+            desktop.transcript_snapshot.sync_derived_rows();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        });
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        redraw(cx);
+        (desktop, cx)
+    }
+
+    #[gpui::test]
+    fn the_page_keys_scroll_the_transcript(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = long_chat_window(cx);
+        let top = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| {
+                let top = desktop.transcript.logical_scroll_top();
+                (top.item_ix, top.offset_in_item, desktop.transcript_pinned())
+            })
+        };
+        assert!(top(&desktop, cx).2, "a chat opens on its newest message");
+        cx.update_window_entity(&desktop, |desktop, window, _| {
+            window.focus(&desktop.root_focus);
+        });
+        cx.simulate_keystrokes("pageup");
+        redraw(cx);
+        let (up, _, pinned) = top(&desktop, cx);
+        assert!(!pinned, "Page Up leaves the bottom");
+        cx.simulate_keystrokes("pageup");
+        redraw(cx);
+        assert!(top(&desktop, cx).0 < up, "and goes on up a page at a time");
+        cx.simulate_keystrokes("ctrl-home");
+        redraw(cx);
+        assert_eq!(top(&desktop, cx), (0, px(0.0), false));
+        cx.simulate_keystrokes("pagedown");
+        redraw(cx);
+        assert!(top(&desktop, cx).0 > 0 || top(&desktop, cx).1 > px(0.0));
+        cx.simulate_keystrokes("ctrl-end");
+        redraw(cx);
+        assert!(top(&desktop, cx).2, "Ctrl+End follows the newest again");
+
+        // The message box has no use for Page Up: from there it scrolls too.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+        });
+        cx.simulate_keystrokes("pageup");
+        redraw(cx);
+        assert!(!top(&desktop, cx).2);
+
+        // A dialog over the chat takes nothing.
+        cx.simulate_keystrokes("ctrl-end");
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.begin_workspace_create(window, cx);
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("pageup");
+        redraw(cx);
+        assert!(top(&desktop, cx).2);
+    }
+
+    #[gpui::test]
+    fn the_page_keys_scroll_the_side_pane_once_it_is_clicked(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = long_chat_window(cx);
+        let patch = (0..400)
+            .map(|line| format!("+line {line}\n"))
+            .collect::<String>();
+        cx.update_window_entity(&desktop, |desktop, window, _| {
+            desktop.diff_panel = Some(DiffPanel {
+                patch: PatchView::new(&format!(
+                    "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -0,0 +1,400 @@\n{patch}"
+                )),
+                ..DiffPanel::default()
+            });
+            desktop.set_browser_open(true);
+            desktop.native_pane = NativePane::Diff;
+            window.focus(&desktop.root_focus);
+        });
+        redraw(cx);
+        let diff = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| {
+                desktop.diff_scroll.0.borrow().base_handle.offset().y
+            })
+        };
+        let pinned = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| desktop.transcript_pinned())
+        };
+        // Until the side pane is pressed in, the keys stay with the chat.
+        cx.simulate_keystrokes("pagedown");
+        redraw(cx);
+        assert_eq!(diff(&desktop, cx), px(0.0));
+        let pane = cx.debug_bounds("native-side-pane").unwrap();
+        cx.simulate_click(pane.center(), gpui::Modifiers::default());
+        cx.update_window_entity(&desktop, |desktop, window, _| {
+            window.focus(&desktop.root_focus);
+        });
+        cx.simulate_keystrokes("pagedown");
+        redraw(cx);
+        let down = diff(&desktop, cx);
+        assert!(down < px(0.0), "the patch scrolls a page");
+        assert!(pinned(&desktop, cx), "and the chat stays where it was");
+        cx.simulate_keystrokes("ctrl-end");
+        redraw(cx);
+        assert!(diff(&desktop, cx) < down);
+        cx.simulate_keystrokes("ctrl-home");
+        redraw(cx);
+        assert_eq!(diff(&desktop, cx), px(0.0));
+        // A press in the chat gives the keys back to the transcript.
+        let chat = cx.debug_bounds("chat-composer").unwrap();
+        cx.simulate_click(
+            point(chat.center().x, chat.top() - px(80.0)),
+            gpui::Modifiers::default(),
+        );
+        cx.update_window_entity(&desktop, |desktop, window, _| {
+            window.focus(&desktop.root_focus);
+        });
+        cx.simulate_keystrokes("pageup");
+        redraw(cx);
+        assert!(!pinned(&desktop, cx));
+        assert_eq!(diff(&desktop, cx), px(0.0));
+    }
+
+    #[gpui::test]
+    fn the_undo_notice_waits_and_answers_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        let discard = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            cx.update_window_entity(desktop, |desktop, window, cx| {
+                desktop.begin_chat_create("atlas".into(), window, cx);
+                desktop
+                    .new_chat_input
+                    .update(cx, |input, cx| input.set_text("Port the palette", cx));
+                desktop.new_chat_prompt = "Port the palette".into();
+                desktop.persist_new_chat_draft();
+                desktop.discard_project_draft("atlas", cx);
+                window.focus(&desktop.root_focus);
+            });
+            redraw(cx);
+        };
+        let prompt = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| desktop.new_chat_prompt.clone())
+        };
+        discard(&desktop, cx);
+        // Long enough to come back for it.
+        cx.executor().advance_clock(Duration::from_secs(20));
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.undo_notice().as_deref(), Some("Discarded"));
+        });
+        let undo = cx.debug_bounds("minimal-settle-undo").unwrap();
+        assert!(undo.size.height >= px(HIT_MIN), "Undo is a full target");
+        // Ctrl+Z takes it back when no text box has the keyboard.
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(prompt(&desktop, cx), "Port the palette");
+        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.undo_notice(), None));
+
+        // Tab reaches Undo, and Enter presses it.
+        discard(&desktop, cx);
+        cx.simulate_keystrokes("tab");
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("minimal-settle-undo"));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(prompt(&desktop, cx), "Port the palette");
+
+        // A text box keeps Ctrl+Z for its own undo.
+        discard(&desktop, cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            window.focus(&desktop.new_chat_input.read(cx).focus_handle(cx));
+        });
+        cx.simulate_keystrokes("ctrl-z");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.undo_notice().as_deref(), Some("Discarded"));
+        });
+        // And the offer ends in the end.
+        cx.executor()
+            .advance_clock(UNDO_LIFETIME + Duration::from_secs(1));
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.undo_notice(), None));
     }
 
     #[gpui::test]
@@ -37936,6 +38405,15 @@ fn base_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("alt-right", WordRight, Some("TerminalInput")),
         KeyBinding::new("up", Up, Some("TerminalInput")),
         KeyBinding::new("down", Down, Some("TerminalInput")),
+        // Programs in the terminal read Alt with an arrow, so the terminal
+        // keeps the keys the window steps through sessions with.
+        KeyBinding::new("alt-up", TerminalAltUp, Some("TerminalInput")),
+        KeyBinding::new("alt-down", TerminalAltDown, Some("TerminalInput")),
+        KeyBinding::new(
+            "alt-shift-down",
+            TerminalAltShiftDown,
+            Some("TerminalInput"),
+        ),
         KeyBinding::new("pageup", TerminalPageUp, Some("TerminalInput")),
         KeyBinding::new("pagedown", TerminalPageDown, Some("TerminalInput")),
         KeyBinding::new("home", Home, Some("TerminalInput")),

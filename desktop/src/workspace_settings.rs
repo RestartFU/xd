@@ -177,6 +177,11 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
     } else {
         "Ctrl Shift V"
     };
+    let ends = if cfg!(target_os = "macos") {
+        "Ctrl Home / Ctrl End, or Cmd Up / Cmd Down"
+    } else {
+        "Ctrl Home / Ctrl End"
+    };
     vec![
         (
             "Window",
@@ -198,6 +203,12 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ("Larger / smaller interface", format!("{m} = / {m} -")),
                 ("Interface size back to 100 %", format!("{m} 0")),
                 ("Copy the selected text", format!("{m} C")),
+                (
+                    "Scroll the chat, or the side pane you last clicked in, by a page",
+                    "Page Up / Page Down".into(),
+                ),
+                ("Scroll to the top / bottom", ends.into()),
+                ("Undo the last settle, discard or removal", format!("{m} Z")),
                 (
                     "Close a dialog or menu, clear a search, or leave the chat",
                     "Escape".into(),
@@ -279,6 +290,10 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 (
                     "Every other Ctrl and letter goes to the shell, so Ctrl K, L, B and T do not reach xd from here",
                     "Ctrl A to Z".into(),
+                ),
+                (
+                    "Alt with an arrow goes to the program too, so these do not change session from here",
+                    "Alt Up / Alt Down / Alt Shift Down".into(),
                 ),
             ],
         ),

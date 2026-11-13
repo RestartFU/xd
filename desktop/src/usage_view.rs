@@ -256,6 +256,8 @@ pub(super) struct UsagePage {
     next_row: u64,
     overview_bounds: Rc<Cell<Bounds<Pixels>>>,
     model_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The flyout's or the full page's scroll, which the page keys move.
+    pub(super) scroll: ScrollHandle,
 }
 
 impl UsagePage {
@@ -280,6 +282,7 @@ impl UsagePage {
             next_row: 0,
             overview_bounds: Rc::new(Cell::new(Bounds::default())),
             model_bounds: Rc::new(Cell::new(Bounds::default())),
+            scroll: ScrollHandle::new(),
         }
     }
 }
@@ -976,6 +979,16 @@ impl XdDesktop {
     }
 
     /// Escape closes the innermost layer first. `false` means Usage is not open.
+    /// Whether a menu, popover or dialog is open over the Usage page.
+    pub(super) fn usage_layer_open(&self) -> bool {
+        let page = &self.usage;
+        page.confirm_reset.is_some()
+            || page.segment.is_some()
+            || page.menu.is_some()
+            || page.price.is_some()
+            || page.model.is_some()
+    }
+
     pub(super) fn dismiss_usage_layer(
         &mut self,
         window: &mut Window,
@@ -1948,6 +1961,7 @@ impl XdDesktop {
             .child(
                 div()
                     .id("usage-scroll")
+                    .track_scroll(&self.usage.scroll)
                     .min_h_0()
                     .overflow_y_scroll()
                     .p_1()
@@ -2207,6 +2221,7 @@ impl XdDesktop {
             .child(
                 div()
                     .id("usage-scroll")
+                    .track_scroll(&self.usage.scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

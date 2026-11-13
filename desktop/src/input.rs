@@ -54,6 +54,9 @@ actions!(
     [
         Up,
         Down,
+        AltUp,
+        AltDown,
+        AltShiftDown,
         PageUp,
         PageDown,
         Interrupt,
@@ -507,6 +510,17 @@ impl ComposerInput {
     }
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal_bytes(b"\x1b[B".to_vec(), cx);
+    }
+    // Alt with an arrow, as xterm sends it: the window's session keys give
+    // these up while the terminal has the keyboard.
+    fn alt_up(&mut self, _: &AltUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[1;3A".to_vec(), cx);
+    }
+    fn alt_down(&mut self, _: &AltDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[1;3B".to_vec(), cx);
+    }
+    fn alt_shift_down(&mut self, _: &AltShiftDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[1;4B".to_vec(), cx);
     }
     fn page_up(&mut self, _: &PageUp, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal_bytes(b"\x1b[5~".to_vec(), cx);
@@ -1198,6 +1212,9 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::alt_up))
+            .on_action(cx.listener(Self::alt_down))
+            .on_action(cx.listener(Self::alt_shift_down))
             .on_action(cx.listener(Self::page_up))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::interrupt))
