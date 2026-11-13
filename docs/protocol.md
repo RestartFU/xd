@@ -845,15 +845,19 @@ nothing.
 follows the host's default again. Each of these starts the chat's count again
 from zero. When the chat had stopped at its quota, it then goes on: the turn the
 quota cut short continues as [`resume-turn`](#resume-turn) would, and then its
-queue runs. `resumed` says whether it went on. The request publishes `changed`
-for the chat and `tree`.
+queue runs. `resumed` says whether it went on. A chat the user had paused
+before it stopped at its quota is no longer stopped, but stays paused, and
+`resumed` is false. The request publishes `changed` for the chat and `tree`.
 
 An agent a chat started with [`start-agent`](#agents-an-agent-starts) has no quota of its
 own: it shares the quota of the chat that started it, and what it uses counts
 there. Its `chat` reply shows that chat's `quota`, and `set-chat-quota` on it
 changes that chat's. A new quota lets every chat sharing it that stopped at it
-go on, the requested one first; `resumed` is about the requested chat. An agent
-whose starting chat was deleted has a quota of its own again.
+go on, the requested one first; `resumed` is about the requested chat. While
+the starting chat is stopped at the quota, its agents have nothing left either,
+even if a raised default would now allow more: they stop too, until the user
+gives the quota a new value. An agent whose starting chat was deleted has a
+quota of its own again.
 
 The `chat` reply has `quota:{percent, used, own}` while a quota applies to the
 chat. `percent` is the quota, `used` is how much of the limit the chat has used
