@@ -87,6 +87,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.snapshots.Snapshot
 import com.restartfu.xd.model.ChatState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -184,8 +188,19 @@ internal fun ChatScreen(
     startedBy: com.restartfu.xd.model.ChatSummary? = null,
     /** Opens another of this host's chats by id. */
     openChat: (String) -> Unit = {},
+    /**
+     * The window is wide enough for two panes: Changes, Files and Terminal
+     * open beside the chat instead of in its place.
+     */
+    sideBySide: Boolean = false,
 ) {
-    val state by model.state.collectAsStateWithLifecycle()
+    // The chat as the host has it, words streaming in included. Read here it
+    // would draw the whole screen again for every word, so the screen reads
+    // [state], which leaves those words out, and only the reply's own row and
+    // the follower read them.
+    val streamingState = model.state.collectAsStateWithLifecycle()
+    val state by remember(streamingState) { derivedStateOf { streamingState.value.withoutLiveText() } }
+    val liveText = remember(streamingState) { { streamingState.value.liveSegment } }
     val sending by model.sending.collectAsStateWithLifecycle()
     val cancelling by model.cancelling.collectAsStateWithLifecycle()
     val steering by model.steering.collectAsStateWithLifecycle()
@@ -381,6 +396,11 @@ internal fun ChatScreen(
             lastIndex = lastTranscriptIndex,
         ),
     )
+    // The words streamed so far, which [state] leaves out: kept up in
+    // composition, as the rest of the target is, by something small enough
+    // to run for every word.
+    val streamed = remember { mutableStateOf("") }
+    StreamedText(streamingState, streamed)
     LaunchedEffect(listState, model) {
         var lastFollowed: Pair<FollowTarget?, Int?> = null to null
         // The newest message's drawn height too: a streaming reply is drawn
@@ -388,7 +408,9 @@ internal fun ChatScreen(
         // this. It is the row above the working row while a turn runs, and
         // the end stays the place scrolled to.
         snapshotFlow {
-            val target = followTarget.value
+            val target = followTarget.value.let {
+                if (it.lastText == LIVE_TEXT_ELSEWHERE) it.copy(lastText = streamed.value) else it
+            }
             val newest = target.lastIndex - target.trailing
             val drawnHeight = listState.layoutInfo.visibleItemsInfo
                 .firstOrNull { it.index == newest }?.size
@@ -730,7 +752,7 @@ internal fun ChatScreen(
                         if (report != null) {
                             AgentReportLine(report, agentChats[report.chatId]) { openChat(report.chatId) }
                         } else {
-                            TranscriptRow(row.item, model, answered[row.item.id])
+                            TranscriptRow(row.item, model, answered[row.item.id], liveText)
                         }
                     }
                     is TranscriptRow.Tools -> ToolGroupRow(row)
@@ -1524,20 +1546,17 @@ private fun QueuedMessageDialog(
  */
 @Composable
 private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
-    val parts = remember(item.text, item.kind) {
-        ImageReference.parts(item.text, markdown = item.kind == TranscriptKind.ASSISTANT)
+    if (item.kind == TranscriptKind.ASSISTANT) {
+        AssistantBody(item, model)
+        return
     }
+    val parts = remember(item.text, item.kind) { ImageReference.parts(item.text) }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         parts.forEach { part ->
             when (part) {
                 is MessagePart.Image -> MessageImage(model, part.path)
                 is MessagePart.Prose -> when (item.kind) {
-                    TranscriptKind.ASSISTANT -> AssistantProse(
-                        text = part.text,
-                        messageId = item.id,
-                        live = item.live,
-                    )
                     TranscriptKind.SYSTEM ->
                         Text(
                             part.text,
@@ -1559,6 +1578,32 @@ private fun SelectableMessageBody(item: TranscriptItem, model: ChatViewModel) {
 }
 
 /**
+ * An assistant's reply: its pictures, and its prose as rendered Markdown.
+ *
+ * A finished reply is read into its parts once, in place. One still arriving
+ * is read again as it grows, on a background thread, and only what changed is
+ * drawn again: see [assistantBody].
+ */
+@Composable
+internal fun AssistantBody(item: TranscriptItem, model: ChatViewModel) {
+    val parts = if (item.live) {
+        rememberOffMain(item.text) { text, previous: List<BodyPart>? -> assistantBody(text, live = true, previous) }
+    } else {
+        remember(item.text) { assistantBody(item.text, live = false) }
+    }
+    CompositionLocalProvider(LocalStreaming provides item.live) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            parts.forEach { part ->
+                when (part) {
+                    is BodyPart.Image -> MessageImage(model, part.path)
+                    is BodyPart.Prose -> AssistantProse(part.document, messageId = item.id)
+                }
+            }
+        }
+    }
+}
+
+/**
  * Assistant prose with its client-side presentation blocks lifted out.
  *
  * `<ask>` becomes the existing question controls, `<analysis>` is an initially
@@ -1566,28 +1611,19 @@ private fun SelectableMessageBody(item: TranscriptItem, model: ChatViewModel) {
  */
 @Composable
 private fun AssistantProse(
-    text: String,
+    document: ProseDocument,
     messageId: String,
-    live: Boolean,
 ) {
-    val ask = remember(text) { AskBlock.parse(text) }
-    val source = ask?.remainder ?: text
-    val visible = remember(source, live) {
-        val projected = if (live) AssistantSections.stream(source) else source
-        SpeakTagVisibility.render(projected, live)
-    }
-    val sections = remember(visible) { AssistantSections.parse(visible) }
-
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        sections.forEachIndexed { index, section ->
+        document.sections.forEachIndexed { index, section ->
             when (section.kind) {
                 AssistantSectionKind.NORMAL ->
-                    if (section.text.isNotBlank()) MarkdownText(section.text)
+                    section.blocks?.takeIf { it.isNotEmpty() }?.let { MarkdownBlocks(it) }
                 AssistantSectionKind.ANALYSIS ->
                     AnalysisDisclosure(messageId, index, section)
             }
         }
-        ask?.let { Text(it.ask.question, fontWeight = FontWeight.Bold) }
+        document.question?.let { Text(it, fontWeight = FontWeight.Bold) }
     }
 }
 
@@ -1595,7 +1631,7 @@ private fun AssistantProse(
 private fun AnalysisDisclosure(
     messageId: String,
     ordinal: Int,
-    section: AssistantSection,
+    section: ProseSection,
 ) {
     val key = "$messageId-analysis-$ordinal"
     var expanded by rememberSaveable(key) { mutableStateOf(false) }
@@ -1623,10 +1659,8 @@ private fun AnalysisDisclosure(
                 DisclosureChevron(expanded)
             }
             if (expanded && section.text.isNotBlank()) {
-                MarkdownText(
-                    section.text,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                )
+                val inset = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                section.blocks?.let { MarkdownBlocks(it, inset) } ?: MarkdownText(section.text, inset)
             }
         }
     }
@@ -1671,16 +1705,41 @@ private const val LIVE_TEXT_INTERVAL_MILLIS = 80L
  * [LIVE_TEXT_INTERVAL_MILLIS]. The first value shows at once.
  */
 @Composable
-private fun rememberPacedText(text: String): String {
+private fun rememberPacedText(text: () -> String): String {
     val latest = rememberUpdatedState(text)
-    var shown by remember { mutableStateOf(text) }
+    // Read without subscribing: the row is drawn again when [shown] moves on,
+    // at its pace, not whenever the text does.
+    var shown by remember { mutableStateOf(Snapshot.withoutReadObservation { text() }) }
     LaunchedEffect(Unit) {
-        snapshotFlow { latest.value }.collect { value ->
-            shown = value
-            delay(LIVE_TEXT_INTERVAL_MILLIS)
+        snapshotFlow { latest.value() }.collect { value ->
+            // The reply's last words stay up until its finished row takes over.
+            if (value.isNotEmpty()) {
+                shown = value
+                delay(LIVE_TEXT_INTERVAL_MILLIS)
+            }
         }
     }
     return shown
+}
+
+/**
+ * Stands in for the words of the reply streaming in, in the state the screen
+ * as a whole reads: see [withoutLiveText].
+ */
+internal const val LIVE_TEXT_ELSEWHERE = "\u2026"
+
+/**
+ * The chat without the words of the reply still streaming in, so that what
+ * reads it is not drawn again for each of them. Whether a reply is streaming,
+ * and everything else, is as it was; the words are read where they are drawn.
+ */
+internal fun ChatState.withoutLiveText(): ChatState =
+    if (working && liveSegment.isNotEmpty()) copy(liveSegment = LIVE_TEXT_ELSEWHERE, turnSequence = 0) else this
+
+/** Keeps [into] at the words streamed so far, for the follower. */
+@Composable
+private fun StreamedText(state: State<ChatState>, into: MutableState<String>) {
+    into.value = state.value.liveSegment
 }
 
 /** Rows drawn alike, so the list can reuse one's layout for another. */
@@ -1826,11 +1885,17 @@ private fun AccountSwitchNotice(sentence: String) {
  * boxes where the only difference is which side is narrower.
  */
 @Composable
-private fun TranscriptRow(row: TranscriptItem, model: ChatViewModel, answering: String? = null) {
+private fun TranscriptRow(
+    row: TranscriptItem,
+    model: ChatViewModel,
+    answering: String? = null,
+    /** The words of the reply streaming in, as they stand now. */
+    liveText: () -> String = { row.text },
+) {
     // The reply still streaming in is drawn at a steady pace rather than
     // parsed and laid out again for every word.
     val item = if (row.id == ChatState.LIVE_SEGMENT_ID) {
-        val shown = rememberPacedText(row.text)
+        val shown = rememberPacedText { if (row.text == LIVE_TEXT_ELSEWHERE) liveText() else row.text }
         remember(row.id, shown) { row.copy(text = shown) }
     } else {
         row

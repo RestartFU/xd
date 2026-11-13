@@ -46,7 +46,12 @@ internal fun CodeText(
     modifier: Modifier = Modifier,
 ) {
     val fallback = LocalContentColor.current
-    val text = remember(code, language) { highlight(code, language, fallback) }
+    val text = if (LocalStreaming.current) {
+        // A block still being written is coloured again as it grows, away from the main thread.
+        rememberOffMain(Triple(code, language, fallback)) { (source, syntax, ink), _ -> highlight(source, syntax, ink) }
+    } else {
+        remember(code, language) { highlight(code, language, fallback) }
+    }
     Text(
         text,
         modifier = modifier.horizontalScroll(rememberScrollState()),

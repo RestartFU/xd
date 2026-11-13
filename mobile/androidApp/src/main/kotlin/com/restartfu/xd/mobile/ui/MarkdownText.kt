@@ -45,6 +45,19 @@ internal fun MarkdownText(
     modifier: Modifier = Modifier,
 ) {
     val blocks = remember(source) { Markdown.parse(source) }
+    MarkdownBlocks(blocks, modifier)
+}
+
+/**
+ * Draws a document already parsed. A block that is the same object as last
+ * time is skipped, which is how a reply still streaming in lays out only the
+ * block being written.
+ */
+@Composable
+internal fun MarkdownBlocks(
+    blocks: List<Block>,
+    modifier: Modifier = Modifier,
+) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         blocks.forEach { BlockContent(it) }
     }
