@@ -17969,6 +17969,7 @@ mod tests {
 
         // A new quota given from an agent is the lead's, and lets every chat
         // that stopped at it go on, the one asked for first.
+        run("UPDATE chats SET turn_resumable = 1 WHERE id IN ('lead', 'agent')");
         assert_eq!(
             store
                 .set_chat_quota(&json!({"chat": "agent", "percent": 20}))
@@ -17981,6 +17982,13 @@ mod tests {
         );
         assert!(!store.chat_quota("agent").unwrap().reached);
         assert!(store.chat_is_paused("agent").unwrap());
+        // Each of them, not only the one asked for, can continue its turn.
+        for chat in ["lead", "agent"] {
+            store
+                .prepare_resume(&json!({"chat": chat, "text": CONTINUE_PROMPT}))
+                .unwrap();
+            assert!(!store.chat_is_paused(chat).unwrap());
+        }
 
         // An agent whose lead is gone keeps a quota of its own.
         run("DELETE FROM chats WHERE id = 'lead'");
