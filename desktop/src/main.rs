@@ -174,6 +174,11 @@ const EXTERNAL_LINK_ICON: &str = "icons/external-link.svg";
 const CHECK_ICON: &str = "icons/check.svg";
 const REPLY_ICON: &str = "icons/reply.svg";
 const UNDO_ICON: &str = "icons/undo.svg";
+/// Settling puts a session on the shelf: a lidded box. The check mark is the
+/// status mark for a finished turn and means nothing else.
+const SETTLE_ICON: &str = "icons/archive.svg";
+/// Bringing a settled session back: the same box, with an arrow out of it.
+const UNSETTLE_ICON: &str = "icons/archive-restore.svg";
 const SIDE_LAYOUT_ICON: &str = "icons/panel-right.svg";
 const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
 const CHANGES_ICON: &str = "icons/changes.svg";
@@ -16060,7 +16065,7 @@ impl XdDesktop {
                 session_row_action(
                     ("minimal-session-settle", instance),
                     "Settle session",
-                    CHECK_ICON,
+                    SETTLE_ICON,
                     emphasized,
                     colors,
                 )
@@ -16176,7 +16181,7 @@ impl XdDesktop {
                 session_row_action(
                     ("minimal-session-unsettle", instance),
                     "Bring back session",
-                    UNDO_ICON,
+                    UNSETTLE_ICON,
                     selected,
                     colors,
                 )
@@ -25434,6 +25439,12 @@ impl AssetSource for EmbeddedIcons {
             )),
             DOWNLOAD_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/download.svg").as_slice(),
+            )),
+            SETTLE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/archive.svg").as_slice(),
+            )),
+            UNSETTLE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/archive-restore.svg").as_slice(),
             )),
             UNDO_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/undo.svg").as_slice(),
