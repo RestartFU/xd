@@ -1257,7 +1257,8 @@ private fun SessionTabStrip(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Row(
-            modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()).padding(vertical = 6.dp),
+            // One group of tabs, so a screen reader says which is open and how many there are.
+            modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()).padding(vertical = 6.dp).selectableGroup(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             chats.filterNot { it.id in hiddenChatIds }.forEach { chat ->
@@ -1277,7 +1278,7 @@ private fun SessionTabStrip(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Row(
-                            modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Tab) { agents.showChat(); selectTab(chat.id) }.padding(start = 12.dp, end = 8.dp),
+                            modifier = Modifier.heightIn(min = 48.dp).selectable(selected = selected, role = Role.Tab) { agents.showChat(); selectTab(chat.id) }.padding(start = 12.dp, end = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
@@ -1309,12 +1310,26 @@ private fun SessionTabStrip(
             }
             DropdownMenu(expanded = openMenu, onDismissRequest = { openMenu = false }) {
                 chats.forEach { chat ->
+                    val open = chat.id == selectedChatId && agents.viewing == null
                     val status = statusOf(chat)
                     DropdownMenuItem(
                         text = { Text(chat.title.ifBlank { "New chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         leadingIcon = { BackendIcon(chat.backend, size = 18.dp) },
-                        trailingIcon = status?.let { { StatusMarkIcon(it) } },
-                        onClick = { openMenu = false; selectTab(chat.id) },
+                        // The open chat is checked, as in the phone's menu.
+                        trailingIcon = if (open || status != null) {
+                            {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    status?.let { StatusMarkIcon(it) }
+                                    if (open) Icon(painterResource(R.drawable.ic_check), "Open", Modifier.size(18.dp))
+                                }
+                            }
+                        } else {
+                            null
+                        },
+                        onClick = { openMenu = false; agents.showChat(); selectTab(chat.id) },
                     )
                 }
                 chats.firstOrNull { it.id == selectedChatId }?.let { active ->
@@ -1374,7 +1389,7 @@ private fun AgentTabChip(agent: AgentTab, selected: Boolean, agents: AgentTabs) 
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(
-                modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Tab) { agents.open(agent.key) }.padding(start = 12.dp, end = 4.dp),
+                modifier = Modifier.heightIn(min = 48.dp).selectable(selected = selected, role = Role.Tab) { agents.open(agent.key) }.padding(start = 12.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
