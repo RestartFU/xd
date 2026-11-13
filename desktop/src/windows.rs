@@ -429,10 +429,7 @@ mod native {
     pub fn begin_run() -> Option<recovery::FailedRun> {
         let directory = state_directory();
         let log = recovery::crash_log(&directory);
-        let reported = log
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok();
+        let reported = log.metadata().and_then(|metadata| metadata.modified()).ok();
         if !recovery::begin(&directory) {
             return None;
         }

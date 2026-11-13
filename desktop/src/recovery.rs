@@ -224,7 +224,12 @@ mod tests {
             crashed.notice(false).unwrap(),
             "xd did not close properly last time. A crash report is in C:/Users/me/AppData/Local/xd/crash.log."
         );
-        assert!(killed.notice(true).unwrap().ends_with("Reopen one from the title bar."));
+        assert!(
+            killed
+                .notice(true)
+                .unwrap()
+                .ends_with("Reopen one from the title bar.")
+        );
         // Nothing was closed and nothing was written: nothing to say.
         assert_eq!(killed.notice(false), None);
     }

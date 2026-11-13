@@ -48,7 +48,16 @@ jobs:
               Get-ChildItem "$root\$view" -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object Publisher -eq 'RestartFU' | ForEach-Object { "$root\$view : $($_.DisplayName) $($_.DisplayVersion) icon=$($_.DisplayIcon) at=$($_.InstallLocation) key=$($_.PSChildName)" } | Write-Host
             }
           }
-          Get-ChildItem -Recurse 'HKCU:\Software\RestartFU' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name): $(($_ | Get-ItemProperty | Out-String).Trim())" } | Write-Host
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          foreach ($product in $installer.ProductsEx('', '', 7)) {
+            $name = $product.InstallProperty('InstalledProductName')
+            if ($name -like 'xd*') {
+              Write-Host "MSI product: $name code=$($product.ProductCode) context=$($product.Context) sid=$($product.UserSid) assignment=$($product.InstallProperty('AssignmentType'))"
+            }
+          }
+          Write-Host "elevated: $(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
+          Select-String -Path (Join-Path $env:RUNNER_TEMP 'xd-install.log') -Pattern 'Property\(S\): (ALLUSERS|MSIINSTALLPERUSER|UILevel|Privileged|AdminUser|ProductCode|ARP)' | ForEach-Object Line | Write-Host
+          Select-String -Path (Join-Path $env:RUNNER_TEMP 'xd-install.log') -Pattern 'assignment mode|Running product|scope|per-user|per-machine|MSCOREE|Elevated' | Select-Object -First 20 | ForEach-Object Line | Write-Host
           foreach ($name in 'xd', 'xd-nightly') {
             $msi = (Resolve-Path "dist/windows/$name-windows-x86_64.msi").Path
             $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/x', "`"$msi`"", '/qn', '/norestart'
@@ -57,6 +66,36 @@ jobs:
           if (Test-Path (Join-Path $env:LOCALAPPDATA 'Programs\xd')) { throw 'left the folder behind' }
           if (Test-Path 'HKCU:\Software\RestartFU') { throw 'left the registry key behind' }
           Write-Host 'installer authoring: ok'
+
+      # The point of a per-user installer: someone who is not an administrator
+      # installs it, and it never asks for one.
+      - name: Install as a standard user
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $password = 'Xd-' + [guid]::NewGuid().ToString('N') + '!a1'
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name xdstandard -Password $secure -AccountNeverExpires | Out-Null
+          Add-LocalGroupMember -Group Users -Member xdstandard
+          $credential = [pscredential]::new('xdstandard', $secure)
+          $shared = 'C:\xd-standard'
+          New-Item -ItemType Directory -Path $shared | Out-Null
+          Copy-Item dist/windows/xd-windows-x86_64.msi $shared
+          icacls $shared /grant 'Users:(OI)(CI)M' | Out-Null
+          $script = @"
+          `$process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/i', '$shared\xd-windows-x86_64.msi', '/qn', '/norestart', '/l*v', '$shared\install.log'
+          "exit=`$(`$process.ExitCode)" | Set-Content '$shared\result.txt'
+          "admin=`$(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))" | Add-Content '$shared\result.txt'
+          "folder=`$(Test-Path (Join-Path `$env:LOCALAPPDATA 'Programs\xd\xd.exe')) at `$env:LOCALAPPDATA" | Add-Content '$shared\result.txt'
+          "shortcut=`$(Test-Path (Join-Path ([Environment]::GetFolderPath('Programs')) 'xd.lnk'))" | Add-Content '$shared\result.txt'
+          "hkcu=`$(@(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | ForEach-Object { (Get-ItemProperty `$_.PSPath).DisplayName }) -join ',')" | Add-Content '$shared\result.txt'
+          `$remove = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/x', '$shared\xd-windows-x86_64.msi', '/qn', '/norestart'
+          "remove=`$(`$remove.ExitCode) left=`$(Test-Path (Join-Path `$env:LOCALAPPDATA 'Programs\xd'))" | Add-Content '$shared\result.txt'
+          "@
+          Set-Content -Path "$shared\run.ps1" -Value $script
+          $run = Start-Process pwsh -Credential $credential -WorkingDirectory $shared -Wait -PassThru -ArgumentList '-NoProfile', '-File', "$shared\run.ps1"
+          Write-Host "standard user run exit: $($run.ExitCode)"
+          Get-Content "$shared\result.txt" | Write-Host
+          Select-String -Path "$shared\install.log" -Pattern 'Property\(S\): (ALLUSERS|Privileged|AdminUser|INSTALLFOLDER)|Return value 3|Error ' | Select-Object -First 20 | ForEach-Object Line | Write-Host
 
   baseline:
     if: false
