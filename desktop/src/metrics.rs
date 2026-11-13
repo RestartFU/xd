@@ -78,6 +78,19 @@ pub(crate) fn px(length: f32) -> Pixels {
     gpui::px(length * interface_scale())
 }
 
+/// A text size in the window's pixels: the role's size at the Interface
+/// size, and never smaller than a caption at 100 %. At 90 % captions and
+/// labels both draw at 11 window pixels, the floor DESIGN.md sets.
+pub(crate) fn text_px(size: f32) -> Pixels {
+    gpui::px((size * interface_scale()).max(TEXT_CAPTION))
+}
+
+/// The side of a pointer target in the window's pixels: `size` at the
+/// Interface size, and never under [`HIT_MIN`] window pixels.
+pub(crate) fn hit_px(size: f32) -> Pixels {
+    gpui::px((size * interface_scale()).max(HIT_MIN))
+}
+
 /// A length the window measured, in logical pixels.
 pub(crate) fn logical(pixels: Pixels) -> f32 {
     f32::from(pixels) / interface_scale()

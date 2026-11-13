@@ -340,7 +340,7 @@ fn unavailable_image(colors: ThemeColors) -> gpui::AnyElement {
         .justify_center()
         .p(px(24.0))
         .text_center()
-        .text_size(px(TEXT_BODY))
+        .text_size(text_px(TEXT_BODY))
         .text_color(rgb(colors.text))
         .child("Image unavailable.")
         .into_any_element()
@@ -524,7 +524,7 @@ impl XdDesktop {
                         .justify_center()
                         .px_1()
                         .text_center()
-                        .text_size(px(TEXT_CAPTION))
+                        .text_size(text_px(TEXT_CAPTION))
                         .text_color(rgb(colors.muted))
                         .overflow_hidden()
                         .child(attachment.name.clone())
@@ -565,7 +565,7 @@ impl XdDesktop {
                             .absolute()
                             .top(px(4.0))
                             .right(px(4.0))
-                            .size(px(HIT_MIN))
+                            .size(hit_px(HIT_MIN))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -642,13 +642,13 @@ impl XdDesktop {
                     .flex_col()
                     .child(
                         truncating_label(attachment.name.clone())
-                            .text_size(px(TEXT_LABEL))
+                            .text_size(text_px(TEXT_LABEL))
                             .line_height(px(15.0))
                             .text_color(rgb(colors.text)),
                     )
                     .child(
                         div()
-                            .text_size(px(TEXT_CAPTION))
+                            .text_size(text_px(TEXT_CAPTION))
                             .line_height(px(13.0))
                             .text_color(rgb(colors.faint))
                             .child(file_size_label(attachment.bytes)),
@@ -888,7 +888,7 @@ impl XdDesktop {
                     .mt(px(CAPTION_GAP))
                     .h(px(CAPTION_LINE_HEIGHT))
                     .max_w(px(ImagePreview::max_viewer_width(window_size.0)))
-                    .text_size(px(TEXT_LABEL))
+                    .text_size(text_px(TEXT_LABEL))
                     .line_height(px(CAPTION_LINE_HEIGHT))
                     .text_color(rgba(CAPTION_COLOR)),
             );

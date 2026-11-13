@@ -329,6 +329,11 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
     ]
 }
 
+/// How a saved naming model the host does not offer is named.
+fn unlisted_model_label(id: &str) -> String {
+    format!("{id} (not offered by this host)")
+}
+
 /// The row a setting draws: its title and description on the left, with the
 /// caller adding the control on the right.
 fn settings_row(
@@ -358,7 +363,7 @@ fn settings_row(
                 .min_w(px(SETTINGS_ROW_TEXT_MIN))
                 .child(
                     div()
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.text))
                         .child(title.into()),
                 )
@@ -366,7 +371,7 @@ fn settings_row(
                     body.child(
                         div()
                             .mt(px(3.0))
-                            .text_size(px(TEXT_LABEL))
+                            .text_size(text_px(TEXT_LABEL))
                             .line_height(px(17.0))
                             .text_color(rgb(colors.muted))
                             .child(description),
@@ -418,7 +423,7 @@ fn settings_group_label(label: impl Into<SharedString>, colors: ThemeColors) -> 
         .mt(px(28.0))
         .mb(px(8.0))
         .px(px(2.0))
-        .text_size(px(TEXT_LABEL))
+        .text_size(text_px(TEXT_LABEL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(colors.muted))
         .child(label.into())
@@ -501,7 +506,7 @@ fn settings_stepper(
                 .w(px(width))
                 .flex()
                 .justify_center()
-                .text_size(px(TEXT_CONTROL))
+                .text_size(text_px(TEXT_CONTROL))
                 .text_color(rgb(colors.text))
                 .child(value),
         )
@@ -639,21 +644,33 @@ impl XdDesktop {
                 .iter()
                 .find(|known| known.id == backend);
             let selected = settings.model(backend).map(str::to_owned);
-            let label = selected.as_deref().map_or_else(
-                || "Choose a model".to_owned(),
-                |selected| {
-                    let name = catalog
-                        .and_then(|catalog| {
-                            catalog.models.iter().find(|model| model.id == selected)
-                        })
+            let models = catalog.map_or(&[][..], |catalog| catalog.models.as_slice());
+            // A saved model the host no longer lists keeps its place: named
+            // for what it is, ticked, and still the one in force.
+            let unlisted = selected
+                .clone()
+                .filter(|selected| !models.iter().any(|model| &model.id == selected));
+            let label = match (&selected, &unlisted) {
+                (_, Some(unlisted)) => unlisted_model_label(unlisted),
+                (Some(selected), None) => {
+                    let name = models
+                        .iter()
+                        .find(|model| &model.id == selected)
                         .map(|model| model.name.as_str());
                     presentation::model_name(selected, name)
-                },
-            );
-            let models = catalog.map_or(&[][..], |catalog| catalog.models.as_slice());
-            let choices = models
-                .iter()
-                .map(|model| {
+                }
+                (None, None) => "Choose a model".to_owned(),
+            };
+            let kept = unlisted.map(|id| {
+                let label = unlisted_model_label(&id);
+                let choose: KeyRun = Rc::new(move |this, _, cx| {
+                    this.choose_chat_title_model(backend, id.clone(), cx)
+                });
+                (label, true, choose)
+            });
+            let choices = kept
+                .into_iter()
+                .chain(models.iter().map(|model| {
                     let id = model.id.clone();
                     let choose: KeyRun = Rc::new(move |this, _, cx| {
                         this.choose_chat_title_model(backend, id.clone(), cx)
@@ -663,7 +680,7 @@ impl XdDesktop {
                         selected.as_deref() == Some(model.id.as_str()),
                         choose,
                     )
-                })
+                }))
                 .collect();
             rows.push(self.dropdown_row(
                 row,
@@ -724,7 +741,9 @@ impl XdDesktop {
                                 .child(div().flex_1().min_w_0().child(name))
                                 .child(menu_check(chosen, colors))
                         },
-                    )),
+                    ))
+                    // After the rows, which the keys scroll to by their place.
+                    .child(scroll_thumb(self.key_scroll.clone(), colors)),
             )
         });
         SettingRow::custom(
@@ -1202,7 +1221,7 @@ impl XdDesktop {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .text_size(px(TEXT_CONTROL))
+                            .text_size(text_px(TEXT_CONTROL))
                             .text_color(rgb(colors.text))
                             .child(theme.label())
                             .when(selected, |label| {
@@ -1227,11 +1246,11 @@ impl XdDesktop {
                 .gap(px(12.0))
                 .child(
                     div()
-                        .child(div().text_size(px(TEXT_CONTROL)).child("Theme"))
+                        .child(div().text_size(text_px(TEXT_CONTROL)).child("Theme"))
                         .child(
                             div()
                                 .mt(px(3.0))
-                                .text_size(px(TEXT_LABEL))
+                                .text_size(text_px(TEXT_LABEL))
                                 .text_color(rgb(colors.muted))
                                 .child("Dark or Light. Both are frosted glass."),
                         ),
@@ -1434,11 +1453,15 @@ impl XdDesktop {
                 .gap(px(12.0))
                 .child(
                     div()
-                        .child(div().text_size(px(TEXT_CONTROL)).child("Build from source"))
+                        .child(
+                            div()
+                                .text_size(text_px(TEXT_CONTROL))
+                                .child("Build from source"),
+                        )
                         .child(
                             div()
                                 .mt(px(3.0))
-                                .text_size(px(TEXT_LABEL))
+                                .text_size(text_px(TEXT_LABEL))
                                 .line_height(px(17.0))
                                 .text_color(rgb(colors.muted))
                                 .child(description),
@@ -1462,7 +1485,7 @@ impl XdDesktop {
                                 .border_1()
                                 .border_color(self.field_frame(&self.source_build_input, cx))
                                 .bg(rgb(colors.surface))
-                                .text_size(px(TEXT_CONTROL))
+                                .text_size(text_px(TEXT_CONTROL))
                                 .child(self.source_build_input.clone())
                                 .child(keys.mark(
                                     KeyLayer::Overlay,
@@ -1528,7 +1551,7 @@ impl XdDesktop {
                 .when_some(self.source_build_panel.message.clone(), |body, message| {
                     body.child(
                         div()
-                            .text_size(px(TEXT_LABEL))
+                            .text_size(text_px(TEXT_LABEL))
                             .line_height(px(17.0))
                             .text_color(rgb(colors.muted))
                             .child(message),
@@ -1540,11 +1563,12 @@ impl XdDesktop {
                             .id("workspace-settings-build-output")
                             .max_h(px(180.0))
                             .overflow_y_scroll()
+                            .thumbed("workspace-settings-build-output", colors)
                             .p_3()
                             .rounded(px(RADIUS_PANEL))
                             .bg(rgb(colors.surface))
                             .font_family(MONO)
-                            .text_size(px(TEXT_LABEL))
+                            .text_size(text_px(TEXT_LABEL))
                             .line_height(px(17.0))
                             .child(
                                 self.source_build_panel
@@ -1592,7 +1616,7 @@ impl XdDesktop {
                             .border_1()
                             .border_color(rgb(colors.border))
                             .font_family(MONO)
-                            .text_size(px(TEXT_LABEL))
+                            .text_size(text_px(TEXT_LABEL))
                             .text_color(rgb(colors.muted))
                             .child(keys),
                     ),
@@ -1747,7 +1771,7 @@ impl XdDesktop {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .text_size(px(TEXT_LABEL))
+                        .text_size(text_px(TEXT_LABEL))
                         .text_color(rgb(if self.model.connected {
                             colors.working
                         } else {
@@ -2012,7 +2036,7 @@ impl XdDesktop {
                         .child(icon(CHEVRON_LEFT_ICON, 14.0, colors.muted))
                         .child(
                             div()
-                                .text_size(px(TEXT_CONTROL))
+                                .text_size(text_px(TEXT_CONTROL))
                                 .text_color(rgb(colors.muted))
                                 .child("Back"),
                         ),
@@ -2021,7 +2045,7 @@ impl XdDesktop {
                     div()
                         .mt(px(14.0))
                         .px(px(6.0))
-                        .text_size(px(TEXT_TITLE))
+                        .text_size(text_px(TEXT_TITLE))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(colors.text))
                         .child("Settings"),
@@ -2052,7 +2076,7 @@ impl XdDesktop {
                             },
                         )
                         .bg(rgb(colors.surface))
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .child(icon(SEARCH_ICON, 13.0, colors.faint))
                         .child(
                             div()
@@ -2097,7 +2121,7 @@ impl XdDesktop {
                             .items_center()
                             .gap(px(10.0))
                             .rounded(px(RADIUS_TAB))
-                            .text_size(px(TEXT_CONTROL))
+                            .text_size(text_px(TEXT_CONTROL))
                             .font_weight(if selected {
                                 FontWeight::MEDIUM
                             } else {
@@ -2126,7 +2150,7 @@ impl XdDesktop {
                                 item.child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(TEXT_CAPTION))
+                                        .text_size(text_px(TEXT_CAPTION))
                                         .text_color(rgb(colors.faint))
                                         .child(count.to_string()),
                                 )
@@ -2145,7 +2169,7 @@ impl XdDesktop {
         if searching {
             page = page.child(
                 div()
-                    .text_size(px(TEXT_DISPLAY))
+                    .text_size(text_px(TEXT_DISPLAY))
                     .font_weight(FontWeight::MEDIUM)
                     .child("Search"),
             );
@@ -2153,7 +2177,7 @@ impl XdDesktop {
                 page = page.child(
                     div()
                         .mt(px(10.0))
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child(format!(
                             "No settings match \u{201c}{}\u{201d}.",
@@ -2173,7 +2197,7 @@ impl XdDesktop {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .text_size(px(TEXT_CONTROL))
+                            .text_size(text_px(TEXT_CONTROL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(colors.muted))
                             .cursor_pointer()
@@ -2191,14 +2215,14 @@ impl XdDesktop {
             page = page
                 .child(
                     div()
-                        .text_size(px(TEXT_DISPLAY))
+                        .text_size(text_px(TEXT_DISPLAY))
                         .font_weight(FontWeight::MEDIUM)
                         .child(entry.name),
                 )
                 .child(
                     div()
                         .mt(px(6.0))
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .line_height(px(20.0))
                         .text_color(rgb(colors.muted))
                         .child(entry.summary),
@@ -2208,7 +2232,7 @@ impl XdDesktop {
                 page = page.child(
                     div()
                         .mt(px(28.0))
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child("This host does not offer these settings."),
                 );
@@ -2235,7 +2259,7 @@ impl XdDesktop {
             .min_h_0()
             .h_full()
             .overflow_y_scroll()
-            .track_scroll(&self.settings_scroll)
+            .scroll_thumb(&self.settings_scroll, colors)
             .child(page);
 
         div()

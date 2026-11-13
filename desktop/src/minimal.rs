@@ -28,7 +28,7 @@ impl AgentCli {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
-            Self::Claude => "Claude",
+            Self::Claude => "Claude Code",
             Self::Other => "Assistant",
         }
     }

@@ -102,7 +102,7 @@ pub(super) fn ask_header(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(TEXT_HEADING))
+                .text_size(text_px(TEXT_HEADING))
                 .line_height(px(22.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(colors.text))
@@ -116,7 +116,7 @@ pub(super) fn ask_header(
                     .flex()
                     .items_center()
                     .debug_selector(|| "composer-ask-counter".into())
-                    .text_size(px(TEXT_LABEL))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.faint))
                     .child(counter),
             )
@@ -146,7 +146,7 @@ pub(super) fn ask_choice(
         .items_start()
         .gap(px(14.0))
         .rounded(px(RADIUS_PANEL))
-        .text_size(px(TEXT_BODY))
+        .text_size(text_px(TEXT_BODY))
         .line_height(px(20.0))
         // Waiting on the host, a choice reads as one that cannot be picked.
         .text_color(rgb(if enabled {
@@ -165,7 +165,7 @@ pub(super) fn ask_choice(
             div()
                 .flex_none()
                 .w(px(10.0))
-                .text_size(px(TEXT_LABEL))
+                .text_size(text_px(TEXT_LABEL))
                 .text_color(rgb(colors.faint))
                 .child((index + 1).to_string()),
         )
@@ -181,7 +181,7 @@ pub(super) fn ask_choice(
                     text.child(
                         div()
                             .min_w_0()
-                            .text_size(px(TEXT_CONTROL))
+                            .text_size(text_px(TEXT_CONTROL))
                             .text_color(rgb(if enabled {
                                 colors.muted
                             } else {
@@ -246,14 +246,14 @@ pub(super) fn chat_heading(
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .text_size(px(TEXT_LABEL))
+                .text_size(text_px(TEXT_LABEL))
                 .text_color(rgb(colors.muted))
                 .child(workspace_icon(avatar, 14.0, colors.muted))
                 .child(project),
         )
         .child(
             div()
-                .text_size(px(TEXT_DISPLAY))
+                .text_size(text_px(TEXT_DISPLAY))
                 .debug_selector(|| "empty-chat-heading".into())
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(colors.text))
@@ -261,7 +261,7 @@ pub(super) fn chat_heading(
         )
         .child(
             div()
-                .text_size(px(TEXT_CONTROL))
+                .text_size(text_px(TEXT_CONTROL))
                 .debug_selector(|| "empty-chat-description".into())
                 .text_color(rgb(colors.muted))
                 .child(description),
@@ -314,7 +314,7 @@ pub(super) fn context_row(project: String, colors: ThemeColors) -> gpui::Div {
         .flex()
         .items_center()
         .gap_2()
-        .text_size(px(TEXT_LABEL))
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(colors.muted))
         .child(div().flex_none().px_2().child(project))
 }
@@ -372,7 +372,7 @@ pub(super) fn composer_option(
         .h(px(CONTROL_HEIGHT_COMPACT))
         .px(px(8.0))
         .gap(px(5.0))
-        .text_size(px(TEXT_LABEL))
+        .text_size(text_px(TEXT_LABEL))
         .max_w(px(max_width))
         .min_w_0()
         .children(leading)
@@ -414,8 +414,14 @@ impl XdDesktop {
             DraftOwner::Chat => ("native-composer-shell", "native-composer", "native-attach"),
             DraftOwner::NewChat => ("draft-composer-shell", "draft-composer", "draft-attach"),
         };
+        // In a short window a docked ask gives up its height before the
+        // editor and Send do: the composer shrinks into the chat's room, and
+        // the ask scrolls inside what is left.
+        let squeezed =
+            ask.is_some() && crate::logical(window.viewport_size().height) < crate::SHORT_WINDOW;
         div()
             .id(shell_id)
+            .when(squeezed, |shell| shell.flex_shrink().min_h_0())
             .debug_selector(move || match owner {
                 DraftOwner::Chat => "chat-composer".into(),
                 DraftOwner::NewChat => "new-chat-composer".into(),
@@ -453,11 +459,14 @@ impl XdDesktop {
                         div()
                             .id("composer-ask")
                             .debug_selector(|| "composer-ask".into())
-                            .flex_shrink_0()
-                            .max_h(px(ask_max_height(crate::logical(
-                                window.viewport_size().height,
-                            ))))
+                            .when(!squeezed, |ask| {
+                                ask.flex_shrink_0().max_h(px(ask_max_height(crate::logical(
+                                    window.viewport_size().height,
+                                ))))
+                            })
+                            .when(squeezed, |ask| ask.flex_shrink().min_h_0())
                             .overflow_y_scroll()
+                            .thumbed("composer-ask", colors)
                             // Choice rows reach into its padding; patches and
                             // commands scroll inside their own boxes.
                             .overflow_x_hidden()
@@ -487,7 +496,7 @@ impl XdDesktop {
                     .max_h(px(200.0))
                     .px(px(8.0))
                     .py_1()
-                    .text_size(px(TEXT_BODY))
+                    .text_size(text_px(TEXT_BODY))
                     .text_color(rgb(colors.text))
                     // A message past the tenth line scrolls inside the
                     // composer; without this it paints over the chat.

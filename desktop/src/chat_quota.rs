@@ -154,7 +154,7 @@ impl XdDesktop {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(TEXT_TITLE))
+                        .text_size(text_px(TEXT_TITLE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!("{}%", quota_points(quota.used))),
                 )
@@ -192,7 +192,7 @@ impl XdDesktop {
                 .flex()
                 .flex_col()
                 .gap(px(12.0))
-                .text_size(px(TEXT_CONTROL))
+                .text_size(text_px(TEXT_CONTROL))
                 .text_color(rgb(colors.text))
                 .child(
                     composer::ask_header("This chat reached its quota", None, colors)
@@ -262,7 +262,7 @@ impl XdDesktop {
                     card.child(
                         div()
                             .debug_selector(|| "chat-quota-invalid".into())
-                            .text_size(px(TEXT_LABEL))
+                            .text_size(text_px(TEXT_LABEL))
                             .text_color(rgb(colors.danger))
                             .child("Enter a whole number from 1 to 100."),
                     )
@@ -287,7 +287,7 @@ impl XdDesktop {
                 .debug_selector(|| "native-quota-meter".into())
                 .flex_none()
                 .mr_2()
-                .text_size(px(TEXT_CAPTION))
+                .text_size(text_px(TEXT_CAPTION))
                 .text_color(rgb(tone))
                 .tooltip(move |_, cx| {
                     cx.new(|_| PaneTooltip {

@@ -323,7 +323,7 @@ impl XdDesktop {
                                     .child(label)
                                     .child(
                                         div()
-                                            .text_size(px(TEXT_CAPTION))
+                                            .text_size(text_px(TEXT_CAPTION))
                                             .text_color(rgb(colors.muted))
                                             .child(if new {
                                                 "Create an isolated branch and checkout"
@@ -559,7 +559,10 @@ impl XdDesktop {
                                 .flex()
                                 .flex_col()
                                 .gap(px(2.0))
-                                .children(rows),
+                                .children(rows)
+                                // After the rows, which the keys scroll to by
+                                // their place.
+                                .child(scroll_thumb(self.key_scroll.clone(), colors)),
                         )
                         // The model picker opens inside the composer, which would
                         // take the focus from the search field to the editor.
@@ -824,7 +827,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(TEXT_LABEL))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(icon(FILE_ICON, 13.0, colors.muted))
                     .child(attachment.name.clone())
@@ -841,6 +844,7 @@ impl XdDesktop {
             .flex_col()
             .gap(px(14.0))
             .overflow_y_scroll()
+            .thumbed("new-chat-starting", colors)
             .child(
                 div()
                     .w_full()
@@ -870,7 +874,7 @@ impl XdDesktop {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .text_size(px(TEXT_BODY))
+                                .text_size(text_px(TEXT_BODY))
                                 .text_color(rgb(colors.text))
                                 .when(!prompt.trim().is_empty(), |bubble| bubble.child(prompt))
                                 .children(files),
@@ -884,7 +888,7 @@ impl XdDesktop {
                     .items_center()
                     .gap(px(8.0))
                     .px(px(2.0))
-                    .text_size(px(TEXT_LABEL))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(
                         div()
@@ -1869,7 +1873,7 @@ impl XdDesktop {
         let agent = self.minimal_new_session_agent;
         let chip = || {
             div()
-                .h(px(HIT_MIN))
+                .h(hit_px(HIT_MIN))
                 .px(px(8.0))
                 .min_w_0()
                 .flex_shrink()
@@ -1878,7 +1882,7 @@ impl XdDesktop {
                 .gap(px(6.0))
                 .rounded_full()
                 .bg(rgb(colors.surface_high))
-                .text_size(px(TEXT_LABEL))
+                .text_size(text_px(TEXT_LABEL))
                 .text_color(rgb(colors.muted))
         };
         div()
@@ -1896,7 +1900,7 @@ impl XdDesktop {
                 truncating_label(title)
                     .min_w_0()
                     .flex_shrink()
-                    .text_size(px(TEXT_BODY))
+                    .text_size(text_px(TEXT_BODY))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(colors.text)),
             )
@@ -2047,14 +2051,14 @@ impl XdDesktop {
                     .child(
                         truncating_label(label)
                             .flex_1()
-                            .text_size(px(TEXT_CONTROL))
+                            .text_size(text_px(TEXT_CONTROL))
                             .text_color(rgb(if selected { colors.text } else { colors.muted }))
                             .when(selected, |title| title.font_weight(FontWeight::MEDIUM)),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(TEXT_CAPTION))
+                            .text_size(text_px(TEXT_CAPTION))
                             .text_color(rgb(colors.faint))
                             .child("Draft"),
                     )
@@ -2119,7 +2123,7 @@ impl XdDesktop {
             .child(
                 truncating_label(label)
                     .flex_1()
-                    .text_size(px(TEXT_CONTROL))
+                    .text_size(text_px(TEXT_CONTROL))
                     .text_color(rgb(if selected { colors.text } else { colors.muted }))
                     .when(selected, |title| title.font_weight(FontWeight::MEDIUM)),
             )
@@ -2129,7 +2133,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .text_size(px(TEXT_CAPTION))
+                    .text_size(text_px(TEXT_CAPTION))
                     .text_color(rgb(colors.working))
                     .child(
                         div()

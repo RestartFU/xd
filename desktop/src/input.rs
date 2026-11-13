@@ -9,7 +9,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::metrics::{TEXT_BODY, TEXT_CONTROL, px};
+use crate::metrics::{TEXT_BODY, TEXT_CONTROL, px, text_px};
 use xd_desktop::theme::{ThemeColors, ThemePreset};
 
 use crate::{
@@ -1254,7 +1254,7 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .line_height(px(if self.compact { 18. } else { 22. }))
-            .text_size(px(if self.compact {
+            .text_size(text_px(if self.compact {
                 TEXT_CONTROL
             } else {
                 TEXT_BODY

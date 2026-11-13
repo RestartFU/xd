@@ -14,7 +14,7 @@
 
 use crate::metrics::{
     CONTROL_HEIGHT, CONTROL_HEIGHT_COMPACT, HIT_MIN, RADIUS_CONTROL, RADIUS_TAB, TEXT_CAPTION,
-    TEXT_CONTROL, TEXT_HEADING, TEXT_LABEL, px,
+    TEXT_CONTROL, TEXT_HEADING, TEXT_LABEL, px, text_px,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -1008,7 +1008,7 @@ fn tab_pill(
             0
         }))
         .when(selected, |tab| tab.bg(rgb(colors.selected_surface)))
-        .text_size(px(TEXT_LABEL))
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(if selected { colors.text } else { colors.muted }))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(colors.surface_high)))
@@ -1665,7 +1665,7 @@ impl Render for BrowserTab {
                                 field.child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(TEXT_CAPTION))
+                                        .text_size(text_px(TEXT_CAPTION))
                                         .text_color(rgb(colors.faint))
                                         .child("Loading…"),
                                 )
@@ -1708,7 +1708,7 @@ impl Render for BrowserTab {
                         div()
                             .max_w(px(320.))
                             .text_center()
-                            .text_size(px(TEXT_CONTROL))
+                            .text_size(text_px(TEXT_CONTROL))
                             .text_color(rgb(colors.muted))
                             .child(error.clone()),
                     )
@@ -1769,13 +1769,13 @@ impl Render for BrowserTab {
                     .text_center()
                     .child(
                         div()
-                            .text_size(px(TEXT_HEADING))
+                            .text_size(text_px(TEXT_HEADING))
                             .font_weight(FontWeight::MEDIUM)
                             .child("Preview your app"),
                     )
                     .child(
                         div()
-                            .text_size(px(TEXT_LABEL))
+                            .text_size(text_px(TEXT_LABEL))
                             .text_color(rgb(colors.muted))
                             .child("Enter a URL above, or open a local development server."),
                     )
@@ -1794,7 +1794,7 @@ impl Render for BrowserTab {
                                 )
                                 .h(px(CONTROL_HEIGHT_COMPACT))
                                 .font_family(crate::MONO)
-                                .text_size(px(TEXT_LABEL))
+                                .text_size(text_px(TEXT_LABEL))
                                 .font_weight(FontWeight::NORMAL)
                                 .child(format!("localhost:{port}"))
                                 .on_click(cx.listener(

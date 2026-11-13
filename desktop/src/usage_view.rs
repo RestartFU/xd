@@ -329,7 +329,7 @@ fn usage_tooltip(
 
 fn section_title(label: impl Into<SharedString>, colors: ThemeColors) -> gpui::Div {
     div()
-        .text_size(px(TEXT_CONTROL))
+        .text_size(text_px(TEXT_CONTROL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(colors.text))
         .child(label.into())
@@ -337,7 +337,7 @@ fn section_title(label: impl Into<SharedString>, colors: ThemeColors) -> gpui::D
 
 fn small_muted(label: impl Into<SharedString>, colors: ThemeColors) -> gpui::Div {
     div()
-        .text_size(px(TEXT_LABEL))
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(colors.muted))
         .child(label.into())
 }
@@ -417,7 +417,7 @@ fn metric_cell(
         .child(small_muted(label, colors))
         .child(figures(
             div()
-                .text_size(px(TEXT_HEADING))
+                .text_size(text_px(TEXT_HEADING))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(colors.text))
                 .child(value),
@@ -484,7 +484,7 @@ fn limit_measure(
             div()
                 .w(px(28.0))
                 .flex_none()
-                .text_size(px(TEXT_CAPTION))
+                .text_size(text_px(TEXT_CAPTION))
                 .child(label),
         )
         .child(
@@ -514,7 +514,7 @@ fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
         .flex_col()
         .gap(px(2.0))
         .rounded(px(RADIUS_CONTROL))
-        .text_size(px(TEXT_LABEL))
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(colors.muted))
         .child(
             div()
@@ -526,7 +526,7 @@ fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
                 .child(
                     truncating_label(row.label)
                         .min_w_0()
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.text)),
                 )
                 .child(
@@ -681,7 +681,7 @@ fn flyout_heading(
         .flex()
         .items_center()
         .gap_2()
-        .text_size(px(TEXT_LABEL))
+        .text_size(text_px(TEXT_LABEL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(colors.muted))
         .children(icon_path.map(|path| assistant_icon(path, 14.0, colors.muted, colors)))
@@ -697,7 +697,7 @@ fn account_heading(name: String, plan: Option<String>, colors: ThemeColors) -> g
         .items_center()
         .justify_between()
         .gap_2()
-        .text_size(px(TEXT_LABEL))
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(colors.muted))
         .child(
             truncating_label(name)
@@ -838,7 +838,7 @@ fn share_bar(
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(TEXT_LABEL))
+            .text_size(text_px(TEXT_LABEL))
             .child(div().size(px(8.0)).rounded(px(2.0)).bg(rgb(segment.color)))
             .child(div().text_color(rgb(colors.muted)).child(segment.label))
             .child(
@@ -866,7 +866,7 @@ fn share_bar(
                             div()
                                 .flex()
                                 .gap_1()
-                                .text_size(px(TEXT_LABEL))
+                                .text_size(text_px(TEXT_LABEL))
                                 .text_color(rgb(colors.muted))
                                 .child("Premium")
                                 .child(
@@ -1839,7 +1839,7 @@ impl XdDesktop {
             "Select"
         };
         div()
-            .text_size(px(TEXT_CONTROL))
+            .text_size(text_px(TEXT_CONTROL))
             .text_color(rgb(colors.muted))
             .child(format!("{verb} an environment to see {noun}."))
     }
@@ -1920,12 +1920,12 @@ impl XdDesktop {
                 .gap_2()
                 .border_t_1()
                 .border_color(rgb(colors.border))
-                .text_size(px(TEXT_LABEL))
+                .text_size(text_px(TEXT_LABEL))
                 .text_color(rgb(colors.muted))
                 .child("Filters are hiding some usage.")
                 .child(
                     ui_button("usage-show-everything", ButtonKind::Ghost, colors)
-                        .h(px(HIT_MIN))
+                        .h(hit_px(HIT_MIN))
                         .child("Show all")
                         .key_stop(
                             &keys,
@@ -2000,7 +2000,7 @@ impl XdDesktop {
             .child(
                 div()
                     .id("usage-scroll")
-                    .track_scroll(&self.usage.scroll)
+                    .scroll_thumb(&self.usage.scroll, colors)
                     .min_h_0()
                     .overflow_y_scroll()
                     .p_1()
@@ -2038,7 +2038,7 @@ impl XdDesktop {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .text_size(px(TEXT_CONTROL))
+                .text_size(text_px(TEXT_CONTROL))
                 .text_color(rgb(colors.muted))
                 .children(lines)
                 .into_any_element();
@@ -2145,7 +2145,7 @@ impl XdDesktop {
                             .items_center()
                             .justify_between()
                             .gap_2()
-                            .text_size(px(TEXT_CONTROL))
+                            .text_size(text_px(TEXT_CONTROL))
                             .text_color(rgb(colors.text))
                             .child(
                                 div()
@@ -2161,7 +2161,7 @@ impl XdDesktop {
                                     ))
                                     .child(truncating_label(model.model.clone()).min_w_0()),
                             )
-                            .child(div().flex_none().text_size(px(TEXT_LABEL)).child(
+                            .child(div().flex_none().text_size(text_px(TEXT_LABEL)).child(
                                 match metric {
                                     ChartMetric::Cost if model.cost_unknown() => {
                                         "Unpriced".to_owned()
@@ -2184,7 +2184,7 @@ impl XdDesktop {
             .children(errors.into_iter().chain(messages).map(|message| {
                 div()
                     .px_2()
-                    .text_size(px(TEXT_LABEL))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(message)
             }))
@@ -2197,7 +2197,7 @@ impl XdDesktop {
                     .gap(px(1.0))
                     .child(
                         div()
-                            .text_size(px(TEXT_TITLE))
+                            .text_size(text_px(TEXT_TITLE))
                             .line_height(px(28.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(colors.text))
@@ -2268,7 +2268,7 @@ impl XdDesktop {
             .child(
                 div()
                     .id("usage-scroll")
-                    .track_scroll(&self.usage.scroll)
+                    .scroll_thumb(&self.usage.scroll, colors)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -2389,7 +2389,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(TEXT_CONTROL))
+                    .text_size(text_px(TEXT_CONTROL))
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
@@ -2508,7 +2508,7 @@ impl XdDesktop {
                 .child(div().flex_1().child(environment_label(index)))
                 .child(
                     div()
-                        .text_size(px(TEXT_LABEL))
+                        .text_size(text_px(TEXT_LABEL))
                         .text_color(rgb(if environment.summary_error.is_some() {
                             colors.danger
                         } else {
@@ -2761,7 +2761,7 @@ impl XdDesktop {
                 .flex_col()
                 .items_center()
                 .gap_2()
-                .text_size(px(TEXT_CONTROL))
+                .text_size(text_px(TEXT_CONTROL))
                 .text_color(rgb(colors.muted))
                 .children(errors)
                 .into_any_element();
@@ -2867,7 +2867,7 @@ impl XdDesktop {
             .gap_1()
             .child(figures(
                 div()
-                    .text_size(px(TEXT_FIGURE))
+                    .text_size(text_px(TEXT_FIGURE))
                     .line_height(px(40.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(colors.text))
@@ -2883,7 +2883,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .text_size(px(TEXT_LABEL))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(figures(
                         div().child(format!("{} sessions", format_count(merged.sessions))),
@@ -2934,7 +2934,7 @@ impl XdDesktop {
                         .items_center()
                         .justify_between()
                         .gap_4()
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .child(
                             div()
                                 .min_w_0()
@@ -2960,7 +2960,7 @@ impl XdDesktop {
                                     row.child(figures(
                                         div()
                                             .flex_none()
-                                            .text_size(px(TEXT_CAPTION))
+                                            .text_size(text_px(TEXT_CAPTION))
                                             .text_color(rgb(colors.muted))
                                             .child(format!(
                                                 "{} {}",
@@ -3181,7 +3181,7 @@ impl XdDesktop {
             .gap_6()
             .children(errors.into_iter().chain(messages).map(|message| {
                 div()
-                    .text_size(px(TEXT_CONTROL))
+                    .text_size(text_px(TEXT_CONTROL))
                     .text_color(rgb(colors.muted))
                     .child(message)
             }))
@@ -3237,7 +3237,7 @@ impl XdDesktop {
             .px_2()
             .border_b_1()
             .border_color(rgb(colors.border))
-            .text_size(px(TEXT_LABEL))
+            .text_size(text_px(TEXT_LABEL))
             .text_color(rgb(colors.muted))
             .child(div().w(px(24.0)).flex_none().child("#"))
             .child(div().flex_1().child("Model"))
@@ -3274,7 +3274,7 @@ impl XdDesktop {
                     .py(px(10.0))
                     .border_b_1()
                     .border_color(rgb(colors.rule))
-                    .text_size(px(TEXT_CONTROL))
+                    .text_size(text_px(TEXT_CONTROL))
                     .text_color(rgb(colors.muted))
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(colors.surface)))
@@ -3294,7 +3294,7 @@ impl XdDesktop {
                         div()
                             .w(px(24.0))
                             .flex_none()
-                            .text_size(px(TEXT_LABEL))
+                            .text_size(text_px(TEXT_LABEL))
                             .child((index + 1).to_string()),
                     )
                     .child(
@@ -3364,7 +3364,7 @@ impl XdDesktop {
                         .py_6()
                         .flex()
                         .justify_center()
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child("No activity in this window."),
                 )
@@ -3401,7 +3401,7 @@ impl XdDesktop {
             .px_2()
             .border_b_1()
             .border_color(rgb(colors.border))
-            .text_size(px(TEXT_LABEL))
+            .text_size(text_px(TEXT_LABEL))
             .text_color(rgb(colors.muted))
             .child(div().flex_1().child(if hourly { "Hour" } else { "Day" }))
             .children(providers.iter().map(|provider| {
@@ -3444,7 +3444,7 @@ impl XdDesktop {
                     .px_2()
                     .border_b_1()
                     .border_color(rgb(colors.rule))
-                    .text_size(px(TEXT_CONTROL))
+                    .text_size(text_px(TEXT_CONTROL))
                     .child(div().flex_1().text_color(rgb(colors.text)).child(label))
                     .children(providers.iter().map(|provider| {
                         cell(
@@ -3477,7 +3477,7 @@ impl XdDesktop {
                         .py_6()
                         .flex()
                         .justify_center()
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child("No activity in this window."),
                 )
@@ -3599,7 +3599,7 @@ impl XdDesktop {
                     .border_color(rgb(colors.rule))
                     .bg(rgb(colors.chrome))
                     .shadow_lg()
-                    .text_size(px(TEXT_LABEL))
+                    .text_size(text_px(TEXT_LABEL))
                     .child(
                         div()
                             .mb_1()
@@ -3657,7 +3657,7 @@ impl XdDesktop {
                                     .absolute()
                                     .right_0()
                                     .top(px(y - 7.0))
-                                    .text_size(px(TEXT_CAPTION))
+                                    .text_size(text_px(TEXT_CAPTION))
                                     .text_color(rgb(colors.muted))
                                     .child(label)
                             })),
@@ -3703,7 +3703,7 @@ impl XdDesktop {
                     .pl(px(64.0))
                     .flex()
                     .justify_between()
-                    .text_size(px(TEXT_CAPTION))
+                    .text_size(text_px(TEXT_CAPTION))
                     .text_color(rgb(colors.muted))
                     .children(axis.map(|label| div().child(label))),
             )
@@ -3822,7 +3822,7 @@ impl XdDesktop {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .text_size(px(TEXT_HEADING))
+                                    .text_size(text_px(TEXT_HEADING))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text))
                                     .child(assistant_icon(
@@ -3859,6 +3859,7 @@ impl XdDesktop {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .thumbed("usage-model-body", colors)
                     .px_6()
                     .pb_6()
                     .flex()
@@ -3875,7 +3876,7 @@ impl XdDesktop {
                                 .child(small_muted(label, colors))
                                 .child(
                                     div()
-                                        .text_size(px(TEXT_TITLE))
+                                        .text_size(text_px(TEXT_TITLE))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(colors.text))
                                         .child(value),
@@ -3962,7 +3963,7 @@ impl XdDesktop {
                 .border_1()
                 .border_color(self.field_frame(&input, cx))
                 .bg(rgb(colors.background))
-                .text_size(px(TEXT_CONTROL))
+                .text_size(text_px(TEXT_CONTROL))
                 .child(input)
         };
         let head =
@@ -3984,7 +3985,7 @@ impl XdDesktop {
                 let model_cell = match &row.model_input {
                     Some(input) => field(input.clone()).into_any_element(),
                     None => div()
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(if row.removed {
                             colors.muted
                         } else {
@@ -4021,7 +4022,7 @@ impl XdDesktop {
                                 line.child(
                                     div()
                                         .flex_1()
-                                        .text_size(px(TEXT_LABEL))
+                                        .text_size(text_px(TEXT_LABEL))
                                         .text_color(rgb(colors.muted))
                                         .child("Automatic pricing after saving"),
                                 )
@@ -4038,7 +4039,7 @@ impl XdDesktop {
                                         div()
                                             .flex_1()
                                             .min_w_0()
-                                            .text_size(px(TEXT_LABEL))
+                                            .text_size(text_px(TEXT_LABEL))
                                             .text_color(rgb(colors.muted))
                                             .child(format!("Counted as {alias}")),
                                     )
@@ -4078,7 +4079,7 @@ impl XdDesktop {
                     .when_some(invalid, |line, message| {
                         line.child(
                             div()
-                                .text_size(px(TEXT_LABEL))
+                                .text_size(text_px(TEXT_LABEL))
                                 .text_color(rgb(colors.danger))
                                 .child(message),
                         )
@@ -4099,7 +4100,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(TEXT_LABEL))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(head("Model ID", 0.22))
                     .child(head("Map to", 0.18))
@@ -4140,7 +4141,7 @@ impl XdDesktop {
                         .justify_center()
                         .border_t_1()
                         .border_color(rgb(colors.border))
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child("No custom prices or mappings. Add a row to set one."),
                 )
@@ -4156,7 +4157,7 @@ impl XdDesktop {
                         .gap_1()
                         .child(
                             div()
-                                .text_size(px(TEXT_HEADING))
+                                .text_size(text_px(TEXT_HEADING))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(colors.text))
                                 .child("Model prices"),
@@ -4172,6 +4173,7 @@ impl XdDesktop {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
+                        .thumbed("usage-price-body", colors)
                         .px_6()
                         .pb_4()
                         .flex()
@@ -4189,7 +4191,7 @@ impl XdDesktop {
                         .when_some(error, |body, error| {
                             body.child(
                                 div()
-                                    .text_size(px(TEXT_LABEL))
+                                    .text_size(text_px(TEXT_LABEL))
                                     .text_color(rgb(colors.danger))
                                     .child(error),
                             )
@@ -4354,7 +4356,7 @@ impl XdDesktop {
                     div()
                         .px_2()
                         .py_1()
-                        .text_size(px(TEXT_CONTROL))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child(if loading {
                             "Reading limits…"
@@ -4377,7 +4379,7 @@ impl XdDesktop {
                         .flex()
                         .items_start()
                         .gap_2()
-                        .text_size(px(TEXT_LABEL))
+                        .text_size(text_px(TEXT_LABEL))
                         .text_color(rgb(colors.waiting))
                         .child(div().flex_none().mt(px(1.0)).child(icon(
                             ALERT_ICON,
@@ -4586,13 +4588,13 @@ impl XdDesktop {
                         .w(px(288.0))
                         .p_3()
                         .gap(px(10.0))
-                        .text_size(px(TEXT_LABEL))
+                        .text_size(text_px(TEXT_LABEL))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .text_size(px(TEXT_CONTROL))
+                                .text_size(text_px(TEXT_CONTROL))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(rgb(colors.text))
                                 .child(assistant_icon(
@@ -4654,7 +4656,7 @@ impl XdDesktop {
                                             ButtonKind::Secondary,
                                             colors,
                                         )
-                                        .h(px(HIT_MIN))
+                                        .h(hit_px(HIT_MIN))
                                         .child(if busy { "Using…" } else { "Use reset" })
                                         .key_stop(
                                             &self.key_targets,
