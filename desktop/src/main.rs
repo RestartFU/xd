@@ -297,13 +297,18 @@ const BROWSER_MIN_WIDTH: f32 = 280.0;
 /// where the catalog no longer fits, the catalog compacts instead.
 const BROWSER_SESSION_MIN_WIDTH: f32 = 460.0;
 
+/// The narrowest the browser goes when the window cannot hold it at its
+/// minimum beside the session: it gives up its room before the session does,
+/// down to this, where its toolbar still fits.
+const BROWSER_SQUEEZED_WIDTH: f32 = 200.0;
+
 /// The browser can take any share of the window that still leaves the session
-/// its minimum, so it is not held at a fixed width on wide screens.
+/// its minimum, so it is not held at a fixed width on wide screens. In a
+/// window too narrow for both minimums the browser yields first.
 fn browser_pane_width(requested: u16, window_width: f32) -> f32 {
-    f32::from(requested).clamp(
-        BROWSER_MIN_WIDTH,
-        (window_width - BROWSER_DIVIDER_WIDTH - BROWSER_SESSION_MIN_WIDTH).max(BROWSER_MIN_WIDTH),
-    )
+    let room = window_width - BROWSER_DIVIDER_WIDTH - BROWSER_SESSION_MIN_WIDTH;
+    let least = BROWSER_MIN_WIDTH.min(room.max(BROWSER_SQUEEZED_WIDTH));
+    f32::from(requested).clamp(least, room.max(least))
 }
 
 /// `room` is the window width left of the browser. The catalog hides once that
@@ -11323,7 +11328,7 @@ impl XdDesktop {
     fn minimal_workspace_width(&self, window: &Window) -> f32 {
         let width = logical(window.viewport_size().width);
         width
-            - if self.browser_compacts_sidebar(window) {
+            - if self.sidebar_compacted(window) {
                 0.0
             } else {
                 self.catalog_width(window)
@@ -11349,14 +11354,19 @@ impl XdDesktop {
         }
     }
 
-    fn browser_compacts_sidebar(&self, window: &Window) -> bool {
-        self.browser_is_open()
-            && logical(window.viewport_size().width)
-                - browser_pane_width(
-                    self.settings.browser_width,
-                    logical(window.viewport_size().width),
-                )
-                < 640.0
+    /// Whether the sidebar steps aside for the session: beside a browser
+    /// that leaves less than 640 logical pixels, and with a session open in
+    /// a window that cannot hold both the sidebar's minimum and the
+    /// session's, as the smallest window is at 130 % and 150 %. The landing
+    /// page keeps it, so every project stays a press of Escape away.
+    fn sidebar_compacted(&self, window: &Window) -> bool {
+        let width = logical(window.viewport_size().width);
+        if self.browser_is_open() {
+            return width - browser_pane_width(self.settings.browser_width, width) < 640.0;
+        }
+        let in_session = self.creating_chat_folder.is_some()
+            || matches!(self.minimal_route, MinimalRoute::Cli { .. });
+        in_session && width < CATALOG_MIN_WIDTH + CATALOG_SESSION_MIN_WIDTH
     }
 
     fn finish_dock_resize(&mut self, cx: &mut Context<Self>) {
@@ -23847,7 +23857,7 @@ impl XdDesktop {
             _ => None,
         };
         let catalog_width = self.catalog_width(window);
-        let catalog = (!self.browser_compacts_sidebar(window))
+        let catalog = (!self.sidebar_compacted(window))
             .then(|| self.render_catalog(colors, catalog_width, active_chat.as_deref(), cx));
         // Drawn after the session so its whole strip stays grabbable and keeps
         // the resize cursor over the session's edge as well as the catalog's.
@@ -25981,7 +25991,7 @@ impl XdDesktop {
     /// Puts the keyboard in the sidebar's find field, with what it holds
     /// selected so typing starts a new search.
     fn focus_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.shortcuts_blocked() || self.browser_compacts_sidebar(window) {
+        if self.shortcuts_blocked() || self.sidebar_compacted(window) {
             return;
         }
         self.catalog_find_input
@@ -33619,6 +33629,71 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             assert_eq!(desktop.settings.catalog_width, 296);
         });
         metrics::set_interface_size(100);
+    }
+
+    #[gpui::test]
+    fn at_150_percent_in_the_smallest_window_the_session_keeps_its_room(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // 760 by 560 of the window's pixels hold 507 by 373 logical ones.
+        let (desktop, cx) = sized_window(cx, 150, 760.0, 560.0);
+        let workspace = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            cx.update_window_entity(desktop, |desktop, window, _| {
+                (
+                    desktop.sidebar_compacted(window),
+                    desktop.minimal_workspace_width(window),
+                )
+            })
+        };
+        // The landing page keeps the sidebar, at its narrowest.
+        assert!(!workspace(&desktop, cx).0);
+        assert!(cx.debug_bounds("catalog-footer").is_some());
+        // A session open: the sidebar steps aside rather than leave the
+        // session less than its minimum.
+        cx.simulate_keystrokes("alt-down");
+        redraw(cx);
+        let (compacted, room) = workspace(&desktop, cx);
+        assert!(compacted);
+        assert!(room >= CATALOG_SESSION_MIN_WIDTH, "the session has {room}");
+        // Beside the browser, the browser yields first: it narrows past its
+        // usual minimum, and the session keeps the larger share.
+        cx.update_window_entity(&desktop, |desktop, _, _| desktop.set_browser_open(true));
+        redraw(cx);
+        let (compacted, room) = workspace(&desktop, cx);
+        let width = 760.0 / 1.5;
+        let browser = browser_pane_width(460, width);
+        assert!(compacted);
+        assert_eq!(browser, BROWSER_SQUEEZED_WIDTH);
+        assert!(
+            room > browser,
+            "the session has {room}, the browser {browser}"
+        );
+        // Back on the landing page the sidebar returns.
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.set_browser_open(false);
+            desktop.show_minimal_projects(cx);
+        });
+        redraw(cx);
+        assert!(!workspace(&desktop, cx).0);
+        metrics::set_interface_size(100);
+    }
+
+    #[test]
+    fn the_browser_yields_before_the_session_in_a_narrow_window() {
+        // At 130 % and 150 % the smallest window is 584 and 507 logical
+        // pixels wide: too narrow for the browser's 280 beside the session's
+        // 460, so the browser takes its squeezed width.
+        for width in [760.0 / 1.3, 760.0 / 1.5] {
+            for requested in [0, 280, 460, u16::MAX] {
+                assert_eq!(browser_pane_width(requested, width), BROWSER_SQUEEZED_WIDTH);
+            }
+        }
+        // Once both minimums fit, nothing changes.
+        assert_eq!(browser_pane_width(0, 760.0), BROWSER_MIN_WIDTH);
+        assert_eq!(
+            browser_pane_width(u16::MAX, 760.0),
+            760.0 - BROWSER_DIVIDER_WIDTH - BROWSER_SESSION_MIN_WIDTH
+        );
     }
 
     #[gpui::test]
