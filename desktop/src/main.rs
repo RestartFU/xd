@@ -33891,7 +33891,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         let long = scroll_thumb_bounds(view, px(100_000.0), px(0.0)).unwrap();
         assert_eq!(long.size.height, px(SCROLL_THUMB_MIN_HEIGHT));
         // The reading panes draw one.
-        let source = include_str!("main.rs");
+        let source = include_str!("main.rs").split_once("#[cfg(test)]").unwrap().0;
         for area in [
             "list_scroll_thumb(self.transcript.clone(), colors)",
             ".thumbed(\"minimal-project-list\", colors)",
