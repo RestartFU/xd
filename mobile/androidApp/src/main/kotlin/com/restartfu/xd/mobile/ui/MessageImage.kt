@@ -4,6 +4,28 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.window.DialogProperties
+import com.restartfu.xd.mobile.R
+import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -84,7 +106,8 @@ internal fun MessageImage(
     var state: Loaded by remember(cacheKey) {
         mutableStateOf(decodedImages.get(cacheKey)?.let(Loaded::Ready) ?: Loaded.Loading)
     }
-    var zoomed by remember(path) { mutableStateOf(false) }
+    // Saved, so the picture stays open when the phone is turned to look at it.
+    var zoomed by rememberSaveable(path) { mutableStateOf(false) }
 
     LaunchedEffect(cacheKey) {
         if (state is Loaded.Ready) return@LaunchedEffect
@@ -148,18 +171,124 @@ internal fun MessageImage(
                     .clickable(onClickLabel = "View larger") { zoomed = true },
                 contentScale = ContentScale.Fit,
             )
-            if (zoomed) {
-                Dialog(onDismissRequest = { zoomed = false }) {
-                    Image(
-                        bitmap = current.bitmap,
-                        contentDescription = described,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .clickable(onClickLabel = "Close") { zoomed = false },
-                        contentScale = ContentScale.Fit,
-                    )
-                }
+            if (zoomed) ImageViewer(current.bitmap, described) { zoomed = false }
+        }
+    }
+}
+
+/**
+ * A picture on its own, over the whole screen: pinch or double-tap to zoom,
+ * drag to move around it once zoomed, and Close or Back to leave.
+ */
+@Composable
+private fun ImageViewer(bitmap: ImageBitmap, description: String, onClose: () -> Unit) {
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        // Its own window, so its bars are set here: the activity's do not reach it.
+        DialogSystemBars()
+        ImageViewerContent(bitmap, description, onClose)
+    }
+}
+
+/** The viewer's picture, for tests. */
+internal const val IMAGE_VIEWER_TAG = "image-viewer"
+
+@Composable
+internal fun ImageViewerContent(bitmap: ImageBitmap, description: String, onClose: () -> Unit) {
+    var zoom by remember { mutableStateOf(ImageZoom()) }
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    // The theme's own ground, said outright: a dialog starts with no surface under it.
+    Surface(
+        Modifier.fillMaxSize(),
+        color = LocalXdGlass.current.backdrop,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+    ) {
+        Box(Modifier.fillMaxSize()) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = description,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag(IMAGE_VIEWER_TAG)
+                    .onSizeChanged { size = it }
+                    // Zooming without a pinch, for a switch, a keyboard or a screen reader.
+                    .semantics {
+                        stateDescription = zoom.label
+                        customActions = listOf(
+                            CustomAccessibilityAction("Zoom in") {
+                                zoom = zoom.moved(1.5f, 0f, 0f, size.width, size.height)
+                                true
+                            },
+                            CustomAccessibilityAction("Zoom out") {
+                                zoom = zoom.moved(1 / 1.5f, 0f, 0f, size.width, size.height)
+                                true
+                            },
+                        )
+                    }
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, pan, zoomBy, _ ->
+                            zoom = zoom.moved(zoomBy, pan.x, pan.y, size.width, size.height)
+                        }
+                    }
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onDoubleTap = { zoom = if (zoom.scale > 1f) ImageZoom() else ImageZoom(DOUBLE_TAP_ZOOM) },
+                        )
+                    }
+                    .graphicsLayer {
+                        scaleX = zoom.scale
+                        scaleY = zoom.scale
+                        translationX = zoom.x
+                        translationY = zoom.y
+                    },
+            )
+            // On a tone of its own, so it reads over whatever part of the picture is under it.
+            FilledTonalIconButton(
+                onClick = onClose,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(8.dp)
+                    .size(48.dp),
+            ) {
+                Icon(painterResource(R.drawable.ic_close), contentDescription = "Close", modifier = Modifier.size(20.dp))
             }
         }
+    }
+}
+
+/** How far a double tap zooms in. */
+private const val DOUBLE_TAP_ZOOM = 2.5f
+
+/**
+ * How far into a picture the viewer is, and where: [scale] from the picture
+ * fitted to the screen (1) to [MAX_SCALE], and how far its middle has been
+ * dragged from the screen's, in pixels.
+ */
+internal data class ImageZoom(val scale: Float = 1f, val x: Float = 0f, val y: Float = 0f) {
+    /** Said to a screen reader: the picture looks the same to it at any zoom. */
+    val label: String get() = if (scale == 1f) "Fitted to the screen" else "Zoomed to ${(scale * 100).roundToInt()}%"
+
+    /**
+     * This, zoomed by [zoomBy] and dragged by [panX] and [panY] on a screen
+     * [width] by [height]. Zoom stays between fitted and [MAX_SCALE], and the
+     * drag stops where the picture's edge would leave the screen's, so it can
+     * never be lost off to one side; fitted, it does not move at all.
+     */
+    fun moved(zoomBy: Float, panX: Float, panY: Float, width: Int, height: Int): ImageZoom {
+        val next = (scale * zoomBy).coerceIn(1f, MAX_SCALE)
+        val reachX = width * (next - 1f) / 2f
+        val reachY = height * (next - 1f) / 2f
+        return ImageZoom(next, within(x + panX, reachX), within(y + panY, reachY))
+    }
+
+    /** [offset] no further than [reach] either way; with no reach, exactly the middle. */
+    private fun within(offset: Float, reach: Float): Float = if (reach <= 0f) 0f else offset.coerceIn(-reach, reach)
+
+    companion object {
+        const val MAX_SCALE = 5f
     }
 }
