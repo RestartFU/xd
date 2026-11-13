@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.selection.selectableGroup
 import com.restartfu.xd.protocol.GitStatusReply
 import com.restartfu.xd.mobile.DiffPane
 import androidx.compose.ui.platform.LocalUriHandler
@@ -39,7 +40,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -85,16 +85,19 @@ internal fun DiffPaneContent(model: DiffViewModel) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            FilterChip(
-                selected = !state.branch,
-                onClick = { model.showBranch(false) },
-                label = { Text("Working") },
-            )
-            FilterChip(
-                selected = state.branch,
-                onClick = { model.showBranch(true) },
-                label = { Text("Branch") },
-            )
+            // One of the two, never both.
+            Row(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ChoiceChip(
+                    selected = !state.branch,
+                    onClick = { model.showBranch(false) },
+                    label = { Text("Working") },
+                )
+                ChoiceChip(
+                    selected = state.branch,
+                    onClick = { model.showBranch(true) },
+                    label = { Text("Branch") },
+                )
+            }
             Box(Modifier.weight(1f))
             TextButton(onClick = model::refresh, enabled = !state.loading) {
                 Text("Refresh")
@@ -107,7 +110,7 @@ internal fun DiffPaneContent(model: DiffViewModel) {
             state.patch.isBlank() -> Centered {
                 Text(
                     if (state.branch) "No branch changes." else "No changes.",
-                    color = MaterialTheme.colorScheme.outline,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             else -> PatchList(state.patch, state.collapsedFiles, model::toggleFile)

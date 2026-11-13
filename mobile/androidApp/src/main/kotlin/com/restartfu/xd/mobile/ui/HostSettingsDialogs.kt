@@ -1,5 +1,7 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -440,7 +442,14 @@ internal fun ChatTitleSettings(model: MainViewModel) {
         if (error != null) TextButton(onClick = model::retryChatTitles) { Text("Try again") }
         return
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    // One stop, named by its words: a tap anywhere on the row turns it.
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(value = current.enabled, role = Role.Switch, onValueChange = model::setChatTitlesEnabled),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
             Text("Generate chat titles", fontWeight = FontWeight.SemiBold)
             Text(
@@ -449,7 +458,7 @@ internal fun ChatTitleSettings(model: MainViewModel) {
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Switch(checked = current.enabled, onCheckedChange = model::setChatTitlesEnabled)
+        Switch(checked = current.enabled, onCheckedChange = null)
     }
     if (catalog.isEmpty() && catalogError != null) {
         Row(verticalAlignment = Alignment.CenterVertically) {

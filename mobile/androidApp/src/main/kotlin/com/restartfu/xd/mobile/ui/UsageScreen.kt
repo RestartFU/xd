@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.FlowRow
@@ -22,7 +23,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -102,20 +102,21 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
             .padding(bottom = bottomInset),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Each row is one choice of several: a screen reader hears radio buttons, and how many.
+        FlowRow(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("Cost", "Tokens", "Limits").forEach { option ->
-                FilterChip(selected = metric == option, onClick = { model.showMetric(option); selectedModel = null; selectedProvider = null }, label = { Text(option) })
+                ChoiceChip(selected = metric == option, onClick = { model.showMetric(option); selectedModel = null; selectedProvider = null }, label = { Text(option) })
             }
         }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("All providers", "Codex", "Claude").forEach { option ->
-                FilterChip(selected = provider == option, onClick = { model.showProvider(option); selectedModel = null; selectedProvider = null }, label = { Text(option) })
+                ChoiceChip(selected = provider == option, onClick = { model.showProvider(option); selectedModel = null; selectedProvider = null }, label = { Text(option) })
             }
         }
         if (metric != "Limits") {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Ops.USAGE_DAYS.forEach { days ->
-                    FilterChip(
+                    ChoiceChip(
                         selected = state.days == days,
                         onClick = { model.showDays(days) },
                         label = { Text(if (days == 1) "Past 24h" else "$days days") },
@@ -256,9 +257,9 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
             }
         }
         Text("Breakdown", style = MaterialTheme.typography.titleSmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = !byTime, onClick = { byTime = false }, label = { Text("Model") })
-            FilterChip(selected = byTime, onClick = { byTime = true }, label = { Text(if (summary.resolution == "hour") "Hour" else "Day") })
+        Row(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChoiceChip(selected = !byTime, onClick = { byTime = false }, label = { Text("Model") })
+            ChoiceChip(selected = byTime, onClick = { byTime = true }, label = { Text(if (summary.resolution == "hour") "Hour" else "Day") })
         }
         if (byTime) {
             summary.periods.forEach { period ->

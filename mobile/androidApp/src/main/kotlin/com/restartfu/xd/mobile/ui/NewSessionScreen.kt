@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.selection.toggleable
 import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -929,10 +930,12 @@ private fun ChoiceRow(label: String, detail: String, chosen: Boolean, onClick: (
 
 @Composable
 private fun SwitchRow(title: String, detail: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    // One stop, named by its words: a tap anywhere on the row turns it.
     Row(
         Modifier
             .fillMaxWidth()
             .heightIn(min = 64.dp)
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -941,7 +944,7 @@ private fun SwitchRow(title: String, detail: String, checked: Boolean, onChecked
             Text(title, style = MaterialTheme.typography.bodyLarge)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = LocalXdSignals.current.faint)
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 

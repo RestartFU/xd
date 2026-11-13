@@ -9,11 +9,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
@@ -72,14 +74,14 @@ internal fun ChatOptionsDialog(
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 // Plan and Build are one setting: Build is Plan off.
                 Section("Mode")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
+                Row(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ChoiceChip(
                         selected = !state.plan,
                         onClick = { model.setPlan(false) },
                         label = { Text("Build") },
                         enabled = !busy,
                     )
-                    FilterChip(
+                    ChoiceChip(
                         selected = state.plan,
                         onClick = { model.setPlan(true) },
                         label = { Text("Plan") },
@@ -101,12 +103,12 @@ internal fun ChatOptionsDialog(
                 if (efforts.isNotEmpty()) {
                     Section("Reasoning effort")
                     FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().selectableGroup(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         efforts.forEach { effort ->
-                            FilterChip(
+                            ChoiceChip(
                                 selected = state.effort == effort,
                                 onClick = { model.setEffort(effort) },
                                 label = { Text(DisplayLabels.effort(effort)) },
@@ -118,12 +120,12 @@ internal fun ChatOptionsDialog(
 
                 Section("Access")
                 FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().selectableGroup(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     ACCESS.forEach { wire ->
-                        FilterChip(
+                        ChoiceChip(
                             selected = DisplayLabels.canonicalAccess(state.access) == wire,
                             onClick = { model.setAccess(wire) },
                             // Planning overrides access on the host, so
@@ -138,49 +140,39 @@ internal fun ChatOptionsDialog(
                     Text(
                         "Switch to Build to change access.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
 
                 if (accounts.isNotEmpty()) {
                     Section("Account")
-                    AccountChoice(
-                        label = AUTOMATIC_ACCOUNT,
-                        selected = chosen == null,
-                        enabled = !busy,
-                        onClick = { model.setAccount(null) },
-                    )
-                    accounts.forEach { account ->
+                    Column(Modifier.selectableGroup()) {
                         AccountChoice(
-                            label = chatAccountLabel(account, now),
-                            selected = chosen == account.id,
+                            label = AUTOMATIC_ACCOUNT,
+                            selected = chosen == null,
                             enabled = !busy,
-                            onClick = { model.setAccount(account.id) },
+                            onClick = { model.setAccount(null) },
                         )
+                        accounts.forEach { account ->
+                            AccountChoice(
+                                label = chatAccountLabel(account, now),
+                                selected = chosen == account.id,
+                                enabled = !busy,
+                                onClick = { model.setAccount(account.id) },
+                            )
+                        }
                     }
                 }
 
                 if (state.canCreateWorktree) {
                     Section("Worktree")
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("New worktree")
-                            Text(
-                                "Run this session in its own checkout.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline,
-                            )
-                        }
-                        Switch(
-                            checked = state.newWorktree,
-                            onCheckedChange = { model.setNewWorktree(it) },
-                            enabled = !busy,
-                        )
-                    }
+                    OptionSwitch(
+                        title = "New worktree",
+                        description = "Run this session in its own checkout.",
+                        checked = state.newWorktree,
+                        enabled = !busy,
+                        onCheckedChange = { model.setNewWorktree(it) },
+                    )
                 }
             }
         },
@@ -198,8 +190,12 @@ private fun OptionSwitch(
     enabled: Boolean,
     onCheckedChange: (Boolean) -> Unit,
 ) {
+    // One stop, named by its words: a tap anywhere on the row turns it.
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -208,14 +204,10 @@ private fun OptionSwitch(
             Text(
                 description,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            enabled = enabled,
-        )
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
     }
 }
 
@@ -229,6 +221,7 @@ internal fun AccountChoice(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = 48.dp)
             .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -245,7 +238,7 @@ private fun Section(title: String) {
     Text(
         title,
         style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.outline,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     Spacer(Modifier.height(6.dp))
 }

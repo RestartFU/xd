@@ -81,6 +81,7 @@ import androidx.compose.material3.rememberTooltipState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.ui.unit.Dp
 import androidx.compose.material3.MaterialTheme
@@ -2151,7 +2152,7 @@ private fun MoveDialog(
         onDismissRequest = onDismiss,
         title = { Text("Move $name", maxLines = 1, overflow = TextOverflow.Ellipsis) },
         text = {
-            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()).selectableGroup()) {
                 MoveRow(
                     label = "Top level",
                     depth = 0,
@@ -2197,7 +2198,7 @@ private fun MoveRow(
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .clip(MaterialTheme.shapes.small)
-            .clickable(role = Role.RadioButton, onClick = onClick)
+            .selectable(selected = chosen, role = Role.RadioButton, onClick = onClick)
             .padding(start = (depth * 12).dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2879,7 +2880,14 @@ internal fun SettingSwitch(
     onCheckedChange: (Boolean) -> Unit,
     enabled: Boolean = true,
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    // One stop, named by its words: a tap anywhere on the row turns it.
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
             Text(title, fontWeight = FontWeight.SemiBold)
             Text(
@@ -2888,7 +2896,7 @@ internal fun SettingSwitch(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
     }
 }
 

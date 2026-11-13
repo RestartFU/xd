@@ -1,5 +1,7 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -82,7 +84,18 @@ internal fun ChatQuotaSection(model: MainViewModel) {
         return
     }
     val percent = current.percent
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    // One stop, named by its words: a tap anywhere on the row turns it.
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(
+                value = percent != null,
+                role = Role.Switch,
+                onValueChange = { on -> model.setChatQuota(if (on) ChatQuota.DEFAULT_PERCENT else null) },
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
             Text("Limit each chat's usage", fontWeight = FontWeight.SemiBold)
             Text(
@@ -91,10 +104,7 @@ internal fun ChatQuotaSection(model: MainViewModel) {
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Switch(
-            checked = percent != null,
-            onCheckedChange = { on -> model.setChatQuota(if (on) ChatQuota.DEFAULT_PERCENT else null) },
-        )
+        Switch(checked = percent != null, onCheckedChange = null)
     }
     if (percent != null) {
         // Keyed by the host's value, so a change made elsewhere replaces what is shown.
