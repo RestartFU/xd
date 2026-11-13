@@ -890,10 +890,27 @@ private fun MinimalProjectsHome(
                 modifier = Modifier.fillMaxSize(),
                 state = listState,
                 contentPadding = PaddingValues(side, 14.dp, side, if (newSessionAboveBar) NewSessionBottom + FloatingBarHeight + 12.dp else 96.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                // Every session is a row of its own, laid out only while on
+                // screen. Each row brings the space above it: the list's own
+                // gap between projects, and a closer one between the sessions
+                // of an open project, which sits padded as one drawer.
+                var first = true
+                var afterDrawer = false
+                fun row(key: String, type: String, gap: Dp, drawerHead: Boolean = false, content: @Composable () -> Unit) {
+                    val top = (if (first) 0.dp else gap + if (afterDrawer && type != "session") DrawerPadding else 0.dp) +
+                        if (drawerHead) DrawerPadding else 0.dp
+                    first = false
+                    afterDrawer = drawerHead || (type == "session" && key.startsWith("session-"))
+                    item(key = key, contentType = type) {
+                        Column {
+                            if (top > 0.dp) Spacer(Modifier.height(top))
+                            content()
+                        }
+                    }
+                }
                 (treeError ?: operationError)?.let { error ->
-                    item("error") {
+                    row("error", "error", ListGap) {
                         Row(
                             Modifier.fillMaxWidth().padding(start = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -917,15 +934,15 @@ private fun MinimalProjectsHome(
                 if (rows.isEmpty()) {
                     // With nothing read there is nothing to suggest making yet.
                     if (treeError == null) {
-                        item("empty-projects") {
+                        row("empty-projects", "empty", ListGap) {
                             EmptyCard("Create a project, then start a Codex or Claude session in it.")
                         }
                     }
                 } else {
-                    items(rows, key = ProjectTreeRow::id) { row ->
+                    rows.forEach { row ->
                         val indent = Modifier.padding(start = (row.depth * FOLDER_INDENT).dp)
                         when (row) {
-                            is ProjectTreeRow.FolderRow -> FolderRow(
+                            is ProjectTreeRow.FolderRow -> row(row.id, "folder", ListGap) { FolderRow(
                                 folder = row.folder,
                                 open = row.open,
                                 icon = ownerIcons[row.folder.owner],
@@ -951,8 +968,8 @@ private fun MinimalProjectsHome(
                                         onDelete = { deletingFolderId = row.folder.id },
                                     )
                                 },
-                            )
-                            is ProjectTreeRow.ProjectRow -> Box(indent) {
+                            ) }
+                            is ProjectTreeRow.ProjectRow -> {
                                 val project = row.project
                                 // Projects open and close on their own, like folders,
                                 // so several can be open at once.
@@ -973,46 +990,84 @@ private fun MinimalProjectsHome(
                                     )
                                 }
                                 if (projectOpen) {
-                                    OpenDrawer(
-                                        project = project,
-                                        icon = ownerIcons[project.owner],
-                                        sessions = listed(project.id),
-                                        starting = starting.filter { it.projectId == project.id && it.sessionId == null },
-                                        signalOf = signalOf,
-                                        outwardOf = outwardOf,
-                                        open = { session -> open(project, session) },
-                                        actions = actions,
-                                        expanded = expandedSessions,
-                                        fold = { session, folded -> settings.setSessionsFolded(listOf(session.id), folded) },
-                                        toggle = toggle,
-                                        onNewSession = { newSessionIn(project.id) },
-                                        pause = pauseFor(project),
-                                        menu = menu,
-                                    )
+                                    val sessions = listed(project.id)
+                                    val startingHere = starting.filter { it.projectId == project.id && it.sessionId == null }
+                                    row(row.id, "open-project", ListGap, drawerHead = true) {
+                                        Box(indent) {
+                                            OpenDrawerHead(
+                                                project = project,
+                                                icon = ownerIcons[project.owner],
+                                                empty = sessions.isEmpty(),
+                                                starting = startingHere,
+                                                toggle = toggle,
+                                                onNewSession = { newSessionIn(project.id) },
+                                                pause = pauseFor(project),
+                                                menu = menu,
+                                            )
+                                        }
+                                    }
+                                    // A folded session hides the run of sessions below it that its agent started,
+                                    // and every such session starts folded until the user unfolds it.
+                                    var hiddenUntil = 0
+                                    sessions.forEachIndexed { index, session ->
+                                        if (index < hiddenUntil) return@forEachIndexed
+                                        val workers = sessions.startedBelow(index)
+                                        val isFolded = workers > 0 && session.id !in expandedSessions
+                                        if (isFolded) hiddenUntil = index + 1 + workers
+                                        val hidden = if (isFolded) sessions.subList(index + 1, hiddenUntil).map(outwardOf) else emptyList()
+                                        // Keyed by its session, so its open menu stays with it when others come and go.
+                                        row("session-${session.id}", "session", DrawerGap) {
+                                            Box(indent) {
+                                                SessionRow(
+                                                    session = session,
+                                                    signal = signalOf(session),
+                                                    onClick = { open(project, session) },
+                                                    actions = actions,
+                                                    fold = if (workers == 0) null else SessionFold(
+                                                        workers = workers,
+                                                        folded = isFolded,
+                                                        hidden = hidden,
+                                                        toggle = { settings.setSessionsFolded(listOf(session.id), !isFolded) },
+                                                    ),
+                                                )
+                                            }
+                                        }
+                                    }
                                 } else {
-                                    DrawerRow(
-                                        project = project,
-                                        open = false,
-                                        icon = ownerIcons[project.owner],
-                                        signals = listed(project.id).map(outwardOf),
-                                        onClick = toggle,
-                                        pause = pauseFor(project),
-                                        menu = menu,
-                                    )
+                                    row(row.id, "project", ListGap) {
+                                        Box(indent) {
+                                            DrawerRow(
+                                                project = project,
+                                                open = false,
+                                                icon = ownerIcons[project.owner],
+                                                signals = listed(project.id).map(outwardOf),
+                                                onClick = toggle,
+                                                pause = pauseFor(project),
+                                                menu = menu,
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 if (settled.isNotEmpty()) {
-                    item("settled-shelf") {
-                        SettledShelf(
-                            settled = settled,
-                            expanded = shelfOpen,
-                            toggle = { shelfOpen = !shelfOpen },
-                            open = { open(it.project, it.session) },
-                            actions = actions,
-                        )
+                    row("settled-shelf", "shelf", ListGap + ShelfGap) {
+                        SettledShelfHead(count = settled.size, expanded = shelfOpen, toggle = { shelfOpen = !shelfOpen })
+                    }
+                    if (shelfOpen) {
+                        settled.forEach { entry ->
+                            row("settled-${entry.session.id}", "session", DrawerGap) {
+                                SessionRow(
+                                    session = entry.session,
+                                    signal = SessionSignal.IDLE,
+                                    onClick = { open(entry.project, entry.session) },
+                                    actions = actions,
+                                    subtitle = entry.project.name,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -2240,20 +2295,13 @@ private fun MoveRow(
 
 /** An open project, with one row per session beneath it. */
 @Composable
-private fun OpenDrawer(
+private fun OpenDrawerHead(
     project: MinimalProject,
     icon: ByteArray?,
-    sessions: List<MinimalSession>,
+    /** The project has no sessions. */
+    empty: Boolean,
     /** New sessions sent to the host and not made yet. */
     starting: List<StartingSession>,
-    signalOf: (MinimalSession) -> SessionSignal,
-    /** What a session shows on a folded row above it. */
-    outwardOf: (MinimalSession) -> SessionSignal,
-    open: (MinimalSession) -> Unit,
-    actions: SessionActions,
-    /** Sessions unfolded to show the sessions their agents started; the rest list folded. */
-    expanded: Set<String>,
-    fold: (MinimalSession, Boolean) -> Unit,
     /** Closes the project. */
     toggle: () -> Unit,
     onNewSession: () -> Unit,
@@ -2261,10 +2309,8 @@ private fun OpenDrawer(
     menu: @Composable () -> Unit,
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(DrawerGap),
     ) {
         DrawerRow(
             project = project,
@@ -2280,7 +2326,7 @@ private fun OpenDrawer(
             key("starting-${session.id}") { StartingRow(session) }
         }
         // Kept to one quiet line: several empty projects can be open at once.
-        if (sessions.isEmpty() && starting.isEmpty()) {
+        if (empty && starting.isEmpty()) {
             Text(
                 "No sessions yet",
                 modifier = Modifier.padding(start = 30.dp, end = 10.dp, bottom = 6.dp),
@@ -2288,32 +2334,16 @@ private fun OpenDrawer(
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
-        // A folded session hides the run of sessions below it that its agent started,
-        // and every such session starts folded until the user unfolds it.
-        var hiddenUntil = 0
-        sessions.forEachIndexed { index, session ->
-            if (index < hiddenUntil) return@forEachIndexed
-            val workers = sessions.startedBelow(index)
-            val isFolded = workers > 0 && session.id !in expanded
-            if (isFolded) hiddenUntil = index + 1 + workers
-            // Keyed so a row's open menu stays with its session when others come and go.
-            key(session.id) {
-                SessionRow(
-                    session = session,
-                    signal = signalOf(session),
-                    onClick = { open(session) },
-                    actions = actions,
-                    fold = if (workers == 0) null else SessionFold(
-                        workers = workers,
-                        folded = isFolded,
-                        hidden = if (isFolded) sessions.subList(index + 1, hiddenUntil).map(outwardOf) else emptyList(),
-                        toggle = { fold(session, !isFolded) },
-                    ),
-                )
-            }
-        }
     }
 }
+
+/** The space between rows of the Projects list, between the rows inside an open project, and around one. */
+private val ListGap = 4.dp
+private val DrawerGap = 2.dp
+private val DrawerPadding = 4.dp
+
+/** The extra space above the Settled shelf. */
+private val ShelfGap = 12.dp
 
 /** A new session the host is still setting up, laid out as its row will be. */
 @Composable
@@ -2541,15 +2571,13 @@ private class SessionActions(
  * recently settled first, each a tap from coming back.
  */
 @Composable
-private fun SettledShelf(
-    settled: List<SettledSession>,
+private fun SettledShelfHead(
+    count: Int,
     expanded: Boolean,
     toggle: () -> Unit,
-    open: (SettledSession) -> Unit,
-    actions: SessionActions,
 ) {
     val faint = LocalXdSignals.current.faint
-    Column(Modifier.fillMaxWidth().padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(DrawerGap)) {
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Row(
             modifier = Modifier
@@ -2575,24 +2603,11 @@ private fun SettledShelf(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                settled.size.toString(),
-                modifier = Modifier.semantics { contentDescription = counted(settled.size, "session") },
+                count.toString(),
+                modifier = Modifier.semantics { contentDescription = counted(count, "session") },
                 style = MaterialTheme.typography.labelMedium,
                 color = faint,
             )
-        }
-        if (expanded) {
-            settled.forEach { entry ->
-                key(entry.session.id) {
-                    SessionRow(
-                        session = entry.session,
-                        signal = SessionSignal.IDLE,
-                        onClick = { open(entry) },
-                        actions = actions,
-                        subtitle = entry.project.name,
-                    )
-                }
-            }
         }
     }
 }
