@@ -13,6 +13,8 @@ public data class ConnectionNotice(
     val reason: String?,
     /** A link that failed, told in the error role. A first connection is told quietly. */
     val failure: Boolean,
+    /** Waiting before the next attempt, which can be made at once instead. */
+    val waiting: Boolean = false,
 ) {
     /** The line as drawn. */
     val text: String get() = if (reason == null) title else "$title · $reason"
@@ -41,6 +43,7 @@ public fun connectionNotice(link: Link, lastFailure: String?, secondsLeft: Long?
             title = secondsLeft?.takeIf { it > 0 }?.let { "Reconnecting in ${countdown(it)}" } ?: "Reconnecting…",
             reason = reason(link.message),
             failure = true,
+            waiting = true,
         )
         Link.Idle, Link.Connecting ->
             if (lastFailure == null) {

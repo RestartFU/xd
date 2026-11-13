@@ -504,9 +504,18 @@ public class XdClient(
         actor.goBackground()
     }
 
-    /** Connects again after a failure another attempt can get past; see [Link.Fatal.retryable]. */
+    /**
+     * Connects again now: after a failure another attempt can get past (see
+     * [Link.Fatal.retryable]), or in place of the wait before the next
+     * attempt while the link is down.
+     */
     public fun retryConnection() {
         actor.retry()
+    }
+
+    /** Reads the project tree again, as after a read that failed. */
+    public fun refreshTree() {
+        requestTreeRefresh()
     }
 
     public suspend fun connect(connection: SshConnection): ConnectResult =

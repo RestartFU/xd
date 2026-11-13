@@ -12,6 +12,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -72,11 +73,19 @@ private fun XdMobileApp(
     // No foreground service: leaving closes the socket, returning reconnects
     // and re-snapshots. The host keeps no resumable event log, so there is
     // nothing a backgrounded socket could usefully catch up on.
+    // While the app is in front, a network coming back is a reason to try
+    // the host at once instead of waiting out the backoff.
+    val context = LocalContext.current
+    val networkWatch = remember(context, model.client) { NetworkReturnWatch(context, model.client::retryConnection) }
     DisposableEffect(lifecycleOwner, model.client) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> model.client.poke()
+                Lifecycle.Event.ON_START -> {
+                    model.client.poke()
+                    networkWatch.start()
+                }
                 Lifecycle.Event.ON_STOP -> {
+                    networkWatch.stop()
                     if (activity?.isChangingConfigurations != true) {
                         model.client.goBackground()
                     }
@@ -85,7 +94,10 @@ private fun XdMobileApp(
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            networkWatch.stop()
+        }
     }
 
     if (!credentialsReady) {

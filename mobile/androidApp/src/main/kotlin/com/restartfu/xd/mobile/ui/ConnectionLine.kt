@@ -9,6 +9,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -41,6 +44,15 @@ import kotlinx.coroutines.delay
 
 /** What [ConnectionLine] says on every page; it holds null while the host is connected. */
 internal val LocalConnectionNotice = staticCompositionLocalOf<State<ConnectionNotice?>> { mutableStateOf(null) }
+
+/**
+ * Makes the next connection attempt at once, in place of the wait before it;
+ * null where nothing can (a preview, a test of the line alone).
+ */
+internal val LocalConnectionRetry = staticCompositionLocalOf<(() -> Unit)?> { null }
+
+/** The action on the line while it waits to try again. */
+internal const val TRY_NOW_LABEL = "Try now"
 
 /** The connection line, for tests. */
 internal const val CONNECTION_LINE_TAG = "connection-line"
@@ -109,6 +121,7 @@ private class LastFailure {
 @Composable
 internal fun ConnectionLine(modifier: Modifier = Modifier, divider: Color = MaterialTheme.colorScheme.outlineVariant) {
     val notice = LocalConnectionNotice.current.value ?: return
+    val retry = LocalConnectionRetry.current?.takeIf { notice.waiting }
     val colors = MaterialTheme.colorScheme
     val content = if (notice.failure) colors.onErrorContainer else colors.onSurfaceVariant
     Column(modifier) {
@@ -116,35 +129,52 @@ internal fun ConnectionLine(modifier: Modifier = Modifier, divider: Color = Mate
             modifier = Modifier
                 .fillMaxWidth()
                 .background(if (notice.failure) colors.errorContainer else glassPane())
-                .testTag(CONNECTION_LINE_TAG)
-                // Spoken without the countdown: a second passing is not news.
-                .semanticsNode {
-                    liveRegion = LiveRegionMode.Polite
-                    contentDescription = notice.spoken
-                }
+                // Slim, and only as tall as its Try now needs while that shows.
                 .heightIn(min = 28.dp)
-                .padding(horizontal = 16.dp, vertical = 5.dp),
+                .padding(start = 16.dp, end = if (retry != null) 4.dp else 16.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (notice.failure) {
-                Icon(
-                    painterResource(R.drawable.ic_alert),
-                    contentDescription = null,
-                    tint = content,
-                    modifier = Modifier.size(14.dp),
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag(CONNECTION_LINE_TAG)
+                    // Spoken without the countdown: a second passing is not news.
+                    .semanticsNode {
+                        liveRegion = LiveRegionMode.Polite
+                        contentDescription = notice.spoken
+                    }
+                    .padding(vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (notice.failure) {
+                    Icon(
+                        painterResource(R.drawable.ic_alert),
+                        contentDescription = null,
+                        tint = content,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+                Text(
+                    buildAnnotatedString {
+                        withStyle(SpanStyle(fontWeight = FontWeight.Medium)) { append(notice.title) }
+                        notice.reason?.let { append(" · $it") }
+                    },
+                    color = content,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-            Text(
-                buildAnnotatedString {
-                    withStyle(SpanStyle(fontWeight = FontWeight.Medium)) { append(notice.title) }
-                    notice.reason?.let { append(" · $it") }
-                },
-                color = content,
-                style = MaterialTheme.typography.labelMedium,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
+            retry?.let {
+                TextButton(
+                    onClick = it,
+                    colors = ButtonDefaults.textButtonColors(contentColor = content),
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                ) {
+                    Text(TRY_NOW_LABEL, style = MaterialTheme.typography.labelLarge)
+                }
+            }
         }
         HorizontalDivider(color = divider)
     }

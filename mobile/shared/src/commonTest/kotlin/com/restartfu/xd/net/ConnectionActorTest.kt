@@ -265,6 +265,38 @@ class ConnectionActorTest {
     }
 
     @Test
+    fun aWaitBeforeReconnectingCanBeCutShort() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = connectedActor(factory)
+        factory.latest.fail(message = "offline")
+        runCurrent()
+        // The second wait, so the backoff has moved on.
+        advanceTimeBy(2_000)
+        runCurrent()
+        factory.latest.fail(message = "offline")
+        runCurrent()
+        assertEquals(Link.Down("offline", 5_000), actor.link.value)
+        val before = factory.sockets.size
+
+        actor.retry()
+        runCurrent()
+        assertEquals(before + 1, factory.sockets.size)
+        assertEquals(Link.Connecting, actor.link.value)
+        // Asking again while that attempt is under way starts no other.
+        actor.retry()
+        runCurrent()
+        assertEquals(before + 1, factory.sockets.size)
+        // The cancelled wait does not start one of its own later.
+        advanceTimeBy(10_000)
+        runCurrent()
+        assertEquals(before + 1, factory.sockets.size)
+        // Failing again waits as long as the next step of the backoff.
+        factory.latest.fail(message = "offline")
+        runCurrent()
+        assertEquals(Link.Down("offline", 15_000), actor.link.value)
+    }
+
+    @Test
     fun hostKeyMismatchIsFatalAndNeverRetries() = runTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(

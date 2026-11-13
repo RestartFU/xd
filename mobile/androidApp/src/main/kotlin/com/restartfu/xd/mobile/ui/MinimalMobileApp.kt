@@ -228,7 +228,11 @@ internal fun MinimalMobileApp(
     settings: MobileSettings,
 ) {
     // Said once for the whole app: every page's connection line reads it.
-    CompositionLocalProvider(LocalConnectionNotice provides rememberConnectionNotice(link)) {
+    CompositionLocalProvider(
+        LocalConnectionNotice provides rememberConnectionNotice(link),
+        // The line's Try now: the next attempt at once, in place of the wait.
+        LocalConnectionRetry provides model.client::retryConnection,
+    ) {
         MinimalMobileWorkspace(model, settings)
     }
 }

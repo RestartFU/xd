@@ -148,9 +148,14 @@ internal class ConnectionActor(
         sendToMailbox(Message.Background)
     }
 
-    /** Connects again after a failure that [Link.Fatal.retryable] says another attempt can get past. */
+    /**
+     * Connects again now: after a failure that [Link.Fatal.retryable] says
+     * another attempt can get past, or, while the link is down and waiting to
+     * try again, at once instead of at the end of the wait. Anything else is
+     * left as it is: an attempt already under way, or a link the app let go.
+     */
     fun retry() {
-        sendToMailbox(Message.RetryFatal)
+        sendToMailbox(Message.RetryNow)
     }
 
     suspend fun connect(connection: SshConnection): ConnectResult {
@@ -228,7 +233,7 @@ internal class ConnectionActor(
                 is Message.CallTimedOut -> handleCallTimedOut(message)
                 is Message.ProtocolFailure -> handleProtocolFailure(message)
                 is Message.Retry -> handleRetry()
-                Message.RetryFatal -> handleRetryFatal()
+                Message.RetryNow -> handleRetryNow()
             }
         }
     }
@@ -524,7 +529,16 @@ internal class ConnectionActor(
         }
     }
 
-    private fun handleRetryFatal() {
+    private fun handleRetryNow() {
+        if (_link.value is Link.Down) {
+            // The wait is cut short; the backoff stays where it was, so an
+            // attempt that fails again waits as long as the next one would have.
+            if (!wanted || socket != null || (connectionAttempt == null && credentials == null)) return
+            retryJob?.cancel()
+            retryJob = null
+            connectSocket()
+            return
+        }
         val fatal = _link.value as? Link.Fatal ?: return
         if (!fatal.retryable || credentials == null) return
         retryJob?.cancel()
@@ -651,7 +665,7 @@ internal class ConnectionActor(
         data object Poke : Message
         data object Background : Message
         data object Retry : Message
-        data object RetryFatal : Message
+        data object RetryNow : Message
 
         data class Connect(
             val connection: SshConnection,
