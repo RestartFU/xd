@@ -1092,7 +1092,9 @@ impl Engine {
     }
 
     /// Sets the account a chat runs on, or with an empty `value` lets xd
-    /// choose again. The next turn runs there; a running one is left alone.
+    /// choose again. The next turn runs there. Work under way is left where
+    /// it is: a running turn, and the reports Claude's process makes on the
+    /// background agents and commands it started.
     fn set_chat_account(&self, request: &Value) -> Value {
         let chat_id =
             match required_string(request, "chat", "set-option needs a chat and an option.") {

@@ -268,17 +268,22 @@ impl XdDesktop {
     }
 
     /// The account the new chat will run on, as remembered for the project,
-    /// while it is still one its assistant can be set to.
+    /// while it is still one its assistant can be set to. Until the accounts
+    /// have been listed it is sent as remembered: the host keeps it only if
+    /// the assistant offers it, where dropping it here would lose the choice.
     pub(super) fn new_chat_account(&self) -> Option<String> {
         if !self.model.chat_accounts_supported {
             return None;
         }
         let backend = self.minimal_new_session_agent.protocol_name();
         let chosen = self.new_chat_remembered.account.as_deref()?;
-        let provider = self
+        let Some(provider) = self
             .auth_providers
             .iter()
-            .find(|provider| provider.provider == backend)?;
+            .find(|provider| provider.provider == backend)
+        else {
+            return Some(chosen.to_owned());
+        };
         let listed = provider.accounts.iter().filter(|account| !account.pending);
         (listed.clone().count() >= 2 && listed.clone().any(|account| account.id == chosen))
             .then(|| chosen.to_owned())

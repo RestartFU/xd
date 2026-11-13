@@ -130,8 +130,8 @@ internal fun NewSessionFlow(
     backends: List<BackendReply>,
     catalogError: String?,
     retryCatalog: () -> Unit,
-    /** By assistant, the accounts a chat can be set to run on; see [chatAccountChoices]. */
-    accounts: Map<String, List<AgentAccountReply>> = emptyMap(),
+    /** By assistant, the accounts a chat can be set to run on; null until they are listed. See [chatAccountChoices]. */
+    accounts: Map<String, List<AgentAccountReply>>? = emptyMap(),
     places: suspend (projectId: String) -> NewSessionPlaces,
     onDismiss: () -> Unit,
     onCreate: (projectId: String, NewSessionRequest) -> Unit,
@@ -182,7 +182,7 @@ internal fun NewSessionDialog(
     backends: List<BackendReply> = emptyList(),
     catalogError: String? = null,
     retryCatalog: (() -> Unit)? = null,
-    accounts: Map<String, List<AgentAccountReply>> = emptyMap(),
+    accounts: Map<String, List<AgentAccountReply>>? = emptyMap(),
     chatTab: Boolean = false,
     /** Where a new session can work; null for a chat joining an existing session. */
     places: (suspend () -> NewSessionPlaces)? = null,
@@ -403,7 +403,7 @@ private fun SessionForm(
     backends: List<BackendReply>,
     catalogError: String?,
     retryCatalog: (() -> Unit)?,
-    accounts: Map<String, List<AgentAccountReply>>,
+    accounts: Map<String, List<AgentAccountReply>>?,
     chatTab: Boolean,
     places: (suspend () -> NewSessionPlaces)?,
     navigation: Navigation,
@@ -461,7 +461,7 @@ private fun SessionForm(
     if (navigation is Navigation.Back) BackHandler(onBack = navigation.action)
 
     val efforts = backends.firstOrNull { it.id == agent.wire }?.efforts.orEmpty()
-    val accountChoices = accounts[agent.wire].orEmpty()
+    val accountChoices = accounts?.get(agent.wire).orEmpty()
     val catalogMissing = retryCatalog != null && backends.isEmpty()
     // Wait for the choices, as the desktop does; if they cannot be read, the
     // host's own default checkout still works. A project with no checkout to
@@ -489,8 +489,10 @@ private fun SessionForm(
                 effort = effort?.takeIf { it in efforts },
                 access = access,
                 plan = plan,
-                // One removed since it was chosen is not sent.
-                account = account?.takeIf { id -> accountChoices.any { it.id == id } },
+                // One removed since it was chosen is not sent. Until the
+                // accounts are listed it is sent as picked: the host keeps
+                // it only if the assistant offers it.
+                account = account?.takeIf { id -> accounts == null || accountChoices.any { it.id == id } },
             ),
         )
     }

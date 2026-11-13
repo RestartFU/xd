@@ -81,7 +81,12 @@ class NewSessionDialogScreenshotTest {
             com.restartfu.xd.protocol.AgentAccountReply(id = "b7c8d9e0f1a2", label = "dana.work@example.com", state = "signed-in"),
         )
         var created: NewSessionRequest? = null
-        fun open(draftKey: String): Pair<ComponentActivity, View> {
+        // Only Codex has two; Claude's lone account is no choice.
+        val listed = mapOf("codex" to accounts, "claude" to emptyList())
+        fun open(
+            draftKey: String,
+            offered: Map<String, List<com.restartfu.xd.protocol.AgentAccountReply>>? = listed,
+        ): Pair<ComponentActivity, View> {
             val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
             activity.setContent {
                 CompositionLocalProvider(LocalXdSignals provides xdSignals(MinimalThemePreset.DARK)) {
@@ -91,8 +96,7 @@ class NewSessionDialogScreenshotTest {
                                 projectName = "Reconnect backoff",
                                 draftKey = draftKey,
                                 backends = listOf(com.restartfu.xd.protocol.BackendReply("claude", "Claude", efforts = listOf("low", "medium", "high"))),
-                                // Only Codex has two; Claude's lone account is no choice.
-                                accounts = mapOf("codex" to accounts, "claude" to emptyList()),
+                                accounts = offered,
                                 chatTab = true,
                                 onDismiss = {},
                                 onCreate = { created = it },
@@ -130,6 +134,21 @@ class NewSessionDialogScreenshotTest {
         click(picked, "Start chat")
         check(checkNotNull(created).account == null) { created.toString() }
         second.finish()
+
+        // Started before the host has listed the accounts, the account picked
+        // is still sent, for the host to check, rather than lost.
+        val drafts = second.getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
+        fun started(draftKey: String, offered: Map<String, List<com.restartfu.xd.protocol.AgentAccountReply>>?): String? {
+            created = null
+            drafts.edit().putString(draftKey, """{"agent":"codex","account":"b7c8d9e0f1a2"}""").commit()
+            val (activity, form) = open(draftKey, offered)
+            click(form, "Start chat")
+            activity.finish()
+            return checkNotNull(created) { "Start chat sent nothing" }.account
+        }
+        check(started("account-choice/unlisted", null) == "b7c8d9e0f1a2") { "Kept until the accounts are listed" }
+        // Listed without it, it was removed since, and is not sent.
+        check(started("account-choice/removed", mapOf("codex" to accounts.take(1))) == null) { "A removed account is not sent" }
     }
 
     @Test fun creationDraftSurvivesClosingAndReopening() {

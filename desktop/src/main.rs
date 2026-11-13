@@ -25616,6 +25616,20 @@ Binary files /dev/null and b/image.png differ\n";
             // An account removed since reads as the host choosing.
             desktop.model.account = Some("ba9876543210".into());
             assert_eq!(desktop.open_chat_account_label(), "Auto account");
+
+            // A new chat is made on the account remembered for the project
+            // while its assistant still has it.
+            desktop.minimal_new_session_agent = AgentCli::Claude;
+            desktop.new_chat_remembered.account = Some("0123456789ab".into());
+            assert_eq!(desktop.new_chat_account().as_deref(), Some("0123456789ab"));
+            desktop.new_chat_remembered.account = Some("ba9876543210".into());
+            assert_eq!(desktop.new_chat_account(), None, "removed since");
+            // Before the accounts are listed the choice is kept for the host
+            // to check, rather than lost.
+            desktop.auth_providers.clear();
+            assert_eq!(desktop.new_chat_account().as_deref(), Some("ba9876543210"));
+            desktop.model.chat_accounts_supported = false;
+            assert_eq!(desktop.new_chat_account(), None, "an older host takes none");
         });
     }
 

@@ -130,16 +130,19 @@ internal fun chatAccountChoices(provider: AgentAuthProviderReply?): List<AgentAc
     return if (accounts.size >= 2) accounts else emptyList()
 }
 
-/** By assistant, the accounts a new chat can be set to run on, on a host that can. */
+/**
+ * By assistant, the accounts a new chat can be set to run on, on a host that
+ * can set one; null until the host has listed them.
+ */
 @Composable
-internal fun rememberChatAccounts(model: MainViewModel): Map<String, List<AgentAccountReply>> {
+internal fun rememberChatAccounts(model: MainViewModel): Map<String, List<AgentAccountReply>>? {
     val auth by model.agentAuth.collectAsStateWithLifecycle()
     val tree by model.client.tree.collectAsStateWithLifecycle()
     // Asked for once the host says it can set a chat's account, which it may
     // only say after the form has opened.
     LaunchedEffect(tree.chatAccounts) { model.loadChatAccounts() }
     if (!tree.chatAccounts) return emptyMap()
-    return auth.orEmpty().mapValues { (_, provider) -> chatAccountChoices(provider) }
+    return auth?.mapValues { (_, provider) -> chatAccountChoices(provider) }
 }
 
 /** How a choice of account reads: its label, and what keeps it from running if anything does. */

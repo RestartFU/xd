@@ -1114,9 +1114,11 @@ such an id is ignored and never kept. A chat an agent starts on its own assistan
 set to its parent's account, if the parent is set to one. The `chat` reply has
 `account` while the chat is set to one that is still in the list.
 
-Every turn of such a chat runs on that account, whatever the order and
-automatic switching say, and even when it is out of usage, so the assistant
-says so itself. A turn that ran out stays there. When switching is on and
+Every turn started for such a chat runs on that account, whatever the order
+and automatic switching say, and even when it is out of usage, so the assistant
+says so itself. Work already under way stays where it began: a running turn,
+and the turns Claude's process starts by itself to report on background agents
+and commands it is still running there. Moving those would mean stopping them. A turn that ran out stays there. When switching is on and
 another account could have taken it, the host adds an `account_switch` row
 saying the chat stays on its account. When the account cannot take a turn at
 all, because it is signed out, signing in or out, signed in to a different
