@@ -37,7 +37,7 @@ impl StartingChat {
 /// A draft or starting chat's name: the one given, or its message's first line.
 pub(super) fn draft_label(title: &str, prompt: &str) -> String {
     let title = title.trim();
-    if !title.is_empty() && title != DEFAULT_CHAT_TITLE {
+    if !is_default_chat_title(title) {
         return title.to_owned();
     }
     prompt
@@ -255,7 +255,7 @@ impl XdDesktop {
                 }
             }
             Some("workspace") => {
-                for (index, (label, new)) in [("Current Worktree", false), ("New Worktree", true)]
+                for (index, (label, new)) in [("Current worktree", false), ("New worktree", true)]
                     .into_iter()
                     .enumerate()
                 {
@@ -551,7 +551,7 @@ impl XdDesktop {
             // The message went up into the conversation above.
             div()
                 .text_color(rgb(colors.faint))
-                .child("Message xd...")
+                .child(editor::MESSAGE_PLACEHOLDER)
                 .into_any_element()
         } else {
             self.new_chat_input.clone().into_any_element()
@@ -673,9 +673,9 @@ impl XdDesktop {
                     "draft-workspace",
                     FOLDER_ICON,
                     if new_worktree {
-                        "New Worktree"
+                        "New worktree"
                     } else {
-                        "Current Worktree"
+                        "Current worktree"
                     }
                     .into(),
                     true,

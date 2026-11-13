@@ -921,7 +921,33 @@ struct TreeSnapshot {
     terminal_activity_revision: Option<u64>,
 }
 
+/// What a chat or session without a name of its own is called, everywhere.
+pub const DEFAULT_CHAT_TITLE: &str = "New chat";
+
+/// Whether a title is only a placeholder. Hosts store the one a client made
+/// the chat with, and clients have capitalized it differently over time.
+pub fn is_default_chat_title(title: &str) -> bool {
+    let title = title.trim();
+    title.is_empty()
+        || title.eq_ignore_ascii_case("new chat")
+        || title.eq_ignore_ascii_case("new session")
+}
+
 fn normalize_sessions(snapshot: &mut TreeSnapshot, body: &Value) {
+    // A stored placeholder reads the same whichever client made the chat.
+    for chat in &mut snapshot.chats {
+        if let Some(title) = &mut chat.title
+            && !title.trim().is_empty()
+            && is_default_chat_title(title)
+        {
+            *title = DEFAULT_CHAT_TITLE.into();
+        }
+    }
+    for session in &mut snapshot.sessions {
+        if is_default_chat_title(&session.title) {
+            session.title = DEFAULT_CHAT_TITLE.into();
+        }
+    }
     let known_chats = snapshot
         .chats
         .iter()
@@ -966,7 +992,7 @@ fn normalize_sessions(snapshot: &mut TreeSnapshot, body: &Value) {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .or_else(|| chat.title.clone())
-                .unwrap_or_else(|| "New Session".into()),
+                .unwrap_or_else(|| DEFAULT_CHAT_TITLE.into()),
             chats: vec![chat.id.clone()],
             branch: chat.branch.clone(),
             working: chat.working,
@@ -2272,7 +2298,10 @@ impl AppModel {
             .map(|chat| SessionSummary {
                 id: chat.id.clone(),
                 folder: chat.folder.clone(),
-                title: chat.title.clone().unwrap_or_else(|| "New Session".into()),
+                title: chat
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_CHAT_TITLE.into()),
                 chats: vec![chat.id.clone()],
                 branch: chat.branch.clone(),
                 working: chat.working,
@@ -2675,6 +2704,39 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_title_reads_new_chat_whichever_client_stored_it() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({"folders":[],"chats":[
+                {"id":"a","folder":"project","title":"New Chat","backend":"codex","session":"one"},
+                {"id":"b","folder":"project","title":"New Session","backend":"claude","session":"two"},
+                {"id":"c","folder":"project","title":"New chat about parsers","backend":"claude","session":"three"}
+            ],"sessions":[
+                {"id":"one","folder":"project","title":"New Chat","chats":["a"]},
+                {"id":"two","folder":"project","title":"New Session","chats":["b"]},
+                {"id":"three","folder":"project","title":"Parsers","chats":["c"]}
+            ]}))
+            .unwrap();
+        let titles = |model: &AppModel| {
+            model
+                .chats
+                .iter()
+                .map(|chat| chat.title.clone().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(&model),
+            ["New chat", "New chat", "New chat about parsers"]
+        );
+        assert_eq!(model.sessions[0].title, "New chat");
+        assert_eq!(model.sessions[1].title, "New chat");
+        assert_eq!(model.sessions[2].title, "Parsers");
+        assert!(is_default_chat_title("  NEW CHAT "));
+        assert!(is_default_chat_title(""));
+        assert!(!is_default_chat_title("New chat about parsers"));
+    }
+
+    #[test]
     fn legacy_trees_normalize_to_single_chat_sessions_with_legacy_terminal_owners() {
         let mut model = AppModel::default();
         model
@@ -2685,7 +2747,7 @@ mod tests {
             .unwrap();
         assert_eq!(model.sessions.len(), 2);
         assert_eq!(model.sessions[0].title, "Old task");
-        assert_eq!(model.sessions[1].title, "New Session");
+        assert_eq!(model.sessions[1].title, "New chat");
         assert_eq!(model.session_key_for_chat("legacy"), "legacy");
         assert_eq!(model.terminal_key_for_chat("legacy"), "legacy");
         assert_eq!(model.session_key_for_chat("unlisted"), "unlisted");

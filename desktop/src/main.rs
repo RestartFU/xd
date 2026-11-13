@@ -53,9 +53,9 @@ use xd_desktop::{
     markdown,
     model::{
         AppModel, Attachment, AutoDeleteRules, AutoSettleRules, BackgroundTaskOutput, ChatQuota,
-        ChatQuotaSettings, ChatSummary, Folder, LinkedPullRequest, MAX_MESSAGE_IMAGE_BYTES,
-        Message, MessageImage, MessagePageDirection, PauseAllAction, PullRequestState, SentFrom,
-        ToolView, Worktree,
+        ChatQuotaSettings, ChatSummary, DEFAULT_CHAT_TITLE, Folder, LinkedPullRequest,
+        MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage, MessagePageDirection, PauseAllAction,
+        PullRequestState, SentFrom, ToolView, Worktree, is_default_chat_title,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -186,7 +186,6 @@ const MINIMIZE_ICON: &str = "icons/minimize.svg";
 const MAXIMIZE_ICON: &str = "icons/maximize.svg";
 use accounts_view::{AuthAccount, CHEVRON_UP_ICON, COPY_ICON, SWITCH_ICON};
 /// What a chat is called when nobody chose a name for it.
-const DEFAULT_CHAT_TITLE: &str = "New Chat";
 /// File attachments have no byte limit. Images retain the host's image limits.
 const MAX_ATTACHMENTS: usize = 10;
 const MAX_IMAGE_ATTACHMENTS: usize = 4;
@@ -3164,15 +3163,15 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
-        let pull_request_input = cx.new(|cx| ComposerInput::new(cx, "Paste a pull request link"));
+        let pull_request_input = cx.new(|cx| ComposerInput::new(cx, "Paste a pull request link…"));
         cx.subscribe(&pull_request_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.pull_request_text_changed(text.clone(), cx),
             ComposerEvent::Submit => this.link_pasted_pull_requests(cx),
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
-        let catalog_find_input = cx.new(|cx| ComposerInput::new(cx, "Find a session or project"));
-        let settings_search_input = cx.new(|cx| ComposerInput::new(cx, "Search settings"));
+        let catalog_find_input = cx.new(|cx| ComposerInput::new(cx, "Find a session or project…"));
+        let settings_search_input = cx.new(|cx| ComposerInput::new(cx, "Search settings…"));
         cx.subscribe(&settings_search_input, |this, _, event, cx| {
             if let ComposerEvent::Changed(text) = event {
                 // A search reaches every section, the accounts included, so it
@@ -3192,7 +3191,7 @@ impl XdDesktop {
             }
         })
         .detach();
-        let workspace_create_input = cx.new(|cx| ComposerInput::new(cx, "Workspace name…"));
+        let workspace_create_input = cx.new(|cx| ComposerInput::new(cx, "Project name…"));
         cx.subscribe(&workspace_create_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_create_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
@@ -3239,7 +3238,7 @@ impl XdDesktop {
         })
         .detach();
         let workspace_context_input =
-            cx.new(|cx| ComposerInput::new(cx, "Instructions inherited by this workspace…"));
+            cx.new(|cx| ComposerInput::new(cx, "Instructions inherited by this project…"));
         cx.subscribe(&workspace_context_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_context_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_context(cx),
@@ -6840,7 +6839,7 @@ impl XdDesktop {
                 value
                     .get("error")
                     .and_then(Value::as_str)
-                    .unwrap_or("The xd host rejected the workspace.")
+                    .unwrap_or("The xd host rejected the project.")
                     .to_owned(),
             );
             return true;
@@ -6848,7 +6847,7 @@ impl XdDesktop {
         let Some(folder_id) = value.get("id").and_then(Value::as_str) else {
             self.pending_clone_requests.remove(&endpoint);
             self.endpoint_model_mut(endpoint).connection_error =
-                Some("The host returned no workspace id.".into());
+                Some("The host returned no project id.".into());
             return true;
         };
         if form_matches {
@@ -13104,7 +13103,7 @@ impl XdDesktop {
                         .title
                         .clone()
                         .filter(|title| !title.trim().is_empty())
-                        .unwrap_or_else(|| "New Chat".into()),
+                        .unwrap_or_else(|| DEFAULT_CHAT_TITLE.into()),
                     needs_you,
                 })
             })
@@ -14119,7 +14118,7 @@ impl XdDesktop {
             }
             MinimalRoute::Projects { .. } | MinimalRoute::Sessions { .. } => project_name
                 .clone()
-                .unwrap_or_else(|| "Workspace".to_string()),
+                .unwrap_or_else(|| "Projects".to_string()),
         };
 
         div()
@@ -15441,7 +15440,7 @@ impl XdDesktop {
                 row.child(
                     session_row_action(
                         ("minimal-session-unsettle", instance),
-                        "Un-settle session",
+                        "Bring back session",
                         UNDO_ICON,
                         selected,
                         colors,
@@ -17731,7 +17730,7 @@ impl XdDesktop {
         let (label, tone) = status.label(colors);
         let title = live
             .map(|live| live.title.clone())
-            .filter(|title| !title.trim().is_empty() && title != "New Chat")
+            .filter(|title| !is_default_chat_title(title))
             .or_else(|| (!view.agent.trim().is_empty()).then(|| view.agent.clone()))
             .unwrap_or_else(|| first_line(&view.prompt));
         let detail = match status {
@@ -19609,7 +19608,7 @@ impl XdDesktop {
                 .child(composer::ask_header(
                     question["question"]
                         .as_str()
-                        .unwrap_or("Your input is needed")
+                        .unwrap_or("Waiting on you")
                         .to_owned(),
                     counter,
                     colors,
@@ -19643,7 +19642,7 @@ impl XdDesktop {
                                         );
                                     }))
                                 })
-                                .child("Submit answer"),
+                                .child("Send answer"),
                         ),
                 );
             }
@@ -19855,7 +19854,10 @@ impl XdDesktop {
                 Self::render_started_by(
                     colors,
                     parent.id.clone(),
-                    parent.title.clone().unwrap_or_else(|| "New Chat".into()),
+                    parent
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_CHAT_TITLE.into()),
                 )
             });
         let messages = self.transcript_snapshot.clone();
@@ -21613,7 +21615,7 @@ impl XdDesktop {
                                     row(
                                         "minimal-settle-session",
                                         if settled {
-                                            "Un-settle session"
+                                            "Bring back session"
                                         } else {
                                             "Settle session"
                                         },
@@ -22100,7 +22102,7 @@ impl XdDesktop {
                                     this.request_agent_catalog();
                                     cx.notify();
                                 }))
-                                .child("Reload options"),
+                                .child("Try again"),
                             )
                         })
                         .child(

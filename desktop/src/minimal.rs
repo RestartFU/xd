@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use xd_desktop::model::{ChatSummary, Folder};
+use xd_desktop::model::{ChatSummary, DEFAULT_CHAT_TITLE, Folder};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AgentCli {
@@ -280,7 +280,7 @@ pub(crate) fn project_sessions(project_id: &str, chats: &[ChatSummary]) -> Vec<S
                     .title
                     .as_deref()
                     .filter(|title| !title.trim().is_empty())
-                    .unwrap_or("New Session")
+                    .unwrap_or(DEFAULT_CHAT_TITLE)
                     .to_owned(),
                 agent: AgentCli::from_backend(&chat.backend)?,
                 branch: chat

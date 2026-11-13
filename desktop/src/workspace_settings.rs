@@ -513,7 +513,7 @@ impl XdDesktop {
             setting(
                 "workspace-settings-settle-inactive",
                 "Settle inactive sessions",
-                "Sessions with no activity for a while settle on their own. Any new activity un-settles them.",
+                "Sessions with no activity for a while settle on their own. Any new activity brings them back.",
                 colors,
                 |row| {
                     row.cursor_pointer()

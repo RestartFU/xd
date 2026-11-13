@@ -521,9 +521,9 @@ pub(super) fn chat_worktree_labels(
     let current = worktrees.iter().find(|worktree| worktree.current);
     let linked = current.is_some_and(|worktree| !worktree.main);
     let worktree = if new_worktree || linked {
-        "New Worktree"
+        "New worktree"
     } else {
-        "Current Worktree"
+        "Current worktree"
     };
     let branch = match current {
         Some(Worktree {
@@ -555,7 +555,7 @@ mod tests {
         let main = [worktree(true, true, Some("main"))];
         assert_eq!(
             chat_worktree_labels(&main, false, None),
-            ("Current Worktree", "main".into())
+            ("Current worktree", "main".into())
         );
         let linked = [
             worktree(true, false, Some("main")),
@@ -563,10 +563,10 @@ mod tests {
         ];
         assert_eq!(
             chat_worktree_labels(&linked, false, Some("main")),
-            ("New Worktree", "xd/footer-1a2b".into())
+            ("New worktree", "xd/footer-1a2b".into())
         );
         // Its worktree is made with the first message.
-        assert_eq!(chat_worktree_labels(&main, true, None).0, "New Worktree");
+        assert_eq!(chat_worktree_labels(&main, true, None).0, "New worktree");
         let detached = [worktree(true, true, None)];
         assert_eq!(
             chat_worktree_labels(&detached, false, None).1,
@@ -575,7 +575,7 @@ mod tests {
         // Not a repository: the chat runs in the project directory.
         assert_eq!(
             chat_worktree_labels(&[], false, None),
-            ("Current Worktree", "Project directory".into())
+            ("Current worktree", "Project directory".into())
         );
         assert_eq!(chat_worktree_labels(&[], false, Some("dev")).1, "dev");
     }
