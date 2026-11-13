@@ -77,8 +77,12 @@ class SettingsScreenshotTest {
     /** Settings opens as its own page, listing its sections. */
     @Test fun homeDark() = shoot("settings-home-dark", MinimalThemePreset.DARK) {
         checkHome()
-        // The page takes the focus, so keys never reach the workspace beneath it.
-        compose.onNode(hasTestTag(SETTINGS_PAGE_TAG)).assertIsFocused()
+        // The page takes the focus, on its heading, so keys never reach the workspace beneath it.
+        compose.onNode(
+            hasText("Settings") and androidx.compose.ui.test.SemanticsMatcher.keyIsDefined(androidx.compose.ui.semantics.SemanticsProperties.Heading) and
+                androidx.compose.ui.test.hasAnyAncestor(hasTestTag(SETTINGS_PAGE_TAG)),
+            useUnmergedTree = true,
+        ).assertIsFocused()
     }
 
     @Test fun homeLight() = shoot("settings-home-light", MinimalThemePreset.LIGHT) { checkHome() }

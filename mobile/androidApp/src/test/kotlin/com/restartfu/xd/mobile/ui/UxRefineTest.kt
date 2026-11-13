@@ -72,7 +72,7 @@ import org.robolectric.shadows.ShadowLooper
 /**
  * Who said each message, which chat tab is open, errors that are told and
  * can be tried again, code colours that follow the theme, replies read once,
- * Back from a tool, Try now on the connection line, and the Usage page's width.
+ * Back from a tool, Try again on the connection line, and the Usage page's width.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -332,7 +332,7 @@ class UxRefineTest {
         assertEquals(true, chatTab.config[SemanticsProperties.Selected])
     }
 
-    // --- Try now ---
+    // --- Try again on the connection line ---
 
     @Test fun aWaitToReconnectCanBeCutShort() {
         val tries = AtomicInteger()
@@ -342,22 +342,23 @@ class UxRefineTest {
                 Column(Modifier.fillMaxWidth().testTag("line")) { ConnectionLine() }
             }
         }
-        compose.onNode(hasText(TRY_NOW_LABEL)).performClick()
+        compose.onNode(hasText(CONNECTION_RETRY_LABEL)).performClick()
         idle()
         assertEquals(1, tries.get())
         // The line grows only to the action's full touch target, and its hairline.
         val height = compose.onNode(hasTestTag("line")).fetchSemanticsNode().size.height
         assertTrue("line is ${height}px", height <= px(49.dp) + 1)
-        val action = compose.onNode(hasText(TRY_NOW_LABEL) and hasClickAction()).fetchSemanticsNode().touchBoundsInRoot
-        assertTrue("Try now is ${action.height}px tall", action.height >= px(48.dp) - 1)
+        val action = compose.onNode(hasText(CONNECTION_RETRY_LABEL) and hasClickAction()).fetchSemanticsNode().touchBoundsInRoot
+        assertTrue("Try again is ${action.height}px tall", action.height >= px(48.dp) - 1)
         // An attempt under way has nothing to cut short.
         change { notice.value = ConnectionNotice("Reconnecting…", "Connection refused", true) }
         settle()
-        compose.onNode(hasText(TRY_NOW_LABEL)).assertDoesNotExist()
+        compose.onNode(hasText(CONNECTION_RETRY_LABEL)).assertDoesNotExist()
     }
 
-    @Test fun theAppOffersTryNowWhileItWaits() = app(link = Link.Down("Connection refused", 120_000)) {
-        compose.onNode(hasText(TRY_NOW_LABEL) and hasClickAction()).assertExists()
+    @Test fun theAppOffersTryAgainWhileItWaits() = app(link = Link.Down("Connection refused", 120_000)) {
+        // In the words every other retry uses.
+        compose.onNode(hasText("Try again") and hasClickAction()).assertExists()
     }
 
     // --- Usage ---
