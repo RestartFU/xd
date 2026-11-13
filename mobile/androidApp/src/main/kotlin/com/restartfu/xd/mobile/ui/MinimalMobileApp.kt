@@ -128,7 +128,10 @@ import com.restartfu.xd.model.backgroundTasksLabel
 import com.restartfu.xd.model.minimalProjects
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.layout.ContentScale
 import com.restartfu.xd.model.FolderDestination
 import com.restartfu.xd.model.MinimalFolder
@@ -691,7 +694,9 @@ private fun MinimalProjectsHome(
     // Folders of projects have context and secrets too, which reach every project inside.
     val contextFor = tree.folders.firstOrNull { it.id == contextForId }
     val secretsFor = tree.folders.firstOrNull { it.id == secretsForId }
-    val settled = if (actions.settlement) tree.settledSessions() else emptyList()
+    val settled = remember(tree, actions.settlement) {
+        if (actions.settlement) tree.settledSessions() else emptyList()
+    }
     val operationError by model.error.collectAsStateWithLifecycle()
     // What the New menu or a folder's menu is making ("project" or "folder"), and in which folder.
     var creating by rememberSaveable { mutableStateOf<String?>(null) }
@@ -704,17 +709,22 @@ private fun MinimalProjectsHome(
     // An earlier project or folder is still being made; another waits rather than being dropped.
     val creatingWorkspace by model.creatingWorkspace.collectAsStateWithLifecycle()
     val ownerIcons by model.client.ownerIcons.collectAsStateWithLifecycle()
-    val rows = tree.projectTree(collapsed)
+    // Built again only when the tree or what is folded changes, not each time the page is drawn.
+    val rows = remember(tree, collapsed) { tree.projectTree(collapsed) }
     // Every row, as if no folder were closed: built once per tree, since building it reads every chat.
     val openTree = remember(tree) { tree.projectTree() }
-    val folders = openTree.mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
+    val folders = remember(openTree) { openTree.mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder } }
     // Opens the folders [id] sits in, and [id] itself, so what lands there is in view.
     val reveal = { id: String? ->
         if (id != null) (tree.ancestors(id) + id).forEach { settings.setFolderOpen(it, true) }
     }
     val newProjectIn = { parentId: String? -> createParentId = parentId; creating = "project" }
     val newFolderIn = { parentId: String? -> createParentId = parentId; creating = "folder" }
-    val canMove = { id: String, parentId: String? -> parentId != null || tree.moveDestinations(id).isNotEmpty() }
+    // Asked for every row drawn, and each answer walks the folders: answered once per item and tree.
+    val movable = remember(tree) { HashMap<String, Boolean>() }
+    val canMove = { id: String, parentId: String? ->
+        parentId != null || movable.getOrPut(id) { tree.moveDestinations(id).isNotEmpty() }
+    }
     // The project New session was opened for; it closes if that project goes away.
     var createSessionIn by rememberSaveable { mutableStateOf<String?>(null) }
     // New session asks which project first, unless there is only one.
@@ -755,8 +765,13 @@ private fun MinimalProjectsHome(
     }
     // An agent's session lists while it has something going on: its lead got
     // the report of a finished one, and its card in the lead's chat opens it.
+    // Worked out once per project, tree and set of waiting chats: every row
+    // drawn asks for it, and each answer reads the project's every session.
+    val listedByProject = remember(tree, waiting) { HashMap<String, List<MinimalSession>>() }
     val listed = { projectId: String ->
-        tree.listedSessions(projectId) { session -> session.chatIds.any { it in waiting } }
+        listedByProject.getOrPut(projectId) {
+            tree.listedSessions(projectId) { session -> session.chatIds.any { it in waiting } }
+        }
     }
     // What a session passes up to a folded or closed row above it: an agent's
     // session passes nothing but a wait on the user, since its lead already
@@ -774,8 +789,12 @@ private fun MinimalProjectsHome(
     ) {
         val pausingAll by model.pausingAll.collectAsStateWithLifecycle()
         // Each project's own pause button, beside its +; hidden with nothing to pause.
+        val pauseActions = remember(tree) { HashMap<String, PauseAllAction?>() }
         val pauseFor: (MinimalProject) -> (@Composable () -> Unit)? = { project ->
-            tree.pauseActionFor(project.id)?.let { action ->
+            // Looked up by key, since "nothing to pause" is an answer worth keeping too.
+            val action = if (project.id in pauseActions) pauseActions[project.id]
+            else tree.pauseActionFor(project.id).also { pauseActions[project.id] = it }
+            action?.let { action ->
                 {
                     PauseProjectButton(
                         projectName = project.name,
@@ -1720,23 +1739,54 @@ private const val FOLDER_INDENT = 16
 /** Told when New folder is offered by a host that would make a project instead. */
 private const val NEEDS_NEWER_HOST = "Needs a newer xd host"
 
-/** An account's avatar, or [fallback] until the host has one to show. */
+/**
+ * An account's avatar, or [fallback] until the host has one to show. The
+ * picture is decoded once per account, off the main thread and at about the
+ * size it is drawn, and kept: a row scrolled back into view finds it ready.
+ */
 @Composable
 internal fun OwnerAvatar(icon: ByteArray?, fallback: Int, tint: Color, size: Dp = 16.dp) {
-    val bitmap = remember(icon) {
-        icon?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull() }
+    val key = remember(icon) { icon?.let(::avatarKey) }
+    var bitmap by remember(key) { mutableStateOf(key?.let(decodedAvatars::get)) }
+    if (icon != null && key != null && bitmap == null) {
+        LaunchedEffect(key) {
+            bitmap = withContext(Dispatchers.Default) { decodeAvatar(icon) }?.also { decodedAvatars.put(key, it) }
+        }
     }
-    if (bitmap != null) {
+    val shown = bitmap
+    if (shown != null) {
         Image(
-            bitmap = bitmap,
+            bitmap = shown,
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            modifier = Modifier.size(size).clip(RoundedCornerShape(4.dp)),
+            modifier = Modifier.size(size).clip(MaterialTheme.shapes.extraSmall),
         )
     } else {
         Icon(painterResource(fallback), contentDescription = null, tint = tint, modifier = Modifier.size(size))
     }
 }
+
+/** The most pixels an avatar is drawn across: 24dp on the densest screens. */
+private const val AVATAR_SIDE = 96
+
+/** Decoded avatars by their bytes' fingerprint, so the same picture sent again is not decoded again. */
+private val decodedAvatars = android.util.LruCache<String, ImageBitmap>(64)
+
+/** Tells one avatar's bytes from another's: the same picture always has the same key. */
+internal fun avatarKey(bytes: ByteArray): String = "${bytes.size}:${bytes.contentHashCode()}"
+
+/**
+ * Decodes an avatar no larger than it needs to be: the host sends them at
+ * hundreds of pixels a side, and they are drawn at a few dozen.
+ */
+internal fun decodeAvatar(bytes: ByteArray): ImageBitmap? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    var sample = 1
+    while (minOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= AVATAR_SIDE) sample *= 2
+    val options = BitmapFactory.Options().apply { inSampleSize = sample }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
+}.getOrNull()
 
 /** A menu entry, with a line saying why it cannot be used when it cannot. */
 @Composable
