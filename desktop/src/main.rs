@@ -2417,6 +2417,18 @@ trait KeyRow: Sized {
         run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
     ) -> Self;
 
+    /// [`KeyRow::key_stop`] for a row of a list that clips at its edges,
+    /// such as the Files pane's: the ring is drawn just inside the row.
+    fn key_stop_inset(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self;
+
     /// [`KeyRow::key_stop_ring`] for a control with the corners of a button.
     fn key_stop(
         self,
@@ -2480,6 +2492,35 @@ impl KeyRow for gpui::Stateful<gpui::Div> {
         let label = label.into();
         self.key_stop(keys, layer, id, colors, cx, run)
             .when(on, |control| control.child(focus_tooltip(label, colors)))
+    }
+
+    fn key_stop_inset(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self {
+        let run: KeyRun = Rc::new(run);
+        let id = id.into();
+        let on = keys.stop_on(&id);
+        self.on_click(cx.listener({
+            let run = run.clone();
+            move |this, _, window, cx| run(this, window, cx)
+        }))
+        .child(keys.mark(layer, KeyStop::Control(id, run)))
+        .when(on, |row| {
+            row.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(RADIUS_CONTROL))
+                    .border_2()
+                    .border_color(rgb(colors.selected_border)),
+            )
+        })
     }
 }
 
@@ -3117,6 +3158,9 @@ fn terminal_runtime_event(event: SessionEvent) -> (ChatEndpoint, &'static str, V
 const SCROLL_THUMB_WIDTH: f32 = 4.0;
 const SCROLL_THUMB_INSET: f32 = 2.0;
 const SCROLL_THUMB_MIN_HEIGHT: f32 = 24.0;
+/// What an area may run past its view without a thumb: the reach of a row
+/// into the padding around it, not content out of sight.
+const SCROLL_THUMB_SLACK: f32 = 8.0;
 /// Past this many, the handles of scroll areas no longer drawn are let go.
 const SCROLL_HANDLES_KEPT: usize = 512;
 
@@ -3148,7 +3192,7 @@ fn scroll_thumb_bounds(
     scrolled: Pixels,
 ) -> Option<Bounds<Pixels>> {
     let height = view.size.height;
-    if overflow <= gpui::px(0.5) || height <= gpui::px(0.0) {
+    if overflow <= px(SCROLL_THUMB_SLACK) || height <= gpui::px(0.0) {
         return None;
     }
     let thumb = (height * (height / (height + overflow)))
@@ -18018,7 +18062,7 @@ impl XdDesktop {
                             .py_2()
                             .text_size(text_px(TEXT_LABEL))
                             .text_color(rgb(colors.muted))
-                            .child("Empty. Drag a project here."),
+                            .child("Empty. Drag a project here, or use Move to… in its menu."),
                     ),
                 )
             })
@@ -23361,7 +23405,8 @@ impl XdDesktop {
                             .child(truncating_label(entry.name.clone()).min_w_0())
                             // Tab stops on the rows in view; Up and Down move
                             // through all of them.
-                            .key_stop(
+                            .relative()
+                            .key_stop_inset(
                                 &keys,
                                 KeyLayer::Page,
                                 format!("{FILE_ROW_STOP}{index}"),
@@ -24160,15 +24205,12 @@ impl XdDesktop {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .child(icon(
-                                    if destination.folder.is_some() {
-                                        FOLDER_ICON
-                                    } else {
-                                        FOLDERS_ICON
-                                    },
-                                    14.0,
-                                    colors.muted,
-                                ))
+                                // Folders as the sidebar marks them; the top
+                                // level is no folder at all.
+                                .child(match destination.folder {
+                                    Some(_) => icon(FOLDERS_ICON, 14.0, colors.muted),
+                                    None => div().size(px(14.0)).flex_none().into_any_element(),
+                                })
                                 .child(truncating_label(destination.name.clone())),
                         )
                         .into_any_element(),
@@ -33879,6 +33921,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         let view = Bounds::new(point(px(100.0), px(50.0)), size(px(300.0), px(200.0)));
         // Everything fits: no thumb.
         assert_eq!(scroll_thumb_bounds(view, px(0.0), px(0.0)), None);
+        // A row reaching into the padding around it is not content out of sight.
+        assert_eq!(scroll_thumb_bounds(view, px(6.0), px(0.0)), None);
         // Twice the view's content: a thumb half the view's height, at the
         // right edge, at the top, then at the bottom.
         let top = scroll_thumb_bounds(view, px(200.0), px(0.0)).unwrap();
@@ -33891,7 +33935,10 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         let long = scroll_thumb_bounds(view, px(100_000.0), px(0.0)).unwrap();
         assert_eq!(long.size.height, px(SCROLL_THUMB_MIN_HEIGHT));
         // The reading panes draw one.
-        let source = include_str!("main.rs").split_once("#[cfg(test)]").unwrap().0;
+        let source = include_str!("main.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
         for area in [
             "list_scroll_thumb(self.transcript.clone(), colors)",
             ".thumbed(\"minimal-project-list\", colors)",

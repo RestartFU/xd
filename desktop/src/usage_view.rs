@@ -5420,7 +5420,10 @@ mod tests {
         // And the chart's mouse handler goes through the gate.
         let source = include_str!("usage_view.rs");
         let production = source.split_once("#[cfg(test)]\nmod tests").unwrap().0;
-        assert!(production.contains(concat!("if set_chart_hover(", "&mut this.usage.hover, next) {")));
+        assert!(production.contains(concat!(
+            "if set_chart_hover(",
+            "&mut this.usage.hover, next) {"
+        )));
     }
 
     #[gpui::test]
