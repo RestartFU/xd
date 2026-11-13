@@ -460,6 +460,10 @@ enum HomeOverview {
         working: Vec<HomeSession>,
         /// Every session listed in the sidebar.
         sessions: usize,
+        /// Sessions with a finished turn the user has not seen, and paused ones:
+        /// neither waits nor works, but neither is idle.
+        finished: usize,
+        paused: usize,
         /// The last session, unless it is already listed above.
         resume: Option<(String, String, AgentCli, String)>,
         /// The project a new session starts in, and its name.
@@ -476,6 +480,32 @@ fn home_heading(waiting: usize, working: usize, sessions: usize) -> String {
         (0, 2..) => format!("{working} sessions are working"),
         (0, 0) if sessions == 0 => "No sessions yet".into(),
         (0, 0) => "Nothing is waiting on you".into(),
+    }
+}
+
+/// The line under a quiet landing page's heading: what the sessions that
+/// neither wait nor work are doing, or that they are all idle.
+fn home_quiet_lead(finished: usize, paused: usize) -> String {
+    let sessions = |count: usize| {
+        if count == 1 {
+            "1 session".to_owned()
+        } else {
+            format!("{count} sessions")
+        }
+    };
+    match (finished, paused) {
+        (0, 0) => "All sessions are idle.".to_owned(),
+        (finished, 0) => format!("{} finished since you looked.", sessions(finished)),
+        (0, 1) => "1 session is paused.".to_owned(),
+        (0, paused) => format!("{paused} sessions are paused."),
+        (finished, 1) => format!(
+            "{} finished since you looked, and 1 is paused.",
+            sessions(finished)
+        ),
+        (finished, paused) => format!(
+            "{} finished since you looked, and {paused} are paused.",
+            sessions(finished)
+        ),
     }
 }
 
@@ -18956,6 +18986,7 @@ impl XdDesktop {
         let mut waiting = Vec::new();
         let mut working = Vec::new();
         let mut sessions = 0;
+        let (mut finished, mut paused) = (0, 0);
         for row in folder_tree(folders) {
             let folder = &folders[row.index];
             if folder.group {
@@ -18969,7 +19000,15 @@ impl XdDesktop {
                 let list = match signal {
                     SessionSignal::Waiting => &mut waiting,
                     SessionSignal::Working | SessionSignal::Background(_) => &mut working,
-                    SessionSignal::Idle | SessionSignal::Done | SessionSignal::Paused => continue,
+                    SessionSignal::Done => {
+                        finished += 1;
+                        continue;
+                    }
+                    SessionSignal::Paused => {
+                        paused += 1;
+                        continue;
+                    }
+                    SessionSignal::Idle => continue,
                 };
                 list.push(HomeSession {
                     project_id: folder.id.clone(),
@@ -19022,6 +19061,8 @@ impl XdDesktop {
             waiting,
             working,
             sessions,
+            finished,
+            paused,
             resume,
             new_session,
         }
@@ -19049,7 +19090,7 @@ impl XdDesktop {
                 .text_color(rgb(colors.text))
                 .child(text)
         };
-        let lead = |text: &'static str| {
+        let lead = |text: SharedString| {
             div()
                 .mt(px(10.0))
                 .max_w(px(460.0))
@@ -19063,7 +19104,7 @@ impl XdDesktop {
             HomeOverview::FirstRun => page
                 .child(heading("Welcome to xd".into()))
                 .child(lead(
-                    "Create a project, then start a Codex or Claude session in it. Sessions keep running when you close the window.",
+                    "Create a project, then start a Codex or Claude session in it. Sessions keep running when you close the window.".into(),
                 ))
                 .child(
                     // Out by the ring's width, so the button keeps its place.
@@ -19083,6 +19124,8 @@ impl XdDesktop {
                 waiting,
                 working,
                 sessions,
+                finished,
+                paused,
                 resume,
                 new_session,
             } => {
@@ -19124,11 +19167,11 @@ impl XdDesktop {
                 };
                 page.child(heading(title).debug_selector(|| "home-heading".into()))
                     .when(quiet && sessions > 0, |page| {
-                        page.child(lead("All sessions are idle."))
+                        page.child(lead(home_quiet_lead(finished, paused).into()))
                     })
                     .when(sessions == 0, |page| {
                         page.child(lead(
-                            "Start a Codex or Claude session in a project. Sessions keep running when you close the window.",
+                            "Start a Codex or Claude session in a project. Sessions keep running when you close the window.".into(),
                         ))
                     })
                     .when(!quiet, |page| {
@@ -34412,6 +34455,29 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert_eq!(home_heading(0, 0, 0), "No sessions yet");
     }
 
+    #[test]
+    fn a_quiet_landing_page_says_what_finished_or_paused_sessions_are_doing() {
+        assert_eq!(home_quiet_lead(0, 0), "All sessions are idle.");
+        assert_eq!(
+            home_quiet_lead(1, 0),
+            "1 session finished since you looked."
+        );
+        assert_eq!(
+            home_quiet_lead(3, 0),
+            "3 sessions finished since you looked."
+        );
+        assert_eq!(home_quiet_lead(0, 1), "1 session is paused.");
+        assert_eq!(home_quiet_lead(0, 2), "2 sessions are paused.");
+        assert_eq!(
+            home_quiet_lead(2, 1),
+            "2 sessions finished since you looked, and 1 is paused."
+        );
+        assert_eq!(
+            home_quiet_lead(1, 2),
+            "1 session finished since you looked, and 2 are paused."
+        );
+    }
+
     #[gpui::test]
     fn the_landing_page_is_a_welcome_only_before_the_first_project(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
@@ -34447,6 +34513,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                     waiting: Vec::new(),
                     working: Vec::new(),
                     sessions: 0,
+                    finished: 0,
+                    paused: 0,
                     resume: None,
                     new_session: Some(("lunar".into(), "lunar".into())),
                 }
@@ -34473,6 +34541,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                 sessions,
                 resume,
                 new_session,
+                ..
             } = desktop.home_overview()
             else {
                 panic!("projects exist");
