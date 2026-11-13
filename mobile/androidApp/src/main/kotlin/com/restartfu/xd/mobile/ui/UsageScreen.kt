@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -78,11 +80,22 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
     var selectedProvider by rememberSaveable { mutableStateOf<String?>(null) }
     BackHandler(selectedModel != null) { selectedModel = null; selectedProvider = null }
     var pricesOpen by rememberSaveable { mutableStateOf(false) }
-    var confirmingReset by remember { mutableStateOf<UsageAccountReply?>(null) }
-    Column(
+    // Saved by account, so turning the device keeps the question open.
+    var confirmingResetKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val confirmingReset = confirmingResetKey?.let { key -> state.accounts?.firstOrNull { it.accountKey == key } }
+    // The page scrolls across its whole width; its content stops at the
+    // reading measure and sits in the middle of a wide window, as Projects
+    // and Settings do.
+    Box(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(rememberScrollState()),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+    Column(
+        Modifier
+            .widthIn(max = ReadingMeasure + 32.dp)
+            .fillMaxWidth()
             .padding(16.dp)
             .navigationBarsPadding()
             // Room to scroll the last card clear of the floating bar.
@@ -117,7 +130,7 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
             when {
                 summary == null && state.summaryError != null -> ErrorLine(state.summaryError.orEmpty(), model::refresh)
                 summary == null -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    CircularProgressIndicator(Modifier.height(18.dp))
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Text("Reading usage…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 else -> SummarySection(summary, state.summaryLoading, model, metric, selectedModel != null) { backend, name -> selectedProvider = backend; selectedModel = name }
@@ -142,7 +155,7 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
                         resetting = state.resetting,
                         unsettled = unsettled,
                         // Checking an earlier attempt again spends nothing new, so it needs no question.
-                        onReset = { if (unsettled) account.accountKey?.let(model::useResetCredit) else confirmingReset = account },
+                        onReset = { if (unsettled) account.accountKey?.let(model::useResetCredit) else confirmingResetKey = account.accountKey },
                     )
                 }
             }
@@ -162,9 +175,10 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
             TextButton(onClick = { pricesOpen = true }) { Text("Edit") }
         }
     }
+    }
     confirmingReset?.let { account ->
         AlertDialog(
-            onDismissRequest = { confirmingReset = null },
+            onDismissRequest = { confirmingResetKey = null },
             title = { Text("Use a reset credit?") },
             text = {
                 Text(
@@ -174,11 +188,11 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    confirmingReset = null
+                    confirmingResetKey = null
                     account.accountKey?.let(model::useResetCredit)
                 }) { Text("Use credit") }
             },
-            dismissButton = { TextButton(onClick = { confirmingReset = null }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { confirmingResetKey = null }) { Text("Cancel") } },
         )
     }
     if (pricesOpen) ModelPricesDialog(model, onDismiss = { pricesOpen = false })
