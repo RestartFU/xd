@@ -1181,14 +1181,14 @@ mod tests {
 
     #[test]
     fn readable_ink_follows_the_real_contrast_on_mid_tones() {
-        // A mid grey and a mid blue sit close to the old luminance cut-off,
-        // where white alone stayed under 3:1.
+        // Grey text on a green the old brightness cut-off called dark, where
+        // white read under 3:1, and a bare mid blue.
         let mut screen = TerminalScreen::new(40, 2);
-        screen.feed(b"\x1b[38;2;20;20;20;48;2;118;118;118mgrey\x1b[0m ");
+        screen.feed(b"\x1b[38;2;80;80;80;48;2;0;176;0mgreen\x1b[0m ");
         screen.feed(b"\x1b[48;2;90;110;200mblue\x1b[0m");
         for palette in [TerminalPalette::Light, TerminalPalette::Dark] {
             let rendered = screen.rendered_with_cursor_in(palette);
-            for text in ["grey", "blue"] {
+            for text in ["green", "blue"] {
                 let style = style_of(&rendered, text);
                 let (foreground, background) =
                     (style.foreground.unwrap(), style.background.unwrap());
