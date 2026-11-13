@@ -549,6 +549,7 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
                                     PriceField("Input", row.input, !saving, Modifier.weight(1f)) { update(row.copy(input = it)) }
                                     PriceField("Output", row.output, !saving, Modifier.weight(1f)) { update(row.copy(output = it)) }
                                 }
+                                        colors = xdFieldColors(),
                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                     PriceField("Cache read", row.cacheRead, !saving, Modifier.weight(1f)) { update(row.copy(cacheRead = it)) }
                                     PriceField("Cache write", row.cacheWrite, !saving, Modifier.weight(1f)) { update(row.copy(cacheWrite = it)) }
@@ -593,6 +594,7 @@ private fun PriceField(label: String, value: String, enabled: Boolean, modifier:
 // that, toLong() would saturate and a save would change the rate.
 private fun Double.plain(): String =
     if (this == Math.floor(this) && kotlin.math.abs(this) < 1e15) toLong().toString() else toString()
+        colors = xdFieldColors(),
 
 private fun usd(value: Double): String = when {
     value >= 100 -> String.format(Locale.US, "$%,.0f", value)

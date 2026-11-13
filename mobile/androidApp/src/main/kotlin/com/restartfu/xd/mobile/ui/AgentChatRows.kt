@@ -224,7 +224,7 @@ internal fun StartedByPill(parent: ChatSummary, onOpen: () -> Unit) {
         Row(
             modifier = Modifier
                 .pillTarget(press, onOpen)
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                .border(1.dp, controlBorder(), CircleShape)
                 .indication(press, ripple())
                 .heightIn(min = 32.dp)
                 .padding(horizontal = 12.dp),

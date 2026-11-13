@@ -313,6 +313,7 @@ private fun ProjectStep(
                 item("none") {
                     Text(
                         "No project matches “${filter.trim()}”",
+                        colors = xdFieldColors(),
                         modifier = Modifier.padding(start = 4.dp, top = 8.dp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyMedium,
@@ -546,6 +547,7 @@ private fun SessionForm(
                             }
                         }
                     }
+                        colors = xdFieldColors(),
                     if (places != null) {
                         FormSection("Workspace") {
                             WorkspaceSection(
@@ -593,10 +595,10 @@ private fun SessionForm(
 private fun segmentedColors() = SegmentedButtonDefaults.colors(
     activeContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
     activeContentColor = MaterialTheme.colorScheme.onSurface,
-    activeBorderColor = MaterialTheme.colorScheme.outline,
+    activeBorderColor = controlBorder(),
     inactiveContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
     inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-    inactiveBorderColor = MaterialTheme.colorScheme.outline,
+    inactiveBorderColor = controlBorder(),
 )
 
 @Composable
@@ -689,7 +691,7 @@ private fun AgentTiles(selected: DirectAgent, onSelect: (DirectAgent) -> Unit) {
                     .background(if (chosen) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow)
                     .border(
                         if (chosen) 1.5.dp else 1.dp,
-                        if (chosen) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.outlineVariant,
+                        if (chosen) MaterialTheme.colorScheme.outline else controlBorder(),
                         shape,
                     )
                     .selectable(selected = chosen, role = Role.RadioButton, onClick = { onSelect(candidate) }),
@@ -1215,6 +1217,7 @@ private fun BasePicker(
                 else -> null
             }
             kept?.let { (label, detail) ->
+                    colors = xdFieldColors(),
                 item("kept") {
                     Group { ChoiceRow(label = label, detail = detail, chosen = true, onClick = onBack, mono = selected is Ops.NewSessionWorktree.Branch) }
                 }

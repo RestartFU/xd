@@ -255,7 +255,7 @@ internal fun CompactChatBar(
                     onClick = { choosingPane = true },
                     shape = MaterialTheme.shapes.small,
                     color = if (pane == Pane.CHAT) Color.Transparent else MaterialTheme.colorScheme.secondaryContainer,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    border = BorderStroke(1.dp, controlBorder()),
                     modifier = Modifier.semantics { contentDescription = "Workspace view: ${pane.label}" },
                 ) {
                     Row(

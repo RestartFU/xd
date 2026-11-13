@@ -413,3 +413,4 @@ private fun LargeFileView(
 
 private fun isLargeFile(text: String): Boolean =
     text.length >= LARGE_FILE_CHARACTERS || text.count { it == '\n' } >= LARGE_FILE_LINES
+                colors = xdFieldColors(),

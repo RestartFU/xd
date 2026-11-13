@@ -79,6 +79,7 @@ internal fun ShortcutEditorDialog(
                                 minLines = 1,
                                 maxLines = 4,
                                 enabled = editable,
+                                colors = xdFieldColors(),
                             )
                             TextButton(
                                 onClick = {

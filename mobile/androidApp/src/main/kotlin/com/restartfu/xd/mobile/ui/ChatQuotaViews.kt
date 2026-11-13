@@ -252,7 +252,7 @@ private fun QuotaPercentField(
                     .background(MaterialTheme.colorScheme.surfaceContainerLow)
                     .border(
                         1.dp,
-                        if (valid) MaterialTheme.colorScheme.outlineVariant else MaterialTheme.colorScheme.error,
+                        if (valid) controlBorder() else MaterialTheme.colorScheme.error,
                         MaterialTheme.shapes.small,
                     )
                     .padding(horizontal = 10.dp),
@@ -288,5 +288,6 @@ private fun PercentField(
         textStyle = MaterialTheme.typography.bodyMedium,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
         keyboardActions = KeyboardActions(onDone = { onDone() }),
+        colors = xdFieldColors(),
     )
 }

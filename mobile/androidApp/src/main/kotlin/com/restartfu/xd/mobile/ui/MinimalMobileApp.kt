@@ -2185,6 +2185,7 @@ private fun NewFolderDialog(
                     isError = organizationError,
                     supportingText = {
                         Text(
+                    colors = xdFieldColors(),
                             if (organizationError) "Enter a GitHub organization name, such as acme or github.com/acme."
                             else "Shows its avatar. Leave the name empty to use the organization's.",
                         )
@@ -2200,6 +2201,7 @@ private fun NewFolderDialog(
         },
         confirmButton = {
             Button(
+                    colors = xdFieldColors(),
                 onClick = { onCreate(folderName, login) },
                 enabled = folderName.isNotEmpty() && nameError == null && !organizationError && !busy,
             ) { Text("Create folder") }
@@ -2679,6 +2681,7 @@ private fun NewProjectDialog(
                     trailingIcon = {
                         IconButton(onClick = { browsing = true }) {
                             Icon(
+                    colors = xdFieldColors(),
                                 painterResource(R.drawable.ic_folder),
                                 contentDescription = "Browse folders on the host",
                                 modifier = Modifier.size(20.dp),
@@ -2695,6 +2698,7 @@ private fun NewProjectDialog(
                 enabled = name.isNotBlank() && !busy,
             ) { Text("Create project") }
         },
+                    colors = xdFieldColors(),
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
     if (browsing) {
@@ -2781,7 +2785,7 @@ private fun ThemeChoice(
         .clip(shape)
         .border(
             if (chosen) 1.5.dp else 1.dp,
-            if (chosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+            if (chosen) MaterialTheme.colorScheme.primary else controlBorder(),
             shape,
         )
         .selectable(selected = chosen, role = Role.RadioButton, onClick = choose)
@@ -3000,6 +3004,7 @@ private fun NameDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
+                colors = xdFieldColors(),
 
 private val NameDraftSaver = listSaver<Pair<String, String>, String>(
     save = { listOf(it.first, it.second) },

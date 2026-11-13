@@ -322,6 +322,7 @@ private fun SecretAnswer(
                 Icon(painterResource(R.drawable.ic_send), "Send answer", modifier = Modifier.size(20.dp))
             }
         },
+        colors = xdFieldColors(),
     )
 }
 

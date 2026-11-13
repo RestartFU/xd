@@ -266,6 +266,7 @@ private fun GitSummary(git: GitStatusReply, state: DiffPane, model: DiffViewMode
                     placeholder = { Text("Commit message") },
                     singleLine = true,
                     enabled = !state.committing,
+                    colors = xdFieldColors(),
                 )
                 Button(
                     onClick = model::commit,

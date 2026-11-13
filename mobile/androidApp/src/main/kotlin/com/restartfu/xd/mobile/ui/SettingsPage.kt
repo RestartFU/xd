@@ -402,11 +402,7 @@ private fun SettingsSearchField(query: String, onQuery: (String) -> Unit) {
             }
         },
         shape = MaterialTheme.shapes.medium,
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedContainerColor = glassPane(),
-            unfocusedContainerColor = glassPane(),
-            unfocusedBorderColor = glassEdge(),
-        ),
+        colors = xdFieldColors(focusedContainerColor = glassPane(), unfocusedContainerColor = glassPane()),
     )
 }
 

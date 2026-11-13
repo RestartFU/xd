@@ -249,6 +249,7 @@ internal fun PullRequestsDialog(
                         singleLine = true,
                         enabled = !linking,
                         isError = error != null,
+                        colors = xdFieldColors(),
                     )
                     TextButton(onClick = link, enabled = !linking && draft.isNotBlank()) {
                         Text(if (linking) "Linking…" else "Link")

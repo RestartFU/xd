@@ -1233,7 +1233,7 @@ private fun Composer(
         Surface(
             shape = MaterialTheme.shapes.large,
             color = glassComposer(),
-            border = BorderStroke(1.dp, glassEdge()),
+            border = BorderStroke(1.dp, controlBorder()),
         ) {
             Column {
                 prompt.section?.invoke()
@@ -1408,7 +1408,7 @@ private fun CompactComposerRow(
     Surface(
         shape = MaterialTheme.shapes.extraLarge,
         color = glassComposer(),
-        border = BorderStroke(1.dp, glassEdge()),
+        border = BorderStroke(1.dp, controlBorder()),
     ) {
         Column {
             prompt.section?.invoke()
@@ -1698,6 +1698,7 @@ private fun QueuedMessageDialog(
             Row {
                 if (working) {
                     TextButton(
+                    colors = xdFieldColors(),
                         onClick = { onSteer(text) },
                         enabled = !busy && canEdit && text.isNotBlank(),
                     ) { Text("Steer") }

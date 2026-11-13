@@ -86,6 +86,7 @@ internal fun ConnectScreen(model: MainViewModel) {
                 keyboardType = KeyboardType.Uri,
                 imeAction = ImeAction.Next,
             ),
+            colors = xdFieldColors(),
         )
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
@@ -108,6 +109,7 @@ internal fun ConnectScreen(model: MainViewModel) {
                 imeAction = ImeAction.Done,
             ),
             keyboardActions = KeyboardActions(onDone = { pair() }),
+            colors = xdFieldColors(),
         )
         Spacer(Modifier.height(12.dp))
         Button(onClick = pair, enabled = ready, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {

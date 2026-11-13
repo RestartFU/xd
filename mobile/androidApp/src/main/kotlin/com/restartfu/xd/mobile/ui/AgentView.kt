@@ -443,7 +443,7 @@ internal fun AgentComposer(
         Surface(
             shape = MaterialTheme.shapes.extraLarge,
             color = MaterialTheme.colorScheme.surfaceContainer,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            border = BorderStroke(1.dp, controlBorder()),
         ) {
             // As the chat's composer: send sits in a 48dp slot that is its touch target alone.
             Row(verticalAlignment = Alignment.Bottom) {

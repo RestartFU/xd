@@ -226,6 +226,7 @@ internal fun AgentSecretsDialog(
                                     singleLine = true,
                                     enabled = !saving,
                                     visualTransformation = PasswordVisualTransformation(),
+                                    colors = xdFieldColors(),
                                 )
                                 TextButton(onClick = { removed = removed + name }, enabled = !saving) { Text("Remove") }
                             }
@@ -243,6 +244,7 @@ internal fun AgentSecretsDialog(
                                     singleLine = true,
                                     enabled = !saving,
                                     isError = name.isNotBlank() && !SECRET_NAME.matches(name.trim()),
+                                    colors = xdFieldColors(),
                                 )
                                 OutlinedTextField(
                                     value = value,
@@ -252,6 +254,7 @@ internal fun AgentSecretsDialog(
                                     singleLine = true,
                                     enabled = !saving,
                                     visualTransformation = PasswordVisualTransformation(),
+                                    colors = xdFieldColors(),
                                 )
                                 TextButton(onClick = { added = added.filter { it.id != row.id } }, enabled = !saving) { Text("Remove") }
                             }
@@ -400,6 +403,7 @@ internal fun ProjectContextDialog(
                         onValueChange = { text = it },
                         modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 360.dp),
                         enabled = !saving,
+                        colors = xdFieldColors(),
                     )
                 }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }

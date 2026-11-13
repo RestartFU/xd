@@ -3,6 +3,8 @@ package com.restartfu.xd.mobile.ui
 import androidx.activity.SystemBarStyle
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.TextFieldColors
 import androidx.compose.material3.Shapes
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.Typography
@@ -171,6 +173,12 @@ public data class XdSignals(
     val diffRemoved: Color,
     val codexIcon: Color,
     val claudeIcon: Color,
+    /**
+     * The edge of a field or an outlined control: 3:1 or more on every ground
+     * one sits on, as a control's boundary needs. The desktop's `control_border`.
+     * Hairlines between panes keep their quieter colours.
+     */
+    val controlBorder: Color,
 )
 
 public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
@@ -180,6 +188,7 @@ public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
         link = Color(0xFFA9ADFF), faint = Color(0xFF929292),
         diffAdded = Color(0xFF142B20), diffRemoved = Color(0xFF351A20),
         codexIcon = Color.White, claudeIcon = Color(0xFFD97757),
+        controlBorder = Color(0xFF6E6E6E),
     )
     MinimalThemePreset.LIGHT -> XdSignals(
         working = Color(0xFF17603F), waiting = Color(0xFF6C490A),
@@ -187,6 +196,7 @@ public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
         link = Color(0xFF4045BB), faint = Color(0xFF5A6074),
         diffAdded = Color(0xFFDFF2E6), diffRemoved = Color(0xFFF8E1E6),
         codexIcon = Color(0xFF1B1E2C), claudeIcon = Color(0xFFB85C3F),
+        controlBorder = Color(0xFF7A7F92),
     )
 }
 
@@ -437,6 +447,21 @@ public fun glassComposer(): Color = LocalXdGlass.current.composer
 /** A pane's hairline. */
 @Composable
 public fun glassEdge(): Color = LocalXdGlass.current.edge
+
+/** The edge of a field or an outlined control: see [XdSignals.controlBorder]. */
+@Composable
+public fun controlBorder(): Color = LocalXdSignals.current.controlBorder
+
+/** An outlined field's colours: Material's, with its resting edge in [controlBorder]. */
+@Composable
+public fun xdFieldColors(
+    focusedContainerColor: Color = Color.Transparent,
+    unfocusedContainerColor: Color = Color.Transparent,
+): TextFieldColors = OutlinedTextFieldDefaults.colors(
+    focusedContainerColor = focusedContainerColor,
+    unfocusedContainerColor = unfocusedContainerColor,
+    unfocusedBorderColor = controlBorder(),
+)
 
 /**
  * Frosted glass with an indigo accent, black (Dark) or cool grey (Light),

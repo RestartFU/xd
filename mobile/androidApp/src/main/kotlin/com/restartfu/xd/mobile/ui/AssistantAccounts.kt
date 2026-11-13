@@ -543,6 +543,7 @@ private fun SignInStepsContent(
                 placeholder = { Text("Code from the sign-in page") },
                 singleLine = true,
                 enabled = !sending,
+                colors = xdFieldColors(),
             )
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
