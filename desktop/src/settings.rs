@@ -98,6 +98,9 @@ pub struct AppSettings {
     pub allow_all_permissions: bool,
     /// Off by default: it starts agents working without anyone asking.
     pub auto_resume_chats: bool,
+    /// Holds the pulsing status marks steady and stops the usage refresh
+    /// icon turning.
+    pub reduce_motion: bool,
     pub git_writer: GitWriter,
     pub git_writer_model: Option<String>,
     pub build_source: String,
@@ -158,6 +161,7 @@ impl Default for AppSettings {
             notifications: true,
             allow_all_permissions: false,
             auto_resume_chats: false,
+            reduce_motion: false,
             git_writer: GitWriter::Chat,
             git_writer_model: None,
             build_source: String::new(),
@@ -506,6 +510,7 @@ mod tests {
             notifications: false,
             allow_all_permissions: true,
             auto_resume_chats: true,
+            reduce_motion: true,
             git_writer: GitWriter::Claude,
             git_writer_model: Some("claude-opus-5".into()),
             build_source: "#128".into(),
@@ -625,6 +630,19 @@ mod tests {
             serde_json::from_str(r#"{"accent":"green","notifications":true}"#).unwrap();
 
         assert_eq!(settings.theme, ThemePreset::Dark);
+    }
+
+    #[test]
+    fn reduce_motion_is_off_unless_chosen_and_survives_serialization() {
+        let defaults = serde_json::to_value(AppSettings::default()).unwrap();
+        assert_eq!(defaults["reduce_motion"], false);
+        let older: AppSettings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
+        assert!(!older.reduce_motion);
+        let enabled: AppSettings = serde_json::from_str(r#"{"reduce_motion":true}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(enabled).unwrap()["reduce_motion"],
+            true
+        );
     }
 
     #[test]

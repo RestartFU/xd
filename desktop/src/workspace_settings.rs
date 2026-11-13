@@ -85,7 +85,7 @@ const SETTINGS_SECTIONS: [SettingsSection; 7] = [
     },
     SettingsSection {
         name: "Keyboard",
-        summary: "Shortcuts for chats and the terminal.",
+        summary: "Every shortcut, by where it works.",
         icon: KEYBOARD_ICON,
     },
     SettingsSection {
@@ -159,6 +159,117 @@ pub(super) fn settings_query_words(query: &str) -> Vec<String> {
 fn setting_matches(words: &[String], section: &str, title: &str, description: &str) -> bool {
     let text = format!("{section} {title} {description}").to_lowercase();
     words.iter().all(|word| text.contains(word.as_str()))
+}
+
+/// Every shortcut xd has, in the groups Settings › Keyboard shows them in:
+/// what each does, and its keys as this platform names them. A key the
+/// terminal or a text box uses for itself stays with it while that has the
+/// keyboard, which the Terminal group says.
+pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, String)>)> {
+    // Ctrl on Linux and Windows, Cmd on macOS.
+    let m = super::MOD_KEY;
+    let paste = if cfg!(target_os = "macos") {
+        "Cmd V"
+    } else {
+        "Ctrl Shift V"
+    };
+    vec![
+        (
+            "Window",
+            vec![
+                ("Find a session or project", format!("{m} K")),
+                ("Next / previous session", "Alt Down / Alt Up".into()),
+                ("Next session waiting on you", "Alt Shift Down".into()),
+                (
+                    "Next / previous chat tab",
+                    "Ctrl Tab / Ctrl Shift Tab".into(),
+                ),
+                ("New chat tab", format!("{m} T")),
+                ("Go to the message box", format!("{m} L / Shift Escape")),
+                ("Stop the running turn", format!("{m} .")),
+                ("Show or hide the side pane", format!("{m} B")),
+                ("Show or hide the terminal under the chat", "Ctrl `".into()),
+                ("Settings", format!("{m} ,")),
+                ("Usage", format!("{m} U")),
+                ("Copy the selected text", format!("{m} C")),
+                (
+                    "Close a dialog or menu, clear a search, or leave the chat",
+                    "Escape".into(),
+                ),
+            ],
+        ),
+        (
+            "Menus and dialogs",
+            vec![
+                (
+                    "Move through a menu, a picker, find results or the landing page",
+                    "Up / Down".into(),
+                ),
+                (
+                    "Choose the row, or press the dialog's main button",
+                    "Enter".into(),
+                ),
+                ("Next / previous field", "Tab / Shift Tab".into()),
+            ],
+        ),
+        (
+            "Chats",
+            vec![
+                ("Send, or queue while the agent works", "Enter".into()),
+                ("Redirect the agent while it works", format!("{m} Enter")),
+                ("New line", "Shift Enter".into()),
+                ("Copy / cut / paste", format!("{m} C / {m} X / {m} V")),
+                ("Select all", format!("{m} A")),
+                ("Undo / redo", format!("{m} Z / {m} Shift Z or Ctrl Y")),
+                ("Pick an answer to a question", "1 to 9".into()),
+                ("Move between a question's answers", "Up / Down".into()),
+            ],
+        ),
+        (
+            "Terminal",
+            vec![
+                ("Interrupt command", "Ctrl C".into()),
+                ("Copy selection", "Ctrl Shift C".into()),
+                ("Paste", paste.into()),
+                ("Clear terminal", "Ctrl L".into()),
+                ("Search command history", "Ctrl R".into()),
+                ("Scroll back and forward", "Page Up / Page Down".into()),
+                (
+                    "Every other Ctrl and letter goes to the shell, so Ctrl K, L, B and T do not reach xd from here",
+                    "Ctrl A to Z".into(),
+                ),
+            ],
+        ),
+        (
+            "Files",
+            vec![
+                ("Save the file", format!("{m} S")),
+                ("Undo / redo", format!("{m} Z / {m} Shift Z or Ctrl Y")),
+                ("Indent", "Tab".into()),
+            ],
+        ),
+        (
+            "Usage",
+            vec![
+                ("Show cost / tokens / limits", "C / T / L".into()),
+                (
+                    "Last day / 7 days / 30 days / 90 days",
+                    format!("{m} Shift 1 to 4"),
+                ),
+            ],
+        ),
+        (
+            "Image viewer",
+            vec![
+                ("Previous / next image", "Left / Right".into()),
+                ("Zoom in / out", "+ / -".into()),
+                ("Fit the window, or actual size", "Enter or Space".into()),
+                ("Reset zoom", "0".into()),
+                ("Move around a zoomed image", "Arrow keys".into()),
+                ("Close", "Escape".into()),
+            ],
+        ),
+    ]
 }
 
 /// The row a setting draws: its title and description on the left, with the
@@ -731,8 +842,10 @@ impl XdDesktop {
     ) -> SettingRow {
         setting(id, title, description, colors, |row| {
             row.cursor_pointer()
+                .debug_selector(move || id.into())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     toggle(&mut this.settings);
+                    super::set_reduce_motion(this.settings.reduce_motion);
                     if let Err(error) = this.settings.save() {
                         this.model.connection_error = Some(error);
                     }
@@ -1000,7 +1113,7 @@ impl XdDesktop {
                                 .items_center()
                                 .rounded(px(8.0))
                                 .border_1()
-                                .border_color(rgb(colors.border))
+                                .border_color(self.field_frame(&self.source_build_input, None, cx))
                                 .bg(rgb(colors.surface))
                                 .text_size(px(12.5))
                                 .child(self.source_build_input.clone()),
@@ -1082,20 +1195,30 @@ impl XdDesktop {
 
     /// Keyboard shortcuts as rows with the keys on the right.
     fn shortcut_rows(
-        prefix: &'static str,
-        shortcuts: &[(&'static str, &'static str)],
+        prefix: (&'static str, usize),
+        shortcuts: &[(&'static str, String)],
         colors: ThemeColors,
     ) -> Vec<SettingRow> {
         shortcuts
             .iter()
             .enumerate()
-            .map(|(index, &(label, keys))| {
+            .map(|(index, (label, keys))| {
+                let (label, keys) = (*label, SharedString::from(keys.clone()));
                 // The keys are searchable, though they show as a chip rather
                 // than a description.
                 SettingRow::custom(
                     label,
-                    keys,
-                    settings_row((prefix, index), label, "", colors).child(
+                    keys.clone(),
+                    settings_row(
+                        gpui::ElementId::NamedInteger(
+                            prefix.0.into(),
+                            (prefix.1 * 100 + index) as u64,
+                        ),
+                        label,
+                        "",
+                        colors,
+                    )
+                    .child(
                         div()
                             .flex_none()
                             .px(px(7.0))
@@ -1124,7 +1247,18 @@ impl XdDesktop {
         match section {
             0 => vec![SettingGroup {
                 label: None,
-                rows: vec![self.theme_row(column, colors, cx)],
+                rows: vec![
+                    self.theme_row(column, colors, cx),
+                    Self::local_switch(
+                        "workspace-settings-reduce-motion",
+                        "Reduce motion",
+                        "Status marks hold steady instead of pulsing, and the usage refresh icon does not turn.",
+                        self.settings.reduce_motion,
+                        |settings| settings.reduce_motion = !settings.reduce_motion,
+                        colors,
+                        cx,
+                    ),
+                ],
             }],
             1 => {
                 let mut groups = Vec::new();
@@ -1205,53 +1339,16 @@ impl XdDesktop {
                 groups
             }
             4 => self.device_groups(colors, cx),
-            5 => {
-                let copy = if cfg!(target_os = "macos") {
-                    "Cmd C / Cmd V"
-                } else {
-                    "Ctrl C / Ctrl V"
-                };
-                let redirect = if cfg!(target_os = "macos") {
-                    "Cmd Enter"
-                } else {
-                    "Ctrl Enter"
-                };
-                let paste = if cfg!(target_os = "macos") {
-                    "Cmd V"
-                } else {
-                    "Ctrl Shift V"
-                };
-                vec![
+            5 => keyboard_shortcuts()
+                .into_iter()
+                .enumerate()
+                .map(|(index, (label, shortcuts))| {
                     group(
-                        "Chats",
-                        Self::shortcut_rows(
-                            "workspace-settings-chat-key",
-                            &[
-                                ("Send, or queue while the agent works", "Enter"),
-                                ("Redirect the agent while it works", redirect),
-                                ("New line", "Shift Enter"),
-                                ("Copy / paste", copy),
-                            ],
-                            colors,
-                        ),
-                    ),
-                    group(
-                        "Terminal",
-                        Self::shortcut_rows(
-                            "workspace-settings-terminal-key",
-                            &[
-                                ("Interrupt command", "Ctrl C"),
-                                ("Copy selection", "Ctrl Shift C"),
-                                ("Paste", paste),
-                                ("Clear terminal", "Ctrl L"),
-                                ("Search command history", "Ctrl R"),
-                                ("Close dialog", "Escape"),
-                            ],
-                            colors,
-                        ),
-                    ),
-                ]
-            }
+                        label,
+                        Self::shortcut_rows(("workspace-settings-key", index), &shortcuts, colors),
+                    )
+                })
+                .collect(),
             _ => vec![
                 group("xd", vec![self.update_row(colors, cx)]),
                 group("Development", vec![self.source_build_row(colors, cx)]),
@@ -1507,7 +1604,15 @@ impl XdDesktop {
                         .gap_2()
                         .rounded(px(8.0))
                         .border_1()
-                        .border_color(crate::glass::edge(colors))
+                        .border_color(
+                            if self.frame_focus.as_ref()
+                                == Some(&self.settings_search_input.read(cx).focus_handle(cx))
+                            {
+                                rgb(colors.selected_border)
+                            } else {
+                                crate::glass::edge(colors)
+                            },
+                        )
                         .bg(rgb(colors.surface))
                         .text_size(px(12.5))
                         .child(icon(SEARCH_ICON, 13.0, colors.faint))
@@ -1572,7 +1677,7 @@ impl XdDesktop {
                                 15.0,
                                 if selected { colors.text } else { colors.muted },
                             ))
-                            .child(div().flex_1().min_w_0().truncate().child(entry.name))
+                            .child(truncating_label(entry.name).flex_1().min_w_0())
                             .when_some(matches, |item, count| {
                                 item.child(
                                     div()

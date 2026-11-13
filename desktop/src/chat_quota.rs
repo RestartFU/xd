@@ -287,7 +287,8 @@ impl XdDesktop {
                     cx.new(|_| PaneTooltip {
                         label: "How much of its account's 5-hour limit this chat has used, \
                                 against its quota. An estimate: chats working on one \
-                                account share each rise.",
+                                account share each rise."
+                            .into(),
                         colors,
                     })
                     .into()

@@ -779,7 +779,7 @@ impl Render for BrowserPane {
                 .child(crate::icon(tab.icon(), 13., colors.muted))
                 .child(tab.label())
                 .child(
-                    tab_close(("close-side-tool", index), colors).on_click(cx.listener(
+                    tab_close(("close-side-tool", index), "Close", colors).on_click(cx.listener(
                         move |pane, _, _, cx| {
                             cx.stop_propagation();
                             pane.close_auxiliary(tab, cx);
@@ -857,7 +857,12 @@ impl Render for BrowserPane {
                                     .child(crate::icon(crate::BROWSER_ICON, 13., colors.muted))
                                     .child(div().flex_1().min_w_0().text_ellipsis().child(label))
                                     .child(
-                                        tab_close(("browser-close-tab", slot.id), colors).on_click(
+                                        tab_close(
+                                            ("browser-close-tab", slot.id),
+                                            "Close tab",
+                                            colors,
+                                        )
+                                        .on_click(
                                             cx.listener(move |pane, _, window, cx| {
                                                 cx.stop_propagation();
                                                 pane.close_tab(index, window, cx);
@@ -872,6 +877,7 @@ impl Render for BrowserPane {
                         crate::ui_button("browser-new-tab", crate::ButtonKind::Ghost, colors)
                             .size(px(28.))
                             .px_0()
+                            .tooltip(crate::pane_tooltip("New browser tab", colors))
                             .on_click(
                                 cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
                             )
@@ -918,10 +924,16 @@ fn tab_pill(
         .hover(|style| style.bg(rgb(colors.surface_high)))
 }
 
-fn tab_close(id: impl Into<ElementId>, colors: ThemeColors) -> gpui::Stateful<gpui::Div> {
+/// A tab's close button. It is an icon alone, so `label` names it.
+fn tab_close(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
-        .size(px(22.))
+        .tooltip(crate::pane_tooltip(label, colors))
+        .size(px(24.))
         .flex_none()
         .flex()
         .items_center()
@@ -1403,15 +1415,18 @@ impl BrowserTab {
         .detach();
     }
 
+    /// A toolbar button. It is an icon alone, so `label` names it.
     fn button(
         &self,
         id: &'static str,
+        label: &'static str,
         path: &'static str,
         enabled: bool,
     ) -> gpui::Stateful<gpui::Div> {
         let colors = self.colors;
         div()
             .id(id)
+            .tooltip(crate::pane_tooltip(label, colors))
             .w(px(28.))
             .h(px(28.))
             .flex_shrink_0()
@@ -1462,7 +1477,7 @@ impl Render for BrowserTab {
                     .border_b_1()
                     .border_color(rgb(colors.border))
                     .child(
-                        self.button("browser-back", crate::ARROW_LEFT_ICON, back_enabled)
+                        self.button("browser-back", "Back", crate::ARROW_LEFT_ICON, back_enabled)
                             .on_click(cx.listener(move |pane, _, _, cx| {
                                 if back_enabled {
                                     pane.history(true, cx);
@@ -1470,16 +1485,22 @@ impl Render for BrowserTab {
                             })),
                     )
                     .child(
-                        self.button("browser-forward", crate::ARROW_RIGHT_ICON, forward_enabled)
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                if forward_enabled {
-                                    pane.history(false, cx);
-                                }
-                            })),
+                        self.button(
+                            "browser-forward",
+                            "Forward",
+                            crate::ARROW_RIGHT_ICON,
+                            forward_enabled,
+                        )
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            if forward_enabled {
+                                pane.history(false, cx);
+                            }
+                        })),
                     )
                     .child(
                         self.button(
                             "browser-reload",
+                            "Reload",
                             crate::ROTATE_CW_ICON,
                             has_page || self.engine_failed,
                         )
@@ -1531,12 +1552,17 @@ impl Render for BrowserTab {
                             }),
                     )
                     .child(
-                        self.button("browser-external", crate::EXTERNAL_LINK_ICON, has_page)
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                if let Some(url) = &pane.url {
-                                    cx.open_url(url);
-                                }
-                            })),
+                        self.button(
+                            "browser-external",
+                            "Open in your browser",
+                            crate::EXTERNAL_LINK_ICON,
+                            has_page,
+                        )
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            if let Some(url) = &pane.url {
+                                cx.open_url(url);
+                            }
+                        })),
                     ),
             );
         if let Some(error) = &self.error {

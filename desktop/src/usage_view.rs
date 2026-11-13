@@ -533,12 +533,10 @@ fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
                 .justify_between()
                 .gap_2()
                 .child(
-                    div()
+                    truncating_label(row.label)
                         .min_w_0()
-                        .truncate()
                         .text_size(px(13.0))
-                        .text_color(rgb(colors.text))
-                        .child(row.label),
+                        .text_color(rgb(colors.text)),
                 )
                 .child(
                     div()
@@ -715,11 +713,9 @@ fn account_heading(name: String, plan: Option<String>, colors: ThemeColors) -> g
         .text_size(px(11.5))
         .text_color(rgb(colors.muted))
         .child(
-            div()
+            truncating_label(name)
                 .min_w_0()
-                .truncate()
-                .font_weight(FontWeight::MEDIUM)
-                .child(name),
+                .font_weight(FontWeight::MEDIUM),
         )
         .children(plan.map(|plan| div().flex_none().child(plan)))
 }
@@ -1753,7 +1749,10 @@ impl XdDesktop {
         // The icon turns a step with each shared pulse. A repeating animation
         // would ask for a frame at display rate, and every frame redraws the
         // whole window.
-        let refresh_icon = if busy {
+        let refresh_icon = if busy && super::reduce_motion() {
+            // Held still: it dims while the refresh runs instead of turning.
+            refresh_icon.text_color(rgb(colors.faint))
+        } else if busy {
             refresh_icon.with_transformation(Transformation::rotate(percentage(refresh_turn(
                 pulse_frame(),
             ))))
@@ -2097,7 +2096,7 @@ impl XdDesktop {
                                         colors.muted,
                                         colors,
                                     ))
-                                    .child(div().min_w_0().truncate().child(model.model.clone())),
+                                    .child(truncating_label(model.model.clone()).min_w_0()),
                             )
                             .child(div().flex_none().text_size(px(12.0)).child(match metric {
                                 ChartMetric::Cost if model.cost_unknown() => "Unpriced".to_owned(),
@@ -2844,7 +2843,7 @@ impl XdDesktop {
                                     colors.muted,
                                     colors,
                                 ))
-                                .child(div().truncate().child(provider_label(provider).to_owned()))
+                                .child(truncating_label(provider_label(provider).to_owned()))
                                 .when(!awaiting_data, |row| {
                                     row.child(figures(
                                         div()
@@ -3182,7 +3181,7 @@ impl XdDesktop {
                                         colors.muted,
                                         colors,
                                     ))
-                                    .child(div().truncate().child(model.model.clone())),
+                                    .child(truncating_label(model.model.clone())),
                             )
                             .children(bar),
                     )
@@ -3527,7 +3526,7 @@ impl XdDesktop {
                                     .absolute()
                                     .right_0()
                                     .top(px(y - 7.0))
-                                    .text_size(px(10.0))
+                                    .text_size(px(11.0))
                                     .text_color(rgb(colors.muted))
                                     .child(label)
                             })),
@@ -3578,7 +3577,7 @@ impl XdDesktop {
                     .pl(px(64.0))
                     .flex()
                     .justify_between()
-                    .text_size(px(10.0))
+                    .text_size(px(11.0))
                     .text_color(rgb(colors.muted))
                     .children(axis.map(|label| div().child(label))),
             )
@@ -3705,7 +3704,7 @@ impl XdDesktop {
                                         colors.muted,
                                         colors,
                                     ))
-                                    .child(div().truncate().child(model.model.clone())),
+                                    .child(truncating_label(model.model.clone())),
                             )
                             .child(small_muted(description, colors)),
                     )
@@ -3820,7 +3819,7 @@ impl XdDesktop {
                 .items_center()
                 .rounded(px(6.0))
                 .border_1()
-                .border_color(rgb(colors.border))
+                .border_color(self.field_frame(&input, None, cx))
                 .bg(rgb(colors.background))
                 .text_size(px(12.5))
                 .child(input)

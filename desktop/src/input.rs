@@ -276,6 +276,13 @@ impl ComposerInput {
         cx.notify();
     }
 
+    /// Selects everything the field holds, so the next keypress replaces it.
+    pub fn select_everything(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
     fn changed(&self, cx: &mut Context<Self>) {
         cx.emit(ComposerEvent::Changed(self.content.to_string()));
         cx.notify();

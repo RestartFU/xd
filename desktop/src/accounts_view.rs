@@ -275,12 +275,14 @@ fn account_meters(account: &AuthAccount, colors: ThemeColors) -> Option<gpui::Di
 /// faint and does nothing.
 fn icon_button(
     id: impl Into<gpui::ElementId>,
+    label: &'static str,
     path: &'static str,
     enabled: bool,
     colors: ThemeColors,
 ) -> gpui::Stateful<gpui::Div> {
     let button = div()
         .id(id)
+        .tooltip(pane_tooltip(label, colors))
         .size(px(26.0))
         .flex_none()
         .flex()
@@ -606,29 +608,35 @@ impl XdDesktop {
         if several && !confirming {
             let up_provider = provider_owned.clone();
             let down_provider = provider_owned.clone();
-            actions =
-                actions
-                    .child(
-                        icon_button(("account-up", element), CHEVRON_UP_ICON, index > 0, colors)
-                            .when(index > 0, |button| {
-                                button.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.move_account(&up_provider, index, true, cx);
-                                }))
-                            }),
+            actions = actions
+                .child(
+                    icon_button(
+                        ("account-up", element),
+                        "Use before the one above",
+                        CHEVRON_UP_ICON,
+                        index > 0,
+                        colors,
                     )
-                    .child(
-                        icon_button(
-                            ("account-down", element),
-                            CHEVRON_DOWN_ICON,
-                            index + 1 < ranked,
-                            colors,
-                        )
-                        .when(index + 1 < ranked, |button| {
-                            button.on_click(cx.listener(move |this, _, _, cx| {
-                                this.move_account(&down_provider, index, false, cx);
-                            }))
-                        }),
-                    );
+                    .when(index > 0, |button| {
+                        button.on_click(cx.listener(move |this, _, _, cx| {
+                            this.move_account(&up_provider, index, true, cx);
+                        }))
+                    }),
+                )
+                .child(
+                    icon_button(
+                        ("account-down", element),
+                        "Use after the one below",
+                        CHEVRON_DOWN_ICON,
+                        index + 1 < ranked,
+                        colors,
+                    )
+                    .when(index + 1 < ranked, |button| {
+                        button.on_click(cx.listener(move |this, _, _, cx| {
+                            this.move_account(&down_provider, index, false, cx);
+                        }))
+                    }),
+                );
         }
         if confirming {
             let remove_provider = provider_owned.clone();
@@ -745,12 +753,10 @@ impl XdDesktop {
                             .items_baseline()
                             .gap(px(8.0))
                             .child(
-                                div()
+                                truncating_label(account.label.clone())
                                     .min_w_0()
                                     .text_size(px(13.0))
-                                    .text_color(rgb(colors.text))
-                                    .truncate()
-                                    .child(account.label.clone()),
+                                    .text_color(rgb(colors.text)),
                             )
                             .when(!facts.is_empty(), |line| {
                                 line.child(
@@ -776,17 +782,15 @@ impl XdDesktop {
                                 )
                             })
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(rgb(tone))
-                                    .child(if confirming {
-                                        "Signs it out and deletes its saved sign-in from this host."
-                                            .to_owned()
-                                    } else {
-                                        status
-                                    }),
+                                truncating_label(if confirming {
+                                    "Signs it out and deletes its saved sign-in from this host."
+                                        .to_owned()
+                                } else {
+                                    status
+                                })
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(rgb(tone)),
                             ),
                     ),
             )
@@ -941,7 +945,7 @@ impl XdDesktop {
                                 .items_center()
                                 .rounded(px(6.0))
                                 .border_1()
-                                .border_color(rgb(colors.border))
+                                .border_color(self.field_frame(&self.auth_input, None, cx))
                                 .bg(rgb(colors.surface))
                                 .child(self.auth_input.clone()),
                         )

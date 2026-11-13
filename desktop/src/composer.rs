@@ -242,7 +242,7 @@ pub(super) fn context_chip(
     chip.max_w(px(280.0))
         .min_w_0()
         .child(assistant_icon(icon_path, 13.0, colors.muted, colors))
-        .child(div().min_w_0().truncate().child(label))
+        .child(truncating_label(label).min_w_0())
         .when(interactive, |chip| {
             chip.child(icon(CHEVRON_DOWN_ICON, 11.0, colors.muted))
         })
@@ -260,9 +260,11 @@ pub(super) fn context_row(project: String, colors: ThemeColors) -> gpui::Div {
         .child(div().px_2().child(project))
 }
 
-/// The round send button at the end of the composer's controls.
+/// The round send button at the end of the composer's controls. It is an
+/// icon alone, so `label` names it under the pointer.
 pub(super) fn composer_send_button(
     id: &'static str,
+    label: &'static str,
     enabled: bool,
     icon_path: &'static str,
     colors: ThemeColors,
@@ -270,6 +272,7 @@ pub(super) fn composer_send_button(
     div()
         .id(id)
         .debug_selector(move || id.into())
+        .tooltip(pane_tooltip(label, colors))
         .size(px(32.0))
         .flex_none()
         .flex()
@@ -314,7 +317,7 @@ pub(super) fn composer_option(
         .max_w(px(max_width))
         .min_w_0()
         .children(leading)
-        .child(div().min_w_0().truncate().child(label))
+        .child(truncating_label(label).min_w_0())
         .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.faint))
 }
 
@@ -462,7 +465,7 @@ impl XdDesktop {
                                     .hover(|style| style.bg(rgb(colors.surface_high)))
                                     .tooltip(move |_, cx| {
                                         cx.new(|_| PaneTooltip {
-                                            label: "Attach files",
+                                            label: "Attach files".into(),
                                             colors,
                                         })
                                         .into()
@@ -513,7 +516,7 @@ impl XdDesktop {
         let fixed = |chip: gpui::Stateful<gpui::Div>| {
             chip.tooltip(move |_, cx| {
                 cx.new(|_| ClearTooltip {
-                    label: "Set when the chat started",
+                    label: "Set when the chat started".into(),
                     colors,
                 })
                 .into()

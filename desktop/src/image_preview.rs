@@ -346,8 +346,10 @@ fn unavailable_image(colors: ThemeColors) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// A button over the image viewer. It is an icon alone, so `label` names it.
 fn viewer_button(
     id: &'static str,
+    label: &'static str,
     size: f32,
     icon_path: &'static str,
     icon_size: f32,
@@ -355,6 +357,7 @@ fn viewer_button(
     div()
         .id(id)
         .debug_selector(move || id.into())
+        .tooltip(pane_tooltip(label, frame_colors()))
         .absolute()
         .size(px(size))
         .flex()
@@ -526,7 +529,7 @@ impl XdDesktop {
                         .justify_center()
                         .px_1()
                         .text_center()
-                        .text_size(px(10.0))
+                        .text_size(px(11.0))
                         .text_color(rgb(colors.muted))
                         .overflow_hidden()
                         .child(attachment.name.clone())
@@ -563,6 +566,7 @@ impl XdDesktop {
                         div()
                             .id(("remove-draft-image", index))
                             .debug_selector(move || format!("remove-draft-image-{index}"))
+                            .tooltip(pane_tooltip("Remove image", colors))
                             .absolute()
                             .top(px(4.0))
                             .right(px(4.0))
@@ -642,16 +646,14 @@ impl XdDesktop {
                     .flex()
                     .flex_col()
                     .child(
-                        div()
-                            .truncate()
+                        truncating_label(attachment.name.clone())
                             .text_size(px(12.0))
                             .line_height(px(15.0))
-                            .text_color(rgb(colors.text))
-                            .child(attachment.name.clone()),
+                            .text_color(rgb(colors.text)),
                     )
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(px(11.0))
                             .line_height(px(13.0))
                             .text_color(rgb(colors.faint))
                             .child(file_size_label(attachment.bytes)),
@@ -661,6 +663,7 @@ impl XdDesktop {
                 div()
                     .id(("remove-draft-file", index))
                     .debug_selector(move || format!("remove-draft-file-{index}"))
+                    .tooltip(pane_tooltip("Remove file", colors))
                     .size(px(24.0))
                     .flex()
                     .flex_none()
@@ -888,36 +891,45 @@ impl XdDesktop {
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(viewer)
             .child(
-                div()
+                truncating_label(caption)
                     .debug_selector(|| "image-preview-caption".into())
                     .mt(px(CAPTION_GAP))
                     .h(px(CAPTION_LINE_HEIGHT))
                     .max_w(px(ImagePreview::max_viewer_width(window_size.0)))
-                    .truncate()
                     .text_size(px(12.0))
                     .line_height(px(CAPTION_LINE_HEIGHT))
-                    .text_color(rgba(CAPTION_COLOR))
-                    .child(caption),
+                    .text_color(rgba(CAPTION_COLOR)),
             );
 
-        let close = viewer_button("image-preview-close", 28.0, CLOSE_ICON, 16.0)
-            .top(px(margin_y))
-            .right(px(margin_x))
-            .border_1()
-            .border_color(rgba(CLOSE_RING))
-            .bg(rgba(CLOSE_BACKGROUND))
-            .shadow_sm()
-            .hover(|style| style.bg(rgba(CLOSE_HOVER_BACKGROUND)))
-            .on_click(cx.listener(|this, _, window, cx| {
-                cx.stop_propagation();
-                this.close_image_preview(window, cx);
-            }));
+        let close = viewer_button(
+            "image-preview-close",
+            "Close (Escape)",
+            28.0,
+            CLOSE_ICON,
+            16.0,
+        )
+        .top(px(margin_y))
+        .right(px(margin_x))
+        .border_1()
+        .border_color(rgba(CLOSE_RING))
+        .bg(rgba(CLOSE_BACKGROUND))
+        .shadow_sm()
+        .hover(|style| style.bg(rgba(CLOSE_HOVER_BACKGROUND)))
+        .on_click(cx.listener(|this, _, window, cx| {
+            cx.stop_propagation();
+            this.close_image_preview(window, cx);
+        }));
 
         let navigation = |id: &'static str,
                           icon_path: &'static str,
                           direction: isize,
                           cx: &mut Context<Self>| {
-            let button = viewer_button(id, 32.0, icon_path, 20.0)
+            let label = if direction < 0 {
+                "Previous image (Left)"
+            } else {
+                "Next image (Right)"
+            };
+            let button = viewer_button(id, label, 32.0, icon_path, 20.0)
                 .hover(|style| style.bg(rgba(NAVIGATION_HOVER_BACKGROUND)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
