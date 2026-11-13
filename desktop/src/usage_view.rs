@@ -2,11 +2,11 @@
 //! cost, and tokens, and a full page for cost and tokens in detail. The full page
 //! follows T3 Code (MIT, see `data/licenses/t3code-LICENSE`).
 
-use std::{cell::Cell, collections::BTreeMap, rc::Rc, time::Duration};
+use std::{cell::Cell, collections::BTreeMap, rc::Rc};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, MouseMoveEvent, PathBuilder, Rgba, Subscription,
-    Transformation, anchored, deferred, percentage, relative,
+    AnyElement, MouseMoveEvent, PathBuilder, Rgba, Subscription, Transformation, anchored,
+    deferred, percentage, relative,
 };
 use serde_json::{Map, json};
 use xd_desktop::usage::{
@@ -1726,7 +1726,7 @@ impl XdDesktop {
         self.usage_showing_limits() || !self.usage.full_page
     }
 
-    fn usage_busy(&self) -> bool {
+    pub(super) fn usage_busy(&self) -> bool {
         let showing_limits = self.usage_showing_limits();
         self.usage_selected().iter().any(|index| {
             let environment = &self.usage.environments[*index];
@@ -1750,18 +1750,15 @@ impl XdDesktop {
             .size(px(size / 2.0 + 1.0))
             .flex_none()
             .text_color(rgb(colors.muted));
+        // The icon turns a step with each shared pulse. A repeating animation
+        // would ask for a frame at display rate, and every frame redraws the
+        // whole window.
         let refresh_icon = if busy {
-            refresh_icon
-                .with_animation(
-                    "usage-refreshing",
-                    Animation::new(Duration::from_secs(1)).repeat(),
-                    |icon, delta| {
-                        icon.with_transformation(Transformation::rotate(percentage(delta)))
-                    },
-                )
-                .into_any_element()
+            refresh_icon.with_transformation(Transformation::rotate(percentage(refresh_turn(
+                pulse_frame(),
+            ))))
         } else {
-            refresh_icon.into_any_element()
+            refresh_icon
         };
         ui_button("usage-refresh", ButtonKind::Ghost, colors)
             .w(px(size))

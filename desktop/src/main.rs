@@ -3646,7 +3646,7 @@ impl XdDesktop {
                 Timer::after(PULSE_INTERVAL).await;
                 let alive = this
                     .update(cx, |this, cx| {
-                        if this.anything_working() {
+                        if this.anything_working() || this.usage_busy() {
                             PULSE_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             // Work that nothing on screen shows, such as a chat
                             // in a collapsed folder, does not redraw the window.
@@ -27920,12 +27920,24 @@ Binary files /dev/null and b/image.png differ\n";
         );
         assert_eq!(working_dot_alphas(0), [0x4d, 0x4d, 0x4d]);
         assert_eq!(working_dot_alphas(3), [0xff, 0xff, 0xff]);
+        for source in [include_str!("main.rs"), include_str!("usage_view.rs")] {
+            let production = source.split_once("#[cfg(test)]").expect("production").0;
+            assert!(
+                !production.contains(".repeat()"),
+                "no per-frame repeating animations"
+            );
+        }
+    }
+
+    #[test]
+    fn the_usage_refresh_icon_turns_with_the_shared_pulse() {
+        // Four steps of an eighth of a turn bring its two arrows back round.
+        assert_eq!(usage_view::refresh_turn(0), 0.0);
+        assert_eq!(usage_view::refresh_turn(1), 0.125);
+        assert_eq!(usage_view::refresh_turn(3), 0.375);
+        assert_eq!(usage_view::refresh_turn(4), 0.0);
         let source = include_str!("main.rs");
-        let production = source.split_once("#[cfg(test)]").expect("production").0;
-        assert!(
-            !production.contains(".repeat()"),
-            "no per-frame repeating animations"
-        );
+        assert!(source.contains("if this.anything_working() || this.usage_busy() {"));
     }
 
     #[test]
