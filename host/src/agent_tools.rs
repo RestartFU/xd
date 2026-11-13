@@ -51,12 +51,21 @@ const TOOLS: [&str; 13] = [
 ];
 /// Added to the agent's instructions when it has the tools. Claude loads MCP
 /// tools only when asked, so without this it would not know to.
+///
+/// The assistant's own subagent tool is named because it is the one an agent
+/// reaches for first: Claude has its Agent tool loaded and described at
+/// length, and a rule that names only shell commands does not read as
+/// covering it.
 const HINT: &str = "When you open, take over, or push to a pull request \
 other than by running gh pr create here, link it to this chat with xd's \
-link_pull_requests tool. To hand work to another Claude or Codex agent that \
-should outlive this turn or work in parallel, start it with xd's start_agent \
-tool, not codex exec, claude -p or a detached process: xd runs it on the \
-user's preferred account, shows it to them, and sends you its reply here. \
+link_pull_requests tool. To hand work to another agent that works in \
+parallel, runs in the background or should outlive this turn, start it with \
+xd's start_agent tool. Do not use your built-in Agent or subagent tool for \
+that work, forks and background agents included, nor codex exec, claude -p \
+or a detached process: xd runs the agent on the user's preferred account, \
+shows it to them as a chat of its own, and sends you its reply here. Keep \
+the built-in tool for one short lookup that you wait for before doing \
+anything else. \
 To open or use a web page, such as the app you are working on, use xd's \
 browser tools (browser_navigate, browser_snapshot, browser_click and the \
 rest): they drive the Chromium browser beside this chat, which the user sees.";
@@ -213,7 +222,9 @@ fn tools() -> Value {
                 under this one. xd runs it on the account the user ranks first that has usage \
                 left, keeps it running after this session ends, and shows it to the user. Each \
                 time it finishes a turn, xd sends you its reply as a message in this chat. Use \
-                this instead of running codex exec, claude -p or another assistant from a shell.",
+                this instead of your built-in Agent or subagent tool for work that runs in \
+                parallel or in the background, and instead of running codex exec, claude -p or \
+                another assistant from a shell.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1001,5 +1012,25 @@ mod tests {
     fn an_agent_another_started_is_not_told_to_start_its_own() {
         assert!(hint(false).contains("start_agent"));
         assert!(!hint(true).contains("start_agent"));
+    }
+
+    #[test]
+    fn a_lead_is_told_its_own_subagent_tool_is_not_how_to_delegate() {
+        // Naming only shell commands left Claude's Agent tool looking allowed.
+        let lead = hint(false);
+        assert!(lead.contains("Do not use your built-in Agent or subagent tool"));
+        assert!(lead.contains("forks and background agents included"));
+        let start = tools()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == START)
+            .unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(start.contains("instead of your built-in Agent or subagent tool"));
+        // An agent xd started has no start_agent, so its own tool stays.
+        assert!(!hint(true).contains("built-in"));
     }
 }
