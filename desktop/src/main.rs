@@ -245,11 +245,18 @@ fn pulse_opacity() -> f32 {
     [0.35, 0.65, 1.0, 0.65][pulse_frame() % 4]
 }
 
+/// Narrowest the browser pane can be dragged.
+const BROWSER_MIN_WIDTH: f32 = 280.0;
+/// Width the browser always leaves for the session beside it. Past the point
+/// where the catalog no longer fits, the catalog compacts instead.
+const BROWSER_SESSION_MIN_WIDTH: f32 = 460.0;
+
+/// The browser can take any share of the window that still leaves the session
+/// its minimum, so it is not held at a fixed width on wide screens.
 fn browser_pane_width(requested: u16, window_width: f32) -> f32 {
-    // Keep the session usable even at the window's minimum size.
     f32::from(requested).clamp(
-        280.0,
-        (window_width - BROWSER_DIVIDER_WIDTH - 460.0).clamp(280.0, 1000.0),
+        BROWSER_MIN_WIDTH,
+        (window_width - BROWSER_DIVIDER_WIDTH - BROWSER_SESSION_MIN_WIDTH).max(BROWSER_MIN_WIDTH),
     )
 }
 
@@ -22676,10 +22683,9 @@ impl XdDesktop {
                     }
                     if let Some((start_x, start_width)) = this.browser_drag {
                         if event.dragging() {
-                            let requested =
-                                (f32::from(start_width) + start_x - f32::from(event.position.x))
-                                    .round()
-                                    .clamp(280.0, 1000.0) as u16;
+                            // The cast saturates; browser_pane_width sets the range.
+                            let moved = start_x - f32::from(event.position.x);
+                            let requested = (f32::from(start_width) + moved).round() as u16;
                             this.settings.browser_width = browser_pane_width(
                                 requested,
                                 f32::from(window.viewport_size().width),
@@ -29459,7 +29465,13 @@ Binary files /dev/null and b/image.png differ\n";
             assert!(760.0 - width - BROWSER_DIVIDER_WIDTH >= 460.0);
         }
         assert_eq!(browser_pane_width(460, 1180.0), 460.0);
-        assert_eq!(browser_pane_width(u16::MAX, 3000.0), 1000.0);
+        // Wide windows let the browser grow past any fixed width, still
+        // leaving the session its minimum.
+        assert_eq!(browser_pane_width(1600, 2560.0), 1600.0);
+        assert_eq!(
+            browser_pane_width(u16::MAX, 2560.0),
+            2560.0 - BROWSER_DIVIDER_WIDTH - BROWSER_SESSION_MIN_WIDTH
+        );
     }
 
     #[test]
