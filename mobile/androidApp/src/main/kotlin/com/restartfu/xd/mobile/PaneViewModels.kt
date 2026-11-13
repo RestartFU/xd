@@ -204,6 +204,8 @@ public data class FilesPane(
     val open: OpenFiles = OpenFiles(),
     val loading: Boolean = false,
     val error: String? = null,
+    /** [error] is a folder that could not be listed, which reading the tree again can fix. */
+    val listFailed: Boolean = false,
 )
 
 /**
@@ -227,7 +229,7 @@ class FilesViewModel(
     fun toggle(path: String) {
         val current = _state.value
         val opening = !current.tree.isExpanded(path)
-        _state.value = current.copy(tree = current.tree.toggled(path), error = null)
+        _state.value = current.copy(tree = current.tree.toggled(path), error = null, listFailed = false)
         if (opening && !current.tree.isLoaded(path)) list(path)
     }
 
@@ -238,7 +240,7 @@ class FilesViewModel(
             show(FileTab.File(path))
             return
         }
-        _state.value = _state.value.copy(loading = true, error = null)
+        _state.value = _state.value.copy(loading = true, error = null, listFailed = false)
         viewModelScope.launch {
             try {
                 val content = session().readFile(path)
@@ -311,7 +313,7 @@ class FilesViewModel(
      */
     fun refresh() {
         val current = _state.value
-        _state.value = current.copy(tree = current.tree.invalidated(), error = null)
+        _state.value = current.copy(tree = current.tree.invalidated(), error = null, listFailed = false)
         list("")
         for (row in current.tree.rows()) {
             if (row.directory && row.expanded) list(row.path)
@@ -333,6 +335,7 @@ class FilesViewModel(
                     it.copy(
                         tree = it.tree.failed(path),
                         error = error.message ?: "Could not list that directory",
+                        listFailed = true,
                     )
                 }
             }

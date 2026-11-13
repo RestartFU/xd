@@ -21,6 +21,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.stateDescription
 import com.restartfu.xd.mobile.R
 import androidx.compose.foundation.layout.width
@@ -85,12 +87,24 @@ internal fun FilesPaneContent(model: FilesViewModel) {
         )
 
         state.error?.let { message ->
-            Text(
-                message,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    message,
+                    // Told as it appears: the tree may look as it did before.
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 4.dp)
+                        .semantics { liveRegion = LiveRegionMode.Polite },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                // A folder that could not be listed is listed again; a file that
+                // could not be opened (binary, too large) would only fail again.
+                if (state.listFailed) TextButton(onClick = model::refresh) { Text("Try again") }
+            }
         }
 
         when (val tab = state.open.active) {

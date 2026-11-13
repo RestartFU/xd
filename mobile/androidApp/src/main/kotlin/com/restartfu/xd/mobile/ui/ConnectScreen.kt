@@ -44,6 +44,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -99,12 +104,29 @@ internal fun ConnectScreen(model: MainViewModel) {
             keyboardActions = KeyboardActions(onDone = { pair() }),
         )
         Spacer(Modifier.height(12.dp))
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        Button(onClick = pair, enabled = ready, modifier = Modifier.fillMaxWidth()) {
-            if (connecting) CircularProgressIndicator() else Text("Pair and connect")
+        error?.let {
+            Text(
+                it,
+                // Told as it appears: the form gives no other sign that pairing failed.
+                modifier = Modifier.padding(bottom = 12.dp).semantics { liveRegion = LiveRegionMode.Polite },
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        Button(onClick = pair, enabled = ready, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            if (connecting) {
+                // Says what it is doing, at the size the button keeps throughout.
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = LocalContentColor.current)
+                Spacer(Modifier.width(10.dp))
+                Text(CONNECTING_LABEL)
+            } else {
+                Text("Pair and connect")
+            }
         }
     }
 }
+
+/** What the pairing button says while it connects. */
+internal const val CONNECTING_LABEL = "Connecting\u2026"
 
 /** The pairing form's two fields, for tests. */
 internal const val PAIRING_ADDRESS_TAG = "pairing-address"

@@ -125,22 +125,17 @@ internal fun TerminalPaneContent(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
             )
-            if (state.closed || state.error != null) {
+            // A terminal that failed to open says Try again under its error instead.
+            if (state.closed) {
                 TextButton(onClick = model::open) { Text("Reopen") }
-            } else {
+            } else if (state.error == null) {
                 TextButton(onClick = model::kill) { Text("Stop") }
             }
         }
 
         when {
             state.connecting -> Centered { CircularProgressIndicator() }
-            state.error != null -> Centered {
-                Text(
-                    state.error.orEmpty(),
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(16.dp),
-                )
-            }
+            state.error != null -> Box(Modifier.weight(1f)) { PaneError(state.error.orEmpty(), retry = model::open) }
             else -> BoxWithConstraints(
                 Modifier
                     .weight(1f)

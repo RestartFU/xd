@@ -29,6 +29,9 @@ import androidx.compose.material3.Button
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,7 +72,7 @@ internal fun DiffPaneContent(model: DiffViewModel) {
                 Text(
                     if (state.git == null) "Git status could not be read: $error"
                     else "This may be out of date: Git status could not be read again ($error)",
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -101,13 +104,7 @@ internal fun DiffPaneContent(model: DiffViewModel) {
 
         when {
             state.loading && state.patch.isEmpty() -> Centered { CircularProgressIndicator() }
-            state.error != null -> Centered {
-                Text(
-                    state.error.orEmpty(),
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(16.dp),
-                )
-            }
+            state.error != null -> PaneError(state.error.orEmpty(), retry = model::refresh)
             state.patch.isBlank() -> Centered {
                 Text(
                     if (state.branch) "No branch changes." else "No changes.",
@@ -323,4 +320,27 @@ private fun DiffFileHeader(
 @Composable
 internal fun Centered(content: @Composable () -> Unit) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { content() }
+}
+
+/**
+ * A pane that could not show what it holds: why, told to a screen reader as
+ * it appears, and Try again where another attempt can get past it.
+ */
+@Composable
+internal fun PaneError(message: String, retry: (() -> Unit)?) {
+    Centered {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                message,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center,
+            )
+            retry?.let { TextButton(onClick = it) { Text("Try again") } }
+        }
+    }
 }

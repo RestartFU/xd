@@ -66,6 +66,8 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.material3.ButtonDefaults
 import androidx.lifecycle.ViewModel
@@ -884,16 +886,32 @@ private fun MinimalProjectsHome(
             ) {
                 (treeError ?: operationError)?.let { error ->
                     item("error") {
-                        Text(
-                            error,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
-                            color = MaterialTheme.colorScheme.error,
-                        )
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                error,
+                                // Told as it appears, since the list may look as it did before.
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(vertical = 8.dp)
+                                    .semantics { liveRegion = LiveRegionMode.Polite },
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            // A tree that did not load is read again from here.
+                            if (treeError != null) {
+                                TextButton(onClick = model.client::refreshTree, enabled = !loading) { Text("Try again") }
+                            }
+                        }
                     }
                 }
                 if (rows.isEmpty()) {
-                    item("empty-projects") {
-                        EmptyCard("Create a project, then start a Codex or Claude session in it.")
+                    // With nothing read there is nothing to suggest making yet.
+                    if (treeError == null) {
+                        item("empty-projects") {
+                            EmptyCard("Create a project, then start a Codex or Claude session in it.")
+                        }
                     }
                 } else {
                     items(rows, key = ProjectTreeRow::id) { row ->
@@ -1186,9 +1204,10 @@ private fun MinimalGlobalTerminal(
         // The header names the page once and holds the shell's one action,
         // in place of a second row that only repeated "Terminal".
         ProductHeader(title = "Terminal", onSettings = onSettings) {
-            if (state.closed || state.error != null) {
+            // A shell that failed to open says Try again under its error instead.
+            if (state.closed) {
                 TextButton(onClick = terminal::open) { Text("Reopen") }
-            } else {
+            } else if (state.error == null) {
                 TextButton(
                     onClick = terminal::kill,
                     enabled = state.id != null,
