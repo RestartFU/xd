@@ -1003,6 +1003,9 @@ thread_local! {
     /// place in the code that draws them, so the next frame gives each a
     /// tooltip that reads it out in full.
     static CUT_LABELS: RefCell<HashSet<u64>> = RefCell::default();
+    /// Where each label the last frame cut short was painted, and its whole
+    /// text: the control the keyboard is on reads its label out from these.
+    static CUT_PAINTED: RefCell<Vec<(Bounds<Pixels>, SharedString)>> = RefCell::default();
     /// A menu or dialog is open over the window. What lies under it keeps
     /// its tooltips to itself: one that came up after a right-click would
     /// sit on top of the menu the click opened.
@@ -1061,6 +1064,9 @@ fn truncating_label(text: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> 
                     let room = bounds.size.width + gpui::px(0.5);
                     let whole = shape(drawn.clone());
                     let over = whole.width > room;
+                    if over {
+                        CUT_PAINTED.with(|cut| cut.borrow_mut().push((bounds, drawn.clone())));
+                    }
                     CUT_LABELS.with(|cut| {
                         let mut cut = cut.borrow_mut();
                         if !over {
@@ -1503,7 +1509,7 @@ fn ui_button(
             .hover(|style| style.bg(rgb(colors.accent_hover))),
         ButtonKind::Secondary => base
             .border_1()
-            .border_color(rgb(colors.border))
+            .border_color(rgb(colors.control_border))
             .bg(rgb(colors.surface))
             .text_color(rgb(colors.text))
             .hover(|style| style.bg(rgb(colors.surface_high))),
@@ -2524,6 +2530,8 @@ struct KeyFrame {
     stops: Vec<(KeyStop, Bounds<Pixels>)>,
     /// The control the Tab ring is on.
     stop: Option<SharedString>,
+    /// Where the row the arrow keys are on was painted.
+    cursor_bounds: Option<Bounds<Pixels>>,
     default: Option<(KeyLayer, KeyRun)>,
     /// The row Enter takes from a picker's search field before the arrow
     /// keys have moved: the first of its matches, past any switch above them.
@@ -2663,6 +2671,31 @@ impl KeyTargets {
         .inset_0()
     }
 
+    /// Notes where the row the arrow keys are on is painted: an element
+    /// that takes no room, laid over the row it is a child of.
+    fn mark_cursor(&self) -> impl IntoElement + use<> {
+        let targets = self.clone();
+        canvas(
+            move |bounds, _, _| targets.0.borrow_mut().cursor_bounds = Some(bounds),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+    }
+
+    /// Where the control the keyboard is on was painted: the one the Tab
+    /// ring is on, else the row the arrow keys are on.
+    fn keyed_bounds(&self) -> Option<Bounds<Pixels>> {
+        let frame = self.0.borrow();
+        let ringed = frame.stop.as_ref().and_then(|id| {
+            frame.stops.iter().find_map(|(stop, bounds)| match stop {
+                KeyStop::Control(stop, _) if stop == id => Some(*bounds),
+                _ => None,
+            })
+        });
+        ringed.or(frame.cursor_bounds)
+    }
+
     /// Whether the Tab ring is on the control `id`.
     fn stop_on(&self, id: &str) -> bool {
         self.0
@@ -2694,7 +2727,7 @@ fn key_row(
 ) -> gpui::Stateful<gpui::Div> {
     let run: KeyRun = Rc::new(run);
     let on = keys.row(layer, owner, run.clone());
-    row.when(on, |row| row.bg(rgb(fill)))
+    row.when(on, |row| row.bg(rgb(fill)).child(keys.mark_cursor()))
         .on_click(cx.listener(move |this, _, window, cx| run(this, window, cx)))
 }
 
@@ -3053,7 +3086,7 @@ fn field_border(focused: bool, colors: ThemeColors) -> gpui::Rgba {
     rgb(if focused {
         colors.selected_border
     } else {
-        colors.border
+        colors.control_border
     })
 }
 
@@ -16147,10 +16180,8 @@ impl XdDesktop {
     fn choose_minimal_theme(&mut self, theme: ThemePreset, cx: &mut Context<Self>) {
         let changed = self.settings.theme != theme;
         self.settings.theme = theme;
+        self.save_setting(THEME_SETTING);
         self.minimal_theme_open = false;
-        if let Err(error) = self.settings.save() {
-            self.model.connection_error = Some(error);
-        }
         if changed {
             self.send_terminal_colors();
         }
@@ -16212,10 +16243,40 @@ impl XdDesktop {
 
     fn toggle_minimal_all_permissions(&mut self, cx: &mut Context<Self>) {
         self.settings.allow_all_permissions = !self.settings.allow_all_permissions;
-        if let Err(error) = self.settings.save() {
-            self.model.connection_error = Some(error);
-        }
+        self.save_setting("minimal-all-permissions");
         cx.notify();
+    }
+
+    /// Saves the settings after `setting` changed. Changed on the Settings
+    /// page, a failure shows under that setting, where the change was made;
+    /// anywhere else it shows in the error banner.
+    fn save_setting(&mut self, setting: &'static str) {
+        if !self.minimal_theme_open {
+            if let Err(error) = self.settings.save() {
+                self.model.connection_error = Some(error);
+            }
+            return;
+        }
+        self.settings_saving = Some((setting, Instant::now()));
+        self.settings_failure = None;
+        if let Err(error) = self.settings.save() {
+            self.settings_failure = Some((setting, error.into()));
+        }
+    }
+
+    /// A save that failed on disk, reported after the fact: the setting just
+    /// changed on the Settings page says so under it, and any other save in
+    /// the error banner.
+    fn note_settings_save_error(&mut self, error: String) {
+        let message = format!("Could not save app settings: {error}");
+        let setting = self
+            .settings_saving
+            .filter(|(_, at)| self.minimal_theme_open && at.elapsed() < SETTING_SAVE_WINDOW)
+            .map(|(setting, _)| setting);
+        match setting {
+            Some(setting) => self.settings_failure = Some((setting, message.into())),
+            None => self.model.connection_error = Some(message),
+        }
     }
 
     /// The selected terminal's rendering, rebuilt only once its screen or the
@@ -16784,7 +16845,7 @@ impl XdDesktop {
                     bar.child(
                         icon_button(
                             "minimal-browser-toggle",
-                            "Toggle side pane",
+                            "Show or hide the side pane",
                             SIDE_LAYOUT_ICON,
                             colors,
                         )
@@ -17028,16 +17089,12 @@ impl XdDesktop {
                             .text_color(rgb(colors.muted))
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(colors.selected_surface)))
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| PaneTooltip {
-                                    label: "Open pull request".into(),
-                                    detail: Vec::new(),
-                                    colors,
-                                })
-                                .into()
-                            })
-                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                this.open_link(&url, event, window, cx);
+                            .tooltip(pane_tooltip("Open pull request", colors))
+                            .on_click(cx.listener({
+                                let url = url.clone();
+                                move |this, event: &ClickEvent, window, cx| {
+                                    this.open_link(&url, event, window, cx);
+                                }
                             }))
                             .child(
                                 svg()
@@ -17084,7 +17141,7 @@ impl XdDesktop {
                     .child(
                         icon_button(
                             "toggle-side-pane",
-                            "Toggle side pane",
+                            format!("Show or hide the side pane ({MOD_KEY}+B)"),
                             SIDE_LAYOUT_ICON,
                             colors,
                         )
@@ -17097,7 +17154,7 @@ impl XdDesktop {
                         controls.child(
                             icon_button(
                                 "toggle-bottom-pane",
-                                "Toggle bottom terminal",
+                                "Show or hide the terminal under the chat (Ctrl+`)",
                                 BOTTOM_LAYOUT_ICON,
                                 colors,
                             )
@@ -21318,7 +21375,7 @@ impl XdDesktop {
                     .items_center()
                     .rounded(px(RADIUS_CONTROL))
                     .border_1()
-                    .border_color(rgb(colors.border))
+                    .border_color(rgb(colors.control_border))
                     .cursor_pointer()
                     .text_size(text_px(TEXT_LABEL))
                     .font_weight(FontWeight::MEDIUM)
@@ -22092,7 +22149,7 @@ impl XdDesktop {
                 .items_center()
                 .rounded(px(RADIUS_CONTROL))
                 .border_1()
-                .border_color(rgb(colors.border))
+                .border_color(rgb(colors.control_border))
                 .cursor_pointer()
                 .text_size(text_px(TEXT_LABEL))
                 .font_weight(FontWeight::MEDIUM)
@@ -24503,7 +24560,7 @@ impl XdDesktop {
                             .border_color(rgb(if commit_focused {
                                 colors.selected_border
                             } else {
-                                colors.border
+                                colors.control_border
                             }))
                             .bg(rgb(colors.surface))
                             .child(div().w_full().child(self.git_commit_input.clone()))
@@ -26979,9 +27036,7 @@ impl XdDesktop {
         });
         // GPUI's own spacing and type helpers follow through the rem.
         window.set_rem_size(px(REM));
-        if let Err(error) = self.settings.save() {
-            self.model.connection_error = Some(error);
-        }
+        self.save_setting(workspace_settings::INTERFACE_SIZE_SETTING);
         window.refresh();
         cx.notify();
     }
@@ -27556,6 +27611,20 @@ impl XdDesktop {
             self.request_newer_messages();
         }
         true
+    }
+
+    /// The whole text of a label cut short in the control the keyboard is
+    /// on, and where that control is, from the frame before: it shows under
+    /// the control as it would under the pointer. Starts the next frame's
+    /// note of the labels it cuts.
+    fn keyed_cut_label(&self) -> Option<(Bounds<Pixels>, SharedString)> {
+        let cut = CUT_PAINTED.with(|cut| std::mem::take(&mut *cut.borrow_mut()));
+        let keyed = (self.key_stop.is_some() || self.key_cursor.is_some())
+            .then(|| self.key_targets.keyed_bounds())
+            .flatten()?;
+        cut.into_iter()
+            .find(|(label, _)| keyed.contains(&label.center()))
+            .map(|(_, text)| (keyed, text))
     }
 
     /// Forgets where the arrow keys were once their list is no longer the
@@ -33717,7 +33786,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert_eq!(focused(cx), (true, false));
         assert_eq!(
             frames(cx),
-            (rgb(colors.selected_border), rgb(colors.border)),
+            (rgb(colors.selected_border), rgb(colors.control_border)),
             "the field with the keyboard has the focus colour"
         );
         cx.simulate_keystrokes("tab");
@@ -33725,7 +33794,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert_eq!(focused(cx), (false, true));
         assert_eq!(
             frames(cx),
-            (rgb(colors.border), rgb(colors.selected_border))
+            (rgb(colors.control_border), rgb(colors.selected_border))
         );
         // After the fields come the buttons: Cancel, and then round to the
         // first field, Connect being one that cannot be pressed yet.
@@ -34513,6 +34582,510 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         });
     }
 
+    /// The open chat of [`keyboard_window`]'s first session, with its two
+    /// tabs and a short conversation.
+    fn keyboard_chat(desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext) {
+        cx.simulate_keystrokes("alt-down");
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.backend = "codex".into();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.transcript_snapshot.messages = Arc::new(vec![
+                Message::new(Some(1), "user", "Port the palette.", None),
+                Message::new(Some(2), "assistant", "Ported the palette.", None),
+            ]);
+            desktop.transcript_snapshot.sync_derived_rows();
+            desktop.sync_transcript_count(true);
+            cx.notify();
+        });
+        redraw(cx);
+    }
+
+    #[gpui::test]
+    fn tab_reaches_a_tabs_close_and_ctrl_w_closes_the_tab_in_front(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        assert_eq!(shown_chat(&desktop, cx).as_deref(), Some("implementation"));
+        let hidden = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| {
+                desktop
+                    .settings
+                    .hidden_chat_tabs
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+        };
+        // Tab stops on the second tab's close, which names itself, and
+        // Enter closes that tab.
+        tab_to(&desktop, cx, "close-session-chat-tab-1");
+        assert!(cx.debug_bounds("focus-tooltip").is_some());
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        assert_eq!(hidden(&desktop, cx), ["review"]);
+        // Reopen is reached the same way.
+        tab_to(&desktop, cx, "reopen-session-chat");
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        assert!(hidden(&desktop, cx).is_empty());
+
+        // Ctrl+W from the message box closes the chat in front, and the one
+        // left open stays open.
+        cx.simulate_keystrokes("escape ctrl-l");
+        redraw(cx);
+        let open = shown_chat(&desktop, cx).unwrap();
+        cx.simulate_keystrokes("ctrl-w");
+        redraw(cx);
+        let left = shown_chat(&desktop, cx).unwrap();
+        assert_ne!(left, open);
+        assert_eq!(hidden(&desktop, cx), std::slice::from_ref(&open));
+        cx.simulate_keystrokes("ctrl-w");
+        redraw(cx);
+        assert_eq!(shown_chat(&desktop, cx), Some(left));
+        assert_eq!(hidden(&desktop, cx), [open]);
+    }
+
+    #[gpui::test]
+    fn each_messages_copy_is_a_tab_stop_with_a_keyboard_menu(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        let clipboard = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        };
+        // The older message's Copy, hidden until the pointer is over it,
+        // shows while the ring is on it, and Enter copies.
+        let first = format!("{COPY_MESSAGE_STOP}0");
+        tab_to(&desktop, cx, &first);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(clipboard(cx).as_deref(), Some("Port the palette."));
+        // Shift+F10 opens the message's menu, whose Copy the keys choose.
+        cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string(String::new())));
+        cx.simulate_keystrokes("shift-f10");
+        redraw(cx);
+        assert!(cx.debug_bounds("message-menu").is_some());
+        cx.simulate_keystrokes("down enter");
+        redraw(cx);
+        assert_eq!(clipboard(cx).as_deref(), Some("Port the palette."));
+        desktop.read_with(cx, |desktop, _| assert!(desktop.message_menu.is_none()));
+        // And Escape closes it without copying.
+        tab_to(&desktop, cx, &first);
+        cx.simulate_keystrokes("shift-f10 escape");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| assert!(desktop.message_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn the_queue_the_pull_requests_and_reconnect_are_tab_stops(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.queue = vec!["Then the icons.".into()];
+            desktop.model.linked_pull_requests_supported = true;
+            let chat = desktop
+                .model
+                .chats
+                .iter_mut()
+                .find(|chat| chat.id == "implementation")
+                .unwrap();
+            chat.pull_requests = vec![LinkedPullRequest {
+                url: "https://github.com/acme/atlas/pull/12".into(),
+                state: None,
+            }];
+            cx.notify();
+        });
+        redraw(cx);
+        // A queued message is removed from the keyboard: asked of the host,
+        // which this window has none of.
+        tab_to(&desktop, cx, "native-drop-queued-0");
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        desktop.update(cx, |desktop, _| {
+            assert_eq!(
+                desktop.model.connection_error.take().as_deref(),
+                Some("xd is not connected to a host.")
+            );
+        });
+        redraw(cx);
+        // The header's pull request and its Link button.
+        tab_to(&desktop, cx, "minimal-session-pull-request-0");
+        tab_to(&desktop, cx, "minimal-session-link-pull-request");
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.pull_request_panel.is_some())
+        });
+        // In its panel: the link, its Remove, the field and Link.
+        let passed = tab_to(&desktop, cx, "pull-request-panel-remove-0");
+        assert!(
+            passed.iter().any(|on| on == "pull-request-panel-row-0"),
+            "{passed:?}"
+        );
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            // Asked of the host, which this window has none of.
+            assert!(desktop.pull_request_panel.as_ref().unwrap().error.is_some());
+        });
+        tab_to(&desktop, cx, "pull-request-panel-link");
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+
+        // Without a host the banner's Reconnect and close are reached too.
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.connected = false;
+            desktop.model.connection_error = Some("xd is not connected to a host.".into());
+            cx.notify();
+        });
+        redraw(cx);
+        tab_to(&desktop, cx, "error-banner-reconnect");
+        tab_to(&desktop, cx, "error-banner-close");
+        cx.simulate_keystrokes("enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.model.connection_error.is_none())
+        });
+    }
+
+    #[gpui::test]
+    fn the_terminals_tabs_close_and_new_are_tab_stops(cx: &mut gpui::TestAppContext) {
+        let shell = |id: &str| {
+            XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({"id": id})).unwrap()
+        };
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            desktop.bottom_terminal_open = true;
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            panel.sessions = vec![shell("first"), shell("second")];
+            panel.selected = Some("first".into());
+            window.focus(&desktop.root_focus);
+        });
+        redraw(cx);
+        tab_to(&desktop, cx, "minimal-terminal-tab-1");
+        cx.simulate_keystrokes("enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(
+                desktop.terminal_panel.as_ref().unwrap().selected.as_deref(),
+                Some("second")
+            );
+        });
+        tab_to(&desktop, cx, "minimal-close-terminal-0");
+        tab_to(&desktop, cx, "minimal-new-terminal");
+        assert!(cx.debug_bounds("focus-tooltip").is_some());
+    }
+
+    #[gpui::test]
+    fn a_projects_pause_is_a_tab_stop_and_in_its_menu(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.pause_folders_supported = true;
+            desktop.model.chats[0].working = true;
+            cx.notify();
+        });
+        redraw(cx);
+        // The button the pointer finds on the row, reached with Tab.
+        tab_to(&desktop, cx, "minimal-project-pause-0");
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        // And the same in the project's menu, opened from the keyboard on
+        // the landing page.
+        cx.simulate_keystrokes("shift-f10");
+        redraw(cx);
+        let pause = cx
+            .debug_bounds("catalog-project-pause")
+            .expect("Pause in the project's menu");
+        cx.simulate_click(pause.center(), gpui::Modifiers::default());
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.sidebar_context_menu.is_none());
+            // Asked of the host, which this window has none of.
+            assert_eq!(
+                desktop.model.connection_error.as_deref(),
+                Some("xd is not connected to a host.")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn every_dialog_field_is_named_above_its_frame(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.begin_workspace_create_in(WorkspaceCreateKind::Project, None, window, cx);
+        });
+        redraw(cx);
+        for label in [
+            "dialog-field-label:Project name",
+            "dialog-field-label:Repository path (optional)",
+            "dialog-field-label:Clone URL (optional)",
+        ] {
+            let name = cx
+                .debug_bounds(label)
+                .unwrap_or_else(|| panic!("{label} is drawn"));
+            assert!(name.size.height > px(0.0));
+        }
+        // Typing leaves the name in place, and a press on it puts the
+        // keyboard in its field.
+        cx.simulate_input("atlas");
+        redraw(cx);
+        assert!(cx.debug_bounds("dialog-field-label:Project name").is_some());
+        let clone = cx
+            .debug_bounds("dialog-field-label:Clone URL (optional)")
+            .unwrap();
+        cx.simulate_click(clone.center(), gpui::Modifiers::default());
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(
+                desktop
+                    .workspace_clone_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn plan_modes_access_is_a_locked_label(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.begin_chat_create("atlas".into(), window, cx);
+            desktop.new_chat_remembered.plan = Some(true);
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("draft-access-locked").is_some());
+        // Tab passes it by: it opens nothing.
+        let passed = tab_to(&desktop, cx, "draft-mode");
+        assert!(!passed.iter().any(|on| on == "draft-access"), "{passed:?}");
+        let locked = cx.debug_bounds("draft-access-locked").unwrap();
+        cx.simulate_click(locked.center(), gpui::Modifiers::default());
+        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.new_chat_menu, None));
+    }
+
+    #[gpui::test]
+    fn a_settings_save_that_fails_says_so_under_the_setting(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.simulate_keystrokes("ctrl-,");
+        redraw(cx);
+        // Changed on the Settings page, a failure shows beside the change.
+        let row = cx.debug_bounds("workspace-settings-reduce-motion").unwrap();
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        desktop.update(cx, |desktop, cx| {
+            desktop.note_settings_save_error("Permission denied".into());
+            cx.notify();
+        });
+        redraw(cx);
+        let failure = cx
+            .debug_bounds("setting-failure")
+            .expect("said under the row");
+        let row = cx.debug_bounds("workspace-settings-reduce-motion").unwrap();
+        assert!(row.contains(&failure.center()), "{failure:?} in {row:?}");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.model.connection_error, None, "not in the banner");
+        });
+        set_reduce_motion(false);
+        // A save from anywhere else still says so in the banner.
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        desktop.update(cx, |desktop, cx| {
+            desktop.note_settings_save_error("Permission denied".into());
+            cx.notify();
+        });
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(
+                desktop.model.connection_error.as_deref(),
+                Some("Could not save app settings: Permission denied")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_label_cut_short_reads_out_while_the_keyboard_is_on_it(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        cx.simulate_resize(size(px(760.0), px(560.0)));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.model = Some("an-extraordinarily-long-model-name-that-cannot-fit".into());
+            cx.notify();
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("ctrl-l");
+        tab_to(&desktop, cx, "native-option-model");
+        // One frame notes the cut, the next shows it under the option.
+        desktop.update(cx, |_, cx| cx.notify());
+        redraw(cx);
+        let option = cx.debug_bounds("native-option-model").unwrap();
+        let title = cx
+            .debug_bounds("keyed-title")
+            .expect("the whole name shows");
+        assert!(title.top() >= option.bottom() - px(1.0));
+        desktop.read_with(cx, |desktop, _| {
+            let (_, text) = desktop.key_title.clone().unwrap();
+            assert_eq!(
+                text.as_ref(),
+                "an-extraordinarily-long-model-name-that-cannot-fit"
+            );
+        });
+        // Off the option, it goes.
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.key_title, None));
+    }
+
+    #[gpui::test]
+    fn a_pulse_step_redraws_the_layer_and_leaves_the_workspace_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        cx.update(|cx| cx.bind_keys(all_key_bindings()));
+        let (root, cx) = cx.add_window_view(XdWindow::new);
+        let (desktop, layer) =
+            root.read_with(cx, |root, _| (root.desktop.clone(), root.layer.clone()));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = keyboard_fixture();
+            desktop.model.connected = true;
+            desktop.settings.browser_sessions.clear();
+            // A session at work shows its pulsing dot in the sidebar.
+            desktop.model.chats[0].working = true;
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(1180.0), px(780.0)));
+        redraw(cx);
+        let dots = || {
+            ANIMATED.with(|animated| {
+                animated
+                    .borrow()
+                    .marks
+                    .iter()
+                    .filter(|mark| matches!(mark.kind, AnimatedKind::Dot { .. }))
+                    .count()
+            })
+        };
+        assert!(dots() > 0, "the working dot is the layer's to draw");
+        let desktop_notes = Rc::new(Cell::new(0));
+        let layer_notes = Rc::new(Cell::new(0));
+        cx.update(|_, cx| {
+            let counted = desktop_notes.clone();
+            cx.observe(&desktop, move |_, _| counted.set(counted.get() + 1))
+                .detach();
+            let counted = layer_notes.clone();
+            cx.observe(&layer, move |_, _| counted.set(counted.get() + 1))
+                .detach();
+        });
+        let renders = DESKTOP_RENDERS.with(Cell::get);
+        // The pulse's timer runs on the clock on the wall, which the tests'
+        // clock does not move: its steps are taken here, as it takes them.
+        for _ in 0..3 {
+            desktop.update(cx, |desktop, cx| desktop.pulse_tick(cx));
+            cx.run_until_parked();
+            // A frame for what changed, and no more.
+            cx.update(|window, cx| window.draw(cx).clear());
+        }
+        assert_eq!(
+            desktop_notes.get(),
+            0,
+            "the pulse leaves the workspace alone"
+        );
+        assert!(layer_notes.get() >= 3, "each step redraws the layer");
+        assert_eq!(
+            DESKTOP_RENDERS.with(Cell::get),
+            renders,
+            "the workspace is not drawn again"
+        );
+        assert!(dots() > 0, "its marks stay noted for the layer");
+
+        // With motion reduced the dot holds still, drawn in place.
+        set_reduce_motion(true);
+        desktop.update(cx, |_, cx| cx.notify());
+        redraw(cx);
+        assert_eq!(dots(), 0);
+        set_reduce_motion(false);
+    }
+
+    #[gpui::test]
+    fn a_new_chat_can_start_on_a_pull_requests_branch(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.begin_chat_create("atlas".into(), window, cx);
+            desktop.chat_create_sources_loading = false;
+            desktop.chat_create_branches = vec![NewSessionBranch {
+                name: "main".into(),
+                reference: "refs/heads/main".into(),
+                oid: "aaa".into(),
+            }];
+            desktop.chat_create_pull_requests = vec![
+                NewSessionPullRequest {
+                    number: 42,
+                    title: "Fix the parser".into(),
+                    oid: "ccc".into(),
+                },
+                NewSessionPullRequest {
+                    number: 7,
+                    title: "Document the keys".into(),
+                    oid: "ddd".into(),
+                },
+            ];
+            desktop.chat_create_worktree = Some(NewSessionWorktree::Branch {
+                reference: "refs/heads/main".into(),
+                oid: "aaa".into(),
+            });
+        });
+        redraw(cx);
+        // The branch chip, reached with Tab, opens the picker, which lists
+        // the pull requests over the branches.
+        tab_to(&desktop, cx, "draft-branch");
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        let first = cx.debug_bounds("draft-pull-request-42").expect("listed");
+        let second = cx.debug_bounds("draft-pull-request-7").expect("listed");
+        assert!(first.top() < second.top());
+        // Its search finds one by title or number, and Enter takes it.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(
+                desktop
+                    .new_chat_search
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window),
+                "the picker's search has the keyboard"
+            );
+        });
+        DRAWN_LABELS.with(|labels| labels.borrow_mut().clear());
+        cx.simulate_input("42");
+        redraw(cx);
+        let drawn = DRAWN_LABELS.with(|labels| labels.borrow().clone());
+        assert!(
+            drawn.iter().any(|label| label == "#42 Fix the parser"),
+            "{drawn:?}"
+        );
+        assert!(
+            !drawn.iter().any(|label| label == "#7 Document the keys"),
+            "{drawn:?}"
+        );
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(
+                desktop.chat_create_worktree,
+                Some(NewSessionWorktree::PullRequest {
+                    number: 42,
+                    oid: "ccc".into(),
+                })
+            );
+            assert_eq!(desktop.new_chat_menu, None);
+            assert_eq!(desktop.new_chat_status(), "Checking out pull request #42");
+        });
+        // The chip names it as the picker did.
+        DRAWN_LABELS.with(|labels| labels.borrow_mut().clear());
+        desktop.update(cx, |_, cx| cx.notify());
+        redraw(cx);
+        assert!(
+            DRAWN_LABELS.with(|labels| labels
+                .borrow()
+                .iter()
+                .any(|label| label == "#42 Fix the parser")),
+            "the branch chip names the pull request"
+        );
+    }
+
     #[gpui::test]
     fn what_was_only_stored_is_now_said(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = keyboard_window(cx);
@@ -34531,7 +35104,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             assert_eq!(desktop.workspace_clone_status, None);
         });
 
-        // The branch picker says why it lists no branches.
+        // The branch picker says why it lists no pull requests.
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.begin_chat_create("atlas".into(), window, cx);
             desktop.chat_create_sources_loading = false;

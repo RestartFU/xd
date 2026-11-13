@@ -207,6 +207,54 @@ fn selectable_themes_produce_distinct_palettes() {
     }
 }
 
+/// The grounds a control or a scroll area is drawn on in a theme: the
+/// opaque roles, and the glass panes and composer over the window's backdrop.
+fn grounds(colors: xd_desktop::theme::ThemeColors) -> Vec<(&'static str, u32)> {
+    let glass = colors.glass;
+    vec![
+        ("background", colors.background),
+        ("sidebar", colors.sidebar),
+        ("surface", colors.surface),
+        ("surface_high", colors.surface_high),
+        ("selected_surface", colors.selected_surface),
+        ("chrome", colors.chrome),
+        ("composer", colors.composer),
+        ("glass backdrop", glass.backdrop),
+        ("glass pane", Glass::over(glass.pane, glass.backdrop)),
+        (
+            "glass composer",
+            Glass::over(glass.composer, glass.backdrop),
+        ),
+    ]
+}
+
+#[test]
+fn scroll_thumbs_and_control_edges_read_at_three_to_one_on_every_ground() {
+    for preset in ThemePreset::ALL {
+        let colors = preset.colors();
+        for (ground, color) in grounds(colors) {
+            // The thumb is translucent: what shows is it over the ground.
+            let thumb = Glass::over(colors.scroll_thumb, color);
+            let ratio = contrast(thumb, color);
+            assert!(
+                ratio >= 3.0,
+                "{preset:?} scroll thumb on {ground} is {ratio:.2}:1"
+            );
+            let ratio = contrast(colors.control_border, color);
+            assert!(
+                ratio >= 3.0,
+                "{preset:?} control edge on {ground} is {ratio:.2}:1"
+            );
+        }
+        // The hairlines between panes stay quiet: under the control edge.
+        assert!(
+            contrast(colors.border, colors.background)
+                < contrast(colors.control_border, colors.background),
+            "{preset:?}"
+        );
+    }
+}
+
 fn contrast(foreground: u32, background: u32) -> f64 {
     let foreground = luminance(foreground);
     let background = luminance(background);

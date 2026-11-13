@@ -710,22 +710,24 @@ impl XdDesktop {
             if option == "account" && !offers_accounts {
                 continue;
             }
-            let label = if option == "access" && plan {
-                "Read only".to_owned()
-            } else {
-                label
-            };
-            let chip = composer::composer_option(
-                SharedString::from(format!("draft-{option}")),
-                None,
-                label,
-                if option == "account" { 220.0 } else { 160.0 },
-                colors,
-            );
+            let id = SharedString::from(format!("draft-{option}"));
+            let max_width = if option == "account" { 220.0 } else { 160.0 };
+            // Plan mode only reads: its access is settled, not a choice.
             let chip = if option == "access" && plan {
-                chip
+                composer::composer_option_locked(
+                    id,
+                    "Read only".to_owned(),
+                    "Plan mode only reads. Build sets the access.",
+                    max_width,
+                    colors,
+                )
+                .debug_selector(|| "draft-access-locked".into())
             } else {
-                self.draft_picker_toggle(option, chip, cx)
+                self.draft_picker_toggle(
+                    option,
+                    composer::composer_option(id, None, label, max_width, colors),
+                    cx,
+                )
             };
             controls.push(
                 div()
@@ -954,13 +956,7 @@ impl XdDesktop {
                     .px(px(2.0))
                     .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
-                    .child(
-                        div()
-                            .size(px(7.0))
-                            .rounded_full()
-                            .bg(rgb(colors.working))
-                            .opacity(pulse_opacity()),
-                    )
+                    .child(pulse_dot(7.0, colors.working, true))
                     .child(self.new_chat_status())
                     .child(working_dots(0, colors.muted)),
             )

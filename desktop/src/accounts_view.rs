@@ -684,7 +684,7 @@ impl XdDesktop {
                                     KeyStop::Control(switch_stop.clone(), flip),
                                 ))
                                 .when(keys.stop_on(&switch_stop), |switch| {
-                                    switch.child(focus_ring(colors, 14.0))
+                                    switch.child(focus_ring(colors, PILL_RING_RADIUS))
                                 }),
                         ),
                 )

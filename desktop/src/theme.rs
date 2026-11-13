@@ -16,7 +16,12 @@ pub struct ThemeColors {
     pub sidebar: u32,
     pub surface: u32,
     pub surface_high: u32,
+    /// A quiet hairline: between panes, around cards, menus and dialogs.
     pub border: u32,
+    /// The edge that shows where a control is: a field's frame and a
+    /// secondary button's. It reads at 3:1 or more on every ground a control
+    /// sits on; [`ThemeColors::border`] stays quiet for decoration.
+    pub control_border: u32,
     pub selected_surface: u32,
     pub selected_border: u32,
     pub text: u32,
@@ -61,7 +66,7 @@ pub struct ThemeColors {
     /// Usage's bars and charts.
     pub chart: ChartInk,
     /// The thumb that shows how far a scroll area has scrolled, as
-    /// `0xRRGGBBAA`.
+    /// `0xRRGGBBAA`: at 3:1 or more over every ground it is drawn on.
     pub scroll_thumb: u32,
     /// The wash under an icon button on a tinted banner, such as the error
     /// banner's close button, as `0xRRGGBBAA` of the banner's ink.
@@ -168,6 +173,7 @@ impl ThemePreset {
                 surface: 0x111111,
                 surface_high: 0x1b1b1b,
                 border: 0x2a2a2a,
+                control_border: 0x6e6e6e,
                 selected_surface: 0x222222,
                 selected_border: 0x7178e6,
                 text: 0xf2f2f2,
@@ -209,7 +215,7 @@ impl ThemePreset {
                     claude_area: 0xd977571f,
                     area: 0xf2f2f21f,
                 },
-                scroll_thumb: 0xffffff38,
+                scroll_thumb: 0xffffff5c,
                 banner_wash: 0xff94a224,
                 pill_alpha: 0x24,
             },
@@ -219,6 +225,7 @@ impl ThemePreset {
                 surface: 0xf8f9fd,
                 surface_high: 0xeceef7,
                 border: 0xd3d7e6,
+                control_border: 0x7a7f92,
                 selected_surface: 0xdfe2f4,
                 selected_border: 0x6366e0,
                 text: 0x1b1e2c,
@@ -260,7 +267,7 @@ impl ThemePreset {
                     claude_area: 0xb85c3f1f,
                     area: 0x1b1e2c1f,
                 },
-                scroll_thumb: 0x1b1e2c3d,
+                scroll_thumb: 0x1b1e2c84,
                 banner_wash: 0x97203a24,
                 pill_alpha: 0x24,
             },

@@ -19,6 +19,9 @@ const SETTINGS_COLUMN_WIDTH: f32 = 680.0;
 const SETTINGS_COLUMN_PADDING: f32 = 40.0;
 /// The padding inside a settings card, around a row's content.
 const SETTINGS_CARD_PADDING: f32 = 14.0;
+/// A section's row in the navigation column: a little taller than a menu
+/// row, as a sidebar's rows are in System Settings, for an icon beside it.
+const SETTINGS_NAV_ROW_HEIGHT: f32 = 34.0;
 /// The title bar stays visible above the settings page.
 const SETTINGS_TITLEBAR_HEIGHT: f32 = 38.0;
 
@@ -343,8 +346,30 @@ fn unlisted_model_label(id: &str) -> String {
     format!("{id} (not offered by this host)")
 }
 
+/// Why a setting was not saved, in the danger ink under its words.
+fn setting_failure_line(error: SharedString, colors: ThemeColors) -> gpui::Div {
+    div()
+        .debug_selector(|| "setting-failure".into())
+        .mt(px(4.0))
+        .flex()
+        .items_start()
+        .gap(px(6.0))
+        .text_size(text_px(TEXT_LABEL))
+        .line_height(px(17.0))
+        .text_color(rgb(colors.danger))
+        .child(
+            div()
+                .h(px(17.0))
+                .flex()
+                .items_center()
+                .child(icon(ALERT_ICON, 12.0, colors.danger)),
+        )
+        .child(div().min_w_0().child(error))
+}
+
 /// The row a setting draws: its title and description on the left, with the
-/// caller adding the control on the right.
+/// caller adding the control on the right, and under them why its last save
+/// failed, when it did.
 fn settings_row(
     id: impl Into<gpui::ElementId>,
     title: impl Into<SharedString>,
@@ -352,6 +377,8 @@ fn settings_row(
     colors: ThemeColors,
 ) -> gpui::Stateful<gpui::Div> {
     let description = description.into();
+    let id = id.into();
+    let failure = super::setting_failure(&id);
     div()
         .id(id)
         .w_full()
@@ -385,6 +412,9 @@ fn settings_row(
                             .text_color(rgb(colors.muted))
                             .child(description),
                     )
+                })
+                .when_some(failure, |body, error| {
+                    body.child(setting_failure_line(error, colors))
                 }),
         )
 }
@@ -466,6 +496,8 @@ const SETTINGS_ROW_TEXT_MIN: f32 = 150.0;
 const SETTINGS_MENU: &str = "settings-menu";
 /// The Interface size dropdown, among the page's dropdowns.
 const INTERFACE_SIZE_MENU: &str = "interface-size";
+/// The Interface size row, for a failure to save it.
+pub(super) const INTERFACE_SIZE_SETTING: &str = "workspace-settings-interface-size";
 const INTERFACE_SIZE_DESCRIPTION: &str = "Scales everything in the window: text, controls, spacing and the terminal. Pages in the browser keep their own size.";
 
 /// A setting that is a switch. A click anywhere on its row flips it; Tab
@@ -492,7 +524,9 @@ fn key_switch(
                 .flex_none()
                 .child(settings_switch(colors, on))
                 .child(keys.mark(KeyLayer::Overlay, KeyStop::Control(id.into(), run)))
-                .when(ringed, |switch| switch.child(focus_ring(colors, 14.0))),
+                .when(ringed, |switch| {
+                    switch.child(focus_ring(colors, PILL_RING_RADIUS))
+                }),
         )
 }
 
@@ -799,7 +833,7 @@ impl XdDesktop {
             })
             .collect();
         self.dropdown_row(
-            "workspace-settings-interface-size",
+            INTERFACE_SIZE_SETTING,
             INTERFACE_SIZE_MENU,
             "Interface size",
             INTERFACE_SIZE_DESCRIPTION,
@@ -1120,9 +1154,7 @@ impl XdDesktop {
                 move |this, _, cx| {
                     toggle(&mut this.settings);
                     super::set_reduce_motion(this.settings.reduce_motion);
-                    if let Err(error) = this.settings.save() {
-                        this.model.connection_error = Some(error);
-                    }
+                    this.save_setting(id);
                     cx.notify();
                 },
             )
@@ -1262,6 +1294,10 @@ impl XdDesktop {
                                 .text_size(text_px(TEXT_LABEL))
                                 .text_color(rgb(colors.muted))
                                 .child("Dark or Light. Both are frosted glass."),
+                        )
+                        .children(
+                            super::setting_failure(&THEME_SETTING.into())
+                                .map(|error| setting_failure_line(error, colors)),
                         ),
                 )
                 // Side by side when there is room, else one to a row, so the
@@ -2000,6 +2036,8 @@ impl XdDesktop {
         if !self.minimal_theme_open {
             self.settings_menu = None;
         }
+        // Each setting's row looks for a failure of its own as it is drawn.
+        super::SETTING_FAILURE.with(|failure| failure.replace(self.settings_failure.clone()));
         let window_width = logical(window.viewport_size().width);
         let narrow = window_width < SETTINGS_NARROW_WINDOW;
         let column = settings_column_width(window_width);
@@ -2123,7 +2161,7 @@ impl XdDesktop {
                         let quiet = searching && matches.is_none();
                         div()
                             .id(("workspace-settings-section", index))
-                            .h(px(34.0))
+                            .h(px(SETTINGS_NAV_ROW_HEIGHT))
                             .px(px(8.0))
                             .flex_none()
                             .flex()

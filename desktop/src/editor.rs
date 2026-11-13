@@ -9,7 +9,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::metrics::{TEXT_CONTROL, TEXT_LABEL, TEXT_MONO, px};
+use crate::metrics::{TEXT_CONTROL, TEXT_LABEL, TEXT_MONO, px, text_px};
 
 use xd_desktop::markdown::{self, CodeKind, CodeSpan};
 
@@ -998,9 +998,10 @@ impl Element for EditorElement {
             let line_number = (!input.composer).then(|| {
                 let number: SharedString = (index + 1).to_string().into();
                 let runs = vec![text_run(number.len(), &style, input.colors.faint)];
-                let layout = window
-                    .text_system()
-                    .shape_line(number, px(TEXT_LABEL), &runs, None);
+                let layout =
+                    window
+                        .text_system()
+                        .shape_line(number, text_px(TEXT_LABEL), &runs, None);
                 PaintedLineNumber {
                     origin: point(
                         bounds.left() + gutter_width - px(10.0) - layout.width,

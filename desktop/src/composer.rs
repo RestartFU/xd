@@ -393,6 +393,39 @@ pub(super) fn composer_option(
         .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.faint))
 }
 
+/// A composer option that cannot be changed now, such as access in Plan
+/// mode: its words alone, as a settled chip in the row under the composer
+/// is, with nothing that looks pressable or points at a menu. `why` says
+/// what holds it, under the pointer.
+pub(super) fn composer_option_locked(
+    id: impl Into<gpui::ElementId>,
+    label: String,
+    why: &'static str,
+    max_width: f32,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(CONTROL_HEIGHT_COMPACT))
+        .px(px(8.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .max_w(px(max_width))
+        .min_w_0()
+        .text_size(text_px(TEXT_LABEL))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(colors.muted))
+        .tooltip(move |_, cx| {
+            cx.new(|_| ClearTooltip {
+                label: why.into(),
+                colors,
+            })
+            .into()
+        })
+        .child(truncating_label(label).min_w_0())
+}
+
 impl XdDesktop {
     pub(super) fn render_composer(
         &mut self,

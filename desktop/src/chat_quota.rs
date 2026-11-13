@@ -182,7 +182,7 @@ impl XdDesktop {
         } else if focused {
             colors.selected_border
         } else {
-            colors.border
+            colors.control_border
         };
         Some(
             div()
@@ -289,17 +289,12 @@ impl XdDesktop {
                 .mr_2()
                 .text_size(text_px(TEXT_CAPTION))
                 .text_color(rgb(tone))
-                .tooltip(move |_, cx| {
-                    cx.new(|_| PaneTooltip {
-                        label: "How much of its account's 5-hour limit this chat has used, \
-                                against its quota. An estimate: chats working on one \
-                                account share each rise."
-                            .into(),
-                        detail: Vec::new(),
-                        colors,
-                    })
-                    .into()
-                })
+                .tooltip(pane_tooltip(
+                    "How much of its account's 5-hour limit this chat has used, \
+                     against its quota. An estimate: chats working on one \
+                     account share each rise.",
+                    colors,
+                ))
                 .child(format!(
                     "Quota {}% of {}%",
                     quota_points(quota.used),
