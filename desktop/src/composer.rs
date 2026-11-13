@@ -52,15 +52,17 @@ pub(super) fn composer_room(room: Rc<Cell<Option<Pixels>>>) -> impl IntoElement 
 }
 
 /// The most of the window a docked ask takes before it scrolls: half the
-/// window's height, and less in a window too short for that to leave the
-/// editor and its options in sight under it, down to room for the question.
+/// window's height. Where that leaves too little for what is around it, the
+/// ask gives up more: the composer shrinks into the room the title bar, the
+/// session's header and tabs, the row under the composer and the least of
+/// the conversation leave, so what it gives up follows what is really there.
 pub(super) fn ask_max_height(window: f32) -> f32 {
-    /// What the title bar, the session's header and tabs, and the editor,
-    /// two rows of options and the worktree row under the ask take of the
-    /// window.
-    const AROUND: f32 = 320.0;
-    (window * 0.5).min(window - AROUND).max(72.0)
+    window * 0.5
 }
+
+/// The least of the conversation a docked ask leaves in sight: two lines of
+/// the last message.
+pub(super) const TRANSCRIPT_MIN_HEIGHT: f32 = 2.0 * MESSAGE_LINE_HEIGHT;
 
 /// What differs between the composers. Everything else is drawn the same.
 pub(super) struct ComposerParts {
@@ -77,6 +79,9 @@ pub(super) struct ComposerParts {
     /// What waits on the user in this chat, docked at the top of the box
     /// above a hairline: a question, an approval, or a quota stop.
     pub ask: Option<gpui::AnyElement>,
+    /// Room is short: the options keep to one row, cutting their labels
+    /// short, and the editor starts a line high.
+    pub compact: bool,
 }
 
 /// The docked ask's first line: the waiting ring, its title, and, when more
@@ -93,7 +98,7 @@ pub(super) fn ask_header(
         // Centred on the title's first line, however many lines it takes.
         .child(
             div()
-                .h(px(22.0))
+                .h(px(if short_window() { 20.0 } else { 22.0 }))
                 .flex()
                 .items_center()
                 .child(waiting_ring(colors)),
@@ -103,7 +108,7 @@ pub(super) fn ask_header(
                 .flex_1()
                 .min_w_0()
                 .text_size(text_px(TEXT_HEADING))
-                .line_height(px(22.0))
+                .line_height(px(if short_window() { 20.0 } else { 22.0 }))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(colors.text))
                 .child(title.into()),
@@ -121,6 +126,12 @@ pub(super) fn ask_header(
                     .child(counter),
             )
         })
+}
+
+/// The room between the parts of a docked ask: less in a short window,
+/// where its question and first answer must fit above the editor.
+pub(super) fn ask_gap() -> f32 {
+    if short_window() { 8.0 } else { 12.0 }
 }
 
 /// One of a question's choices in the docked ask: a faint number, which is
@@ -141,7 +152,9 @@ pub(super) fn ask_choice(
         .group(group.clone())
         .w_full()
         .px(px(10.0))
-        .py(px(9.0))
+        // In a short window a row is a line and a little, so the first
+        // answer fits whole under the question.
+        .py(px(if short_window() { 5.0 } else { 9.0 }))
         .flex()
         .items_start()
         .gap(px(14.0))
@@ -396,6 +409,7 @@ impl XdDesktop {
             actions,
             show_attachments,
             ask,
+            compact,
         } = parts;
         let input = match owner {
             DraftOwner::Chat => self.composer_input.clone(),
@@ -414,26 +428,25 @@ impl XdDesktop {
             DraftOwner::Chat => ("native-composer-shell", "native-composer", "native-attach"),
             DraftOwner::NewChat => ("draft-composer-shell", "draft-composer", "draft-attach"),
         };
-        // In a short window a docked ask gives up its height before the
-        // editor and Send do: the composer shrinks into the chat's room, and
-        // the ask scrolls inside what is left.
-        let squeezed =
-            ask.is_some() && crate::logical(window.viewport_size().height) < crate::SHORT_WINDOW;
+        // A docked ask gives up its height before the editor and Send do:
+        // the composer shrinks into the chat's room, and the ask scrolls
+        // inside what is left.
+        let docked = ask.is_some();
         div()
             .id(shell_id)
-            .when(squeezed, |shell| shell.flex_shrink().min_h_0())
+            .when(docked, |shell| shell.flex_shrink().min_h_0())
             .debug_selector(move || match owner {
                 DraftOwner::Chat => "chat-composer".into(),
                 DraftOwner::NewChat => "new-chat-composer".into(),
             })
             .w_full()
             .max_w(width)
-            .pt(px(10.0))
-            .pb(px(8.0))
+            .pt(px(if compact { 6.0 } else { 10.0 }))
+            .pb(px(if compact { 6.0 } else { 8.0 }))
             .px(px(8.0))
             .flex()
             .flex_col()
-            .gap_1()
+            .gap(px(if compact { 2.0 } else { 4.0 }))
             .rounded(px(RADIUS_COMPOSER))
             .border_1()
             .border_color(rgb(if focus.is_focused(window) {
@@ -459,20 +472,19 @@ impl XdDesktop {
                         div()
                             .id("composer-ask")
                             .debug_selector(|| "composer-ask".into())
-                            .when(!squeezed, |ask| {
-                                ask.flex_shrink_0().max_h(px(ask_max_height(crate::logical(
-                                    window.viewport_size().height,
-                                ))))
-                            })
-                            .when(squeezed, |ask| ask.flex_shrink().min_h_0())
+                            .max_h(px(ask_max_height(crate::logical(
+                                window.viewport_size().height,
+                            ))))
+                            .flex_shrink()
+                            .min_h_0()
                             .overflow_y_scroll()
                             .thumbed("composer-ask", colors)
                             // Choice rows reach into its padding; patches and
                             // commands scroll inside their own boxes.
                             .overflow_x_hidden()
-                            .pt(px(6.0))
+                            .pt(px(if compact { 2.0 } else { 6.0 }))
                             .px(px(10.0))
-                            .pb(px(6.0))
+                            .pb(px(if compact { 4.0 } else { 6.0 }))
                             // Its buttons and fields keep the focus they take,
                             // rather than the box handing it to the editor.
                             .on_click(|_, _, cx| cx.stop_propagation())
@@ -482,7 +494,7 @@ impl XdDesktop {
                         div()
                             .flex_none()
                             .mx(px(10.0))
-                            .mb(px(6.0))
+                            .mb(px(if compact { 4.0 } else { 6.0 }))
                             .h(px(1.0))
                             .bg(rgb(colors.border)),
                     )
@@ -492,7 +504,7 @@ impl XdDesktop {
                 div()
                     .id(editor_id)
                     .debug_selector(move || editor_id.into())
-                    .min_h(px(48.0))
+                    .min_h(px(if compact { 32.0 } else { 48.0 }))
                     .max_h(px(200.0))
                     .px(px(8.0))
                     .py_1()
@@ -527,9 +539,10 @@ impl XdDesktop {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .py(px(2.0))
+                            .py(px(if compact { 0.0 } else { 2.0 }))
                             .flex()
-                            .flex_wrap()
+                            .when(!compact, |options| options.flex_wrap())
+                            .when(compact, |options| options.overflow_hidden())
                             .items_center()
                             .gap_1()
                             .child(

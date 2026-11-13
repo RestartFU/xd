@@ -240,6 +240,35 @@ const SESSION_NEST_INDENT: f32 = 10.0;
 /// removed message: long enough to notice what went and come back for it
 /// with the keyboard, and the next of those replaces it sooner.
 const UNDO_LIFETIME: Duration = Duration::from_secs(30);
+/// The height of a line of a message's prose.
+const MESSAGE_LINE_HEIGHT: f32 = 23.0;
+
+/// How long after a change on the Settings page a failed save is still
+/// that change's: the background writer reports within a moment.
+const SETTING_SAVE_WINDOW: Duration = Duration::from_secs(10);
+/// The theme cards' place in Settings, for a failure to save them.
+const THEME_SETTING: &str = "minimal-theme";
+
+thread_local! {
+    /// The setting whose save failed, and why, while Settings draws.
+    static SETTING_FAILURE: RefCell<Option<(&'static str, SharedString)>> =
+        const { RefCell::new(None) };
+}
+
+/// Why the setting drawn as `id` was not saved, when its last save failed.
+fn setting_failure(id: &gpui::ElementId) -> Option<SharedString> {
+    let gpui::ElementId::Name(name) = id else {
+        return None;
+    };
+    SETTING_FAILURE.with(|failure| {
+        failure
+            .borrow()
+            .as_ref()
+            .filter(|(setting, _)| *setting == name.as_ref())
+            .map(|(_, error)| error.clone())
+    })
+}
+
 /// How long the sidebar's footer says a clone finished.
 const CLONE_NOTICE_LIFETIME: Duration = Duration::from_secs(8);
 /// Rows of the Settled shelf shown at first, and how many Show more adds.
@@ -723,6 +752,11 @@ thread_local! {
     /// its tooltips to itself: one that came up after a right-click would
     /// sit on top of the menu the click opened.
     static UNDER_A_DIALOG: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the window the frame is drawn in is short: see [`SHORT_WINDOW`].
+fn short_window() -> bool {
+    FRAME_VIEWPORT.with(Cell::get).1 < SHORT_WINDOW
 }
 
 fn under_a_dialog() -> bool {
@@ -19755,7 +19789,7 @@ impl XdDesktop {
             markdown::Block::Paragraph(content) => div()
                 .id(("native-paragraph", index))
                 .text_size(text_px(TEXT_BODY))
-                .line_height(px(23.0))
+                .line_height(px(MESSAGE_LINE_HEIGHT))
                 .text_color(rgb(colors.text))
                 .child(Self::render_native_inline(content, colors, index))
                 .into_any_element(),
@@ -22406,7 +22440,7 @@ impl XdDesktop {
                 .w_full()
                 .flex()
                 .flex_col()
-                .gap(px(12.0))
+                .gap(px(composer::ask_gap()))
                 .child(composer::ask_header(question, None, colors))
                 .children(self.render_ask_choices(colors, cx))
                 .into_any_element(),
@@ -22431,7 +22465,7 @@ impl XdDesktop {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(px(composer::ask_gap()))
             .text_size(text_px(TEXT_CONTROL))
             .text_color(rgb(colors.text));
         if method == "item/tool/requestUserInput" {
@@ -23140,6 +23174,9 @@ impl XdDesktop {
             .map(|backend| !backend.efforts.is_empty())
             .unwrap_or(matches!(agent, Some(AgentCli::Codex | AgentCli::Claude)));
         let option_keys = self.key_targets.clone();
+        // A short window keeps the options to one row: each gives up room,
+        // cutting its label short, instead of wrapping to a second.
+        let short = short_window();
         let offers_accounts = !self.open_chat_account_choices(colors).is_empty();
         let options = [
             ("model", self.model.selected_model_label()),
@@ -23187,6 +23224,7 @@ impl XdDesktop {
                 colors,
             )
             .debug_selector(move || format!("native-option-{option}"))
+            .when(short, |chip| chip.flex_shrink())
             .key_stop(
                 &option_keys,
                 KeyLayer::Page,
@@ -23287,6 +23325,7 @@ impl XdDesktop {
                     actions,
                     show_attachments: true,
                     ask,
+                    compact: short,
                 },
                 colors,
                 window,
@@ -23320,7 +23359,6 @@ impl XdDesktop {
                     }))
             });
         // A short window gives the row's height to the composer above it.
-        let short = FRAME_VIEWPORT.with(Cell::get).1 < SHORT_WINDOW;
         let context_row = (metadata_ready && !short)
             .then(|| self.render_chat_context_row(colors))
             .flatten();
@@ -23363,8 +23401,12 @@ impl XdDesktop {
                             .mb(px(28.0))
                     })
                     .min_h_0()
+                    // A docked ask leaves the last lines of the conversation.
+                    .when(ask_docked && !empty_ready, |pane| {
+                        pane.min_h(px(composer::TRANSCRIPT_MIN_HEIGHT))
+                    })
                     .w_full()
-                    // A docked ask in a short window may take all of it.
+                    // In a short window the ask needs the room more.
                     .when(!(short && ask_docked), |pane| pane.pt_4())
                     .children(started_by)
                     .child(transcript)
@@ -23461,7 +23503,13 @@ impl XdDesktop {
                 )
             })
             .child(composer::composer_room(self.composer_room.clone()))
-            .child(composer.mb(px(if context_row.is_some() { 8.0 } else { 16.0 })))
+            .child(composer.mb(px(if short {
+                6.0
+            } else if context_row.is_some() {
+                8.0
+            } else {
+                16.0
+            })))
             .when_some(context_row, |chat, row| {
                 chat.child(row.w_full().max_w(composer_width).mb(px(10.0)))
             })
@@ -34682,16 +34730,12 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
     }
 
     #[test]
-    fn a_docked_ask_leaves_the_editor_in_sight_in_a_short_window() {
-        // Half of a window with the height to spare.
-        for window in [640.0, 780.0, 1200.0] {
+    fn a_docked_ask_takes_at_most_half_the_window() {
+        // What it gives up below that follows what is around it, in the
+        // layout; see the smallest window's test.
+        for window in [373.0, 560.0, 640.0, 780.0, 1200.0] {
             assert_eq!(composer::ask_max_height(window), window * 0.5);
         }
-        // The smallest window keeps what is under the ask in sight.
-        let smallest = f32::from(MIN_WINDOW_HEIGHT);
-        assert_eq!(composer::ask_max_height(smallest), smallest - 320.0);
-        // At 150 % it is 373 logical pixels high: the question's own lines.
-        assert_eq!(composer::ask_max_height(smallest / 1.5), 72.0);
     }
 
     #[gpui::test]
@@ -34828,19 +34872,42 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             );
             ask
         };
-        check(cx, 150);
-        // At 130 % the smallest window has the room for the first answer
-        // whole as well.
+        // The question, its first answer and the last lines of the
+        // conversation all show, and the options keep to one row.
+        let whole = |cx: &mut gpui::VisualTestContext, percent: u16| {
+            let ask = check(cx, percent);
+            let first = cx.debug_bounds("composer-ask-choice-0").unwrap();
+            assert!(
+                first.top() >= ask.top() && first.bottom() <= ask.bottom() + px(0.5),
+                "at {percent} %: the first answer shows whole: {first:?} in {ask:?}"
+            );
+            let question = cx.debug_bounds("tagged-question").unwrap();
+            assert!(
+                question.top() >= ask.top(),
+                "at {percent} %: the question starts in the ask"
+            );
+            let transcript = cx.debug_bounds("native-transcript").unwrap();
+            assert!(
+                transcript.size.height >= px(composer::TRANSCRIPT_MIN_HEIGHT) - px(0.5),
+                "at {percent} %: two lines of the chat show, not {:?}",
+                transcript.size.height
+            );
+            let attach = cx.debug_bounds("native-attach").unwrap();
+            for option in ["native-option-model", "native-option-plan"] {
+                let option = cx.debug_bounds(option).unwrap();
+                assert!(
+                    option.top() < attach.bottom() && option.bottom() > attach.top(),
+                    "at {percent} %: {option:?} is on the attach button's row"
+                );
+            }
+        };
+        whole(cx, 150);
+        // At 130 % too.
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.set_interface_size(130, window, cx);
         });
         redraw(cx);
-        let ask = check(cx, 130);
-        let first = cx.debug_bounds("composer-ask-choice-0").unwrap();
-        assert!(
-            first.top() >= ask.top() && first.bottom() <= ask.bottom(),
-            "the first answer shows whole: {first:?} in {ask:?}"
-        );
+        whole(cx, 130);
         metrics::set_interface_size(100);
     }
 

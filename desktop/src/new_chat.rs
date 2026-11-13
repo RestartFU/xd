@@ -696,6 +696,7 @@ impl XdDesktop {
                 actions: vec![send],
                 show_attachments: !starting,
                 ask: None,
+                compact: false,
             },
             colors,
             window,
