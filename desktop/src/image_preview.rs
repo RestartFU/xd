@@ -354,18 +354,13 @@ fn viewer_button(
     icon_path: &'static str,
     icon_size: f32,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
+    icon_button(id, label, icon_path, frame_colors())
+        .size(size)
+        .glyph(icon_size)
+        .ink(MEDIA_FOREGROUND)
+        .build()
         .debug_selector(move || id.into())
-        .tooltip(pane_tooltip(label, frame_colors()))
         .absolute()
-        .size(px(size))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(8.0))
-        .cursor_pointer()
-        .child(icon(icon_path, icon_size, MEDIA_FOREGROUND))
 }
 
 impl XdDesktop {

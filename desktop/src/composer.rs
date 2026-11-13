@@ -103,9 +103,12 @@ pub(super) fn ask_choice(
         .rounded(px(8.0))
         .text_size(px(14.0))
         .line_height(px(20.0))
-        .text_color(rgb(colors.text))
         // Waiting on the host, a choice reads as one that cannot be picked.
-        .when(!enabled, |row| row.opacity(0.5))
+        .text_color(rgb(if enabled {
+            colors.text
+        } else {
+            disabled_ink(colors)
+        }))
         .when(enabled && focused, |row| {
             row.bg(rgb(colors.selected_surface))
         })
@@ -134,7 +137,11 @@ pub(super) fn ask_choice(
                         div()
                             .min_w_0()
                             .text_size(px(13.0))
-                            .text_color(rgb(colors.muted))
+                            .text_color(rgb(if enabled {
+                                colors.muted
+                            } else {
+                                disabled_ink(colors)
+                            }))
                             .child(format!("· {description}")),
                     )
                 }),
@@ -347,6 +354,7 @@ impl XdDesktop {
         });
         let focus = input.read(cx).focus_handle(cx);
         let scroll = input.read(cx).scroll_handle();
+        let keys = self.key_targets.clone();
         let attachments = self
             .render_composer_attachments(owner, colors, window, cx)
             .filter(|_| show_attachments);
@@ -434,6 +442,8 @@ impl XdDesktop {
                     .track_focus(&focus)
                     .child(editor),
             )
+            // Tab goes from the editor through the options and back.
+            .child(keys.mark(KeyLayer::Page, KeyStop::Field(focus.clone())))
             .child(
                 // The options wrap among themselves when the composer is
                 // narrow; the send action stays at the bottom right, level
@@ -452,34 +462,28 @@ impl XdDesktop {
                             .items_center()
                             .gap_1()
                             .child(
-                                div()
-                                    .id(attach_id)
+                                icon_button(attach_id, "Attach files", PAPERCLIP_ICON, colors)
+                                    .glyph(15.0)
+                                    .build()
                                     .debug_selector(move || attach_id.into())
-                                    .size(px(28.0))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(8.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                                    .tooltip(move |_, cx| {
-                                        cx.new(|_| PaneTooltip {
-                                            label: "Attach files".into(),
-                                            colors,
-                                        })
-                                        .into()
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        match owner {
-                                            DraftOwner::Chat => this.pick_attachments(window, cx),
-                                            DraftOwner::NewChat => {
-                                                this.pick_new_chat_attachments(window, cx)
+                                    .key_stop(
+                                        &keys,
+                                        KeyLayer::Page,
+                                        attach_id,
+                                        colors,
+                                        cx,
+                                        move |this, window, cx| {
+                                            cx.stop_propagation();
+                                            match owner {
+                                                DraftOwner::Chat => {
+                                                    this.pick_attachments(window, cx)
+                                                }
+                                                DraftOwner::NewChat => {
+                                                    this.pick_new_chat_attachments(window, cx)
+                                                }
                                             }
-                                        }
-                                    }))
-                                    .child(icon(PAPERCLIP_ICON, 15.0, colors.muted)),
+                                        },
+                                    ),
                             )
                             .children(controls),
                     )

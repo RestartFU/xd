@@ -927,7 +927,317 @@ fn disabled_button(
 ) -> gpui::Stateful<gpui::Div> {
     ui_button_shape(id)
         .bg(rgb(colors.surface_high))
-        .text_color(rgb(colors.faint))
+        .text_color(rgb(disabled_ink(colors)))
+}
+
+/// What a control that cannot be used now is drawn in: the faint ink, which
+/// stays at least 4.8:1 on every ground of both themes, on the control's own
+/// ground at full strength. Nothing is dimmed by opacity, which let a
+/// disabled label fall under 3:1.
+fn disabled_ink(colors: ThemeColors) -> u32 {
+    colors.faint
+}
+
+/// [`ui_button`], or the same button while it cannot be pressed: nothing
+/// reacts, its words are in [`disabled_ink`], and a button with a fill or a
+/// frame takes [`disabled_button`]'s quiet fill in their place.
+fn ui_button_when(
+    enabled: bool,
+    id: impl Into<gpui::ElementId>,
+    kind: ButtonKind,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    match kind {
+        _ if enabled => ui_button(id, kind, colors),
+        ButtonKind::Ghost | ButtonKind::DangerGhost => {
+            ui_button_shape(id).text_color(rgb(disabled_ink(colors)))
+        }
+        ButtonKind::Primary | ButtonKind::Secondary | ButtonKind::Danger => {
+            disabled_button(id, colors)
+        }
+    }
+}
+
+/// The one button that is an icon alone, so `label` names it under the
+/// pointer: 28 by 28 around a 16px icon, or `size` around an icon in
+/// proportion. One that cannot be used now keeps its place and its name and
+/// is drawn in [`disabled_ink`], with nothing that reacts.
+fn icon_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    path: &'static str,
+    colors: ThemeColors,
+) -> IconButton {
+    IconButton {
+        id: id.into(),
+        label: label.into(),
+        path,
+        colors,
+        size: 28.0,
+        glyph: None,
+        ink: None,
+        active: false,
+        enabled: true,
+    }
+}
+
+struct IconButton {
+    id: gpui::ElementId,
+    label: SharedString,
+    path: &'static str,
+    colors: ThemeColors,
+    size: f32,
+    glyph: Option<f32>,
+    ink: Option<u32>,
+    active: bool,
+    enabled: bool,
+}
+
+impl IconButton {
+    fn size(mut self, size: f32) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// The icon's own size, where the button's does not settle it.
+    fn glyph(mut self, glyph: f32) -> Self {
+        self.glyph = Some(glyph);
+        self
+    }
+
+    /// For a button drawn over a picture, not on the theme's ground: the
+    /// icon's ink, with the fill under the pointer left to the caller.
+    fn ink(mut self, ink: u32) -> Self {
+        self.ink = Some(ink);
+        self
+    }
+
+    /// Lit, for a button whose pane or mode is the one showing.
+    fn active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+
+    fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    fn build(self) -> gpui::Stateful<gpui::Div> {
+        let Self {
+            id,
+            label,
+            path,
+            colors,
+            size,
+            glyph,
+            ink,
+            active,
+            enabled,
+        } = self;
+        // 16px in the 28px button, 14px in a smaller one.
+        let glyph = glyph.unwrap_or(if size < 28.0 { 14.0 } else { 16.0 });
+        let button = div()
+            .id(id)
+            .size(px(size))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .tooltip(pane_tooltip(label, colors));
+        if !enabled {
+            return button.child(icon(path, glyph, disabled_ink(colors)));
+        }
+        let button = button.cursor_pointer();
+        if let Some(ink) = ink {
+            return button.child(icon(path, glyph, ink));
+        }
+        button
+            .when(active, |button| button.bg(rgb(colors.selected_surface)))
+            .hover(|style| style.bg(rgb(colors.surface_high)))
+            .child(icon(
+                path,
+                glyph,
+                if active { colors.text } else { colors.muted },
+            ))
+    }
+}
+
+/// The two widths a dialog comes in: one for a question, a name or a short
+/// list, and one for a form or a longer explanation.
+const DIALOG_WIDTH: f32 = 450.0;
+const DIALOG_WIDE_WIDTH: f32 = 480.0;
+/// A dialog's corners.
+const DIALOG_RADIUS: f32 = 10.0;
+
+/// The layer a dialog is centred in: a backdrop over the whole window that
+/// takes every click, with room left around the dialog.
+fn dialog_layer(colors: ThemeColors) -> gpui::Div {
+    div()
+        .occlude()
+        .absolute()
+        .inset_0()
+        .p_6()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(colors.backdrop))
+}
+
+/// The frame every dialog is drawn in, at any width.
+fn dialog_frame(colors: ThemeColors) -> gpui::Div {
+    div()
+        .rounded(px(DIALOG_RADIUS))
+        .border_1()
+        .border_color(rgb(colors.border))
+        .bg(rgb(colors.surface))
+        .shadow_lg()
+}
+
+/// The one dialog: a title, what it says or asks for, and its actions at the
+/// bottom right. It never grows past the window: the part of it that can be
+/// long scrolls inside it.
+fn dialog_shell(width: f32, colors: ThemeColors) -> gpui::Div {
+    dialog_frame(colors)
+        .w(px(width))
+        .max_w_full()
+        .max_h_full()
+        .min_h_0()
+        .p_5()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .text_color(rgb(colors.text))
+        // A press on the dialog is not a press on the backdrop behind it.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
+fn dialog_title(title: impl Into<SharedString>, colors: ThemeColors) -> gpui::Div {
+    div()
+        .flex_none()
+        .text_size(px(16.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(colors.text))
+        .child(title.into())
+}
+
+/// What a dialog says under its title.
+fn dialog_text(text: impl Into<SharedString>, colors: ThemeColors) -> gpui::Div {
+    div()
+        .flex_none()
+        .text_sm()
+        .text_color(rgb(colors.muted))
+        .child(text.into())
+}
+
+/// The row of a dialog's actions: the way out first, the main action last.
+fn dialog_actions() -> gpui::Div {
+    div().flex_none().mt_2().flex().justify_end().gap_2()
+}
+
+/// One of a dialog's actions: a [`ui_button`] Tab stops on. While it cannot
+/// be pressed it is a [`disabled_button`], which Tab passes over.
+#[allow(clippy::too_many_arguments)]
+fn dialog_button(
+    keys: &KeyTargets,
+    id: &'static str,
+    label: impl Into<SharedString>,
+    kind: ButtonKind,
+    enabled: bool,
+    colors: ThemeColors,
+    cx: &Context<XdDesktop>,
+    run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let button = ui_button_when(enabled, id, kind, colors).child(label.into());
+    if enabled {
+        button.key_stop(keys, KeyLayer::Dialog, id, colors, cx, run)
+    } else {
+        button
+    }
+}
+
+/// How near the window's edge a menu may come.
+const MENU_MARGIN: f32 = 8.0;
+
+/// The frame every menu and popover is drawn in. A press on it stays in it.
+fn menu_shell(colors: ThemeColors) -> gpui::Div {
+    div()
+        .occlude()
+        .p_1()
+        .flex()
+        .flex_col()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(colors.border))
+        .bg(rgb(colors.surface))
+        .shadow_lg()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+}
+
+/// One choice in a menu. It grows for a second line.
+fn menu_row(id: impl Into<gpui::ElementId>, colors: ThemeColors) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .w_full()
+        .min_h(px(32.0))
+        .px(px(10.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded(px(6.0))
+        .text_size(px(13.0))
+        .text_color(rgb(colors.text))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(colors.surface_high)))
+}
+
+/// The room a menu row keeps for its check mark, and the mark on the choice
+/// in force.
+fn menu_check(checked: bool, colors: ThemeColors) -> gpui::Div {
+    div().size(px(14.0)).flex_none().when(checked, |slot| {
+        slot.child(icon(CHECK_ICON, 14.0, colors.text))
+    })
+}
+
+/// A line of quiet text in a menu: a heading over its rows, or a note.
+fn menu_note(label: impl IntoElement, colors: ThemeColors) -> gpui::Div {
+    div()
+        .px(px(10.0))
+        .py(px(6.0))
+        .text_size(px(12.0))
+        .text_color(rgb(colors.muted))
+        .child(label)
+}
+
+/// The hairline between a menu's groups.
+fn menu_rule(colors: ThemeColors) -> gpui::Div {
+    div().h(px(1.0)).my_1().flex_none().bg(rgb(colors.rule))
+}
+
+/// Hangs a menu from where this is placed, by `corner`, over everything
+/// else, and moved as far as it takes to stay inside the window.
+fn menu_popover(corner: gpui::Corner, menu: impl IntoElement) -> gpui::Deferred {
+    gpui::deferred(
+        gpui::anchored()
+            .anchor(corner)
+            .snap_to_window_with_margin(px(MENU_MARGIN))
+            .child(menu),
+    )
+    .with_priority(1)
+}
+
+/// [`menu_popover`] at a point in the window, such as where the pointer was.
+fn menu_at(position: Point<Pixels>, menu: impl IntoElement) -> gpui::Deferred {
+    gpui::deferred(
+        gpui::anchored()
+            .position(position)
+            .snap_to_window_with_margin(px(MENU_MARGIN))
+            .child(menu),
+    )
+    .with_priority(1)
 }
 
 /// A drawn stroke icon from the embedded set, tinted to the surrounding text.
@@ -1010,7 +1320,8 @@ impl Render for PaneTooltip {
 /// The most of its list the Paired devices dialog shows before it scrolls,
 /// which keeps the whole dialog inside the smallest window: five rows and
 /// half of the next, its name cut through, so a longer list is seen to go on.
-const PAIRED_DEVICES_LIST_HEIGHT: f32 = 319.0;
+/// A row is its Revoke button, 30 high, and 8 above and below.
+const PAIRED_DEVICES_LIST_HEIGHT: f32 = 5.5 * 46.0;
 
 /// How far a [`ClearTooltip`] stays from the pointer, above or below it.
 const CLEAR_TOOLTIP_GAP: f32 = 18.0;
@@ -1030,27 +1341,6 @@ impl Render for ClearTooltip {
             .py(px(CLEAR_TOOLTIP_GAP))
             .child(tooltip_box(self.label.clone(), self.colors))
     }
-}
-
-fn pane_icon_button(
-    id: impl Into<gpui::ElementId>,
-    label: &'static str,
-    path: &'static str,
-    active: bool,
-    colors: ThemeColors,
-) -> gpui::Stateful<gpui::Div> {
-    ui_button(id, ButtonKind::Ghost, colors)
-        .w(px(28.0))
-        .h(px(28.0))
-        .px_0()
-        .rounded(px(6.0))
-        .when(active, |button| button.bg(rgb(colors.selected_surface)))
-        .tooltip(pane_tooltip(label, colors))
-        .child(icon(
-            path,
-            16.0,
-            if active { colors.text } else { colors.muted },
-        ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1280,8 +1570,10 @@ gpui::actions!(
         KeyUp,
         KeyDown,
         KeyConfirm,
+        KeyPress,
         NextField,
-        PreviousField
+        PreviousField,
+        OpenContextMenu
     ]
 );
 
@@ -1318,8 +1610,16 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", KeyConfirm, context),
         KeyBinding::new("tab", NextField, context),
         KeyBinding::new("shift-tab", PreviousField, context),
+        // Only while the Tab ring is on a control: a text box keeps its space.
+        KeyBinding::new("space", KeyPress, Some(KEY_STOP_CONTEXT)),
+        KeyBinding::new("shift-f10", OpenContextMenu, context),
+        KeyBinding::new("menu", OpenContextMenu, context),
     ]
 }
+
+/// The key context of the handle that has the keyboard while the Tab ring is
+/// on a control.
+const KEY_STOP_CONTEXT: &str = "KeyStop";
 
 /// What Ctrl is called on this platform's keys.
 const MOD_KEY: &str = if cfg!(target_os = "macos") {
@@ -1330,6 +1630,8 @@ const MOD_KEY: &str = if cfg!(target_os = "macos") {
 
 /// What one press of the keyboard does in the frame last drawn.
 type KeyRun = Rc<dyn Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>)>;
+/// The same, for a row whose action is chosen where the row is built.
+type BoxedKeyRun = Box<dyn Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>)>;
 
 /// Where something the keyboard can reach sits. What is on top takes the
 /// keys: a menu over a dialog, a dialog over the sidebar's find results, and
@@ -1338,8 +1640,18 @@ type KeyRun = Rc<dyn Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>)>;
 enum KeyLayer {
     Page,
     Find,
+    /// A page drawn over the workspace, such as Settings.
+    Overlay,
     Dialog,
     Menu,
+}
+
+/// Something Tab stops on: a text field, which takes the keyboard itself, or
+/// a control, which shows a ring and is pressed with Enter or Space.
+#[derive(Clone)]
+enum KeyStop {
+    Field(FocusHandle),
+    Control(SharedString, KeyRun),
 }
 
 /// The rows, fields and default action the frame being drawn offers the
@@ -1355,8 +1667,16 @@ struct KeyFrame {
     /// Where each row sits among its scrolling list's children, when it
     /// scrolls, so the row the keys move to is brought into view.
     row_children: Vec<Option<usize>>,
-    fields_layer: Option<KeyLayer>,
-    fields: Vec<FocusHandle>,
+    /// Rows whose menu stays open when they are pressed, so the keys stay on
+    /// them: a choice that is ticked, not taken.
+    rows_stay: Vec<bool>,
+    /// The topmost stops for Tab, in the order they are painted, each with
+    /// where it is in the window. Noted as the frame is painted, so only
+    /// what shows is among them.
+    stops_layer: Option<KeyLayer>,
+    stops: Vec<(KeyStop, Bounds<Pixels>)>,
+    /// The control the Tab ring is on.
+    stop: Option<SharedString>,
     default: Option<(KeyLayer, KeyRun)>,
     /// The row Enter takes from a picker's search field before the arrow
     /// keys have moved: the first of its matches, past any switch above them.
@@ -1371,10 +1691,46 @@ struct KeyFrame {
 #[derive(Clone, Default)]
 struct KeyTargets(Rc<RefCell<KeyFrame>>);
 
+/// A sidebar row whose context menu the keyboard can open: what the menu is
+/// for, and where the row was painted.
+struct KeyMenuRow {
+    target: SidebarTarget,
+    title: String,
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl KeyMenuRow {
+    fn new(target: SidebarTarget, title: String) -> Self {
+        Self {
+            target,
+            title,
+            bounds: Rc::default(),
+        }
+    }
+
+    /// Notes where the row it is a child of is painted.
+    fn mark(&self) -> impl IntoElement + use<> {
+        let bounds = self.bounds.clone();
+        canvas(
+            move |painted, _, _| bounds.set(Some(painted)),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+    }
+}
+
 impl KeyTargets {
-    fn begin(&self, cursor: Option<(&'static str, usize)>, page_covered: bool, finding: bool) {
+    fn begin(
+        &self,
+        cursor: Option<(&'static str, usize)>,
+        stop: Option<SharedString>,
+        page_covered: bool,
+        finding: bool,
+    ) {
         *self.0.borrow_mut() = KeyFrame {
             cursor,
+            stop,
             page_covered,
             finding,
             ..KeyFrame::default()
@@ -1396,12 +1752,14 @@ impl KeyTargets {
             _ => {
                 frame.rows.clear();
                 frame.row_children.clear();
+                frame.rows_stay.clear();
                 frame.first = 0;
                 frame.rows_owner = Some((layer, owner));
             }
         }
         frame.rows.push(run);
         frame.row_children.push(None);
+        frame.rows_stay.push(false);
         let index = frame.rows.len() - 1;
         match frame.cursor {
             Some((on, row)) if on == owner => row == index,
@@ -1423,17 +1781,48 @@ impl KeyTargets {
         }
     }
 
-    fn field(&self, layer: KeyLayer, focus: FocusHandle) {
+    /// Says the row just noted leaves its menu open when pressed.
+    fn row_stays(&self) {
+        if let Some(last) = self.0.borrow_mut().rows_stay.last_mut() {
+            *last = true;
+        }
+    }
+
+    fn stop(&self, layer: KeyLayer, stop: KeyStop, bounds: Bounds<Pixels>) {
         let mut frame = self.0.borrow_mut();
-        match frame.fields_layer {
+        if layer == KeyLayer::Page && frame.page_covered {
+            return;
+        }
+        match frame.stops_layer {
             Some(top) if top > layer => return,
             Some(top) if top == layer => {}
             _ => {
-                frame.fields.clear();
-                frame.fields_layer = Some(layer);
+                frame.stops.clear();
+                frame.stops_layer = Some(layer);
             }
         }
-        frame.fields.push(focus);
+        frame.stops.push((stop, bounds));
+    }
+
+    /// Notes a Tab stop where it is painted: an element that takes no room,
+    /// laid over the control it is a child of.
+    fn mark(&self, layer: KeyLayer, stop: KeyStop) -> impl IntoElement + use<> {
+        let targets = self.clone();
+        canvas(
+            move |bounds, _, _| targets.stop(layer, stop, bounds),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+    }
+
+    /// Whether the Tab ring is on the control `id`.
+    fn stop_on(&self, id: &str) -> bool {
+        self.0
+            .borrow()
+            .stop
+            .as_ref()
+            .is_some_and(|stop| stop.as_ref() == id)
     }
 
     fn default_action(&self, layer: KeyLayer, run: KeyRun) {
@@ -1484,6 +1873,38 @@ trait KeyRow: Sized {
         keys.row_is_not_a_choice();
         self
     }
+
+    fn key_stays(self, keys: &KeyTargets) -> Self {
+        keys.row_stays();
+        self
+    }
+
+    /// Makes a control a Tab stop: Enter, Space and a click all run `run`,
+    /// and a ring of `radius` shows around it while Tab is on it.
+    #[allow(clippy::too_many_arguments)]
+    fn key_stop_ring(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        radius: f32,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self;
+
+    /// [`KeyRow::key_stop_ring`] for a control with the corners of a button.
+    fn key_stop(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self {
+        self.key_stop_ring(keys, layer, id, FOCUS_RING_RADIUS, colors, cx, run)
+    }
 }
 
 impl KeyRow for gpui::Stateful<gpui::Div> {
@@ -1498,6 +1919,46 @@ impl KeyRow for gpui::Stateful<gpui::Div> {
     ) -> Self {
         key_row(keys, layer, owner, self, fill, cx, run)
     }
+
+    fn key_stop_ring(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        radius: f32,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self {
+        let run: KeyRun = Rc::new(run);
+        let id = id.into();
+        let on = keys.stop_on(&id);
+        self.on_click(cx.listener({
+            let run = run.clone();
+            move |this, _, window, cx| run(this, window, cx)
+        }))
+        .child(keys.mark(layer, KeyStop::Control(id, run)))
+        .when(on, |control| control.child(focus_ring(colors, radius)))
+    }
+}
+
+/// How far the focus ring stands off the control it is around.
+const FOCUS_RING_GAP: f32 = 3.0;
+/// The ring's corners around a button.
+const FOCUS_RING_RADIUS: f32 = 10.0;
+
+/// The ring that shows Tab is on a control. It is drawn around the control,
+/// in room the control does not take, so nothing moves when it shows.
+fn focus_ring(colors: ThemeColors, radius: f32) -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(-FOCUS_RING_GAP))
+        .bottom(px(-FOCUS_RING_GAP))
+        .left(px(-FOCUS_RING_GAP))
+        .right(px(-FOCUS_RING_GAP))
+        .rounded(px(radius))
+        .border_2()
+        .border_color(rgb(colors.selected_border))
 }
 
 /// A button the keyboard can reach as well as the pointer, inside the ring
@@ -1535,9 +1996,9 @@ fn field_border(focused: bool, colors: ThemeColors) -> gpui::Rgba {
 fn key_ring(on: bool, colors: ThemeColors, button: impl IntoElement) -> gpui::Div {
     div()
         .min_w_0()
-        .p(px(2.0))
-        .rounded(px(10.0))
-        .border_1()
+        .p(px(FOCUS_RING_GAP - 2.0))
+        .rounded(px(FOCUS_RING_RADIUS))
+        .border_2()
         .border_color(rgba(if on {
             (colors.selected_border << 8) | 0xff
         } else {
@@ -3307,6 +3768,21 @@ struct XdDesktop {
     /// Holds the keyboard when nothing else does, so the window's shortcuts
     /// keep working on the landing page and after a dialog closes.
     root_focus: FocusHandle,
+    /// Holds the keyboard while the Tab ring is on a control, so Space and
+    /// Enter press that control and no text box takes them.
+    stop_focus: FocusHandle,
+    /// The control the Tab ring is on, by the name it was noted under.
+    key_stop: Option<SharedString>,
+    /// What had the keyboard before the ring took it, to give it back.
+    key_stop_return: Option<gpui::WeakFocusHandle>,
+    /// The Settings page's scroll, to bring a control Tab reaches into view,
+    /// and the section it last showed: each section starts at its top.
+    settings_scroll: ScrollHandle,
+    settings_scroll_key: Option<usize>,
+    /// The sidebar rows a context menu opens for from the keyboard: the open
+    /// session's, and the current project's. Noted as each frame is drawn.
+    key_menu_session: Option<KeyMenuRow>,
+    key_menu_project: Option<KeyMenuRow>,
     key_targets: KeyTargets,
     /// The list the arrow keys are in, by its owner, and the row they are on.
     key_cursor: Option<(&'static str, usize)>,
@@ -4187,6 +4663,13 @@ impl XdDesktop {
             settle_undo: None,
             discard_undo: None,
             root_focus,
+            stop_focus: cx.focus_handle(),
+            key_stop: None,
+            key_stop_return: None,
+            settings_scroll: ScrollHandle::new(),
+            settings_scroll_key: None,
+            key_menu_session: None,
+            key_menu_project: None,
             key_targets: KeyTargets::default(),
             key_cursor: None,
             key_scroll: ScrollHandle::new(),
@@ -8332,16 +8815,9 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let viewport = window.bounds().size;
-        let x = f32::from(position.x).clamp(8.0, (f32::from(viewport.width) - 216.0).max(8.0));
-        // Two two-line rows, plus the "Add to …" heading inside a folder.
-        let height = if parent.is_some() { 160.0 } else { 132.0 };
-        let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - height).max(8.0));
+        // The menu's shell keeps it inside the window.
         self.sidebar_context_menu = None;
-        self.project_add_menu = Some(ProjectAddMenu {
-            parent,
-            position: point(px(x), px(y)),
-        });
+        self.project_add_menu = Some(ProjectAddMenu { parent, position });
         self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         cx.notify();
     }
@@ -11311,13 +11787,11 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let viewport = window.bounds().size;
-        let x = f32::from(position.x).clamp(8.0, (f32::from(viewport.width) - 196.0).max(8.0));
-        let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - 196.0).max(8.0));
+        // The menu's shell keeps it inside the window.
         self.sidebar_context_menu = Some(SidebarContextMenu {
             target,
             title,
-            position: point(px(x), px(y)),
+            position,
         });
         self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         cx.notify();
@@ -14758,13 +15232,14 @@ impl XdDesktop {
                 !matches!(self.minimal_route, MinimalRoute::Cli { .. }),
                 |bar| {
                     bar.child(
-                        pane_icon_button(
+                        icon_button(
                             "minimal-browser-toggle",
                             "Toggle side pane",
                             SIDE_LAYOUT_ICON,
-                            self.browser_is_open(),
                             colors,
                         )
+                        .active(self.browser_is_open())
+                        .build()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
                     )
@@ -14992,24 +15467,26 @@ impl XdDesktop {
                     .items_center()
                     .gap(px(2.0))
                     .child(
-                        pane_icon_button(
+                        icon_button(
                             "toggle-side-pane",
                             "Toggle side pane",
                             SIDE_LAYOUT_ICON,
-                            self.browser_is_open(),
                             colors,
                         )
+                        .active(self.browser_is_open())
+                        .build()
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
                     )
                     .when(self.native_session(), |controls| {
                         controls.child(
-                            pane_icon_button(
+                            icon_button(
                                 "toggle-bottom-pane",
                                 "Toggle bottom terminal",
                                 BOTTOM_LAYOUT_ICON,
-                                self.bottom_terminal_open,
                                 colors,
                             )
+                            .active(self.bottom_terminal_open)
+                            .build()
                             .on_click(cx.listener(
                                 |this, _, window, cx| this.toggle_bottom_terminal(window, cx),
                             )),
@@ -15132,13 +15609,13 @@ impl XdDesktop {
                     .bg(rgb(colors.selected_surface))
                     .child(icon(GIT_PULL_REQUEST_ICON, 16.0, colors.text))
                 } else {
-                    pane_icon_button(
+                    icon_button(
                         "minimal-session-link-pull-request",
                         "Link pull request",
                         GIT_PULL_REQUEST_ICON,
-                        false,
                         colors,
                     )
+                    .build()
                 }
                 .debug_selector(|| "minimal-session-link-pull-request".into())
                 .w(px(24.0))
@@ -15150,14 +15627,11 @@ impl XdDesktop {
             .when_some(panel, |group, panel| {
                 // Drawn last, over the transcript, just under the header.
                 group.child(
-                    div().absolute().top_full().left_0().child(
-                        gpui::deferred(
-                            gpui::anchored()
-                                .snap_to_window_with_margin(px(8.0))
-                                .child(panel),
-                        )
-                        .with_priority(1),
-                    ),
+                    div()
+                        .absolute()
+                        .top_full()
+                        .left_0()
+                        .child(menu_popover(gpui::Corner::TopLeft, panel)),
                 )
             })
     }
@@ -15257,23 +15731,13 @@ impl XdDesktop {
                     )
             })
             .collect::<Vec<_>>();
-        div()
+        menu_shell(colors)
             .id("pull-request-panel")
             .debug_selector(|| "pull-request-panel".into())
-            .occlude()
             .mt(px((browser::SESSION_HEADER_HEIGHT - 24.0) / 2.0 + 4.0))
             .w(px(360.0))
             .p_2()
-            .flex()
-            .flex_col()
             .gap_1()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(rgb(colors.border))
-            .bg(rgb(colors.chrome))
-            .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .px_2()
@@ -15329,7 +15793,7 @@ impl XdDesktop {
                             .border_color(if error.is_some() {
                                 rgb(colors.danger)
                             } else {
-                                self.field_frame(&self.pull_request_input, None, cx)
+                                self.field_frame(&self.pull_request_input, cx)
                             })
                             .bg(rgb(colors.background))
                             .child(self.pull_request_input.clone()),
@@ -15862,6 +16326,13 @@ impl XdDesktop {
             .map(|group| SidebarTarget::Session(group.id.clone()))
             .unwrap_or_else(|| SidebarTarget::Chat(context_chat_id.clone()));
         let context_title = session.title.clone();
+        // The open session's row is the one Shift+F10 opens the menu for.
+        let key_menu =
+            selected.then(|| KeyMenuRow::new(context_target.clone(), context_title.clone()));
+        let key_menu_mark = key_menu.as_ref().map(KeyMenuRow::mark);
+        if key_menu.is_some() {
+            self.key_menu_session = key_menu;
+        }
         let drag_payload = SessionDragPayload {
             chat_id: session.id.clone(),
             project_id: project_id.to_owned(),
@@ -16020,6 +16491,7 @@ impl XdDesktop {
             .child(drawer_tabs(&fold.hidden, colors))
         })
         .children(signal_tab(signal, colors))
+        .children(key_menu_mark)
         .when_some(fold, |row, fold| {
             let label = if fold.folded {
                 "Show the agents it started"
@@ -16098,6 +16570,13 @@ impl XdDesktop {
             .map(|group| group.id.clone());
         let unsettle_session = session_id.clone();
         let context_title = card.title.clone();
+        let key_menu = session_id.clone().filter(|_| selected).map(|session_id| {
+            KeyMenuRow::new(SidebarTarget::Session(session_id), context_title.clone())
+        });
+        let key_menu_mark = key_menu.as_ref().map(KeyMenuRow::mark);
+        if key_menu.is_some() {
+            self.key_menu_session = key_menu;
+        }
         key_row(
             &self.key_targets,
             KeyLayer::Find,
@@ -16176,6 +16655,7 @@ impl XdDesktop {
             .text_size(px(11.0))
             .text_color(rgb(colors.faint)),
         )
+        .children(key_menu_mark)
         .when_some(unsettle_session, |row, session_id| {
             row.child(
                 session_row_action(
@@ -16945,8 +17425,21 @@ impl XdDesktop {
                 .text_size(px(12.5))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(if current { colors.text } else { colors.muted }));
+            // On the landing page, Shift+F10 opens the current project's menu.
+            let key_menu = current.then(|| {
+                KeyMenuRow::new(
+                    SidebarTarget::Folder(project.id.clone()),
+                    project.name.clone(),
+                )
+            });
+            let key_menu_mark = key_menu.as_ref().map(KeyMenuRow::mark);
+            if key_menu.is_some() {
+                self.key_menu_project = key_menu;
+            }
             let header = div()
                 .id(("minimal-session-group-header", project_index))
+                .relative()
+                .children(key_menu_mark)
                 .h(px(30.0))
                 .w_full()
                 .pl(px(4.0))
@@ -17341,44 +17834,33 @@ impl XdDesktop {
                             .items_center()
                             .gap(px(2.0))
                             .child(
-                                pane_icon_button(
+                                icon_button(
                                     "minimal-terminal-tab",
                                     "Terminal",
                                     TERMINAL_ICON,
-                                    terminal_active,
                                     colors,
                                 )
+                                .active(terminal_active)
+                                .build()
                                 .on_click(cx.listener(
                                     |this, _, window, cx| this.show_minimal_terminal(window, cx),
                                 )),
                             )
                             .child(
-                                pane_icon_button(
-                                    "minimal-theme",
-                                    "Settings",
-                                    SETTINGS_ICON,
-                                    settings_open,
-                                    colors,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
+                                icon_button("minimal-theme", "Settings", SETTINGS_ICON, colors)
+                                    .active(settings_open)
+                                    .build()
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.toggle_minimal_theme_popup(window, cx)
-                                    },
-                                )),
+                                    })),
                             )
                             .child(
-                                pane_icon_button(
-                                    "minimal-usage",
-                                    "Usage",
-                                    USAGE_ICON,
-                                    self.usage_open,
-                                    colors,
-                                )
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| {
+                                icon_button("minimal-usage", "Usage", USAGE_ICON, colors)
+                                    .active(self.usage_open)
+                                    .build()
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.toggle_usage(window, cx)
-                                    }),
-                                ),
+                                    })),
                             ),
                     )
                     .child(
@@ -20639,19 +21121,23 @@ impl XdDesktop {
                                 .child(self.secret_question_input.clone()),
                         )
                         .child(
-                            ui_button("interaction-submit", ButtonKind::Primary, colors)
-                                .when(submitting, |button| button.opacity(0.5))
-                                .when(!submitting, |button| {
-                                    button.on_click(cx.listener(move |this, _, _, cx| {
-                                        this.answer_interaction(
-                                            request_id.clone(),
-                                            question_id.clone(),
-                                            this.question_answer.clone(),
-                                            cx,
-                                        );
-                                    }))
-                                })
-                                .child("Send answer"),
+                            ui_button_when(
+                                !submitting,
+                                "interaction-submit",
+                                ButtonKind::Primary,
+                                colors,
+                            )
+                            .when(!submitting, |button| {
+                                button.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.answer_interaction(
+                                        request_id.clone(),
+                                        question_id.clone(),
+                                        this.question_answer.clone(),
+                                        cx,
+                                    );
+                                }))
+                            })
+                            .child("Send answer"),
                         ),
                 );
             }
@@ -21292,6 +21778,7 @@ impl XdDesktop {
             .find(|backend| backend.id == self.model.backend)
             .map(|backend| !backend.efforts.is_empty())
             .unwrap_or(matches!(agent, Some(AgentCli::Codex | AgentCli::Claude)));
+        let option_keys = self.key_targets.clone();
         let options = [
             ("model", self.model.selected_model_label()),
             (
@@ -21332,14 +21819,21 @@ impl XdDesktop {
                 colors,
             )
             .debug_selector(move || format!("native-option-{option}"))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                this.native_option_open = Some(option);
-                this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
-                this.minimal_popup_previous_focus =
-                    Some(this.composer_input.read(cx).focus_handle(cx).downgrade());
-                cx.notify();
-            }))
+            .key_stop(
+                &option_keys,
+                KeyLayer::Page,
+                format!("native-option-{option}"),
+                colors,
+                cx,
+                move |this, window, cx| {
+                    cx.stop_propagation();
+                    this.native_option_open = Some(option);
+                    this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
+                    this.minimal_popup_previous_focus =
+                        Some(this.composer_input.read(cx).focus_handle(cx).downgrade());
+                    cx.notify();
+                },
+            )
             .into_any_element()
         })
         .collect::<Vec<_>>();
@@ -21942,13 +22436,13 @@ impl XdDesktop {
                     .border_color(rgb(colors.border))
                     .when(!at_root, |row| {
                         row.child(
-                            pane_icon_button(
+                            icon_button(
                                 "native-files-up",
                                 "Parent directory",
                                 ARROW_LEFT_ICON,
-                                false,
                                 colors,
                             )
+                            .build()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let (Some(chat), Some(panel)) =
                                     (this.model.selected_chat.clone(), &mut this.diff_panel)
@@ -22103,18 +22597,11 @@ impl XdDesktop {
                             .child("Working tree"),
                     )
                     .child(
-                        pane_icon_button(
-                            "native-refresh-diff",
-                            "Refresh",
-                            ROTATE_CW_ICON,
-                            false,
-                            colors,
-                        )
-                        .on_click(
-                            cx.listener(|this, _, _, cx| {
+                        icon_button("native-refresh-diff", "Refresh", ROTATE_CW_ICON, colors)
+                            .build()
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 this.show_native_pane(NativePane::Diff, cx)
-                            }),
-                        ),
+                            })),
                     ),
             )
             .when(loading, |pane| {
@@ -22524,6 +23011,131 @@ impl XdDesktop {
                     .map(|state| (session_id.clone(), state)),
                 _ => None,
             };
+            // One row of the menu: what it says, and what choosing it does.
+            let row = |id: &'static str, label: &'static str, danger: bool, run: BoxedKeyRun| {
+                let fill = if danger {
+                    colors.danger_surface
+                } else {
+                    colors.surface_high
+                };
+                key_row(
+                    &keys,
+                    KeyLayer::Menu,
+                    "sidebar-menu",
+                    menu_row(id, colors).when(danger, |row| {
+                        row.text_color(rgb(colors.danger))
+                            .hover(|style| style.bg(rgb(colors.danger_surface)))
+                    }),
+                    fill,
+                    cx,
+                    run,
+                )
+                .child(label)
+            };
+            let mut rows = Vec::new();
+            if let Some(folder_id) = group {
+                for (id, label, kind) in [
+                    (
+                        "catalog-folder-new-project",
+                        "New project here",
+                        WorkspaceCreateKind::Project,
+                    ),
+                    (
+                        "catalog-folder-new-folder",
+                        "New folder here",
+                        WorkspaceCreateKind::Folder,
+                    ),
+                ] {
+                    let parent = folder_id.clone();
+                    rows.push(row(
+                        id,
+                        label,
+                        false,
+                        Box::new(move |this, window, cx| {
+                            this.sidebar_context_menu = None;
+                            this.begin_workspace_create_in(kind, Some(parent.clone()), window, cx);
+                        }),
+                    ));
+                }
+            }
+            rows.push(row(
+                if project {
+                    "minimal-rename-project"
+                } else {
+                    "minimal-rename-session"
+                },
+                if folder_group {
+                    "Rename folder"
+                } else if project {
+                    "Rename project"
+                } else if chat {
+                    "Rename chat"
+                } else {
+                    "Rename session"
+                },
+                false,
+                Box::new(move |this, window, cx| {
+                    this.begin_sidebar_edit(
+                        rename_target.clone(),
+                        rename_title.clone(),
+                        window,
+                        cx,
+                    );
+                }),
+            ));
+            if let Some((session_id, (settled, auto_disabled))) = settlement {
+                let settle_session = session_id.clone();
+                rows.push(row(
+                    "minimal-settle-session",
+                    if settled {
+                        "Bring back session"
+                    } else {
+                        "Settle session"
+                    },
+                    false,
+                    Box::new(move |this, window, cx| {
+                        this.close_sidebar_context_menu(window, cx);
+                        if settled {
+                            this.unsettle_session(&settle_session, cx);
+                        } else {
+                            this.settle_session(&settle_session, cx);
+                        }
+                    }),
+                ));
+                rows.push(row(
+                    "minimal-session-auto-settle",
+                    if auto_disabled {
+                        "Enable auto-settle"
+                    } else {
+                        "Disable auto-settle"
+                    },
+                    false,
+                    Box::new(move |this, window, cx| {
+                        this.close_sidebar_context_menu(window, cx);
+                        this.set_session_auto_settle(&session_id, auto_disabled, cx);
+                    }),
+                ));
+            }
+            rows.push(row(
+                if project {
+                    "minimal-delete-project"
+                } else {
+                    "minimal-delete-session"
+                },
+                if folder_group {
+                    "Delete folder"
+                } else if project {
+                    "Delete project"
+                } else if chat {
+                    "Delete chat"
+                } else {
+                    "Delete session"
+                },
+                true,
+                Box::new(move |this, window, cx| {
+                    this.begin_sidebar_delete(delete_target.clone(), window, cx);
+                }),
+            ));
             div()
                 .occlude()
                 .absolute()
@@ -22537,207 +23149,13 @@ impl XdDesktop {
                     MouseButton::Right,
                     cx.listener(|this, _, window, cx| this.close_sidebar_context_menu(window, cx)),
                 )
-                .child(
-                    div()
-                        .occlude()
-                        .absolute()
-                        .left(menu.position.x)
-                        .top(menu.position.y)
+                .child(menu_at(
+                    menu.position,
+                    menu_shell(colors)
+                        .debug_selector(|| "sidebar-context-menu".into())
                         .w(px(188.0))
-                        .p_1()
-                        .rounded(px(7.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .bg(rgb(colors.surface))
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                        .when_some(group, |card, folder_id| {
-                            let row =
-                                |id: &'static str,
-                                 label: &'static str,
-                                 kind: WorkspaceCreateKind| {
-                                    let parent = folder_id.clone();
-                                    key_row(
-                                        &keys,
-                                        KeyLayer::Menu,
-                                        "sidebar-menu",
-                                        div()
-                                            .id(id)
-                                            .w_full()
-                                            .px_3()
-                                            .py_2()
-                                            .rounded_md()
-                                            .text_sm()
-                                            .text_color(rgb(colors.text))
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(rgb(colors.surface_high))),
-                                        colors.surface_high,
-                                        cx,
-                                        move |this, window, cx| {
-                                            this.sidebar_context_menu = None;
-                                            this.begin_workspace_create_in(
-                                                kind,
-                                                Some(parent.clone()),
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    )
-                                    .child(label)
-                                };
-                            card.child(row(
-                                "catalog-folder-new-project",
-                                "New project here",
-                                WorkspaceCreateKind::Project,
-                            ))
-                            .child(row(
-                                "catalog-folder-new-folder",
-                                "New folder here",
-                                WorkspaceCreateKind::Folder,
-                            ))
-                        })
-                        .child(
-                            key_row(
-                                &keys,
-                                KeyLayer::Menu,
-                                "sidebar-menu",
-                                div()
-                                    .id(if project {
-                                        "minimal-rename-project"
-                                    } else {
-                                        "minimal-rename-session"
-                                    })
-                                    .w_full()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .text_sm()
-                                    .text_color(rgb(colors.text))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(colors.surface_high))),
-                                colors.surface_high,
-                                cx,
-                                move |this, window, cx| {
-                                    this.begin_sidebar_edit(
-                                        rename_target.clone(),
-                                        rename_title.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            )
-                            .child(if folder_group {
-                                "Rename folder"
-                            } else if project {
-                                "Rename project"
-                            } else if chat {
-                                "Rename chat"
-                            } else {
-                                "Rename session"
-                            }),
-                        )
-                        .when_some(
-                            settlement,
-                            |card, (session_id, (settled, auto_disabled))| {
-                                let settle_session = session_id.clone();
-                                let row = |id: &'static str, label: &'static str| {
-                                    div()
-                                        .id(id)
-                                        .w_full()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_md()
-                                        .text_sm()
-                                        .text_color(rgb(colors.text))
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(colors.surface_high)))
-                                        .child(label)
-                                };
-                                card.child(key_row(
-                                    &keys,
-                                    KeyLayer::Menu,
-                                    "sidebar-menu",
-                                    row(
-                                        "minimal-settle-session",
-                                        if settled {
-                                            "Bring back session"
-                                        } else {
-                                            "Settle session"
-                                        },
-                                    ),
-                                    colors.surface_high,
-                                    cx,
-                                    move |this, window, cx| {
-                                        this.close_sidebar_context_menu(window, cx);
-                                        if settled {
-                                            this.unsettle_session(&settle_session, cx);
-                                        } else {
-                                            this.settle_session(&settle_session, cx);
-                                        }
-                                    },
-                                ))
-                                .child(key_row(
-                                    &keys,
-                                    KeyLayer::Menu,
-                                    "sidebar-menu",
-                                    row(
-                                        "minimal-session-auto-settle",
-                                        if auto_disabled {
-                                            "Enable auto-settle"
-                                        } else {
-                                            "Disable auto-settle"
-                                        },
-                                    ),
-                                    colors.surface_high,
-                                    cx,
-                                    move |this, window, cx| {
-                                        this.close_sidebar_context_menu(window, cx);
-                                        this.set_session_auto_settle(
-                                            &session_id,
-                                            auto_disabled,
-                                            cx,
-                                        );
-                                    },
-                                ))
-                            },
-                        )
-                        .child(
-                            key_row(
-                                &keys,
-                                KeyLayer::Menu,
-                                "sidebar-menu",
-                                div()
-                                    .id(if project {
-                                        "minimal-delete-project"
-                                    } else {
-                                        "minimal-delete-session"
-                                    })
-                                    .w_full()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .text_sm()
-                                    .text_color(rgb(colors.danger))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(colors.danger_surface))),
-                                colors.danger_surface,
-                                cx,
-                                move |this, window, cx| {
-                                    this.begin_sidebar_delete(delete_target.clone(), window, cx);
-                                },
-                            )
-                            .child(if folder_group {
-                                "Delete folder"
-                            } else if project {
-                                "Delete project"
-                            } else if chat {
-                                "Delete chat"
-                            } else {
-                                "Delete session"
-                            }),
-                        ),
-                )
+                        .children(rows),
+                ))
                 .into_any_element()
         });
         let project_add_overlay = self.project_add_menu.clone().map(|menu| {
@@ -22755,22 +23173,18 @@ impl XdDesktop {
                        kind: WorkspaceCreateKind,
                        enabled: bool| {
                 let parent = menu.parent.clone();
-                let row = div()
-                    .id(id)
-                    .w_full()
-                    .px_3()
-                    .py(px(7.0))
-                    .flex()
+                let row = menu_row(id, colors)
+                    .py(px(6.0))
                     .flex_col()
-                    .gap(px(1.0))
-                    .rounded_md();
+                    .items_start()
+                    .justify_center()
+                    .gap(px(1.0));
                 let row = if enabled {
                     key_row(
                         &keys,
                         KeyLayer::Menu,
                         "add-menu",
-                        row.cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high))),
+                        row,
                         colors.surface_high,
                         cx,
                         move |this, window, cx| {
@@ -22778,18 +23192,18 @@ impl XdDesktop {
                         },
                     )
                 } else {
-                    row
+                    row.cursor_default()
+                        .text_color(rgb(disabled_ink(colors)))
+                        .hover(|style| style.bg(gpui::transparent_black()))
                 };
-                row.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(if enabled { colors.text } else { colors.faint }))
-                        .child(label),
-                )
-                .child(
+                row.child(label).child(
                     div()
                         .text_size(px(11.5))
-                        .text_color(rgb(if enabled { colors.muted } else { colors.faint }))
+                        .text_color(rgb(if enabled {
+                            colors.muted
+                        } else {
+                            disabled_ink(colors)
+                        }))
                         .child(detail),
                 )
             };
@@ -22806,32 +23220,17 @@ impl XdDesktop {
                     MouseButton::Right,
                     cx.listener(|this, _, window, cx| this.close_project_add_menu(window, cx)),
                 )
-                .child(
-                    div()
+                .child(menu_at(
+                    menu.position,
+                    menu_shell(colors)
                         .id("catalog-add-menu")
-                        .occlude()
-                        .absolute()
-                        .left(menu.position.x)
-                        .top(menu.position.y)
+                        .debug_selector(|| "catalog-add-menu".into())
                         .w(px(208.0))
-                        .p_1()
-                        .rounded(px(7.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .bg(rgb(colors.surface))
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                         .when_some(inside, |card, name| {
-                            card.child(
-                                div()
-                                    .px_3()
-                                    .pt(px(5.0))
-                                    .pb(px(3.0))
-                                    .text_size(px(11.5))
-                                    .text_color(rgb(colors.faint))
-                                    .child(truncating_label(format!("Add to {name}"))),
-                            )
+                            card.child(menu_note(
+                                truncating_label(format!("Add to {name}")),
+                                colors,
+                            ))
                         })
                         .child(row(
                             "catalog-add-project",
@@ -22851,7 +23250,7 @@ impl XdDesktop {
                             WorkspaceCreateKind::Folder,
                             folders_supported,
                         )),
-                )
+                ))
                 .into_any_element()
         });
         let usage_overlay = self
@@ -22865,21 +23264,82 @@ impl XdDesktop {
             .then(|| self.render_update_popup(colors, cx));
         let image_preview_overlay = self.render_image_preview(colors, window, cx);
         let share_overlay = self.share_panel.clone().map(|panel| {
-            let pairing_code = xd_transport::PairingCode { code: panel.code.clone(), fingerprint: panel.fingerprint.clone() }.encode().ok().filter(|_| !panel.loading);
+            let pairing_code = xd_transport::PairingCode {
+                code: panel.code.clone(),
+                fingerprint: panel.fingerprint.clone(),
+            }
+            .encode()
+            .ok()
+            .filter(|_| !panel.loading);
             let can_copy = pairing_code.is_some();
-            div().occlude().absolute().inset_0().flex().items_center().justify_center().bg(rgba(colors.backdrop)).child(
-                div().w(px(480.0)).p_5().flex().flex_col().gap_3().rounded_xl().bg(rgb(colors.surface)).text_color(rgb(colors.text))
-                .child(div().text_size(px(16.0)).child("Pair a device"))
-                .child(div().text_sm().text_color(rgb(colors.muted)).child("Copy this code to the other device within five minutes, then enter a LAN or Tailscale address that reaches this host. Each code can be used once."))
-                .child(if panel.loading { "Starting listener…".to_owned() } else { format!("Port {} · {}", panel.port.unwrap_or(0), panel.code) })
-                .when_some(panel.error, |card, error| card.child(div().text_sm().text_color(rgb(colors.danger)).child(error)))
-                .child(div().flex().gap_3()
-                    .child(ui_button("copy-pairing-code", if can_copy { ButtonKind::Primary } else { ButtonKind::Secondary }, colors).on_click(cx.listener(move |_, _, _, cx| { if let Some(code) = &pairing_code { cx.write_to_clipboard(ClipboardItem::new_string(code.clone())); } })).child("Copy pairing code"))
-                    .child(ui_button("refresh-pairing-code", ButtonKind::Secondary, colors).on_click(cx.listener(|this, _, _, cx| { if let Some(panel) = &mut this.share_panel { panel.loading = true; }
-                    if let Some(host) = &this.host { let _ = host.peer_pairing(); } cx.notify(); })).child("New code"))
-                    .child(div().flex_1())
-                    .child(ui_button("close-pairing", ButtonKind::Ghost, colors).on_click(cx.listener(|this, _, _, cx| { this.share_panel = None; cx.notify(); })).child("Close")))
-            ).into_any_element()
+            dialog_layer(colors)
+                .child(
+                    dialog_shell(DIALOG_WIDE_WIDTH, colors)
+                        .child(dialog_title("Pair a device", colors))
+                        .child(dialog_text(
+                            "Copy this code to the other device within five minutes, then enter a LAN or Tailscale address that reaches this host. Each code can be used once.",
+                            colors,
+                        ))
+                        .child(div().flex_none().child(if panel.loading {
+                            "Starting listener…".to_owned()
+                        } else {
+                            format!("Port {} · {}", panel.port.unwrap_or(0), panel.code)
+                        }))
+                        .when_some(panel.error, |card, error| {
+                            card.child(div().text_sm().text_color(rgb(colors.danger)).child(error))
+                        })
+                        .child(
+                            dialog_actions()
+                                .child(dialog_button(
+                                    &keys,
+                                    "close-pairing",
+                                    "Close",
+                                    ButtonKind::Ghost,
+                                    true,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| {
+                                        this.share_panel = None;
+                                        cx.notify();
+                                    },
+                                ))
+                                .child(dialog_button(
+                                    &keys,
+                                    "refresh-pairing-code",
+                                    "New code",
+                                    ButtonKind::Secondary,
+                                    true,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| {
+                                        if let Some(panel) = &mut this.share_panel {
+                                            panel.loading = true;
+                                        }
+                                        if let Some(host) = &this.host {
+                                            let _ = host.peer_pairing();
+                                        }
+                                        cx.notify();
+                                    },
+                                ))
+                                .child(dialog_button(
+                                    &keys,
+                                    "copy-pairing-code",
+                                    "Copy pairing code",
+                                    ButtonKind::Primary,
+                                    can_copy,
+                                    colors,
+                                    cx,
+                                    move |_, _, cx| {
+                                        if let Some(code) = &pairing_code {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                code.clone(),
+                                            ));
+                                        }
+                                    },
+                                )),
+                        ),
+                )
+                .into_any_element()
         });
         let devices_overlay = self.devices_panel.clone().map(|panel| {
             let rows = panel
@@ -22904,27 +23364,32 @@ impl XdDesktop {
                         .items_center()
                         .gap_3()
                         .py_2()
-                        .child(div().flex_1().child(name))
+                        // Room for the ring around Revoke inside the list,
+                        // which clips what it scrolls.
+                        .pr(px(FOCUS_RING_GAP))
+                        .child(truncating_label(name).flex_1())
                         .child(
-                            div()
-                                .id(("revoke-device", index))
-                                .px_3()
-                                .py_2()
-                                .text_color(rgb(colors.danger))
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if confirmed {
-                                        if let Some(host) = &this.host {
-                                            let _ = host.revoke_device(&id);
+                            ui_button(("revoke-device", index), ButtonKind::DangerGhost, colors)
+                                .key_stop(
+                                    &keys,
+                                    KeyLayer::Dialog,
+                                    format!("revoke-device-{index}"),
+                                    colors,
+                                    cx,
+                                    move |this, _, cx| {
+                                        if confirmed {
+                                            if let Some(host) = &this.host {
+                                                let _ = host.revoke_device(&id);
+                                            }
+                                            if let Some(panel) = &mut this.devices_panel {
+                                                panel.mutating = Some(id.clone());
+                                            }
+                                        } else if let Some(panel) = &mut this.devices_panel {
+                                            panel.revoke_confirmation = Some(id.clone());
                                         }
-                                        if let Some(panel) = &mut this.devices_panel {
-                                            panel.mutating = Some(id.clone());
-                                        }
-                                    } else if let Some(panel) = &mut this.devices_panel {
-                                        panel.revoke_confirmation = Some(id.clone());
-                                    }
-                                    cx.notify();
-                                }))
+                                        cx.notify();
+                                    },
+                                )
                                 .child(if confirmed {
                                     "Confirm revoke"
                                 } else {
@@ -22933,37 +23398,16 @@ impl XdDesktop {
                         )
                 })
                 .collect::<Vec<_>>();
-            div()
-                .occlude()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgba(colors.backdrop))
+            dialog_layer(colors)
                 .child(
-                    div()
-                        .w(px(480.0))
-                        // Many devices scroll inside the dialog, so its title
-                        // and Close stay on screen in a short window.
-                        .max_h(px(500.0))
-                        .p_5()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded_xl()
-                        .bg(rgb(colors.surface))
-                        .text_color(rgb(colors.text))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(16.0))
-                                .child("Paired devices"),
-                        )
+                    dialog_shell(DIALOG_WIDE_WIDTH, colors)
+                        .child(dialog_title("Paired devices", colors))
                         .when(panel.loading, |card| card.child("Loading…"))
                         .when(!panel.loading && rows.is_empty(), |card| {
                             card.child("No paired devices.")
                         })
+                        // Many devices scroll inside the dialog, so its title
+                        // and Close stay on screen in a short window.
                         .child(
                             div()
                                 .id("paired-devices-list")
@@ -22977,18 +23421,22 @@ impl XdDesktop {
                             card.child(div().text_color(rgb(colors.danger)).child(error))
                         })
                         .child(
-                            div()
-                                .id("close-devices")
-                                .debug_selector(|| "close-devices".into())
-                                .flex_none()
-                                .px_3()
-                                .py_2()
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.devices_panel = None;
-                                    cx.notify();
-                                }))
-                                .child("Close"),
+                            dialog_actions().child(
+                                dialog_button(
+                                    &keys,
+                                    "close-devices",
+                                    "Close",
+                                    ButtonKind::Secondary,
+                                    true,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| {
+                                        this.devices_panel = None;
+                                        cx.notify();
+                                    },
+                                )
+                                .debug_selector(|| "close-devices".into()),
+                            ),
                         ),
                 )
                 .into_any_element()
@@ -23074,27 +23522,19 @@ impl XdDesktop {
                 .enumerate()
                 .map(|(index, (value, label))| {
                     let selected = current == value;
-                    let row = div()
-                        .id(("native-setting-choice", index))
-                        .w_full()
-                        .min_h(px(36.0))
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .when(selected, |row| row.bg(rgb(colors.selected_surface)))
-                        .when(disabled, |row| row.opacity(0.6));
+                    let row = menu_row(("native-setting-choice", index), colors);
                     let row = if disabled {
-                        row
+                        // Not to be picked now: in the ink of a disabled
+                        // control, with nothing that reacts.
+                        row.cursor_default()
+                            .text_color(rgb(disabled_ink(colors)))
+                            .hover(|style| style.bg(gpui::transparent_black()))
                     } else {
                         let row = key_row(
                             &keys,
                             KeyLayer::Menu,
                             "native-option",
-                            row.cursor_pointer()
-                                .hover(|style| style.bg(rgb(colors.surface_high))),
+                            row,
                             colors.surface_high,
                             cx,
                             move |this, window, cx| {
@@ -23112,22 +23552,12 @@ impl XdDesktop {
                         keys.row_child(index);
                         row
                     };
-                    row.child(div().min_w_0().flex_1().child(label)).child(
-                        div().size(px(16.0)).flex_none().when(selected, |mark| {
-                            mark.child(icon(CHECK_ICON, 16.0, colors.text))
-                        }),
-                    )
+                    row.child(truncating_label(label).flex_1())
+                        .child(menu_check(selected, colors))
                 })
                 .collect::<Vec<_>>();
-            div()
-                .occlude()
-                .absolute()
-                .inset_0()
+            dialog_layer(colors)
                 .track_focus(&minimal_popup_focus)
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgba(colors.backdrop))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
@@ -23137,207 +23567,120 @@ impl XdDesktop {
                     }),
                 )
                 .child(
-                    div()
-                        .w(px(420.0))
-                        .max_h(px(500.0))
-                        .flex()
-                        .flex_col()
-                        .p_4()
-                        .gap_2()
-                        .rounded_xl()
-                        .bg(rgb(colors.surface))
-                        .text_color(rgb(colors.text))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .text_size(px(16.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(colors.muted))
-                                .child(if disabled {
-                                    "Planning uses read-only access. Switch to Build to change it."
-                                        .to_owned()
-                                } else {
-                                    format!("Current: {current_label}")
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id("native-setting-choices")
-                                .min_h_0()
-                                .max_h(px(352.0))
-                                .overflow_y_scroll()
-                                .track_scroll(&self.key_scroll)
-                                .children(rows),
-                        )
-                        .when(empty, |card| {
+                    dialog_shell(DIALOG_WIDTH, colors)
+                        .child(dialog_title(title, colors))
+                        .child(dialog_text(
+                            if disabled {
+                                "Planning uses read-only access. Switch to Build to change it."
+                                    .to_owned()
+                            } else {
+                                format!("Current: {current_label}")
+                            },
+                            colors,
+                        ))
+                        .when(!empty, |card| {
                             card.child(
                                 div()
-                                    .py_3()
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(colors.muted))
-                                    .child(if option == "model" {
-                                        "No models are available for this assistant."
-                                    } else {
-                                        "No reasoning options are available for this assistant."
-                                    }),
-                            )
-                            .child(
-                                ui_button(
-                                    "retry-native-setting-catalog",
-                                    ButtonKind::Secondary,
-                                    colors,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.request_agent_catalog();
-                                    cx.notify();
-                                }))
-                                .child("Try again"),
+                                    .id("native-setting-choices")
+                                    // Its rows' words line up under the title.
+                                    .mx(px(-10.0))
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.key_scroll)
+                                    .children(rows),
                             )
                         })
+                        .when(empty, |card| {
+                            card.child(dialog_text(
+                                if option == "model" {
+                                    "No models are available for this assistant."
+                                } else {
+                                    "No reasoning options are available for this assistant."
+                                },
+                                colors,
+                            ))
+                        })
                         .child(
-                            ui_button("close-native-setting", ButtonKind::Ghost, colors)
-                                .debug_selector(|| "native-option-cancel".into())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.native_option_open = None;
-                                    this.restore_minimal_popup_focus(window);
-                                    cx.notify();
-                                }))
-                                .child("Cancel"),
+                            dialog_actions()
+                                .when(empty, |actions| {
+                                    actions.child(dialog_button(
+                                        &keys,
+                                        "retry-native-setting-catalog",
+                                        "Try again",
+                                        ButtonKind::Secondary,
+                                        true,
+                                        colors,
+                                        cx,
+                                        |this, _, cx| {
+                                            this.request_agent_catalog();
+                                            cx.notify();
+                                        },
+                                    ))
+                                })
+                                .child(
+                                    dialog_button(
+                                        &keys,
+                                        "close-native-setting",
+                                        "Cancel",
+                                        ButtonKind::Ghost,
+                                        true,
+                                        colors,
+                                        cx,
+                                        |this, window, cx| {
+                                            this.native_option_open = None;
+                                            this.restore_minimal_popup_focus(window);
+                                            cx.notify();
+                                        },
+                                    )
+                                    .debug_selector(|| "native-option-cancel".into()),
+                                ),
                         ),
                 )
                 .into_any_element()
         });
         let remote_overlay = self.remote_panel.clone().map(|panel| {
-            let can_connect =
-                !panel.submitting && xd_transport::PairingInvite::new(&panel.address, &panel.command).is_ok();
-            div()
-                .occlude()
-                .absolute()
-                .inset_0()
+            let can_connect = !panel.submitting
+                && xd_transport::PairingInvite::new(&panel.address, &panel.command).is_ok();
+            dialog_layer(colors)
                 .track_focus(&minimal_popup_focus)
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgba(colors.backdrop))
                 .child(
-                    div()
-                        .w(px(470.0))
-                        .p_5()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded(px(10.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .bg(rgb(colors.surface))
-                        .shadow_lg()
-                        .child(
-                            div()
-                                .text_size(px(16.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(colors.text))
-                                .child("Pair with a host"),
-                        )
-                        .child(
-                            div()
-                                .mb_2()
-                                .text_sm()
-                                .text_color(rgb(colors.muted))
-                                .child(
-                                    "On the host, open Settings → Pair a device and copy its pairing code. Enter an address that reaches the host, then paste the code to connect directly.",
-                                ),
-                        )
-                        .child(
-                            div()
-                                .h(px(36.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(self.field_frame(&self.remote_address_input, Some(KeyLayer::Dialog), cx))
-                                .bg(rgb(colors.background))
-                                .child(self.remote_address_input.clone()),
-                        )
-                        .child(
-                            div()
-                                .h(px(36.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(self.field_frame(&self.remote_pairing_input, Some(KeyLayer::Dialog), cx))
-                                .bg(rgb(colors.background))
-                                .child(self.remote_pairing_input.clone()),
-                        )
+                    dialog_shell(DIALOG_WIDE_WIDTH, colors)
+                        .child(dialog_title("Pair with a host", colors))
+                        .child(dialog_text(
+                            "On the host, open Settings → Pair a device and copy its pairing code. Enter an address that reaches the host, then paste the code to connect directly.",
+                            colors,
+                        ).mb_2())
+                        .child(self.dialog_field(&self.remote_address_input, colors, cx))
+                        .child(self.dialog_field(&self.remote_pairing_input, colors, cx))
                         .when_some(panel.error.clone(), |card, error| {
                             card.child(div().text_sm().text_color(rgb(colors.danger)).child(error))
                         })
                         .child(
-                            div()
-                                .mt_2()
-                                .flex()
-                                .justify_end()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id("minimal-cancel-remote")
-                                        .h(px(30.0))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.0))
-                                        .text_sm()
-                                        .text_color(rgb(colors.muted))
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(colors.surface_high)))
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.close_remote(cx)),
-                                        )
-                                        .child("Cancel"),
-                                )
-                                .child(
-                                    div()
-                                        .id("minimal-connect-remote")
-                                        .h(px(30.0))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.0))
-                                        .bg(rgb(if can_connect {
-                                            colors.accent
-                                        } else {
-                                            colors.surface_high
-                                        }))
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(if can_connect {
-                                            colors.accent_text
-                                        } else {
-                                            colors.muted
-                                        }))
-                                        .when(can_connect, |button| {
-                                            button
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(colors.accent_hover)))
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if can_connect {
-                                                this.connect_remote_machine(cx);
-                                            }
-                                        }))
-                                        .child(if panel.submitting {
-                                            "Connecting…"
-                                        } else {
-                                            "Connect"
-                                        }),
-                                ),
+                            dialog_actions()
+                                .child(dialog_button(
+                                    &keys,
+                                    "minimal-cancel-remote",
+                                    "Cancel",
+                                    ButtonKind::Ghost,
+                                    true,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.close_remote(cx),
+                                ))
+                                .child(dialog_button(
+                                    &keys,
+                                    "minimal-connect-remote",
+                                    if panel.submitting {
+                                        "Connecting…"
+                                    } else {
+                                        "Connect"
+                                    },
+                                    ButtonKind::Primary,
+                                    can_connect,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.connect_remote_machine(cx),
+                                )),
                         ),
                 )
                 .into_any_element()
@@ -23360,39 +23703,17 @@ impl XdDesktop {
                 WorkspaceCreateKind::Project => ("New project", "Create project"),
                 WorkspaceCreateKind::Folder => ("New folder", "Create folder"),
             };
-            div()
-                .occlude()
-                .absolute()
-                .inset_0()
+            dialog_layer(colors)
                 .track_focus(&minimal_popup_focus)
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgba(colors.backdrop))
                 .child(
-                    div()
-                        .w(px(500.0))
-                        .p_5()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded(px(10.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .bg(rgb(colors.surface))
-                        .shadow_lg()
+                    dialog_shell(DIALOG_WIDE_WIDTH, colors)
                         .child(
                             div()
+                                .flex_none()
                                 .flex()
                                 .flex_col()
                                 .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .text_size(px(16.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(colors.text))
-                                        .child(heading),
-                                )
+                                .child(dialog_title(heading, colors))
                                 .when_some(inside, |title, name| {
                                     title.child(
                                         truncating_label(format!("In {name}"))
@@ -23401,59 +23722,15 @@ impl XdDesktop {
                                     )
                                 }),
                         )
-                        .child(
-                            div()
-                                .h(px(36.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(self.field_frame(&self.workspace_create_input, Some(KeyLayer::Dialog), cx))
-                                .bg(rgb(colors.background))
-                                .child(self.workspace_create_input.clone()),
-                        )
+                        .child(self.dialog_field(&self.workspace_create_input, colors, cx))
                         .when(project, |card| {
-                            card.child(
-                                div()
-                                    .h(px(36.0))
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .rounded(px(6.0))
-                                    .border_1()
-                                    .border_color(self.field_frame(&self.workspace_repo_input, Some(KeyLayer::Dialog), cx))
-                                    .bg(rgb(colors.background))
-                                    .child(self.workspace_repo_input.clone()),
-                            )
-                            .child(
-                                div()
-                                    .h(px(36.0))
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .rounded(px(6.0))
-                                    .border_1()
-                                    .border_color(self.field_frame(&self.workspace_clone_input, Some(KeyLayer::Dialog), cx))
-                                    .bg(rgb(colors.background))
-                                    .child(self.workspace_clone_input.clone()),
-                            )
+                            card.child(self.dialog_field(&self.workspace_repo_input, colors, cx))
+                                .child(self.dialog_field(&self.workspace_clone_input, colors, cx))
                         })
                         .when(!project, |card| {
-                            card.child(
-                                div()
-                                    .h(px(36.0))
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .rounded(px(6.0))
-                                    .border_1()
-                                    .border_color(self.field_frame(&self.workspace_org_input, Some(KeyLayer::Dialog), cx))
-                                    .bg(rgb(colors.background))
-                                    .child(self.workspace_org_input.clone()),
-                            )
+                            card.child(self.dialog_field(&self.workspace_org_input, colors, cx))
                         })
-                        .child(div().text_xs().text_color(rgb(colors.muted)).child(
+                        .child(div().flex_none().text_xs().text_color(rgb(colors.muted)).child(
                             match kind {
                                 WorkspaceCreateKind::Project
                                     if cfg!(target_os = "windows")
@@ -23470,70 +23747,36 @@ impl XdDesktop {
                             },
                         ))
                         .child(
-                            div()
-                                .mt_2()
-                                .flex()
-                                .justify_end()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id("minimal-cancel-project")
-                                        .h(px(30.0))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.0))
-                                        .text_sm()
-                                        .text_color(rgb(colors.muted))
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(colors.surface_high)))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.cancel_workspace_create(cx)
-                                        }))
-                                        .child("Cancel"),
-                                )
-                                .child(
-                                    div()
-                                        .id("minimal-save-project")
-                                        .h(px(30.0))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.0))
-                                        .bg(rgb(if can_save {
-                                            colors.accent
-                                        } else {
-                                            colors.surface_high
-                                        }))
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(if can_save {
-                                            colors.accent_text
-                                        } else {
-                                            colors.muted
-                                        }))
-                                        .when(can_save, |button| {
-                                            button
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(colors.accent_hover)))
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if can_save {
-                                                this.save_workspace_create(cx)
-                                            }
-                                        }))
-                                        .child(if self.workspace_create_submitting {
-                                            "Creating…"
-                                        } else {
-                                            action
-                                        }),
-                                ),
+                            dialog_actions()
+                                .child(dialog_button(
+                                    &keys,
+                                    "minimal-cancel-project",
+                                    "Cancel",
+                                    ButtonKind::Ghost,
+                                    true,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.cancel_workspace_create(cx),
+                                ))
+                                .child(dialog_button(
+                                    &keys,
+                                    "minimal-save-project",
+                                    if self.workspace_create_submitting {
+                                        "Creating…"
+                                    } else {
+                                        action
+                                    },
+                                    ButtonKind::Primary,
+                                    can_save,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.save_workspace_create(cx),
+                                )),
                         ),
                 )
                 .into_any_element()
         });
-        #[allow(clippy::bind_instead_of_map)]
-        let sidebar_rename_overlay = self.sidebar_edit.clone().and_then(|edit| {
+        let sidebar_rename_overlay = self.sidebar_edit.clone().map(|edit| {
             let (heading, cancel_id, save_id) = match &edit.target {
                 SidebarTarget::Folder(folder_id)
                     if self
@@ -23566,115 +23809,81 @@ impl XdDesktop {
             };
             let name = edit.text.trim();
             let can_save = !edit.submitting && !name.is_empty() && name != edit.original;
-            Some(
-                div()
-                    .occlude()
-                    .absolute()
-                    .inset_0()
-                    .track_focus(&minimal_popup_focus)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgba(colors.backdrop))
-                    .child(
-                        div()
-                            .w(px(430.0))
-                            .p_5()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .rounded(px(10.0))
-                            .border_1()
-                            .border_color(rgb(colors.border))
-                            .bg(rgb(colors.surface))
-                            .shadow_lg()
-                            .child(
-                                div()
-                                    .text_size(px(16.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(colors.text))
-                                    .child(heading),
-                            )
-                            .child(
-                                div()
-                                    .h(px(36.0))
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .rounded(px(6.0))
-                                    .border_1()
-                                    .border_color(self.field_frame(
-                                        &self.sidebar_edit_input,
-                                        Some(KeyLayer::Dialog),
-                                        cx,
-                                    ))
-                                    .bg(rgb(colors.background))
-                                    .child(self.sidebar_edit_input.clone()),
-                            )
-                            .child(
-                                div()
-                                    .mt_2()
-                                    .flex()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .id(cancel_id)
-                                            .h(px(30.0))
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(6.0))
-                                            .text_sm()
-                                            .text_color(rgb(colors.muted))
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.cancel_sidebar_edit(cx)
-                                            }))
-                                            .child("Cancel"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(save_id)
-                                            .h(px(30.0))
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(6.0))
-                                            .bg(rgb(if can_save {
-                                                colors.accent
-                                            } else {
-                                                colors.surface_high
-                                            }))
-                                            .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(if can_save {
-                                                colors.accent_text
-                                            } else {
-                                                colors.muted
-                                            }))
-                                            .when(can_save, |button| {
-                                                button.cursor_pointer().hover(|style| {
-                                                    style.bg(rgb(colors.accent_hover))
-                                                })
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if can_save {
-                                                    this.save_sidebar_edit(cx)
-                                                }
-                                            }))
-                                            .child(if edit.submitting {
-                                                "Renaming…"
-                                            } else {
-                                                "Rename"
-                                            }),
-                                    ),
-                            ),
-                    )
-                    .into_any_element(),
-            )
+            dialog_layer(colors)
+                .track_focus(&minimal_popup_focus)
+                .child(
+                    dialog_shell(DIALOG_WIDTH, colors)
+                        .child(dialog_title(heading, colors))
+                        .child(self.dialog_field(&self.sidebar_edit_input, colors, cx))
+                        .child(
+                            dialog_actions()
+                                .child(dialog_button(
+                                    &keys,
+                                    cancel_id,
+                                    "Cancel",
+                                    ButtonKind::Ghost,
+                                    true,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.cancel_sidebar_edit(cx),
+                                ))
+                                .child(dialog_button(
+                                    &keys,
+                                    save_id,
+                                    if edit.submitting {
+                                        "Renaming…"
+                                    } else {
+                                        "Rename"
+                                    },
+                                    ButtonKind::Primary,
+                                    can_save,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.save_sidebar_edit(cx),
+                                )),
+                        ),
+                )
+                .into_any_element()
         });
+        // What the open delete dialog asks, and what its confirm button says.
+        let delete_dialog = |title: &'static str,
+                             body: String,
+                             action: &'static str,
+                             cancel_id: &'static str,
+                             confirm_id: &'static str| {
+            let submitting = self.sidebar_delete_submitting;
+            dialog_layer(colors)
+                .track_focus(&minimal_popup_focus)
+                .child(
+                    dialog_shell(DIALOG_WIDTH, colors)
+                        .child(dialog_title(title, colors))
+                        .child(dialog_text(body, colors))
+                        .child(
+                            dialog_actions()
+                                .child(dialog_button(
+                                    &keys,
+                                    cancel_id,
+                                    "Cancel",
+                                    ButtonKind::Ghost,
+                                    true,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.cancel_sidebar_delete(cx),
+                                ))
+                                .child(dialog_button(
+                                    &keys,
+                                    confirm_id,
+                                    if submitting { "Deleting…" } else { action },
+                                    ButtonKind::Danger,
+                                    !submitting,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.confirm_sidebar_delete(cx),
+                                )),
+                        ),
+                )
+                .into_any_element()
+        };
         let workspace_delete_overlay = self.pending_sidebar_delete.clone().and_then(|target| {
             let SidebarTarget::Folder(folder_id) = target else {
                 return None;
@@ -23685,232 +23894,75 @@ impl XdDesktop {
                 .iter()
                 .find(|folder| folder.id == folder_id)
                 .map(|folder| (folder.name.clone(), folder.group))?;
-            let submitting = self.sidebar_delete_submitting;
-            Some(
-                div()
-                    .occlude()
-                    .absolute()
-                    .inset_0()
-                    .track_focus(&minimal_popup_focus)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgba(colors.backdrop))
-                    .child(
-                        div()
-                            .w(px(450.0))
-                            .p_5()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .rounded(px(10.0))
-                            .border_1()
-                            .border_color(rgb(colors.border))
-                            .bg(rgb(colors.surface))
-                            .shadow_lg()
-                            .child(
-                                div()
-                                    .text_size(px(16.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(colors.text))
-                                    .child(if group {
-                                        "Delete folder?"
-                                    } else {
-                                        "Delete project?"
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(colors.muted))
-                                    .child(if group {
-                                        format!(
-                                            "This removes {project_name}, every project and folder in it, and all their sessions from xd. Its files will be moved to the workspace trash."
-                                        )
-                                    } else {
-                                        format!(
-                                            "This removes {project_name} and all its sessions from xd. Its files will be moved to the workspace trash."
-                                        )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .mt_2()
-                                    .flex()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .id("minimal-cancel-project-delete")
-                                            .h(px(30.0))
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(6.0))
-                                            .text_sm()
-                                            .text_color(rgb(colors.muted))
-                                            .when(!submitting, |button| {
-                                                button
-                                                    .cursor_pointer()
-                                                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.cancel_sidebar_delete(cx)
-                                            }))
-                                            .child("Cancel"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("minimal-confirm-project-delete")
-                                            .h(px(30.0))
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(6.0))
-                                            .bg(rgb(if submitting {
-                                                colors.surface_high
-                                            } else {
-                                                colors.danger
-                                            }))
-                                            .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(if submitting {
-                                                colors.muted
-                                            } else {
-                                                colors.surface
-                                            }))
-                                            .when(!submitting, |button| {
-                                                button
-                                                    .cursor_pointer()
-                                                    .hover(|style| style.bg(rgb(colors.danger)))
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.confirm_sidebar_delete(cx)
-                                            }))
-                                            .child(if submitting {
-                                                "Deleting…"
-                                            } else {
-                                                if group { "Delete folder" } else { "Delete project" }
-                                            }),
-                                    ),
-                            ),
+            Some(if group {
+                delete_dialog(
+                    "Delete folder?",
+                    format!(
+                        "This removes {project_name}, every project and folder in it, and all their sessions from xd. Its files will be moved to the workspace trash."
+                    ),
+                    "Delete folder",
+                    "minimal-cancel-project-delete",
+                    "minimal-confirm-project-delete",
                 )
-                .into_any_element(),
-            )
+            } else {
+                delete_dialog(
+                    "Delete project?",
+                    format!(
+                        "This removes {project_name} and all its sessions from xd. Its files will be moved to the workspace trash."
+                    ),
+                    "Delete project",
+                    "minimal-cancel-project-delete",
+                    "minimal-confirm-project-delete",
+                )
+            })
         });
         let chat_delete_overlay = self.pending_sidebar_delete.clone().and_then(|target| {
             let (session_name, deleting_group) = match &target {
-                SidebarTarget::Session(id) => (self.model.sessions.iter().find(|session| &session.id == id)?.title.clone(), true),
-                SidebarTarget::Chat(id) => (self.model.chats.iter().find(|chat| &chat.id == id)?.title.clone().unwrap_or_else(|| "New chat".into()), false),
+                SidebarTarget::Session(id) => (
+                    self.model
+                        .sessions
+                        .iter()
+                        .find(|session| &session.id == id)?
+                        .title
+                        .clone(),
+                    true,
+                ),
+                SidebarTarget::Chat(id) => (
+                    self.model
+                        .chats
+                        .iter()
+                        .find(|chat| &chat.id == id)?
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| "New chat".into()),
+                    false,
+                ),
                 _ => return None,
             };
-            let submitting = self.sidebar_delete_submitting;
-            Some(
-                div()
-                    .occlude()
-                    .absolute()
-                    .inset_0()
-                    .track_focus(&minimal_popup_focus)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgba(colors.backdrop))
-                    .child(
-                        div()
-                            .w(px(450.0))
-                            .p_5()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .rounded(px(10.0))
-                            .border_1()
-                            .border_color(rgb(colors.border))
-                            .bg(rgb(colors.surface))
-                            .shadow_lg()
-                            .child(
-                                div()
-                                    .text_size(px(16.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(colors.text))
-                                    .child(if deleting_group { "Delete session?" } else { "Delete chat?" }),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(colors.muted))
-                                    .child(if deleting_group {
-                                        format!("This permanently removes {session_name} and all its chats from xd. Project files are kept.")
-                                    } else {
-                                        format!("This permanently removes {session_name} and its conversation from xd. Project files are kept.")
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .mt_2()
-                                    .flex()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .id("minimal-cancel-session-delete")
-                                            .h(px(30.0))
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(6.0))
-                                            .text_sm()
-                                            .text_color(rgb(colors.muted))
-                                            .when(!submitting, |button| {
-                                                button.cursor_pointer().hover(|style| {
-                                                    style.bg(rgb(colors.surface_high))
-                                                })
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.cancel_sidebar_delete(cx)
-                                            }))
-                                            .child("Cancel"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("minimal-confirm-session-delete")
-                                            .h(px(30.0))
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(6.0))
-                                            .bg(rgb(if submitting {
-                                                colors.surface_high
-                                            } else {
-                                                colors.danger
-                                            }))
-                                            .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(if submitting {
-                                                colors.muted
-                                            } else {
-                                                colors.surface
-                                            }))
-                                            .when(!submitting, |button| {
-                                                button
-                                                    .cursor_pointer()
-                                                    .hover(|style| style.bg(rgb(colors.danger)))
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.confirm_sidebar_delete(cx)
-                                            }))
-                                            .child(if submitting {
-                                                "Deleting…"
-                                            } else {
-                                                if deleting_group { "Delete session" } else { "Delete chat" }
-                                            }),
-                                    ),
-                            ),
-                    )
-                    .into_any_element(),
-            )
+            Some(if deleting_group {
+                delete_dialog(
+                    "Delete session?",
+                    format!(
+                        "This permanently removes {session_name} and all its chats from xd. Project files are kept."
+                    ),
+                    "Delete session",
+                    "minimal-cancel-session-delete",
+                    "minimal-confirm-session-delete",
+                )
+            } else {
+                delete_dialog(
+                    "Delete chat?",
+                    format!(
+                        "This permanently removes {session_name} and its conversation from xd. Project files are kept."
+                    ),
+                    "Delete chat",
+                    "minimal-cancel-session-delete",
+                    "minimal-confirm-session-delete",
+                )
+            })
         });
         if self.pending_sidebar_delete.is_some() {
-            // Enter confirms, as the dialog's filled button does.
+            // Enter confirms, as the dialog's main button does.
             keys.default_action(
                 KeyLayer::Dialog,
                 Rc::new(|this, _, cx| this.confirm_sidebar_delete(cx)),
@@ -24188,6 +24240,28 @@ impl XdDesktop {
                     cx.propagate();
                 }
             }))
+            .on_action(cx.listener(|this, _: &KeyPress, window, cx| {
+                if !this.key_press(window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenContextMenu, window, cx| {
+                this.open_context_menu_from_keys(window, cx);
+            }))
+            // A pointer press anywhere ends the ring: the pointer has taken over.
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                if this.key_stop.is_some() {
+                    this.leave_key_stop(window);
+                    cx.notify();
+                }
+            }))
+            // Tab in an empty message box has nothing to indent, so it goes
+            // on to the options under the box.
+            .capture_action(cx.listener(|this, _: &EditorTab, window, cx| {
+                if this.tab_leaves_message_box(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &NextField, window, cx| {
                 if !this.key_field(false, window, cx) {
                     cx.propagate();
@@ -24226,6 +24300,13 @@ impl XdDesktop {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                // From a control Tab reached on the page, Escape goes back to
+                // where the keyboard was: the message box.
+                if this.key_stop.is_some() && !this.shortcuts_blocked() && !this.menu_open() {
+                    this.leave_key_stop(window);
+                    cx.notify();
+                    return;
+                }
                 if this.pull_request_panel.is_some() {
                     this.close_pull_request_panel(window, cx);
                     return;
@@ -24259,6 +24340,10 @@ impl XdDesktop {
                     return;
                 }
                 if this.account_remove_confirm.take().is_some() {
+                    cx.notify();
+                    return;
+                }
+                if this.minimal_theme_open && this.chat_title_model_menu.take().is_some() {
                     cx.notify();
                     return;
                 }
@@ -24309,6 +24394,13 @@ impl XdDesktop {
             }))
             // Takes no room and no clicks: it only holds the keyboard.
             .child(div().absolute().size_0().track_focus(&self.root_focus))
+            .child(
+                div()
+                    .absolute()
+                    .size_0()
+                    .track_focus(&self.stop_focus)
+                    .key_context(KEY_STOP_CONTEXT),
+            )
             .child(titlebar)
             .child(
                 div()
@@ -24498,6 +24590,14 @@ impl XdDesktop {
             || self.sidebar_context_menu.is_some()
             || self.pending_sidebar_delete.is_some()
             || self.pull_request_panel.is_some()
+    }
+
+    /// Whether a menu that leaves the page under it in sight is open: a new
+    /// chat's picker, a Usage filter, or a Settings dropdown.
+    fn menu_open(&self) -> bool {
+        self.new_chat_menu.is_some()
+            || (self.minimal_theme_open && self.chat_title_model_menu.is_some())
+            || self.usage_menu_open()
     }
 
     /// The sessions the sidebar lists, top to bottom, as what opens each: the
@@ -24787,19 +24887,36 @@ impl XdDesktop {
     }
 
     /// The border of the frame a text field sits in: the focus colour while
-    /// the field has the keyboard. A dialog's fields are noted for Tab too.
-    fn field_frame(
-        &self,
-        input: &Entity<ComposerInput>,
-        layer: Option<KeyLayer>,
-        cx: &App,
-    ) -> gpui::Rgba {
+    /// the field has the keyboard.
+    fn field_frame(&self, input: &Entity<ComposerInput>, cx: &App) -> gpui::Rgba {
         let focus = input.read(cx).focus_handle(cx);
         let focused = self.frame_focus.as_ref() == Some(&focus);
-        if let Some(layer) = layer {
-            self.key_targets.field(layer, focus);
-        }
         field_border(focused, self.settings.theme.colors())
+    }
+
+    /// A dialog's text field in its frame, which Tab stops on.
+    fn dialog_field(
+        &self,
+        input: &Entity<ComposerInput>,
+        colors: ThemeColors,
+        cx: &App,
+    ) -> gpui::Div {
+        div()
+            .relative()
+            .h(px(36.0))
+            .px_3()
+            .flex_none()
+            .flex()
+            .items_center()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(self.field_frame(input, cx))
+            .bg(rgb(colors.background))
+            .child(input.clone())
+            .child(self.key_targets.mark(
+                KeyLayer::Dialog,
+                KeyStop::Field(input.read(cx).focus_handle(cx)),
+            ))
     }
 
     /// The topmost list's length, owner and layer, when it has rows.
@@ -24826,10 +24943,11 @@ impl XdDesktop {
     }
 
     /// Up and Down: moves through the topmost list, going round at its ends.
-    /// Says whether there was a list to move in.
+    /// Says whether there was a list to move in. In Settings, with no menu
+    /// open, they move through its sections.
     fn key_move(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
         let Some((_, owner, len)) = self.key_rows() else {
-            return false;
+            return self.step_settings_section(down, cx);
         };
         let next = match (self.key_row_at(), down) {
             (Some(at), true) => (at + 1) % len,
@@ -24849,6 +24967,11 @@ impl XdDesktop {
     /// Enter: presses the row the keys are on, or else the open dialog's
     /// default button. Says whether there was either.
     fn key_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // A menu's row the arrow keys are on comes before the control Tab is
+        // on, which opened the menu; that control comes before all else.
+        if !(self.menu_has_keys() && self.key_row_at().is_some()) && self.key_press(window, cx) {
+            return true;
+        }
         let run = {
             let frame = self.key_targets.0.borrow();
             let rows_layer = frame.rows_owner.map(|(layer, _)| layer);
@@ -24869,7 +24992,13 @@ impl XdDesktop {
         let found = self
             .key_rows()
             .is_some_and(|(layer, _, _)| layer == KeyLayer::Find);
-        self.key_cursor = None;
+        let stays = self.key_row_at().is_some_and(|row| {
+            let frame = self.key_targets.0.borrow();
+            frame.rows_stay.get(row).copied().unwrap_or(false)
+        });
+        if !stays {
+            self.key_cursor = None;
+        }
         run(self, window, cx);
         if found {
             // The search did its work: the sidebar lists everything again.
@@ -24901,27 +25030,172 @@ impl XdDesktop {
             KeyLayer::Menu | KeyLayer::Find => {}
             // From the find field the arrow keys also reach the page beside it.
             KeyLayer::Page if self.find_focused => {}
-            KeyLayer::Page | KeyLayer::Dialog => return false,
+            KeyLayer::Page | KeyLayer::Overlay | KeyLayer::Dialog => return false,
         }
         self.key_row_at().is_some() && self.key_confirm(window, cx)
     }
 
-    /// Tab and Shift+Tab: moves between the fields of the open dialog.
+    /// Tab and Shift+Tab: moves through the topmost stops, the fields and
+    /// controls of the open dialog, of Settings, or of the composer, going
+    /// round at the ends. A field takes the keyboard; a control takes the
+    /// ring. Says whether there was anything to move to.
     fn key_field(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let fields = self.key_targets.0.borrow().fields.clone();
-        if fields.is_empty() {
+        let stops = self.key_targets.0.borrow().stops.clone();
+        if stops.is_empty() {
             return false;
         }
-        let at = fields.iter().position(|field| field.is_focused(window));
+        let ringed = self.stop_focus.is_focused(window);
+        let at = stops.iter().position(|(stop, _)| match stop {
+            KeyStop::Field(field) => field.is_focused(window),
+            KeyStop::Control(id, _) => ringed && self.key_stop.as_ref() == Some(id),
+        });
         let next = match (at, back) {
-            (Some(at), false) => (at + 1) % fields.len(),
-            (Some(at), true) => (at + fields.len() - 1) % fields.len(),
+            (Some(at), false) => (at + 1) % stops.len(),
+            (Some(at), true) => (at + stops.len() - 1) % stops.len(),
             (None, false) => 0,
-            (None, true) => fields.len() - 1,
+            (None, true) => stops.len() - 1,
         };
-        window.focus(&fields[next]);
+        match &stops[next] {
+            (KeyStop::Field(field), _) => {
+                self.key_stop = None;
+                window.focus(field);
+            }
+            (KeyStop::Control(id, _), bounds) => {
+                if !ringed {
+                    self.key_stop_return = window.focused(cx).map(|focus| focus.downgrade());
+                    window.focus(&self.stop_focus);
+                }
+                self.key_stop = Some(id.clone());
+                self.reveal_key_stop(*bounds);
+            }
+        }
         cx.notify();
         true
+    }
+
+    /// Enter or Space on the control the Tab ring is on. Says whether there
+    /// was one.
+    fn key_press(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.stop_focus.is_focused(window) {
+            return false;
+        }
+        let Some(id) = self.key_stop.clone() else {
+            return false;
+        };
+        let run = self
+            .key_targets
+            .0
+            .borrow()
+            .stops
+            .iter()
+            .find_map(|(stop, _)| match stop {
+                KeyStop::Control(stop, run) if *stop == id => Some(run.clone()),
+                _ => None,
+            });
+        let Some(run) = run else {
+            return false;
+        };
+        run(self, window, cx);
+        cx.notify();
+        true
+    }
+
+    /// Takes the ring off its control. On the page the keyboard goes back
+    /// to what had it before, the message box; in Settings, Usage or a
+    /// dialog it goes to the page or dialog itself, not into a text field
+    /// nobody chose.
+    fn leave_key_stop(&mut self, window: &mut Window) {
+        self.key_stop = None;
+        let back = self.key_stop_return.take();
+        if !self.stop_focus.is_focused(window) {
+            return;
+        }
+        if self.usage_open {
+            self.focus_usage(window);
+        } else if self.shortcuts_blocked() {
+            window.focus(&self.minimal_popup_focus);
+        } else {
+            match back.and_then(|focus| focus.upgrade()) {
+                Some(focus) => window.focus(&focus),
+                None => window.focus(&self.root_focus),
+            }
+        }
+    }
+
+    /// Drops the ring once its control is gone, or once something else has
+    /// the keyboard. Called before a frame is drawn, about the frame before.
+    fn settle_key_stop(&mut self, window: &mut Window) {
+        let Some(id) = &self.key_stop else {
+            return;
+        };
+        if !self.stop_focus.is_focused(window) {
+            self.key_stop = None;
+            return;
+        }
+        let drawn = self
+            .key_targets
+            .0
+            .borrow()
+            .stops
+            .iter()
+            .any(|(stop, _)| matches!(stop, KeyStop::Control(stop, _) if stop == id));
+        if !drawn {
+            self.leave_key_stop(window);
+        }
+    }
+
+    /// Scrolls the Settings page so the control Tab moved to is in view.
+    fn reveal_key_stop(&mut self, bounds: Bounds<Pixels>) {
+        if !self.minimal_theme_open {
+            return;
+        }
+        let view = self.settings_scroll.bounds();
+        if bounds.left() < view.left() || bounds.size.height > view.size.height {
+            return;
+        }
+        let margin = px(24.0);
+        let mut offset = self.settings_scroll.offset();
+        if bounds.top() < view.top() + margin {
+            offset.y += view.top() + margin - bounds.top();
+        } else if bounds.bottom() > view.bottom() - margin {
+            offset.y -= bounds.bottom() - (view.bottom() - margin);
+        }
+        offset.y = offset.y.min(px(0.0));
+        self.settings_scroll.set_offset(offset);
+    }
+
+    /// Tab in a message box that holds nothing moves to the options under
+    /// it. With text in the box Tab indents, as it always has.
+    fn tab_leaves_message_box(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.shortcuts_blocked() || self.menu_open() {
+            return false;
+        }
+        let (input, empty) = if self.creating_chat_folder.is_some() {
+            (&self.new_chat_input, self.new_chat_prompt.is_empty())
+        } else {
+            (&self.composer_input, self.composer.is_empty())
+        };
+        empty && input.read(cx).focus_handle(cx).is_focused(window) && {
+            self.key_field(false, window, cx)
+        }
+    }
+
+    /// Shift+F10 and the Menu key: the context menu of the open session's
+    /// row, or of the current project's on the landing page, under that row.
+    fn open_context_menu_from_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shortcuts_blocked() || self.menu_open() {
+            return;
+        }
+        let Some((target, title, bounds)) = self
+            .key_menu_session
+            .as_ref()
+            .or(self.key_menu_project.as_ref())
+            .and_then(|row| Some((row.target.clone(), row.title.clone(), row.bounds.get()?)))
+        else {
+            return;
+        };
+        let position = point(bounds.left() + px(24.0), bounds.bottom());
+        self.open_sidebar_context_menu(target, title, position, window, cx);
     }
 
     /// Forgets where the arrow keys were once their list is no longer the
@@ -24964,13 +25238,17 @@ impl Render for XdDesktop {
         self.terminal_drawn = false;
         // What the keyboard can reach is noted again as this frame is drawn.
         self.settle_key_cursor();
+        self.settle_key_stop(window);
+        self.key_menu_session = None;
+        self.key_menu_project = None;
         self.frame_focus = window.focused(cx);
         FRAME_COLORS.with(|colors| colors.set(Some(self.settings.theme.colors())));
-        UNDER_A_DIALOG.with(|under| under.set(self.dialog_open() || self.new_chat_menu.is_some()));
+        UNDER_A_DIALOG.with(|under| under.set(self.dialog_open() || self.menu_open()));
         self.find_focused =
             self.frame_focus.as_ref() == Some(&self.catalog_find_input.read(cx).focus_handle(cx));
         self.key_targets.begin(
             self.key_cursor,
+            self.key_stop.clone(),
             self.shortcuts_blocked(),
             self.find_focused && !self.catalog_query.is_empty(),
         );
@@ -30186,6 +30464,26 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             ("let image_viewer_overlay =", "let error_banner ="),
         ];
 
+        // A dialog blocks them through the layer every dialog is centred in.
+        let dialog_layer = production
+            .split_once("fn dialog_layer(")
+            .expect("the dialog layer")
+            .1
+            .split_once("fn dialog_frame(")
+            .expect("end of the dialog layer")
+            .0;
+        assert!(dialog_layer.contains(".occlude()"));
+        assert!(dialog_layer.contains(".inset_0()"));
+        // The delete confirmations are one dialog, asked two ways.
+        let delete_dialog = render
+            .split_once("let delete_dialog =")
+            .expect("the delete dialog")
+            .1
+            .split_once("let workspace_delete_overlay =")
+            .expect("end of the delete dialog")
+            .0;
+        assert!(delete_dialog.contains("dialog_layer(colors)"));
+
         for (start, end) in overlays {
             let overlay = render
                 .split_once(start)
@@ -30195,7 +30493,9 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                 .unwrap_or_else(|| panic!("missing {end}"))
                 .0;
             assert!(
-                overlay.contains(".occlude()"),
+                overlay.contains(".occlude()")
+                    || overlay.contains("dialog_layer(colors)")
+                    || overlay.contains("delete_dialog("),
                 "{start} must block pointer events from reaching content behind it"
             );
         }
@@ -30250,9 +30550,11 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             .split_once("let remote_overlay =")
             .expect("end of theme overlay")
             .0;
+        // The dialogs between them are centred in the layer that covers the
+        // window, which the test above checks.
         assert!(
-            theme_overlay.contains(".inset_0()"),
-            "the settings popover needs a full-window pointer shield"
+            theme_overlay.contains("dialog_layer(colors)"),
+            "a dialog needs a full-window pointer shield"
         );
         assert!(
             theme_overlay.contains(".track_focus(&minimal_popup_focus)"),
@@ -30285,8 +30587,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert!(connect.contains("host.resume_interrupted(self.settings.auto_resume_chats)"));
 
         assert!(overlay.contains("Pair with a host"));
-        assert!(overlay.contains("self.remote_address_input.clone()"));
-        assert!(overlay.contains("self.remote_pairing_input.clone()"));
+        assert!(overlay.contains("self.dialog_field(&self.remote_address_input, colors, cx)"));
+        assert!(overlay.contains("self.dialog_field(&self.remote_pairing_input, colors, cx)"));
         assert!(!overlay.contains("Pairing code"));
         assert!(!overlay.contains("remote_port_input"));
         assert!(production.contains("settings.remote_credentials = Some"));
@@ -30587,12 +30889,34 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             "enter",
             "tab",
             "shift-tab",
+            "shift-f10",
+            "menu",
         ];
         assert_eq!(
-            keys.len(),
+            // Space is the one shortcut bound deeper than the window.
+            keys.len() + 1,
             app_key_bindings().len(),
             "every shortcut of the window is checked here"
         );
+        // Space presses a control only while the Tab ring is on one, which
+        // has the keyboard then. A text box and the terminal never lose it.
+        assert_eq!(
+            key_action(&after, "space", &["XdDesktop", KEY_STOP_CONTEXT]).as_deref(),
+            Some("xd::KeyPress")
+        );
+        for context in [
+            vec!["XdDesktop"],
+            vec!["XdDesktop", "TerminalInput"],
+            vec!["XdDesktop", "ComposerInput"],
+            vec!["XdDesktop", "FileEditor"],
+            vec!["XdDesktop", "MessageEditor"],
+        ] {
+            assert_eq!(
+                key_action(&after, "space", &context),
+                key_action(&before, "space", &context),
+                "space in {context:?}"
+            );
+        }
         for key in keys {
             // Alone in the window, the key is the window's.
             let window = key_action(&after, key, &["XdDesktop"]).unwrap();
@@ -30920,8 +31244,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         let frames = |cx: &mut gpui::VisualTestContext| {
             cx.update_window_entity(&desktop, |desktop, _, cx| {
                 (
-                    desktop.field_frame(&desktop.remote_address_input, None, cx),
-                    desktop.field_frame(&desktop.remote_pairing_input, None, cx),
+                    desktop.field_frame(&desktop.remote_address_input, cx),
+                    desktop.field_frame(&desktop.remote_pairing_input, cx),
                 )
             })
         };
@@ -30938,10 +31262,303 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             frames(cx),
             (rgb(colors.border), rgb(colors.selected_border))
         );
+        // After the fields come the buttons: Cancel, and then round to the
+        // first field, Connect being one that cannot be pressed yet.
+        cx.simulate_keystrokes("tab");
+        assert_eq!(focused(cx), (false, false));
         cx.simulate_keystrokes("tab");
         assert_eq!(focused(cx), (true, false), "round to the first");
-        cx.simulate_keystrokes("shift-tab");
+        cx.simulate_keystrokes("shift-tab shift-tab");
         assert_eq!(focused(cx), (false, true));
+    }
+
+    /// The control the Tab ring is on.
+    fn ring(desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext) -> Option<String> {
+        cx.update_window_entity(desktop, |desktop, window, _| {
+            desktop
+                .key_stop
+                .as_ref()
+                .filter(|_| desktop.stop_focus.is_focused(window))
+                .map(|stop| stop.to_string())
+        })
+    }
+
+    #[gpui::test]
+    fn tab_goes_on_to_a_dialogs_buttons_and_enter_or_space_presses_the_one_it_is_on(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.begin_sidebar_delete(SidebarTarget::Chat("palette".into()), window, cx);
+        });
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), None);
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("minimal-cancel-session-delete")
+        );
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("minimal-confirm-session-delete")
+        );
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("minimal-cancel-session-delete"),
+            "round to the first"
+        );
+        // Enter presses the button the ring is on, Cancel, and not the
+        // dialog's main button: nothing was asked of the host.
+        cx.simulate_keystrokes("enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.pending_sidebar_delete.is_none());
+            assert!(desktop.model.connection_error.is_none());
+        });
+        redraw(cx);
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), None, "the ring goes with its dialog");
+
+        // A dialog's fields come first, then its buttons. Connect cannot be
+        // pressed yet, so Tab passes over it. Space presses as Enter does.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_remote(window, cx)
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("tab tab");
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("minimal-cancel-remote"));
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(
+            ring(&desktop, cx),
+            None,
+            "a field takes the keyboard itself"
+        );
+        cx.simulate_keystrokes("tab space");
+        desktop.read_with(cx, |desktop, _| assert!(desktop.remote_panel.is_none()));
+    }
+
+    #[gpui::test]
+    fn tab_from_an_empty_message_box_reaches_the_options_under_it(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.simulate_keystrokes("alt-down");
+        desktop.update(cx, |desktop, _| {
+            desktop.model.backend = "codex".into();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("ctrl-l");
+        redraw(cx);
+        let in_box = |cx: &mut gpui::VisualTestContext| {
+            cx.update_window_entity(&desktop, |desktop, window, cx| {
+                desktop
+                    .composer_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            })
+        };
+        assert!(in_box(cx));
+        cx.simulate_keystrokes("tab");
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("native-attach"));
+        assert!(!in_box(cx));
+        cx.simulate_keystrokes("tab");
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("native-option-model"));
+        // Space opens the option the ring is on; Escape closes it and goes
+        // back to the message box.
+        cx.simulate_keystrokes("space");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.native_option_open, Some("model"))
+        });
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.native_option_open, None)
+        });
+        assert!(in_box(cx));
+
+        // Shift+Tab goes back from the box to its last option, and Escape
+        // from an option returns to the box without leaving the chat.
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("native-option-plan"));
+        cx.simulate_keystrokes("tab");
+        assert!(in_box(cx), "round to the message box");
+        cx.simulate_keystrokes("shift-tab escape");
+        redraw(cx);
+        assert!(in_box(cx));
+        assert_eq!(ring(&desktop, cx), None);
+        assert_eq!(shown_chat(&desktop, cx).as_deref(), Some("implementation"));
+
+        // With words in the box, Tab indents them as it always has.
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("tab");
+        assert!(in_box(cx));
+        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.composer, "x    "));
+    }
+
+    #[gpui::test]
+    fn shift_f10_and_the_menu_key_open_the_menu_of_the_open_row(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.simulate_keystrokes("alt-down");
+        redraw(cx);
+        cx.simulate_keystrokes("shift-f10");
+        let position = desktop.read_with(cx, |desktop, _| {
+            let menu = desktop.sidebar_context_menu.as_ref().expect("the menu");
+            assert_eq!(menu.target, SidebarTarget::Session("workspace".into()));
+            menu.position
+        });
+        // Under the open session's row, in the sidebar.
+        assert!(position.x < px(CATALOG_MAX_WIDTH) && position.y > px(0.0));
+        redraw(cx);
+        // The keys work it as they do after a right click.
+        cx.simulate_keystrokes("down");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(matches!(
+                desktop.key_rows(),
+                Some((KeyLayer::Menu, "sidebar-menu", _))
+            ));
+            assert_eq!(desktop.key_row_at(), Some(0));
+        });
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.sidebar_context_menu.is_none())
+        });
+
+        // Back on the landing page, the key is for the current project's row.
+        // No host is connected here, and Escape would close the banner that
+        // says so first.
+        desktop.update(cx, |desktop, _| desktop.model.connection_error = None);
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        assert_eq!(shown_chat(&desktop, cx), None);
+        cx.simulate_keystrokes("menu");
+        desktop.read_with(cx, |desktop, _| {
+            let menu = desktop.sidebar_context_menu.as_ref().expect("the menu");
+            assert_eq!(menu.target, SidebarTarget::Folder("atlas".into()));
+        });
+    }
+
+    #[gpui::test]
+    fn settings_work_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        desktop.update(cx, |desktop, _| {
+            desktop.chat_title_settings =
+                workspace_settings::ChatTitleSettings::from_reply(&serde_json::json!({
+                    "enabled": true,
+                    "models": {"codex": "gpt-small", "claude": "claude-small"},
+                }));
+            desktop.model.agent_backends = vec![xd_desktop::model::AgentBackend {
+                id: "codex".into(),
+                name: "Codex".into(),
+                default_model: "gpt-large".into(),
+                models: ["gpt-large", "gpt-small"]
+                    .map(|id| xd_desktop::model::AgentModel {
+                        id: id.into(),
+                        name: id.into(),
+                    })
+                    .to_vec(),
+                efforts: Vec::new(),
+            }];
+        });
+        cx.simulate_keystrokes("ctrl-,");
+        redraw(cx);
+        let section = |cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| {
+                assert!(desktop.minimal_theme_open);
+                desktop.settings_section
+            })
+        };
+        // Up and Down move through the sections, going round.
+        assert_eq!(section(cx), 0);
+        cx.simulate_keystrokes("up");
+        assert!(section(cx) > 1, "round to the last");
+        cx.simulate_keystrokes("down");
+        assert_eq!(section(cx), 0);
+        redraw(cx);
+
+        // Tab: the search field, the theme cards, then the switch.
+        cx.simulate_keystrokes("tab");
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(
+                desktop
+                    .settings_search_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        });
+        cx.simulate_keystrokes("tab tab");
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("minimal-theme-choice-1")
+        );
+        cx.simulate_keystrokes("enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.settings.theme, ThemePreset::ALL[1]);
+        });
+        cx.simulate_keystrokes("shift-tab space");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.settings.theme, ThemePreset::ALL[0]);
+        });
+
+        // Chats: the switch for chat titles, then the naming model dropdowns.
+        cx.simulate_keystrokes("down");
+        assert_eq!(section(cx), 1);
+        redraw(cx);
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), None, "the ring stays with its section");
+        // The keyboard is the page's again, not the search field's.
+        cx.update_window_entity(&desktop, |desktop, window, _| {
+            assert!(desktop.minimal_popup_focus.is_focused(window));
+        });
+        cx.simulate_keystrokes("tab tab");
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("workspace-settings-chat-titles")
+        );
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("workspace-settings-chat-title-codex")
+        );
+        // Space opens the dropdown; the arrow keys are in it; Escape closes
+        // it and leaves Settings open.
+        cx.simulate_keystrokes("space");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.chat_title_model_menu, Some("codex"));
+            assert_eq!(
+                desktop.key_rows(),
+                Some((KeyLayer::Menu, "settings-menu", 2))
+            );
+        });
+        cx.simulate_keystrokes("down");
+        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.key_row_at(), Some(0)));
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.chat_title_model_menu, None);
+            assert!(desktop.minimal_theme_open);
+        });
+        // A switch flips with Space, and the ring stays on it.
+        cx.simulate_keystrokes("tab tab");
+        redraw(cx);
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("workspace-settings-auto-resume")
+        );
+        let resumes = desktop.read_with(cx, |desktop, _| desktop.settings.auto_resume_chats);
+        cx.simulate_keystrokes("space");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.settings.auto_resume_chats, !resumes)
+        });
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("workspace-settings-auto-resume"),
+            "the ring stays on the switch it flipped"
+        );
     }
 
     #[cfg(unix)]
@@ -35787,8 +36404,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             "rename_target.clone()",
             "let sidebar_rename_overlay =",
             "\"Rename project\"",
-            ".child(heading)",
-            "self.sidebar_edit_input.clone()",
+            ".child(dialog_title(heading, colors))",
+            "self.dialog_field(&self.sidebar_edit_input, colors, cx)",
             "minimal-cancel-project-rename",
             "minimal-save-project-rename",
             "this.save_sidebar_edit(cx)",

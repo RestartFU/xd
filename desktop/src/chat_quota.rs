@@ -227,23 +227,26 @@ impl XdDesktop {
                                 .child(div().flex_none().text_color(rgb(colors.faint)).child("%")),
                         )
                         .child(
-                            ui_button("chat-quota-continue", ButtonKind::Primary, colors)
-                                .debug_selector(|| "chat-quota-continue".into())
-                                .when(!can_continue, |button| button.opacity(0.5))
-                                .when_some(percent.filter(|_| can_continue), |button, percent| {
-                                    button.on_click(cx.listener(move |this, _, _, cx| {
-                                        this.continue_with_quota(Some(percent), cx)
-                                    }))
-                                })
-                                .child("Continue"),
+                            ui_button_when(
+                                can_continue,
+                                "chat-quota-continue",
+                                ButtonKind::Primary,
+                                colors,
+                            )
+                            .debug_selector(|| "chat-quota-continue".into())
+                            .when_some(percent.filter(|_| can_continue), |button, percent| {
+                                button.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.continue_with_quota(Some(percent), cx)
+                                }))
+                            })
+                            .child("Continue"),
                         )
                         .child(div().flex_1())
                         // No limit at all is the bigger step, so it asks for
                         // less attention than going on with a quota.
                         .child(
-                            ui_button("chat-quota-lift", ButtonKind::Ghost, colors)
+                            ui_button_when(can_lift, "chat-quota-lift", ButtonKind::Ghost, colors)
                                 .debug_selector(|| "chat-quota-lift".into())
-                                .when(!can_lift, |button| button.opacity(0.5))
                                 .when(can_lift, |button| {
                                     button.on_click(cx.listener(|this, _, _, cx| {
                                         this.continue_with_quota(None, cx)

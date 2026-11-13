@@ -795,16 +795,11 @@ impl Render for BrowserPane {
                 // An open tool already has its tab; only offer the others.
                 .filter(|(_, tab)| !self.auxiliary_tabs.contains(tab))
                 .map(|(index, tab)| {
-                    crate::pane_icon_button(
-                        ("side-add-tool", index),
-                        tab.label(),
-                        tab.icon(),
-                        false,
-                        colors,
-                    )
-                    .on_click(
-                        cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)),
-                    )
+                    crate::icon_button(("side-add-tool", index), tab.label(), tab.icon(), colors)
+                        .build()
+                        .on_click(
+                            cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)),
+                        )
                 })
                 .collect::<Vec<_>>()
         });
@@ -1423,24 +1418,10 @@ impl BrowserTab {
         path: &'static str,
         enabled: bool,
     ) -> gpui::Stateful<gpui::Div> {
-        let colors = self.colors;
-        div()
-            .id(id)
-            .tooltip(crate::pane_tooltip(label, colors))
-            .w(px(28.))
-            .h(px(28.))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.))
-            .opacity(if enabled { 1. } else { 0.4 })
-            .when(enabled, |button| {
-                button
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.surface_high)))
-            })
-            .child(crate::icon(path, 15., colors.muted))
+        crate::icon_button(id, label, path, self.colors)
+            .glyph(15.)
+            .enabled(enabled)
+            .build()
     }
 }
 

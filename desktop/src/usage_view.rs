@@ -373,43 +373,38 @@ fn segment_button(
         .child(label)
 }
 
-fn menu_row(
+/// The list the arrow keys are in while a Usage filter's menu is open.
+const USAGE_MENU: &str = "usage-menu";
+
+/// A row of a Usage filter's menu: a tick for what is shown, then the row.
+/// The keys reach it as the pointer does.
+fn usage_menu_row(
+    keys: &KeyTargets,
     id: impl Into<gpui::ElementId>,
     checked: bool,
     colors: ThemeColors,
+    cx: &Context<XdDesktop>,
+    run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(28.0))
-        .px_2()
-        .flex()
-        .items_center()
-        .gap_2()
-        .rounded(px(6.0))
-        .text_size(px(12.5))
-        .text_color(rgb(colors.text))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(colors.surface_high)))
-        .child(div().size(px(14.0)).flex_none().when(checked, |slot| {
-            slot.child(icon(CHECK_ICON, 14.0, colors.text))
-        }))
+    key_row(
+        keys,
+        KeyLayer::Menu,
+        USAGE_MENU,
+        menu_row(id, colors),
+        colors.surface_high,
+        cx,
+        run,
+    )
+    .child(menu_check(checked, colors))
 }
 
-fn menu_shell(colors: ThemeColors) -> gpui::Div {
+/// A filter's menu, hung under the filter and kept inside the window.
+fn usage_menu_under(menu: gpui::Div) -> gpui::Div {
     div()
-        .occlude()
         .absolute()
         .top(px(30.0))
         .left_0()
-        .min_w(px(220.0))
-        .p_1()
-        .flex()
-        .flex_col()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(rgb(colors.border))
-        .bg(rgb(colors.chrome))
-        .shadow_lg()
+        .child(menu_popover(gpui::Corner::TopLeft, menu))
 }
 
 fn metric_cell(
@@ -1718,6 +1713,15 @@ impl XdDesktop {
 
     /// Limits, cost and tokens open as a flyout over the sidebar's chart icon.
     /// The full page holds what does not fit: filters, prices and breakdowns.
+    /// Gives the keyboard to the Usage page, whose keys need it there.
+    pub(super) fn focus_usage(&self, window: &mut Window) {
+        window.focus(&self.usage.focus);
+    }
+
+    pub(super) fn usage_menu_open(&self) -> bool {
+        self.usage_open && self.usage.menu.is_some()
+    }
+
     fn usage_flyout_open(&self) -> bool {
         self.usage_showing_limits() || !self.usage.full_page
     }
@@ -2390,6 +2394,7 @@ impl XdDesktop {
             format!("{} environments", selected.len())
         };
         let open = self.usage.menu == Some(UsageMenu::Environment);
+        let keys = self.key_targets.clone();
         let has_issue = selected
             .iter()
             .any(|index| self.usage.environments[*index].summary_error.is_some());
@@ -2412,21 +2417,24 @@ impl XdDesktop {
                 } else {
                     "Ready"
                 };
-                menu_row(
+                usage_menu_row(
+                    &keys,
                     ("usage-environment", index),
                     selected.contains(&index),
                     colors,
+                    cx,
+                    move |this, _, cx| {
+                        let hidden = &mut this.usage.hidden_environments;
+                        if let Some(position) = hidden.iter().position(|held| *held == index) {
+                            hidden.remove(position);
+                            this.usage_read_current(false);
+                        } else {
+                            hidden.push(index);
+                        }
+                        cx.notify();
+                    },
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let hidden = &mut this.usage.hidden_environments;
-                    if let Some(position) = hidden.iter().position(|held| *held == index) {
-                        hidden.remove(position);
-                        this.usage_read_current(false);
-                    } else {
-                        hidden.push(index);
-                    }
-                    cx.notify();
-                }))
+                .key_stays(&keys)
                 .child(div().flex_1().child(environment_label(index)))
                 .child(
                     div()
@@ -2455,43 +2463,43 @@ impl XdDesktop {
                     )
                 }))
                 .collect();
+            // The rows are noted for the keys in the order they are drawn.
+            let all = usage_menu_row(
+                &keys,
+                "usage-environment-all",
+                selected.len() == connected.len(),
+                colors,
+                cx,
+                |this, _, cx| {
+                    if this.usage.hidden_environments.is_empty() {
+                        this.usage.hidden_environments = vec![0, 1];
+                    } else {
+                        this.usage.hidden_environments.clear();
+                        this.usage_read_current(false);
+                    }
+                    cx.notify();
+                },
+            )
+            .key_stays(&keys)
+            .child("All environments");
+            let rows = rows.collect::<Vec<_>>();
             menu_shell(colors)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    menu_row(
-                        "usage-environment-all",
-                        selected.len() == connected.len(),
-                        colors,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.usage.hidden_environments.is_empty() {
-                            this.usage.hidden_environments = vec![0, 1];
-                        } else {
-                            this.usage.hidden_environments.clear();
-                            this.usage_read_current(false);
-                        }
-                        cx.notify();
-                    }))
-                    .child("All environments"),
-                )
-                .child(div().h(px(1.0)).my_1().bg(rgb(colors.rule)))
+                .min_w(px(220.0))
+                .child(all)
+                .child(menu_rule(colors))
                 .children(rows)
                 .when(partial, |menu| {
-                    menu.child(
-                        small_muted(
-                            "Totals are partial while selected environments scan.",
-                            colors,
-                        )
-                        .px_2()
-                        .py_2(),
-                    )
+                    menu.child(menu_note(
+                        "Totals are partial while selected environments scan.",
+                        colors,
+                    ))
                 })
                 .when(!notices.is_empty(), |menu| {
                     menu.child(
                         div()
                             .max_w(px(320.0))
                             .mt_1()
-                            .px_2()
+                            .px(px(10.0))
                             .py_2()
                             .flex()
                             .flex_col()
@@ -2505,14 +2513,19 @@ impl XdDesktop {
                             ),
                     )
                 })
-                .child(div().h(px(1.0)).my_1().bg(rgb(colors.rule)))
+                .child(menu_rule(colors))
                 .child(
-                    menu_row("usage-model-prices", false, colors)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_usage_prices(None, window, cx)
-                        }))
-                        .child(icon(SLIDERS_ICON, 14.0, colors.muted))
-                        .child("Model prices"),
+                    key_row(
+                        &keys,
+                        KeyLayer::Menu,
+                        USAGE_MENU,
+                        menu_row("usage-model-prices", colors),
+                        colors.surface_high,
+                        cx,
+                        |this, window, cx| this.open_usage_prices(None, window, cx),
+                    )
+                    .child(icon(SLIDERS_ICON, 14.0, colors.muted))
+                    .child("Model prices"),
                 )
         });
         div()
@@ -2542,7 +2555,7 @@ impl XdDesktop {
                         icon(CHEVRON_DOWN_ICON, 14.0, colors.muted)
                     }),
             )
-            .children(menu.map(|menu| deferred(menu).with_priority(1)))
+            .children(menu.map(usage_menu_under))
             .into_any_element()
     }
 
@@ -2563,12 +2576,18 @@ impl XdDesktop {
             many => format!("{} providers", many.len()),
         };
         let open = self.usage.menu == Some(UsageMenu::Provider);
+        let keys = self.key_targets.clone();
         let menu = open.then(|| {
             menu_shell(colors)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .min_w(px(220.0))
                 .child(
-                    menu_row("usage-provider-all", hidden.is_empty(), colors)
-                        .on_click(cx.listener(|this, _, _, cx| {
+                    usage_menu_row(
+                        &keys,
+                        "usage-provider-all",
+                        hidden.is_empty(),
+                        colors,
+                        cx,
+                        |this, _, cx| {
                             this.settings.usage_hidden_providers =
                                 if this.settings.usage_hidden_providers.is_empty() {
                                     PROVIDER_ORDER.map(str::to_owned).to_vec()
@@ -2577,27 +2596,33 @@ impl XdDesktop {
                                 };
                             this.usage_save_preferences();
                             cx.notify();
-                        }))
-                        .child("All providers"),
+                        },
+                    )
+                    .key_stays(&keys)
+                    .child("All providers"),
                 )
-                .child(div().h(px(1.0)).my_1().bg(rgb(colors.rule)))
+                .child(menu_rule(colors))
                 .children(PROVIDER_ORDER.map(|provider| {
                     let checked = !hidden.iter().any(|held| held == provider);
-                    menu_row(
+                    usage_menu_row(
+                        &keys,
                         gpui::ElementId::Name(format!("usage-provider-{provider}").into()),
                         checked,
                         colors,
+                        cx,
+                        move |this, _, cx| {
+                            let hidden = &mut this.settings.usage_hidden_providers;
+                            if let Some(position) = hidden.iter().position(|held| held == provider)
+                            {
+                                hidden.remove(position);
+                            } else {
+                                hidden.push(provider.to_owned());
+                            }
+                            this.usage_save_preferences();
+                            cx.notify();
+                        },
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let hidden = &mut this.settings.usage_hidden_providers;
-                        if let Some(position) = hidden.iter().position(|held| held == provider) {
-                            hidden.remove(position);
-                        } else {
-                            hidden.push(provider.to_owned());
-                        }
-                        this.usage_save_preferences();
-                        cx.notify();
-                    }))
+                    .key_stays(&keys)
                     .child(assistant_icon(
                         provider_icon(provider),
                         14.0,
@@ -2630,7 +2655,7 @@ impl XdDesktop {
                     .child(label)
                     .child(icon(CHEVRON_DOWN_ICON, 14.0, colors.muted)),
             )
-            .children(menu.map(|menu| deferred(menu).with_priority(1)))
+            .children(menu.map(usage_menu_under))
             .into_any_element()
     }
 
@@ -3819,7 +3844,7 @@ impl XdDesktop {
                 .items_center()
                 .rounded(px(6.0))
                 .border_1()
-                .border_color(self.field_frame(&input, None, cx))
+                .border_color(self.field_frame(&input, cx))
                 .bg(rgb(colors.background))
                 .text_size(px(12.5))
                 .child(input)
@@ -4095,18 +4120,12 @@ impl XdDesktop {
                                         })),
                                 )
                                 .child(
-                                    ui_button(
+                                    ui_button_when(
+                                        has_changes && !saving,
                                         "usage-price-save",
-                                        if has_changes && !saving {
-                                            ButtonKind::Primary
-                                        } else {
-                                            ButtonKind::Secondary
-                                        },
+                                        ButtonKind::Primary,
                                         colors,
                                     )
-                                    .when(!has_changes || saving, |button| {
-                                        button.opacity(0.6).cursor_default()
-                                    })
                                     .child(if saving { "Saving…" } else { "Save changes" })
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         if has_changes && !saving {
@@ -4137,59 +4156,46 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
-            .occlude()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(colors.backdrop))
+        let keys = self.key_targets.clone();
+        // Enter confirms, as the dialog's main button does.
+        keys.default_action(KeyLayer::Dialog, {
+            let confirm = confirm.clone();
+            Rc::new(move |this, _, cx| this.usage_use_reset_credit(confirm.clone(), cx))
+        });
+        dialog_layer(colors)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
-                div()
-                    .w(px(420.0))
-                    .p_5()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .rounded(px(12.0))
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .bg(rgb(colors.surface))
+                dialog_shell(DIALOG_WIDTH, colors)
+                    .child(dialog_title("Use a reset credit?", colors))
+                    .child(dialog_text(
+                        "This redeems one credit on your account and clears the current rate-limit windows. It cannot be undone.",
+                        colors,
+                    ))
                     .child(
-                        div()
-                            .text_size(px(16.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(colors.text))
-                            .child("Use a reset credit?"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.5))
-                            .text_color(rgb(colors.muted))
-                            .child("This redeems one credit on your account and clears the current rate-limit windows. It cannot be undone."),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                ui_button("usage-reset-cancel", ButtonKind::Secondary, colors)
-                                    .child("Cancel")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.usage.confirm_reset = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                ui_button("usage-reset-confirm", ButtonKind::Primary, colors)
-                                    .child("Use credit")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.usage_use_reset_credit(confirm.clone(), cx)
-                                    })),
-                            ),
+                        dialog_actions()
+                            .child(dialog_button(
+                                &keys,
+                                "usage-reset-cancel",
+                                "Cancel",
+                                ButtonKind::Ghost,
+                                true,
+                                colors,
+                                cx,
+                                |this, _, cx| {
+                                    this.usage.confirm_reset = None;
+                                    cx.notify();
+                                },
+                            ))
+                            .child(dialog_button(
+                                &keys,
+                                "usage-reset-confirm",
+                                "Use credit",
+                                ButtonKind::Primary,
+                                true,
+                                colors,
+                                cx,
+                                move |this, _, cx| this.usage_use_reset_credit(confirm.clone(), cx),
+                            )),
                     ),
             )
             .into_any_element()
@@ -4460,21 +4466,12 @@ impl XdDesktop {
                 .anchor(gpui::Corner::BottomLeft)
                 .snap_to_window_with_margin(px(8.0))
                 .child(
-                    div()
-                        .occlude()
+                    menu_shell(colors)
                         .ml(px(FLYOUT_WIDTH - 1.0))
                         .w(px(288.0))
                         .p_3()
-                        .flex()
-                        .flex_col()
                         .gap(px(10.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .bg(rgb(colors.chrome))
-                        .shadow_lg()
                         .text_size(px(12.0))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
                                 .flex()
@@ -4536,20 +4533,24 @@ impl XdDesktop {
                                     .text_color(rgb(colors.muted))
                                     .child(div().flex_1().min_w_0().child(credits.summary(now)))
                                     .child(
-                                        ui_button("usage-use-reset", ButtonKind::Secondary, colors)
-                                            .h(px(24.0))
-                                            .when(busy, |button| {
-                                                button.opacity(0.6).cursor_default()
-                                            })
-                                            .child(if busy { "Using…" } else { "Use reset" })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        ui_button_when(
+                                            !busy,
+                                            "usage-use-reset",
+                                            ButtonKind::Secondary,
+                                            colors,
+                                        )
+                                        .h(px(24.0))
+                                        .child(if busy { "Using…" } else { "Use reset" })
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 if this.usage.reset_busy.is_none() {
                                                     this.usage.segment = None;
                                                     this.usage.confirm_reset =
                                                         Some(confirm.clone());
                                                     cx.notify();
                                                 }
-                                            })),
+                                            }),
+                                        ),
                                     ),
                             )
                         }),
@@ -4586,17 +4587,13 @@ fn shown_environments(held: &[(usize, (u32, i64), &str)], asked_days: u32) -> Ve
 }
 
 fn usage_dialog_panel(width: f32, colors: ThemeColors) -> gpui::Div {
-    div()
+    dialog_frame(colors)
         .w_full()
         .max_w(px(width))
         .max_h_full()
         .min_h_0()
         .flex()
         .flex_col()
-        .rounded(px(12.0))
-        .border_1()
-        .border_color(rgb(colors.border))
-        .bg(rgb(colors.surface))
 }
 
 /// A dialog over the page. Presses on the panel stay in it, and a press on the
@@ -5184,6 +5181,54 @@ mod tests {
                 desktop.settings.usage_metric, "limits",
                 "typing belongs to the dialog"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn a_filters_menu_takes_the_arrow_keys_enter_and_escape(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut bindings = base_key_bindings();
+            bindings.extend(app_key_bindings());
+            cx.bind_keys(bindings);
+        });
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.usage_metric = "cost".into();
+            desktop.settings.usage_hidden_providers.clear();
+            desktop.toggle_usage(window, cx);
+            desktop.usage.full_page = true;
+            desktop.usage.menu = Some(UsageMenu::Provider);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        desktop.read_with(cx, |desktop, _| {
+            // "All providers", then one row for each.
+            assert_eq!(
+                desktop.key_rows(),
+                Some((KeyLayer::Menu, USAGE_MENU, 1 + PROVIDER_ORDER.len()))
+            );
+        });
+        // Down then Enter ticks the first row, and the menu stays open with
+        // the keys still on that row.
+        cx.simulate_keystrokes("down enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(
+                desktop.settings.usage_hidden_providers.len(),
+                PROVIDER_ORDER.len()
+            );
+            assert!(desktop.usage.menu == Some(UsageMenu::Provider));
+            assert_eq!(desktop.key_row_at(), Some(0));
+        });
+        cx.simulate_keystrokes("enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.settings.usage_hidden_providers.is_empty());
+        });
+        // Escape closes the menu, and Usage stays.
+        cx.simulate_keystrokes("escape");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.usage.menu.is_none());
+            assert!(desktop.usage_open);
         });
     }
 

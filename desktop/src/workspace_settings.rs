@@ -209,7 +209,36 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                     "Choose the row, or press the dialog's main button",
                     "Enter".into(),
                 ),
-                ("Next / previous field", "Tab / Shift Tab".into()),
+                (
+                    "Next / previous field or button of a dialog",
+                    "Tab / Shift Tab".into(),
+                ),
+                (
+                    "Press the button, or flip the switch, that Tab is on",
+                    "Enter or Space".into(),
+                ),
+                (
+                    "Open the menu of the open session, or of the current project on the landing page",
+                    "Shift F10 / Menu".into(),
+                ),
+            ],
+        ),
+        (
+            "Settings",
+            vec![
+                ("Next / previous section", "Down / Up".into()),
+                (
+                    "Through the search field and the controls of the open section",
+                    "Tab / Shift Tab".into(),
+                ),
+                (
+                    "Flip a switch, press a button, or open a dropdown",
+                    "Enter or Space".into(),
+                ),
+                (
+                    "Move through an open dropdown, and choose",
+                    "Up / Down, Enter".into(),
+                ),
             ],
         ),
         (
@@ -218,6 +247,13 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ("Send, or queue while the agent works", "Enter".into()),
                 ("Redirect the agent while it works", format!("{m} Enter")),
                 ("New line", "Shift Enter".into()),
+                (
+                    "From the message box to the options under it, and through them",
+                    "Tab in an empty box, or Shift Tab".into(),
+                ),
+                ("Open the option Tab is on", "Enter or Space".into()),
+                ("Back to the message box from its options", "Escape".into()),
+                ("Indent, in a box with text", "Tab".into()),
                 ("Copy / cut / paste", format!("{m} C / {m} X / {m} V")),
                 ("Select all", format!("{m} A")),
                 ("Undo / redo", format!("{m} Z / {m} Shift Z or Ctrl Y")),
@@ -362,18 +398,55 @@ fn settings_group_label(label: impl Into<SharedString>, colors: ThemeColors) -> 
         .child(label.into())
 }
 
-/// A minus or plus button beside a number, dimmed at a limit.
+/// A minus or plus button beside a number. At a limit it is drawn as a
+/// button that cannot be pressed, and Tab passes over it.
 fn settings_step_button(
+    keys: &KeyTargets,
     id: &'static str,
     label: &'static str,
-    enabled: bool,
     colors: ThemeColors,
+    cx: &Context<XdDesktop>,
+    run: Option<impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static>,
 ) -> gpui::Stateful<gpui::Div> {
-    ui_button(id, ButtonKind::Secondary, colors)
+    let button = ui_button_when(run.is_some(), id, ButtonKind::Secondary, colors)
         .w(px(30.0))
         .px_0()
-        .when(!enabled, |button| button.opacity(0.4))
-        .child(label)
+        .child(label);
+    match run {
+        Some(run) => button.key_stop(keys, KeyLayer::Overlay, id, colors, cx, run),
+        None => button,
+    }
+}
+
+/// The list the arrow keys are in while a Settings dropdown is open.
+const SETTINGS_MENU: &str = "settings-menu";
+
+/// A setting that is a switch. A click anywhere on its row flips it; Tab
+/// stops on the switch itself, which Space and Enter flip.
+fn key_switch(
+    row: gpui::Stateful<gpui::Div>,
+    keys: &KeyTargets,
+    id: &'static str,
+    on: bool,
+    colors: ThemeColors,
+    cx: &Context<XdDesktop>,
+    run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let run: KeyRun = Rc::new(run);
+    let ringed = keys.stop_on(id);
+    row.cursor_pointer()
+        .on_click(cx.listener({
+            let run = run.clone();
+            move |this, _, window, cx| run(this, window, cx)
+        }))
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .child(settings_switch(colors, on))
+                .child(keys.mark(KeyLayer::Overlay, KeyStop::Control(id.into(), run)))
+                .when(ringed, |switch| switch.child(focus_ring(colors, 14.0))),
+        )
 }
 
 /// A number between a minus and a plus button.
@@ -508,6 +581,7 @@ impl XdDesktop {
     /// The chat title switch and a naming model row per assistant, once the
     /// host has said what they are.
     fn chat_title_rows(&self, colors: ThemeColors, cx: &mut Context<Self>) -> Vec<SettingRow> {
+        let keys = self.key_targets.clone();
         let Some(settings) = self.chat_title_settings.clone() else {
             return Vec::new();
         };
@@ -517,9 +591,15 @@ impl XdDesktop {
             "Name a new chat from its first message, using its naming model.",
             colors,
             |row| {
-                row.cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_chat_titles(cx)))
-                    .child(settings_switch(colors, settings.enabled))
+                key_switch(
+                    row,
+                    &keys,
+                    "workspace-settings-chat-titles",
+                    settings.enabled,
+                    colors,
+                    cx,
+                    |this, _, cx| this.toggle_chat_titles(cx),
+                )
             },
         )];
         // Shown with titles off too: new worktrees are still named with these.
@@ -543,53 +623,73 @@ impl XdDesktop {
             );
             let open = self.chat_title_model_menu == Some(backend);
             let models = catalog.map_or(&[][..], |catalog| catalog.models.as_slice());
+            // A menu under its button, as every dropdown is.
             let menu = open.then(|| {
                 div()
-                    .px(px(8.0))
-                    .pb(px(8.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .children(models.iter().enumerate().map(|(index, model)| {
-                        let id = model.id.clone();
-                        div()
-                            .id((row, index + 1))
-                            .h(px(32.0))
-                            .px(px(10.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(6.0))
-                            .text_size(px(13.0))
-                            .text_color(rgb(colors.text))
-                            .when(selected.as_deref() == Some(model.id.as_str()), |choice| {
-                                choice.bg(rgb(colors.selected_surface))
-                            })
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.choose_chat_title_model(backend, id.clone(), cx)
-                            }))
-                            .child(presentation::model_name(&model.id, Some(&model.name)))
-                    }))
+                    .absolute()
+                    .top_full()
+                    .right_0()
+                    .mt(px(4.0))
+                    .child(menu_popover(
+                        gpui::Corner::TopRight,
+                        menu_shell(colors)
+                            .id((row, usize::MAX))
+                            .debug_selector(|| "settings-menu".into())
+                            .min_w(px(220.0))
+                            .max_h(px(320.0))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.key_scroll)
+                            .children(models.iter().enumerate().map(|(index, model)| {
+                                let id = model.id.clone();
+                                menu_row((row, index + 1), colors)
+                                    .key_row(
+                                        &keys,
+                                        KeyLayer::Menu,
+                                        SETTINGS_MENU,
+                                        colors.surface_high,
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.choose_chat_title_model(backend, id.clone(), cx)
+                                        },
+                                    )
+                                    .key_child(&keys, index)
+                                    .child(div().flex_1().min_w_0().child(
+                                        presentation::model_name(&model.id, Some(&model.name)),
+                                    ))
+                                    .child(menu_check(
+                                        selected.as_deref() == Some(model.id.as_str()),
+                                        colors,
+                                    ))
+                            })),
+                    ))
             });
             rows.push(SettingRow::custom(
                 title,
                 description,
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        settings_row(row, title, description, colors).child(
+                settings_row(row, title, description, colors).child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .child(
                             ui_button((row, 0_usize), ButtonKind::Secondary, colors)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_chat_title_model_menu(backend, cx)
-                                }))
+                                // The press that opens the menu is not one
+                                // outside it, which would close it again.
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .key_stop(
+                                    &keys,
+                                    KeyLayer::Overlay,
+                                    row,
+                                    colors,
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.toggle_chat_title_model_menu(backend, cx)
+                                    },
+                                )
                                 .child(label)
                                 .child(icon(CHEVRON_DOWN_ICON, 12.0, colors.muted)),
-                        ),
-                    )
-                    .children(menu),
+                        )
+                        .children(menu),
+                ),
             ));
         }
         rows
@@ -598,6 +698,7 @@ impl XdDesktop {
     /// The connected host's settling rules, or nothing while it has not said
     /// what they are: an older host does not have any.
     fn auto_settle_rows(&mut self, colors: ThemeColors, cx: &mut Context<Self>) -> Vec<SettingRow> {
+        let keys = self.key_targets.clone();
         let Some(rules) = self.auto_settle else {
             return Vec::new();
         };
@@ -608,8 +709,14 @@ impl XdDesktop {
                 "Settle a session when its pull request merges. A closed pull request settles it while either rule here is on.",
                 colors,
                 |row| {
-                    row.cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                    key_switch(
+                        row,
+                        &keys,
+                        "workspace-settings-settle-merged",
+                        rules.on_merge,
+                        colors,
+                        cx,
+                        move |this, _, cx| {
                             this.change_auto_settle(
                                 AutoSettleRules {
                                     on_merge: !rules.on_merge,
@@ -617,8 +724,8 @@ impl XdDesktop {
                                 },
                                 cx,
                             );
-                        }))
-                        .child(settings_switch(colors, rules.on_merge))
+                        },
+                    )
                 },
             ),
             setting(
@@ -627,8 +734,14 @@ impl XdDesktop {
                 "Sessions with no activity for a while settle on their own. Any new activity brings them back.",
                 colors,
                 |row| {
-                    row.cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                    key_switch(
+                        row,
+                        &keys,
+                        "workspace-settings-settle-inactive",
+                        rules.after_days.is_some(),
+                        colors,
+                        cx,
+                        move |this, _, cx| {
                             this.change_auto_settle(
                                 AutoSettleRules {
                                     after_days: match rules.after_days {
@@ -639,8 +752,8 @@ impl XdDesktop {
                                 },
                                 cx,
                             );
-                        }))
-                        .child(settings_switch(colors, rules.after_days.is_some()))
+                        },
+                    )
                 },
             ),
         ];
@@ -650,17 +763,24 @@ impl XdDesktop {
         let step = |id: &'static str, label: &'static str, to: i64, cx: &mut Context<Self>| {
             let allowed =
                 (AutoSettleRules::MIN_AFTER_DAYS..=AutoSettleRules::MAX_AFTER_DAYS).contains(&to);
-            settings_step_button(id, label, allowed, colors).when(allowed, |button| {
-                button.on_click(cx.listener(move |this, _, _, cx| {
-                    this.change_auto_settle(
-                        AutoSettleRules {
-                            after_days: Some(to),
-                            ..rules
-                        },
-                        cx,
-                    );
-                }))
-            })
+            settings_step_button(
+                &keys,
+                id,
+                label,
+                colors,
+                cx,
+                allowed.then_some(
+                    move |this: &mut Self, _: &mut Window, cx: &mut Context<Self>| {
+                        this.change_auto_settle(
+                            AutoSettleRules {
+                                after_days: Some(to),
+                                ..rules
+                            },
+                            cx,
+                        );
+                    },
+                ),
+            )
         };
         let fewer = step("settle-days-fewer", "\u{2212}", days - 1, cx);
         let more = step("settle-days-more", "+", days + 1, cx);
@@ -688,8 +808,14 @@ impl XdDesktop {
             "Inactivity does not settle sessions with a pull request. Merge and close still do.",
             colors,
             |row| {
-                row.cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                key_switch(
+                    row,
+                    &keys,
+                    "workspace-settings-settle-keep-pr",
+                    rules.keep_pull_requests,
+                    colors,
+                    cx,
+                    move |this, _, cx| {
                         this.change_auto_settle(
                             AutoSettleRules {
                                 keep_pull_requests: !rules.keep_pull_requests,
@@ -697,8 +823,8 @@ impl XdDesktop {
                             },
                             cx,
                         );
-                    }))
-                    .child(settings_switch(colors, rules.keep_pull_requests))
+                    },
+                )
             },
         ));
         rows
@@ -707,6 +833,7 @@ impl XdDesktop {
     /// The connected host's deletion rule, or nothing while it has not said
     /// what it is: an older host does not have one.
     fn auto_delete_rows(&mut self, colors: ThemeColors, cx: &mut Context<Self>) -> Vec<SettingRow> {
+        let keys = self.key_targets.clone();
         let Some(rules) = self.auto_delete else {
             return Vec::new();
         };
@@ -716,8 +843,14 @@ impl XdDesktop {
             "Delete sessions with no activity for a while, with the worktree xd made for them. Branches and their commits are kept.",
             colors,
             |row| {
-                row.cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                key_switch(
+                    row,
+                    &keys,
+                    "workspace-settings-delete-inactive",
+                    rules.after_days.is_some(),
+                    colors,
+                    cx,
+                    move |this, _, cx| {
                         this.change_auto_delete(
                             AutoDeleteRules {
                                 after_days: match rules.after_days {
@@ -727,8 +860,8 @@ impl XdDesktop {
                             },
                             cx,
                         );
-                    }))
-                    .child(settings_switch(colors, rules.after_days.is_some()))
+                    },
+                )
             },
         )];
         let Some(days) = rules.after_days else {
@@ -736,16 +869,23 @@ impl XdDesktop {
         };
         let step = |id: &'static str, label: &'static str, longer: bool, cx: &mut Context<Self>| {
             let to = AutoDeleteRules::step(days, longer);
-            settings_step_button(id, label, to.is_some(), colors).when_some(to, |button, to| {
-                button.on_click(cx.listener(move |this, _, _, cx| {
-                    this.change_auto_delete(
-                        AutoDeleteRules {
-                            after_days: Some(to),
-                        },
-                        cx,
-                    );
-                }))
-            })
+            settings_step_button(
+                &keys,
+                id,
+                label,
+                colors,
+                cx,
+                to.map(|to| {
+                    move |this: &mut Self, _: &mut Window, cx: &mut Context<Self>| {
+                        this.change_auto_delete(
+                            AutoDeleteRules {
+                                after_days: Some(to),
+                            },
+                            cx,
+                        );
+                    }
+                }),
+            )
         };
         let fewer = step("delete-days-fewer", "\u{2212}", false, cx);
         let more = step("delete-days-more", "+", true, cx);
@@ -767,6 +907,7 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<SettingRow> {
+        let keys = self.key_targets.clone();
         let Some(settings) = self.chat_quota.filter(|_| self.model.chat_quotas_supported) else {
             return Vec::new();
         };
@@ -781,8 +922,7 @@ impl XdDesktop {
             },
             colors,
             |row| {
-                row.cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                key_switch(row, &keys, "workspace-settings-chat-quota", settings.percent.is_some(), colors, cx, move |this, _, cx| {
                         this.change_chat_quota_settings(
                             ChatQuotaSettings {
                                 percent: match settings.percent {
@@ -792,8 +932,7 @@ impl XdDesktop {
                             },
                             cx,
                         );
-                    }))
-                    .child(settings_switch(colors, settings.percent.is_some()))
+                    })
             },
         )];
         let Some(percent) = settings.percent else {
@@ -801,11 +940,21 @@ impl XdDesktop {
         };
         let step = |id: &'static str, label: &'static str, larger: bool, cx: &mut Context<Self>| {
             let to = ChatQuotaSettings::step(percent, larger);
-            settings_step_button(id, label, to.is_some(), colors).when_some(to, |button, to| {
-                button.on_click(cx.listener(move |this, _, _, cx| {
-                    this.change_chat_quota_settings(ChatQuotaSettings { percent: Some(to) }, cx);
-                }))
-            })
+            settings_step_button(
+                &keys,
+                id,
+                label,
+                colors,
+                cx,
+                to.map(|to| {
+                    move |this: &mut Self, _: &mut Window, cx: &mut Context<Self>| {
+                        this.change_chat_quota_settings(
+                            ChatQuotaSettings { percent: Some(to) },
+                            cx,
+                        );
+                    }
+                }),
+            )
         };
         let fewer = step("chat-quota-smaller", "\u{2212}", false, cx);
         let more = step("chat-quota-larger", "+", true, cx);
@@ -831,32 +980,40 @@ impl XdDesktop {
     }
 
     /// A switch row for one of this device's own settings, saved on change.
+    #[allow(clippy::too_many_arguments)]
     fn local_switch(
         id: &'static str,
         title: &'static str,
         description: &'static str,
         enabled: bool,
         toggle: fn(&mut AppSettings),
+        keys: &KeyTargets,
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> SettingRow {
         setting(id, title, description, colors, |row| {
-            row.cursor_pointer()
-                .debug_selector(move || id.into())
-                .on_click(cx.listener(move |this, _, _, cx| {
+            key_switch(
+                row.debug_selector(move || id.into()),
+                keys,
+                id,
+                enabled,
+                colors,
+                cx,
+                move |this, _, cx| {
                     toggle(&mut this.settings);
                     super::set_reduce_motion(this.settings.reduce_motion);
                     if let Err(error) = this.settings.save() {
                         this.model.connection_error = Some(error);
                     }
                     cx.notify();
-                }))
-                .child(settings_switch(colors, enabled))
+                },
+            )
         })
     }
 
     /// The theme cards, as one setting.
     fn theme_row(&self, column: f32, colors: ThemeColors, cx: &mut Context<Self>) -> SettingRow {
+        let keys = self.key_targets.clone();
         let room = column - 2.0 * SETTINGS_CARD_PADDING;
         let card_width = theme_card_width(room, theme_columns(room));
         let cards = ThemePreset::ALL
@@ -865,9 +1022,15 @@ impl XdDesktop {
             .map(|(index, theme)| {
                 let swatch = theme.colors();
                 let selected = self.settings.theme == theme;
-                div()
+                let stop: SharedString = format!("minimal-theme-choice-{index}").into();
+                let ringed = keys.stop_on(&stop);
+                let choose: KeyRun = Rc::new(move |this, _, cx| {
+                    this.choose_minimal_theme(theme, cx);
+                    this.minimal_theme_open = true;
+                    cx.notify();
+                });
+                let card = div()
                     .id(("minimal-theme-choice", index))
-                    .flex_none()
                     .w(px(card_width))
                     .rounded(px(10.0))
                     .overflow_hidden()
@@ -880,10 +1043,9 @@ impl XdDesktop {
                     .bg(rgb(colors.surface))
                     .cursor_pointer()
                     .hover(|style| style.border_color(rgb(colors.selected_border)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.choose_minimal_theme(theme, cx);
-                        this.minimal_theme_open = true;
-                        cx.notify();
+                    .on_click(cx.listener({
+                        let choose = choose.clone();
+                        move |this, _, window, cx| choose(this, window, cx)
                     }))
                     .child(
                         div()
@@ -953,7 +1115,14 @@ impl XdDesktop {
                             .when(selected, |label| {
                                 label.child(icon(CHECK_ICON, 14.0, colors.accent_ink))
                             }),
-                    )
+                    );
+                // The card clips to its corners, so the ring goes around it.
+                div()
+                    .relative()
+                    .flex_none()
+                    .child(card)
+                    .child(keys.mark(KeyLayer::Overlay, KeyStop::Control(stop, choose)))
+                    .when(ringed, |card| card.child(focus_ring(colors, 13.0)))
             });
         SettingRow::custom(
             "Theme",
@@ -980,6 +1149,7 @@ impl XdDesktop {
 
     /// The update status of xd itself, with what can be done about it.
     fn update_row(&self, colors: ThemeColors, cx: &mut Context<Self>) -> SettingRow {
+        let keys = self.key_targets.clone();
         let panel = self.self_update_panel.as_ref();
         let status: String = panel
             .map(|panel| {
@@ -1037,17 +1207,27 @@ impl XdDesktop {
                         .when(!busy && !installed, |actions| {
                             actions.child(
                                 ui_button("check-app-update", ButtonKind::Secondary, colors)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.request_app_update("check", cx)
-                                    }))
+                                    .key_stop(
+                                        &keys,
+                                        KeyLayer::Overlay,
+                                        "check-app-update",
+                                        colors,
+                                        cx,
+                                        |this, _, cx| this.request_app_update("check", cx),
+                                    )
                                     .child("Check now"),
                             )
                         })
                         .when(!busy && !installed && available, |actions| {
                             actions.child(
                                 ui_button("install-app-update", ButtonKind::Primary, colors)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.install_app_update(cx)),
+                                    .key_stop(
+                                        &keys,
+                                        KeyLayer::Overlay,
+                                        "install-app-update",
+                                        colors,
+                                        cx,
+                                        |this, _, cx| this.install_app_update(cx),
                                     )
                                     .child("Install"),
                             )
@@ -1055,11 +1235,18 @@ impl XdDesktop {
                         .when(!busy && installed, |actions| {
                             actions.child(
                                 ui_button("restart-app-update", ButtonKind::Primary, colors)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if this.flush_draft_before_navigation() {
-                                            this.request_app_update("restart", cx);
-                                        }
-                                    }))
+                                    .key_stop(
+                                        &keys,
+                                        KeyLayer::Overlay,
+                                        "restart-app-update",
+                                        colors,
+                                        cx,
+                                        |this, _, cx| {
+                                            if this.flush_draft_before_navigation() {
+                                                this.request_app_update("restart", cx);
+                                            }
+                                        },
+                                    )
                                     .child("Restart to update"),
                             )
                         }),
@@ -1070,6 +1257,7 @@ impl XdDesktop {
 
     /// Building and installing a branch, pull request or commit.
     fn source_build_row(&self, colors: ThemeColors, cx: &mut Context<Self>) -> SettingRow {
+        let keys = self.key_targets.clone();
         let running = self.source_build_panel.running;
         let can_build =
             source_build::supported() && self.source_build_panel.target.is_some() && !running;
@@ -1105,6 +1293,7 @@ impl XdDesktop {
                         .gap_2()
                         .child(
                             div()
+                                .relative()
                                 .flex_1()
                                 .min_w_0()
                                 .h(px(32.0))
@@ -1113,23 +1302,34 @@ impl XdDesktop {
                                 .items_center()
                                 .rounded(px(8.0))
                                 .border_1()
-                                .border_color(self.field_frame(&self.source_build_input, None, cx))
+                                .border_color(self.field_frame(&self.source_build_input, cx))
                                 .bg(rgb(colors.surface))
                                 .text_size(px(12.5))
-                                .child(self.source_build_input.clone()),
+                                .child(self.source_build_input.clone())
+                                .child(keys.mark(
+                                    KeyLayer::Overlay,
+                                    KeyStop::Field(
+                                        self.source_build_input.read(cx).focus_handle(cx),
+                                    ),
+                                )),
                         )
                         .child(
-                            ui_button(
+                            ui_button_when(
+                                can_build,
                                 "workspace-settings-source-build",
                                 ButtonKind::Secondary,
                                 colors,
                             )
-                            .when(!can_build, |button| button.opacity(0.5))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if can_build {
-                                    this.start_source_build(cx);
-                                }
-                            }))
+                            .when(can_build, |button| {
+                                button.key_stop(
+                                    &keys,
+                                    KeyLayer::Overlay,
+                                    "workspace-settings-source-build",
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.start_source_build(cx),
+                                )
+                            })
                             .child(if running {
                                 "Building…"
                             } else {
@@ -1143,13 +1343,20 @@ impl XdDesktop {
                                     ButtonKind::Ghost,
                                     colors,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(run) = &this.source_build_run {
-                                        run.cancel();
-                                    }
-                                    this.source_build_panel.stopping = true;
-                                    cx.notify();
-                                }))
+                                .key_stop(
+                                    &keys,
+                                    KeyLayer::Overlay,
+                                    "workspace-settings-source-stop",
+                                    colors,
+                                    cx,
+                                    |this, _, cx| {
+                                        if let Some(run) = &this.source_build_run {
+                                            run.cancel();
+                                        }
+                                        this.source_build_panel.stopping = true;
+                                        cx.notify();
+                                    },
+                                )
                                 .child(
                                     if self.source_build_panel.stopping {
                                         "Stopping…"
@@ -1244,6 +1451,7 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<SettingGroup> {
+        let keys = self.key_targets.clone();
         match section {
             0 => vec![SettingGroup {
                 label: None,
@@ -1255,6 +1463,7 @@ impl XdDesktop {
                         "Status marks hold steady instead of pulsing, and the usage refresh icon does not turn.",
                         self.settings.reduce_motion,
                         |settings| settings.reduce_motion = !settings.reduce_motion,
+                        &keys,
                         colors,
                         cx,
                     ),
@@ -1275,6 +1484,7 @@ impl XdDesktop {
                             "Continue turns a restart cut off. Agents start working without asking.",
                             self.settings.auto_resume_chats,
                             |settings| settings.auto_resume_chats = !settings.auto_resume_chats,
+                            &keys,
                             colors,
                             cx,
                         ),
@@ -1284,6 +1494,7 @@ impl XdDesktop {
                             "A chat that finishes in the background sends a notification.",
                             self.settings.notifications,
                             |settings| settings.notifications = !settings.notifications,
+                            &keys,
                             colors,
                             cx,
                         ),
@@ -1317,11 +1528,15 @@ impl XdDesktop {
                         "New chats pass the agent's unrestricted flag: no approvals or sandbox where the CLI supports it.",
                         colors,
                         |row| {
-                            row.cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_minimal_all_permissions(cx)
-                                }))
-                                .child(settings_switch(colors, self.settings.allow_all_permissions))
+                            key_switch(
+                                row,
+                                &keys,
+                                "minimal-all-permissions",
+                                self.settings.allow_all_permissions,
+                                colors,
+                                cx,
+                                |this, _, cx| this.toggle_minimal_all_permissions(cx),
+                            )
                         },
                     )],
                 ),
@@ -1358,6 +1573,7 @@ impl XdDesktop {
 
     /// This device's connection, pairing, and remote hosts.
     fn device_groups(&mut self, colors: ThemeColors, cx: &mut Context<Self>) -> Vec<SettingGroup> {
+        let keys = self.key_targets.clone();
         let local = self.active_endpoint == ChatEndpoint::Local;
         let mut this_device = vec![setting(
             "workspace-settings-connection",
@@ -1397,17 +1613,24 @@ impl XdDesktop {
                 |row| {
                     row.child(
                         ui_button("pair-device", ButtonKind::Secondary, colors)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.leave_settings(cx);
-                                this.share_panel = Some(SharePanel {
-                                    loading: true,
-                                    ..Default::default()
-                                });
-                                if let Some(host) = &this.host {
-                                    let _ = host.peer_pairing();
-                                }
-                                cx.notify();
-                            }))
+                            .key_stop(
+                                &keys,
+                                KeyLayer::Overlay,
+                                "pair-device",
+                                colors,
+                                cx,
+                                |this, _, cx| {
+                                    this.leave_settings(cx);
+                                    this.share_panel = Some(SharePanel {
+                                        loading: true,
+                                        ..Default::default()
+                                    });
+                                    if let Some(host) = &this.host {
+                                        let _ = host.peer_pairing();
+                                    }
+                                    cx.notify();
+                                },
+                            )
                             .child("Pair a device"),
                     )
                 },
@@ -1420,15 +1643,22 @@ impl XdDesktop {
                 |row| {
                     row.child(
                         ui_button("paired-devices", ButtonKind::Secondary, colors)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.leave_settings(cx);
-                                this.devices_panel = Some(DevicesPanel {
-                                    loading: true,
-                                    ..Default::default()
-                                });
-                                this.request_devices();
-                                cx.notify();
-                            }))
+                            .key_stop(
+                                &keys,
+                                KeyLayer::Overlay,
+                                "paired-devices",
+                                colors,
+                                cx,
+                                |this, _, cx| {
+                                    this.leave_settings(cx);
+                                    this.devices_panel = Some(DevicesPanel {
+                                        loading: true,
+                                        ..Default::default()
+                                    });
+                                    this.request_devices();
+                                    cx.notify();
+                                },
+                            )
                             .child("Manage"),
                     )
                 },
@@ -1442,10 +1672,17 @@ impl XdDesktop {
             |row| {
                 row.child(
                     ui_button("workspace-settings-connect", ButtonKind::Secondary, colors)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.leave_settings(cx);
-                            this.open_remote(window, cx);
-                        }))
+                        .key_stop(
+                            &keys,
+                            KeyLayer::Overlay,
+                            "workspace-settings-connect",
+                            colors,
+                            cx,
+                            |this, window, cx| {
+                                this.leave_settings(cx);
+                                this.open_remote(window, cx);
+                            },
+                        )
                         .child("Connect"),
                 )
             },
@@ -1463,10 +1700,17 @@ impl XdDesktop {
                             ButtonKind::Secondary,
                             colors,
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.leave_settings(cx);
-                            this.disconnect_remote_runtime(cx);
-                        }))
+                        .key_stop(
+                            &keys,
+                            KeyLayer::Overlay,
+                            "workspace-settings-disconnect-remote",
+                            colors,
+                            cx,
+                            |this, _, cx| {
+                                this.leave_settings(cx);
+                                this.disconnect_remote_runtime(cx);
+                            },
+                        )
                         .child("Disconnect"),
                     )
                 },
@@ -1501,8 +1745,35 @@ impl XdDesktop {
             .collect()
     }
 
+    /// Up and Down in Settings: the section after the open one, or before
+    /// it, going round. A search, a dialog over the page, Usage, or a text
+    /// field of the open section keeps the keys. Says whether the section
+    /// changed.
+    pub(super) fn step_settings_section(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
+        if !self.minimal_theme_open
+            || self.usage_open
+            || self.dialog_open()
+            || !self.settings_query.trim().is_empty()
+        {
+            return false;
+        }
+        // From the page itself, a control Tab is on, or the search field.
+        let search = self.settings_search_input.read(cx).focus_handle(cx);
+        let at_home = [&self.minimal_popup_focus, &self.stop_focus, &search]
+            .into_iter()
+            .any(|focus| self.frame_focus.as_ref() == Some(focus));
+        if !at_home {
+            return false;
+        }
+        let count = SETTINGS_SECTIONS.len();
+        let at = self.settings_section.min(count - 1);
+        self.open_settings_section(if down { at + 1 } else { at + count - 1 } % count, cx);
+        true
+    }
+
     /// Opens a section, leaving any search.
     fn open_settings_section(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.chat_title_model_menu = None;
         self.settings_section = index;
         if index == AGENTS_SECTION {
             self.request_agent_accounts();
@@ -1534,6 +1805,9 @@ impl XdDesktop {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        if !self.minimal_theme_open {
+            self.chat_title_model_menu = None;
+        }
         let window_width = f32::from(window.viewport_size().width);
         let narrow = window_width < SETTINGS_NARROW_WINDOW;
         let column = settings_column_width(window_width);
@@ -1595,6 +1869,7 @@ impl XdDesktop {
                 )
                 .child(
                     div()
+                        .relative()
                         .mt(px(14.0))
                         .h(px(32.0))
                         .px(px(9.0))
@@ -1603,6 +1878,10 @@ impl XdDesktop {
                         .items_center()
                         .gap_2()
                         .rounded(px(8.0))
+                        .child(self.key_targets.mark(
+                            KeyLayer::Overlay,
+                            KeyStop::Field(self.settings_search_input.read(cx).focus_handle(cx)),
+                        ))
                         .border_1()
                         .border_color(
                             if self.frame_focus.as_ref()
@@ -1624,15 +1903,21 @@ impl XdDesktop {
                         )
                         .when(searching, |field| {
                             field.child(
-                                div()
-                                    .id("workspace-settings-search-clear")
-                                    .flex_none()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                icon_button(
+                                    "workspace-settings-search-clear",
+                                    "Clear the search",
+                                    CLOSE_ICON,
+                                    colors,
+                                )
+                                .size(24.0)
+                                .build()
+                                .mr(px(-5.0))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.clear_settings_search(cx);
                                         cx.notify();
-                                    }))
-                                    .child(icon(CLOSE_ICON, 12.0, colors.faint)),
+                                    },
+                                )),
                             )
                         }),
                 )
@@ -1778,16 +2063,20 @@ impl XdDesktop {
             }
         }
 
+        // Each section, and a search, starts at its top.
+        let content_key = if searching { usize::MAX } else { section };
+        if self.settings_scroll_key != Some(content_key) {
+            self.settings_scroll_key = Some(content_key);
+            self.settings_scroll.set_offset(point(px(0.0), px(0.0)));
+        }
         let content = div()
-            .id((
-                "workspace-settings-content",
-                if searching { usize::MAX } else { section },
-            ))
+            .id(("workspace-settings-content", content_key))
             .flex_1()
             .min_w_0()
             .min_h_0()
             .h_full()
             .overflow_y_scroll()
+            .track_scroll(&self.settings_scroll)
             .child(page);
 
         div()
@@ -1802,8 +2091,16 @@ impl XdDesktop {
             .bg(crate::glass::window(colors))
             .track_focus(&minimal_popup_focus)
             // The page is the whole window below the title bar: nothing behind
-            // it takes a click.
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // it takes a click. A press outside an open dropdown closes it.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    if this.chat_title_model_menu.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .child(navigation)
             .child(content)
             .into_any_element()
