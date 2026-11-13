@@ -2777,6 +2777,8 @@ struct KeyFrame {
     /// The sidebar's find field has the keyboard and holds a search, so the
     /// sessions it lists are the rows the keys move through.
     finding: bool,
+    /// The controls that show a name under the Tab ring.
+    named: HashSet<SharedString>,
 }
 
 #[derive(Clone, Default)]
@@ -2956,6 +2958,12 @@ impl KeyTargets {
             }
         }
         frame.stops.push((stop, bounds));
+    }
+
+    /// Notes that the control `id` shows its name under the Tab ring, so
+    /// the whole of a label cut short in it stands under that name.
+    fn note_named(&self, id: &SharedString) {
+        self.0.borrow_mut().named.insert(id.clone());
     }
 
     /// Notes a Tab stop where it is painted: an element that takes no room,
@@ -3172,6 +3180,7 @@ impl KeyRow for gpui::Stateful<gpui::Div> {
         let id = id.into();
         let on = keys.stop_on(&id);
         let label = label.into();
+        keys.note_named(&id);
         self.key_stop(keys, layer, id, colors, cx, run)
             .when(on, |control| control.child(focus_tooltip(label, colors)))
     }
@@ -3263,6 +3272,9 @@ fn key_reach(
 ) -> gpui::Stateful<gpui::Div> {
     let id = id.into();
     let on = keys.stop_on(&id);
+    if label.is_some() {
+        keys.note_named(&id);
+    }
     let run: KeyRun = Rc::new(run);
     control
         .child(keys.mark(layer, KeyStop::Control(id, run)))
@@ -3300,6 +3312,7 @@ fn key_action_stop(
     };
     let id = id.into();
     let on = keys.stop_on(&id);
+    keys.note_named(&id);
     let run: KeyRun =
         Rc::new(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx));
     control
@@ -3327,6 +3340,10 @@ fn details_label(expanded: bool) -> &'static str {
         "Show details"
     }
 }
+
+/// How far below a control's name the whole of a label cut short in it
+/// stands: a tooltip's height and a little.
+const FOCUS_TOOLTIP_STACK: f32 = 32.0;
 
 /// How far under its control a name shown for the Tab ring sits: clear of
 /// the ring.
@@ -3378,6 +3395,7 @@ fn in_popover<R>(build: impl FnOnce() -> R) -> R {
 fn keyed_title(
     bounds: Bounds<Pixels>,
     text: SharedString,
+    stacked: bool,
     colors: ThemeColors,
 ) -> impl IntoElement {
     gpui::deferred(
@@ -3387,7 +3405,10 @@ fn keyed_title(
             .child(
                 div()
                     .debug_selector(|| "keyed-title".into())
-                    .pt(px(FOCUS_TOOLTIP_GAP))
+                    // Under the control's own name, when it shows one.
+                    .pt(px(
+                        FOCUS_TOOLTIP_GAP + if stacked { FOCUS_TOOLTIP_STACK } else { 0.0 }
+                    ))
                     .child(tooltip_box(text, colors)),
             ),
     )
@@ -5479,6 +5500,9 @@ struct XdDesktop {
     /// The whole text of the label the keyboard's control cuts short, and
     /// where that control is, shown under it.
     key_title: Option<(Bounds<Pixels>, SharedString)>,
+    /// The control the keyboard is on shows its own name too, which the
+    /// whole label stands under.
+    key_title_stacked: bool,
     /// The setting changed last on the Settings page, and when: a save that
     /// fails soon after is that setting's.
     settings_saving: Option<(&'static str, Instant)>,
@@ -6431,6 +6455,7 @@ impl XdDesktop {
             message_menu: None,
             pulse_layer: None,
             key_title: None,
+            key_title_stacked: false,
             settings_saving: None,
             settings_failure: None,
             settle_undo: None,
@@ -27932,7 +27957,7 @@ impl XdDesktop {
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(message_menu_overlay, |root, overlay| root.child(overlay))
             .when_some(self.key_title.clone(), |root, (bounds, text)| {
-                root.child(keyed_title(bounds, text, colors))
+                root.child(keyed_title(bounds, text, self.key_title_stacked, colors))
             })
             .when_some(project_add_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
@@ -29220,6 +29245,10 @@ impl Render for XdDesktop {
         self.settle_key_cursor();
         self.settle_key_stop(window);
         self.key_title = self.keyed_cut_label();
+        self.key_title_stacked = self
+            .key_stop
+            .as_ref()
+            .is_some_and(|id| self.key_targets.0.borrow().named.contains(id));
         // What moves with the pulse goes to the layer over the window, while
         // nothing covers the page it is on.
         LAYERED.with(|layered| {
