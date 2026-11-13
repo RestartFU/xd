@@ -377,6 +377,52 @@ struct SessionFold {
     hidden: Vec<SessionSignal>,
 }
 
+/// How many sessions of each kind the landing page lists before it says
+/// only how many more there are.
+const HOME_ROWS: usize = 6;
+
+/// A session the landing page lists because it waits on the user or works.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HomeSession {
+    project_id: String,
+    project: String,
+    chat_id: String,
+    agent: AgentCli,
+    title: String,
+    signal: SessionSignal,
+}
+
+/// What the landing page shows once a chat is left.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HomeOverview {
+    /// No project yet: the welcome.
+    FirstRun,
+    Projects {
+        /// Sessions waiting on the user, in the sidebar's order.
+        waiting: Vec<HomeSession>,
+        /// Sessions at work, or waiting on their own agents and shells.
+        working: Vec<HomeSession>,
+        /// Every session listed in the sidebar.
+        sessions: usize,
+        /// The last session, unless it is already listed above.
+        resume: Option<(String, String, AgentCli, String)>,
+        /// The project a new session starts in, and its name.
+        new_session: Option<(String, String)>,
+    },
+}
+
+/// The landing page's heading: what waits on the user first, then what works.
+fn home_heading(waiting: usize, working: usize, sessions: usize) -> String {
+    match (waiting, working) {
+        (1, _) => "1 session is waiting on you".into(),
+        (2.., _) => format!("{waiting} sessions are waiting on you"),
+        (0, 1) => "1 session is working".into(),
+        (0, 2..) => format!("{working} sessions are working"),
+        (0, 0) if sessions == 0 => "No sessions yet".into(),
+        (0, 0) => "Nothing is waiting on you".into(),
+    }
+}
+
 /// What a session's signal tab says about its agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionSignal {
@@ -783,18 +829,46 @@ struct PaneTooltip {
     colors: ThemeColors,
 }
 
+fn tooltip_box(label: &'static str, colors: ThemeColors) -> gpui::Div {
+    div()
+        .px_2()
+        .py_1()
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(colors.border))
+        .bg(rgb(colors.surface_high))
+        .text_size(px(12.0))
+        .text_color(rgb(colors.text))
+        .child(label)
+}
+
 impl Render for PaneTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        tooltip_box(self.label, self.colors)
+    }
+}
+
+/// The most of its list the Paired devices dialog shows before it scrolls,
+/// which keeps the whole dialog inside the smallest window.
+const PAIRED_DEVICES_LIST_HEIGHT: f32 = 336.0;
+
+/// How far a [`ClearTooltip`] stays from the pointer, above or below it.
+const CLEAR_TOOLTIP_GAP: f32 = 18.0;
+
+/// A tooltip for a label, not a button: it explains the words under the
+/// pointer, so it is held a line away from the pointer instead of over them.
+/// GPUI opens a tooltip at the pointer, or just above it at the foot of the
+/// window; the space around the box moves it clear either way.
+struct ClearTooltip {
+    label: &'static str,
+    colors: ThemeColors,
+}
+
+impl Render for ClearTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .px_2()
-            .py_1()
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(rgb(self.colors.border))
-            .bg(rgb(self.colors.surface_high))
-            .text_size(px(12.0))
-            .text_color(rgb(self.colors.text))
-            .child(self.label)
+            .py(px(CLEAR_TOOLTIP_GAP))
+            .child(tooltip_box(self.label, self.colors))
     }
 }
 
@@ -11284,6 +11358,20 @@ impl XdDesktop {
         self.request_message_page(chat_id, cursor);
     }
 
+    /// Asks again for a conversation whose first page did not arrive.
+    fn retry_transcript(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        self.transcript_page_loading = false;
+        self.transcript_refresh_pending = false;
+        self.transcript_loading = true;
+        self.request_chat(&chat_id);
+        // Without a connection this ends the loading again and says why.
+        self.request_messages(&chat_id);
+        cx.notify();
+    }
+
     fn request_older_messages(&mut self) {
         if !self.transcript_has_older || self.transcript_page_loading || self.transcript_loading {
             return;
@@ -16662,69 +16750,242 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    /// The landing surface; projects and sessions are browsed in the sidebar.
+    /// What the landing page has to say: nothing but a welcome before the
+    /// first project, and after that the sessions that need the user, the
+    /// ones at work, and where to carry on.
+    fn home_overview(&self) -> HomeOverview {
+        let folders = &self.model.folders;
+        if folders.iter().all(|folder| folder.group) {
+            return HomeOverview::FirstRun;
+        }
+        // The sessions the sidebar lists: not settled, and not an agent's
+        // finished one.
+        let chats = self
+            .catalog_session_chats()
+            .into_iter()
+            .filter(|chat| chat.settled_at.is_none() && !self.finished_agent_row(chat, None))
+            .collect::<Vec<_>>();
+        let mut waiting = Vec::new();
+        let mut working = Vec::new();
+        let mut sessions = 0;
+        for row in folder_tree(folders) {
+            let folder = &folders[row.index];
+            if folder.group {
+                continue;
+            }
+            for card in project_sessions(&folder.id, &chats) {
+                sessions += 1;
+                // An agent's session shows through its lead, as in a closed
+                // project, unless it is the one waiting on the user.
+                let signal = self.outward_signal(&card);
+                let list = match signal {
+                    SessionSignal::Waiting => &mut waiting,
+                    SessionSignal::Working | SessionSignal::Background(_) => &mut working,
+                    SessionSignal::Idle | SessionSignal::Done | SessionSignal::Paused => continue,
+                };
+                list.push(HomeSession {
+                    project_id: folder.id.clone(),
+                    project: folder.name.clone(),
+                    chat_id: card.id,
+                    agent: card.agent,
+                    title: card.title,
+                    signal,
+                });
+            }
+        }
+        let listed = |chat_id: &str| {
+            waiting
+                .iter()
+                .take(HOME_ROWS)
+                .chain(working.iter().take(HOME_ROWS))
+                .any(|session: &HomeSession| session.chat_id == chat_id)
+        };
+        let last = resumable_session(self.cached_last_chat().as_deref(), &self.model.chats);
+        // Said once: a session listed above is already one click away.
+        let resume = last
+            .clone()
+            .filter(|(_, chat_id, _)| !listed(chat_id))
+            .and_then(|(project_id, chat_id, agent)| {
+                let title = project_sessions(&project_id, &chats)
+                    .into_iter()
+                    .find(|session| session.id == chat_id)?
+                    .title;
+                Some((project_id, chat_id, agent, title))
+            });
+        // A new session goes where the user was: the project just left, or
+        // the last session's, or the first one.
+        let left = match &self.minimal_route {
+            MinimalRoute::Projects { project_id } | MinimalRoute::Sessions { project_id } => {
+                project_id.clone()
+            }
+            MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
+            MinimalRoute::Terminal => None,
+        };
+        let new_session = left
+            .or_else(|| last.map(|(project_id, _, _)| project_id))
+            .and_then(|id| {
+                folders
+                    .iter()
+                    .find(|folder| folder.id == id && !folder.group)
+            })
+            .or_else(|| folders.iter().find(|folder| !folder.group))
+            .map(|folder| (folder.id.clone(), folder.name.clone()));
+        HomeOverview::Projects {
+            waiting,
+            working,
+            sessions,
+            resume,
+            new_session,
+        }
+    }
+
+    /// The landing surface. Projects and sessions are browsed in the sidebar;
+    /// this says what needs the user and gives one way back into the work.
     fn render_minimal_home(
         &mut self,
         colors: ThemeColors,
         _window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let resume = resumable_session(self.cached_last_chat().as_deref(), &self.model.chats)
-            .and_then(|(project_id, chat_id, agent)| {
-                let title = project_sessions(&project_id, &self.catalog_session_chats())
-                    .into_iter()
-                    .find(|session| session.id == chat_id)?
-                    .title;
-                Some((project_id, chat_id, agent, title))
-            });
-        div()
-            .id("minimal-project-content")
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .overflow_y_scroll()
-            .bg(glass::canvas())
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(760.0))
-                    .mx_auto()
-                    .px(px(32.0))
-                    .pt(px(44.0))
-                    .pb_8()
+        let page = div()
+            .w_full()
+            .max_w(px(760.0))
+            .mx_auto()
+            .px(px(32.0))
+            .pt(px(44.0))
+            .pb_8();
+        let heading = |text: String| {
+            div()
+                .text_size(px(22.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(colors.text))
+                .child(text)
+        };
+        let lead = |text: &'static str| {
+            div()
+                .mt(px(10.0))
+                .max_w(px(460.0))
+                .text_size(px(13.5))
+                .line_height(px(21.0))
+                .text_color(rgb(colors.muted))
+                .child(text)
+        };
+        let page = match self.home_overview() {
+            HomeOverview::FirstRun => page
+                .child(heading("Welcome to xd".into()))
+                .child(lead(
+                    "Create a project, then start a Codex or Claude session in it. Sessions keep running when you close the window.",
+                ))
+                .child(
+                    div().mt_5().flex().child(
+                        ui_button("minimal-welcome-project", ButtonKind::Primary, colors)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.begin_workspace_create(window, cx)
+                            }))
+                            .child(plus_icon(colors.accent_text))
+                            .child("New project"),
+                    ),
+                ),
+            HomeOverview::Projects {
+                waiting,
+                working,
+                sessions,
+                resume,
+                new_session,
+            } => {
+                let title = home_heading(waiting.len(), working.len(), sessions);
+                let quiet = waiting.is_empty() && working.is_empty();
+                let both = !waiting.is_empty() && !working.is_empty();
+                let more_waiting = waiting.len().saturating_sub(HOME_ROWS);
+                let more_working = working.len().saturating_sub(HOME_ROWS);
+                let mut index = 0;
+                let mut rows = |sessions: Vec<HomeSession>, cx: &mut Context<Self>| {
+                    sessions
+                        .into_iter()
+                        .take(HOME_ROWS)
+                        .map(|session| {
+                            index += 1;
+                            Self::render_home_session(colors, session, index, cx)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let waiting = rows(waiting, cx);
+                let working = rows(working, cx);
+                let more = |count: usize| {
+                    div()
+                        .h(px(24.0))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .text_size(px(12.0))
+                        .text_color(rgb(colors.faint))
+                        .child(format!("and {count} more"))
+                };
+                // Continue is the page's one filled action; with no session
+                // to continue, starting one is.
+                let start_kind = if resume.is_some() {
+                    ButtonKind::Secondary
+                } else {
+                    ButtonKind::Primary
+                };
+                let start_ink = if resume.is_some() {
+                    colors.text
+                } else {
+                    colors.accent_text
+                };
+                page.child(heading(title).debug_selector(|| "home-heading".into()))
+                    .when(quiet && sessions > 0, |page| {
+                        page.child(lead("All sessions are idle."))
+                    })
+                    .when(sessions == 0, |page| {
+                        page.child(lead(
+                            "Start a Codex or Claude session in a project. Sessions keep running when you close the window.",
+                        ))
+                    })
+                    .when(!quiet, |page| {
+                        page.child(
+                            div()
+                                .id("home-sessions")
+                                .mt(px(14.0))
+                                // The rows' hover fill reaches past the text,
+                                // which lines up with the heading.
+                                .mx(px(-8.0))
+                                .flex()
+                                .flex_col()
+                                .children(waiting)
+                                .when(more_waiting > 0, |list| list.child(more(more_waiting)))
+                                .when(both, |list| {
+                                    list.child(
+                                        div()
+                                            .mt(px(14.0))
+                                            .h(px(24.0))
+                                            .px_2()
+                                            .flex()
+                                            .items_center()
+                                            .text_size(px(12.0))
+                                            .text_color(rgb(colors.muted))
+                                            .child("Working"),
+                                    )
+                                })
+                                .children(working)
+                                .when(more_working > 0, |list| list.child(more(more_working))),
+                        )
+                    })
                     .child(
                         div()
-                            .text_size(px(22.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(colors.text))
-                            .child("Welcome to xd"),
-                    )
-                    .child(
-                        div()
-                            .mt(px(10.0))
-                            .max_w(px(460.0))
-                            .text_size(px(13.5))
-                            .line_height(px(21.0))
-                            .text_color(rgb(colors.muted))
-                            .child(
-                                "Create a workspace, then start a Codex or Claude session in it. Sessions keep running when you close the window.",
-                            ),
-                    )
-                    .child(
-                        div().mt_5().flex().child(
-                            ui_button("minimal-welcome-project", ButtonKind::Primary, colors)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.begin_workspace_create(window, cx)
-                                }))
-                                .child(plus_icon(colors.accent_text))
-                                .child("New project"),
-                        ),
-                    )
-                    .when_some(resume, |front, (project_id, chat_id, agent, title)| {
-                        front.child(
-                            div().mt(px(18.0)).flex().child(
-                                ui_button("minimal-resume-session", ButtonKind::Secondary, colors)
+                            .mt_5()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .when_some(resume, |actions, (project_id, chat_id, agent, title)| {
+                                actions.child(
+                                    ui_button(
+                                        "minimal-resume-session",
+                                        ButtonKind::Primary,
+                                        colors,
+                                    )
                                     .max_w(px(420.0))
+                                    .min_w_0()
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.open_minimal_session(
                                             project_id.clone(),
@@ -16734,14 +16995,97 @@ impl XdDesktop {
                                             cx,
                                         );
                                     }))
-                                    .child(div().text_color(rgb(colors.muted)).child("Continue"))
-                                    .child(div().min_w_0().truncate().child(title)),
-                            ),
-                        )
-                    }),
+                                    .child("Continue")
+                                    .child(
+                                        truncating_label(title).font_weight(FontWeight::NORMAL),
+                                    ),
+                                )
+                            })
+                            .when_some(new_session, |actions, (project_id, project)| {
+                                actions.child(
+                                    ui_button("home-new-session", start_kind, colors)
+                                        .max_w(px(320.0))
+                                        .min_w_0()
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.begin_chat_create(project_id.clone(), window, cx)
+                                        }))
+                                        .child(plus_icon(start_ink))
+                                        .child(truncating_label(format!(
+                                            "New session in {project}"
+                                        ))),
+                                )
+                            }),
+                    )
+            }
+        };
+        div()
+            .id("minimal-project-content")
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_y_scroll()
+            .bg(glass::canvas())
+            .child(page)
+            .into_any_element()
+    }
+
+    /// One session on the landing page: its mark, its name and its project.
+    /// The mark is the sidebar's, so a state looks the same in both places.
+    fn render_home_session(
+        colors: ThemeColors,
+        session: HomeSession,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let HomeSession {
+            project_id,
+            project,
+            chat_id,
+            agent,
+            title,
+            signal,
+        } = session;
+        let mark = match signal {
+            // The heading says what the ring means.
+            SessionSignal::Waiting => Some(waiting_ring(colors).into_any_element()),
+            signal => signal_tab(signal, colors),
+        };
+        div()
+            .id(("home-session", index))
+            .h(px(32.0))
+            .px_2()
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(colors.surface_high)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_minimal_session(project_id.clone(), chat_id.clone(), agent, window, cx);
+            }))
+            .child(
+                div()
+                    .w(px(22.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .children(mark),
+            )
+            .child(
+                truncating_label(title)
+                    .text_size(px(13.0))
+                    .text_color(rgb(colors.text)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(rgb(colors.faint))
+                    .child(project),
             )
             .into_any_element()
     }
+
     fn render_native_inline(
         content: &markdown::InlineText,
         colors: ThemeColors,
@@ -19895,12 +20239,22 @@ impl XdDesktop {
             let project = folder.map(|folder| folder.name.clone()).unwrap_or_default();
             let project_avatar =
                 self.owner_avatar(folder.and_then(|folder| folder.owner.as_deref()));
-            let (heading, description) = if self.transcript_loaded {
-                composer::EMPTY_CHAT
+            let failed = !self.transcript_loaded;
+            let (heading, description) = if failed {
+                composer::CHAT_NOT_LOADED
             } else {
-                ("Conversation did not load", "Select this chat to retry.")
+                composer::EMPTY_CHAT
             };
             composer::chat_heading(project, project_avatar, heading, description, colors)
+                .when(failed, |heading| {
+                    heading.child(
+                        ui_button("transcript-retry", ButtonKind::Secondary, colors)
+                            .debug_selector(|| "transcript-retry".into())
+                            .mt_1()
+                            .on_click(cx.listener(|this, _, _, cx| this.retry_transcript(cx)))
+                            .child("Try again"),
+                    )
+                })
                 .into_any_element()
         } else {
             list(self.transcript.clone(), move |index, _window, cx| {
@@ -21879,6 +22233,9 @@ impl XdDesktop {
                 .child(
                     div()
                         .w(px(480.0))
+                        // Many devices scroll inside the dialog, so its title
+                        // and Close stay on screen in a short window.
+                        .max_h(px(500.0))
                         .p_5()
                         .flex()
                         .flex_col()
@@ -21886,18 +22243,33 @@ impl XdDesktop {
                         .rounded_xl()
                         .bg(rgb(colors.surface))
                         .text_color(rgb(colors.text))
-                        .child(div().text_size(px(16.0)).child("Paired devices"))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(16.0))
+                                .child("Paired devices"),
+                        )
                         .when(panel.loading, |card| card.child("Loading…"))
                         .when(!panel.loading && rows.is_empty(), |card| {
                             card.child("No paired devices.")
                         })
-                        .children(rows)
+                        .child(
+                            div()
+                                .id("paired-devices-list")
+                                .debug_selector(|| "paired-devices-list".into())
+                                .min_h_0()
+                                .max_h(px(PAIRED_DEVICES_LIST_HEIGHT))
+                                .overflow_y_scroll()
+                                .children(rows),
+                        )
                         .when_some(panel.error, |card, error| {
                             card.child(div().text_color(rgb(colors.danger)).child(error))
                         })
                         .child(
                             div()
                                 .id("close-devices")
+                                .debug_selector(|| "close-devices".into())
+                                .flex_none()
                                 .px_3()
                                 .py_2()
                                 .cursor_pointer()
@@ -28708,6 +29080,245 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         });
     }
 
+    /// The implementation chat of [`grouped_workspace_fixture`], open and
+    /// loaded, in a window of the given size.
+    fn open_implementation_chat(
+        cx: &mut gpui::TestAppContext,
+        width: f32,
+        height: f32,
+    ) -> (Entity<XdDesktop>, &mut gpui::VisualTestContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "claude".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Claude,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+        });
+        cx.simulate_resize(size(px(width), px(height)));
+        cx.run_until_parked();
+        (desktop, cx)
+    }
+
+    #[gpui::test]
+    fn send_stays_at_the_composers_bottom_right_when_its_options_wrap(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for width in [760.0, 1180.0] {
+            let (_, cx) = open_implementation_chat(cx, width, 560.0);
+            let composer = cx.debug_bounds("chat-composer").unwrap();
+            let attach = cx.debug_bounds("native-attach").unwrap();
+            let send = cx.debug_bounds("native-send-message").unwrap();
+            assert!(
+                send.right() > composer.right() - px(16.0),
+                "at {width}: send ends at {:?} in a composer ending at {:?}",
+                send.right(),
+                composer.right()
+            );
+            assert!(
+                send.left() > attach.right(),
+                "at {width}: right of the options"
+            );
+            assert!(
+                send.bottom() > composer.bottom() - px(16.0),
+                "at {width}: on the last row"
+            );
+            // Level with the options' last row, whose first is the attach
+            // button's: never on a row of its own below them.
+            assert!(send.top() < attach.bottom() + px(40.0));
+        }
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_conversation_that_did_not_load_offers_to_try_again(cx: &mut gpui::TestAppContext) {
+        let (host, mut requests) = socket_host("transcript-retry-test");
+        let (desktop, cx) = open_implementation_chat(cx, 1100.0, 800.0);
+        assert!(cx.debug_bounds("transcript-retry").is_none(), "it loaded");
+        desktop.update(cx, |desktop, cx| {
+            desktop.host = Some(host.clone());
+            desktop.transcript_loaded = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let retry = cx.debug_bounds("transcript-retry").unwrap();
+        cx.simulate_click(retry.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            next_messages_request(&mut requests)["chat"],
+            "implementation"
+        );
+        // Loading takes the offer's place until the page arrives.
+        desktop.update(cx, |desktop, _| assert!(desktop.transcript_loading));
+    }
+
+    #[gpui::test]
+    fn many_paired_devices_scroll_inside_a_dialog_that_fits_the_smallest_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = open_implementation_chat(cx, 760.0, 560.0);
+        desktop.update(cx, |desktop, cx| {
+            desktop.devices_panel = Some(DevicesPanel {
+                devices: (0..40)
+                    .map(|index| serde_json::json!({"id": format!("d{index}"), "name": format!("Device {index}")}))
+                    .collect(),
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let list = cx.debug_bounds("paired-devices-list").unwrap();
+        let close = cx.debug_bounds("close-devices").unwrap();
+        assert!(list.size.height <= px(PAIRED_DEVICES_LIST_HEIGHT));
+        assert!(list.top() > px(0.0), "the title above it is on screen");
+        assert!(close.top() >= list.bottom());
+        assert!(
+            close.bottom() <= px(560.0),
+            "Close ends at {:?}",
+            close.bottom()
+        );
+    }
+
+    #[test]
+    fn the_landing_page_leads_with_what_waits_on_the_user() {
+        assert_eq!(home_heading(1, 3, 5), "1 session is waiting on you");
+        assert_eq!(home_heading(2, 0, 5), "2 sessions are waiting on you");
+        assert_eq!(home_heading(0, 1, 5), "1 session is working");
+        assert_eq!(home_heading(0, 3, 5), "3 sessions are working");
+        assert_eq!(home_heading(0, 0, 5), "Nothing is waiting on you");
+        assert_eq!(home_heading(0, 0, 0), "No sessions yet");
+    }
+
+    #[gpui::test]
+    fn the_landing_page_is_a_welcome_only_before_the_first_project(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.settings.last_chats.clear();
+            desktop.settings.last_chat = None;
+            assert_eq!(desktop.home_overview(), HomeOverview::FirstRun);
+
+            // A folder that only groups projects is not a project yet.
+            desktop
+                .model
+                .apply_tree(&serde_json::json!({
+                    "folders": [{"id": "group", "name": "Work", "group": true}],
+                    "chats": [],
+                }))
+                .unwrap();
+            assert_eq!(desktop.home_overview(), HomeOverview::FirstRun);
+
+            desktop
+                .model
+                .apply_tree(&serde_json::json!({
+                    "folders": [
+                        {"id": "lunar", "name": "lunar"},
+                        {"id": "site", "name": "website"},
+                    ],
+                    "chats": [],
+                }))
+                .unwrap();
+            assert_eq!(
+                desktop.home_overview(),
+                HomeOverview::Projects {
+                    waiting: Vec::new(),
+                    working: Vec::new(),
+                    sessions: 0,
+                    resume: None,
+                    new_session: Some(("lunar".into(), "lunar".into())),
+                }
+            );
+
+            desktop
+                .model
+                .apply_tree(&serde_json::json!({
+                    "folders": [
+                        {"id": "lunar", "name": "lunar"},
+                        {"id": "site", "name": "website"},
+                    ],
+                    "chats": [
+                        {"id": "idle", "folder": "lunar", "title": "Tidy the README", "backend": "codex"},
+                        {"id": "busy", "folder": "lunar", "title": "Port the parser", "backend": "claude", "working": true},
+                        {"id": "ask", "folder": "site", "title": "Review the copy", "backend": "claude", "question_waiting": true},
+                        {"id": "old", "folder": "site", "title": "Settled", "backend": "claude", "working": true, "settled_at": 5},
+                    ],
+                }))
+                .unwrap();
+            let HomeOverview::Projects {
+                waiting,
+                working,
+                sessions,
+                resume,
+                new_session,
+            } = desktop.home_overview()
+            else {
+                panic!("projects exist");
+            };
+            let listed = |sessions: &[HomeSession]| {
+                sessions
+                    .iter()
+                    .map(|session| {
+                        (
+                            session.title.clone(),
+                            session.project.clone(),
+                            session.signal,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                listed(&waiting),
+                [(
+                    "Review the copy".to_owned(),
+                    "website".to_owned(),
+                    SessionSignal::Waiting
+                )]
+            );
+            assert_eq!(
+                listed(&working),
+                [(
+                    "Port the parser".to_owned(),
+                    "lunar".to_owned(),
+                    SessionSignal::Working
+                )]
+            );
+            assert_eq!(sessions, 3, "the settled session is not counted");
+            // Nothing was open before: the first session the user can carry
+            // on with is offered, and a new one starts in the first project.
+            assert_eq!(
+                resume,
+                Some((
+                    "lunar".into(),
+                    "idle".into(),
+                    AgentCli::Codex,
+                    "Tidy the README".into()
+                ))
+            );
+            assert_eq!(new_session, Some(("lunar".into(), "lunar".into())));
+
+            // The last session is listed above, so Continue would repeat it;
+            // a new session starts in the project that session is in.
+            desktop.settings.last_chat = Some("ask".into());
+            let HomeOverview::Projects {
+                resume,
+                new_session,
+                ..
+            } = desktop.home_overview()
+            else {
+                panic!("projects exist");
+            };
+            assert_eq!(resume, None);
+            assert_eq!(new_session, Some(("site".into(), "website".into())));
+        });
+    }
+
     #[gpui::test]
     fn a_lead_waits_on_its_agents_and_finished_agents_leave_the_sidebar(
         cx: &mut gpui::TestAppContext,
@@ -32996,6 +33607,12 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert!(home.contains("minimal-project-content"));
         assert!(home.contains("Welcome to xd"));
         assert!(!home.contains("self.render_catalog("));
+        // It lists the sessions that need the user, not the catalog's cards,
+        // and its welcome is the first run's alone.
+        assert!(home.contains("HomeOverview::FirstRun => page"));
+        assert!(home.contains("home_heading(waiting.len(), working.len(), sessions)"));
+        assert!(!home.contains("minimal-session-card"));
+        assert!(!home.contains("Create a workspace"));
 
         let root = production
             .split_once("fn render_minimal(")

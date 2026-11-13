@@ -161,6 +161,13 @@ pub(super) const EMPTY_CHAT: (&str, &str) = (
     "A new conversation in the same workspace.",
 );
 
+/// What a chat says in place of a conversation the host did not send. A
+/// button under it asks again.
+pub(super) const CHAT_NOT_LOADED: (&str, &str) = (
+    "Conversation did not load",
+    "The request to the host failed.",
+);
+
 /// The heading over an empty chat's composer: the project, a question, and a
 /// line under it. A new chat shows the same one, as it did when it opened as
 /// an empty chat.
@@ -209,8 +216,9 @@ pub(super) fn chat_heading(
         )
 }
 
-/// A chip in the row under the composer. One that opens a picker reacts to
-/// the pointer like a button; a settled one looks the same but does not.
+/// A chip in the row under the composer. One that opens a picker is a button
+/// with a chevron. A settled one is a plain label: it has nothing to open, so
+/// it neither looks pressable nor points at a menu.
 pub(super) fn context_chip(
     id: impl Into<gpui::ElementId>,
     icon_path: &'static str,
@@ -221,13 +229,23 @@ pub(super) fn context_chip(
     let chip = if interactive {
         ui_button(id, ButtonKind::Ghost, colors)
     } else {
-        ui_button_shape(id).text_color(rgb(colors.muted))
+        div()
+            .id(id)
+            .h(px(30.0))
+            .px_2()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_color(rgb(colors.muted))
     };
     chip.max_w(px(280.0))
         .min_w_0()
         .child(assistant_icon(icon_path, 13.0, colors.muted, colors))
         .child(div().min_w_0().truncate().child(label))
-        .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.muted))
+        .when(interactive, |chip| {
+            chip.child(icon(CHEVRON_DOWN_ICON, 11.0, colors.muted))
+        })
 }
 
 /// The row under the composer, starting with the project's name.
@@ -414,44 +432,62 @@ impl XdDesktop {
                     .child(editor),
             )
             .child(
+                // The options wrap among themselves when the composer is
+                // narrow; the send action stays at the bottom right, level
+                // with their last row.
                 div()
                     .flex()
-                    .flex_wrap()
-                    .items_center()
+                    .items_end()
                     .gap_1()
                     .child(
                         div()
-                            .id(attach_id)
-                            .debug_selector(move || attach_id.into())
-                            .size(px(28.0))
+                            .flex_1()
+                            .min_w_0()
+                            .py(px(2.0))
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id(attach_id)
+                                    .debug_selector(move || attach_id.into())
+                                    .size(px(28.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(8.0))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| PaneTooltip {
+                                            label: "Attach files",
+                                            colors,
+                                        })
+                                        .into()
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        match owner {
+                                            DraftOwner::Chat => this.pick_attachments(window, cx),
+                                            DraftOwner::NewChat => {
+                                                this.pick_new_chat_attachments(window, cx)
+                                            }
+                                        }
+                                    }))
+                                    .child(icon(PAPERCLIP_ICON, 15.0, colors.muted)),
+                            )
+                            .children(controls),
+                    )
+                    .child(
+                        div()
                             .flex_none()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .rounded(px(8.0))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| PaneTooltip {
-                                    label: "Attach files",
-                                    colors,
-                                })
-                                .into()
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                match owner {
-                                    DraftOwner::Chat => this.pick_attachments(window, cx),
-                                    DraftOwner::NewChat => {
-                                        this.pick_new_chat_attachments(window, cx)
-                                    }
-                                }
-                            }))
-                            .child(icon(PAPERCLIP_ICON, 15.0, colors.muted)),
-                    )
-                    .children(controls)
-                    .child(div().flex_1())
-                    .children(actions),
+                            .gap_1()
+                            .children(actions),
+                    ),
             )
     }
 
@@ -476,7 +512,7 @@ impl XdDesktop {
         );
         let fixed = |chip: gpui::Stateful<gpui::Div>| {
             chip.tooltip(move |_, cx| {
-                cx.new(|_| PaneTooltip {
+                cx.new(|_| ClearTooltip {
                     label: "Set when the chat started",
                     colors,
                 })
