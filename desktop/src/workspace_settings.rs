@@ -1089,7 +1089,10 @@ impl XdDesktop {
     /// The theme cards, as one setting.
     fn theme_row(&self, column: f32, colors: ThemeColors, cx: &mut Context<Self>) -> SettingRow {
         let keys = self.key_targets.clone();
-        let room = column - 2.0 * SETTINGS_CARD_PADDING;
+        // The card's own hairlines stay one pixel of the window each, which
+        // is more than a logical pixel under 100 %: left out, the two theme
+        // cards came out a fraction too wide for one row at 90 %.
+        let room = column - 2.0 * SETTINGS_CARD_PADDING - 2.0 * logical(gpui::px(1.0));
         let card_width = theme_card_width(room, theme_columns(room));
         let cards = ThemePreset::ALL
             .into_iter()
