@@ -34,6 +34,8 @@ import kotlinx.serialization.json.longOrNull
 internal class AuditHost(
     /** Replaces the script's answer for a request; null leaves it to the script. */
     private val override: (op: String?, request: JsonObject) -> String? = { _, _ -> null },
+    /** An event sent in the same read as the reply to [op], right after it; null sends none. */
+    private val afterReply: (op: String?) -> String? = { null },
 ) {
     /** Every request the app sent, in order. */
     val sent = CopyOnWriteArrayList<JsonObject>()
@@ -96,9 +98,10 @@ internal class AuditHost(
                 val op = request["op"]?.jsonPrimitive?.content
                 val body = (override(op, request) ?: reply(op, request))
                     .removeSuffix("}") + (if (id != null) ""","_xd_request":$id}""" else "}")
+                val next = afterReply(op)?.let { it + "\n" }.orEmpty()
                 Thread {
                     Thread.sleep(5)
-                    listener.get()?.onBytes((body + "\n").encodeToByteArray())
+                    listener.get()?.onBytes((body + "\n" + next).encodeToByteArray())
                 }.start()
             }
         }

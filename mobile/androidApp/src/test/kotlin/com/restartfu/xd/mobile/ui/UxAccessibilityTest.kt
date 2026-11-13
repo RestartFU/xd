@@ -374,9 +374,9 @@ class UxAccessibilityTest {
 
     @Test fun aChatThatDidNotLoadCanBeTriedAgain() {
         var failing = true
-        val scripted = AuditHost { op, _ ->
+        val scripted = AuditHost(override = { op, _ ->
             if (op == "chat" && failing) """{"ok":false,"error":"The host is restarting."}""" else null
-        }
+        })
         chat(scripted, await = "The host is restarting.") {
             val error = compose.onNode(hasText("The host is restarting."), useUnmergedTree = true).fetchSemanticsNode()
             assertEquals(LiveRegionMode.Polite, error.config[SemanticsProperties.LiveRegion])
@@ -453,6 +453,25 @@ class UxAccessibilityTest {
         for (key in listOf("Escape", "Tab", "Up", "Down", "Left", "Right")) {
             compose.onNode(hasContentDescription(key)).assertExists()
         }
+    }
+
+    @Test fun outputRightAfterTheReplayIsKept() {
+        // The host answers the terminal list and, in the same read, sends output
+        // the replay did not hold. It lands after the replay, not nowhere.
+        val after = Base64.encodeToString("\r\nright-after-replay".encodeToByteArray(), Base64.NO_WRAP)
+        val scripted = AuditHost(afterReply = { op ->
+            if (op == "terminal-list") {
+                """{"event":"terminal-output","chat":"global:mobile","terminal":"t1","data":"$after"}"""
+            } else {
+                null
+            }
+        }).connect().also { host = it }
+        val terminal = TerminalViewModel.ShellFactory(scripted.client, "global:mobile").create(TerminalViewModel::class.java)
+        content { TerminalPaneContent(terminal, showSessionBar = false) }
+        fun screen() = terminal.state.value.rows.joinToString("\n") { row -> row.joinToString("") { it.char.toString() } }
+        await { "right-after-replay" in screen() }
+        val text = screen()
+        assertTrue(text, text.indexOf("BUILD SUCCESSFUL in 41s") in 0 until text.indexOf("right-after-replay"))
     }
 
     @Test fun theTerminalPaletteFollowsTheTheme() {

@@ -22,9 +22,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 public data class TerminalPane(
     val id: String? = null,
@@ -48,6 +48,11 @@ public data class TerminalPane(
  * thread: a build can print thousands of lines a second, and each one moves
  * the grid. What it has drawn is copied out for the screen at most once per
  * [FRAME_MILLIS], however much arrived in between.
+ *
+ * Which output belongs to the screen is still decided on the main thread, in
+ * the order the host sent it, as the reply carrying the replay is: the replay
+ * and every later write are queued on [emulation] from there, so they run in
+ * that order and no output between the replay and the first write is lost.
  */
 class TerminalViewModel(
     private val session: ChatSession,
@@ -61,6 +66,9 @@ class TerminalViewModel(
 
     /** Only touched on [emulation]. */
     private var screen = TerminalScreen(COLUMNS, ROWS)
+
+    /** The terminal whose output is fed to [screen]. Only touched on the main thread. */
+    private var liveId: String? = null
 
     /** Rung when the grid changed; however often, the screen is copied out once for all of it. */
     private val redraw = Channel<Unit>(Channel.CONFLATED)
@@ -81,10 +89,11 @@ class TerminalViewModel(
         }
         client?.let { connected ->
             // Keep interpreting output while another chat or workspace pane is visible.
-            // Every terminal's output reaches every pane, so reading the events,
-            // decoding their bytes and emulating them is done away from the main thread.
-            viewModelScope.launch(emulation) {
-                connected.terminalEvents.collect(::onEvent)
+            // Every terminal's output reaches every pane, so decoding the events and
+            // emulating them is done away from the main thread; only picking out this
+            // terminal's, in order with the replay, happens here.
+            viewModelScope.launch {
+                connected.terminalEvents.flowOn(Dispatchers.Default).collect(::onEvent)
             }
             viewModelScope.launch {
                 var wasConnected = connected.link.value is Link.Up
@@ -98,34 +107,43 @@ class TerminalViewModel(
     }
 
     fun open() {
+        liveId = null
         _state.value = TerminalPane(connecting = true)
         viewModelScope.launch {
             try {
                 val existing = session.terminals().firstOrNull { it.agent == null }
                 val id = existing?.id ?: session.openTerminal(columns, rows, reuse = true)
-                // In one step on the emulator's thread: output that arrives
-                // from here on finds the new screen, after the replay.
-                withContext(emulation) {
-                    val fresh = TerminalScreen(columns, rows)
-                    // A terminal opened elsewhere already has scrollback. Replay
-                    // rebuilds it, resize frames included and in order, so older
-                    // output is interpreted at the geometry that produced it.
-                    existing?.let { reply ->
-                        TerminalWire.frames(reply).forEach { frame ->
-                            when (frame) {
-                                is ReplayFrame.Output -> fresh.write(frame.data)
-                                is ReplayFrame.Resize -> fresh.resize(frame.columns, frame.rows)
+                // Still on the main thread, in order with the events: output
+                // accepted from here on is queued on the emulator after the replay.
+                liveId = id
+                launch(emulation) {
+                    try {
+                        val fresh = TerminalScreen(columns, rows)
+                        // A terminal opened elsewhere already has scrollback. Replay
+                        // rebuilds it, resize frames included and in order, so older
+                        // output is interpreted at the geometry that produced it.
+                        existing?.let { reply ->
+                            TerminalWire.frames(reply).forEach { frame ->
+                                when (frame) {
+                                    is ReplayFrame.Output -> fresh.write(frame.data)
+                                    is ReplayFrame.Resize -> fresh.resize(frame.columns, frame.rows)
+                                }
                             }
+                            fresh.resize(columns, rows)
                         }
-                        fresh.resize(columns, rows)
+                        screen = fresh
+                        _state.value = TerminalPane(
+                            id = id,
+                            rows = fresh.snapshot(),
+                            cursorRow = fresh.cursorRow,
+                            cursorColumn = fresh.cursorColumn,
+                        )
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        // A replay it cannot read leaves no screen to draw on.
+                        _state.value = TerminalPane(error = error.message ?: "Could not open a terminal")
                     }
-                    screen = fresh
-                    _state.value = TerminalPane(
-                        id = id,
-                        rows = fresh.snapshot(),
-                        cursorRow = fresh.cursorRow,
-                        cursorColumn = fresh.cursorColumn,
-                    )
                 }
                 session.resizeTerminal(id, columns, rows)
             } catch (error: CancellationException) {
@@ -138,15 +156,17 @@ class TerminalViewModel(
         }
     }
 
-    /** Runs on [emulation]. */
+    /** Picks out this terminal's events on the main thread and queues them on [emulation], in order. */
     private fun onEvent(event: TerminalEvent) {
-        if (event.chatId != chatId || event.terminalId != _state.value.id) return
-        when (event) {
-            is TerminalEvent.Output -> {
-                screen.write(event.data)
-                redraw.trySend(Unit)
+        if (event.chatId != chatId || event.terminalId != liveId) return
+        viewModelScope.launch(emulation) {
+            when (event) {
+                is TerminalEvent.Output -> {
+                    screen.write(event.data)
+                    redraw.trySend(Unit)
+                }
+                is TerminalEvent.Closed -> _state.update { it.copy(closed = true) }
             }
-            is TerminalEvent.Closed -> _state.update { it.copy(closed = true) }
         }
     }
 
