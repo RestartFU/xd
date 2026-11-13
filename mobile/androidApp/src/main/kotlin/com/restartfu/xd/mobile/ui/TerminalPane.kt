@@ -98,6 +98,7 @@ internal fun TerminalPaneContent(
     val terminalForeground = MaterialTheme.colorScheme.onSurface
     // The theme's sixteen ANSI colours: Dark's pastels would wash out on Light's ground.
     val palette = LocalXdTerminalPalette.current
+    val light = LocalXdTheme.current.isLight
 
     // The IME is driven through a field the reader never sees. Android
     // delivers typed characters as text edits rather than key events, so
@@ -179,8 +180,8 @@ internal fun TerminalPaneContent(
                     state.rows.forEachIndexed { index, row ->
                         val caret = if (index == state.cursorRow) state.cursorColumn else -1
                         Text(
-                            remember(row, caret, terminalForeground, terminalBackground, palette) {
-                                row.render(caret, terminalForeground, terminalBackground, palette)
+                            remember(row, caret, terminalForeground, terminalBackground, palette, light) {
+                                row.render(caret, terminalForeground, terminalBackground, palette, light)
                             },
                             fontFamily = XdMonoFamily,
                             style = MaterialTheme.typography.bodySmall,
@@ -337,19 +338,17 @@ private fun List<Cell>.render(
     defaultForeground: Color,
     defaultBackground: Color,
     palette: List<Color>,
+    light: Boolean,
 ): AnnotatedString = buildAnnotatedString {
     val trailing = indexOfLast { it.char != ' ' || it.background != null } + 1
     val visible = maxOf(trailing, if (caret >= 0) caret + 1 else 0)
     for (column in 0 until visible) {
         val cell = getOrNull(column) ?: Cell()
-        val foreground = cell.foreground?.let { palette.colour(it) } ?: defaultForeground
-        val background = cell.background?.let { palette.colour(it) } ?: Color.Unspecified
-        // The caret is drawn as a block, the way a terminal draws it.
-        val inverse = cell.inverse != (column == caret)
+        val (ink, ground) = cell.colours(column == caret, defaultForeground, defaultBackground, palette, light)
         withStyle(
             SpanStyle(
-                color = if (inverse) background.orElse(defaultBackground) else foreground,
-                background = if (inverse) foreground else background,
+                color = ink,
+                background = ground ?: Color.Unspecified,
                 fontWeight = if (cell.bold) FontWeight.Bold else null,
             ),
         ) {
@@ -358,9 +357,27 @@ private fun List<Cell>.render(
     }
 }
 
-private fun List<Color>.colour(index: Int): Color = getOrElse(index) { this[7] }
+/**
+ * The text colour and the background, if it has one of its own, that a cell
+ * is drawn in. The caret is drawn as a block, the way a terminal draws it:
+ * the cell under it swaps its two colours, as an inverse cell does. What
+ * comes out is then kept readable by the desktop's rule, [terminalCellInk].
+ */
+internal fun Cell.colours(
+    caret: Boolean,
+    defaultForeground: Color,
+    defaultBackground: Color,
+    palette: List<Color>,
+    light: Boolean,
+): Pair<Color, Color?> {
+    val foreground = foreground?.let { palette.colour(it) }
+    val background = background?.let { palette.colour(it) }
+    val swapped = inverse != caret
+    val ink = if (swapped) background ?: defaultBackground else foreground
+    val ground = if (swapped) foreground ?: defaultForeground else background
+    return (terminalCellInk(ink, ground, palette, light) ?: defaultForeground) to ground
+}
 
-private fun Color.orElse(other: Color): Color =
-    if (this == Color.Unspecified) other else this
+private fun List<Color>.colour(index: Int): Color = getOrElse(index) { this[7] }
 
 private const val PAD = "\u200B\u200B\u200B\u200B"
