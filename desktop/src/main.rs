@@ -33926,6 +33926,17 @@ fn main() {
                 });
             });
             cx.activate(true);
+            // Crash on purpose, the way a real failure does: a panic on the UI
+            // thread, a few seconds in. It lets the Windows test see the crash
+            // report, the dialog and the next launch for itself.
+            #[cfg(target_os = "windows")]
+            if env::var_os("XD_CRASH_TEST").is_some() {
+                cx.spawn(async move |_| {
+                    Timer::after(Duration::from_secs(3)).await;
+                    panic!("XD_CRASH_TEST asked for this crash");
+                })
+                .detach();
+            }
         });
     // Reached on Windows once the last window has closed, which is the run
     // ending as it should.

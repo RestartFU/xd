@@ -57,6 +57,8 @@ delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
 [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")] static extern IntPtr GetClassLongPtr(IntPtr window, int index);
 [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out RECT value, int size);
 [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint action, uint parameter, out RECT value, uint update);
+[DllImport("user32.dll")] static extern bool PostMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int capacity);
 
 public static void Initialize() { SetProcessDPIAware(); }
 
@@ -87,6 +89,31 @@ public static IntPtr FindWindow(int process) {
     }, IntPtr.Zero);
     return found;
 }
+
+// A message box of the process, such as the one xd shows after a crash.
+public static IntPtr FindDialog(int process) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+        uint owner;
+        GetWindowThreadProcessId(window, out owner);
+        if (owner != (uint)process || !IsWindowVisible(window)) return true;
+        var name = new System.Text.StringBuilder(256);
+        GetClassName(window, name, name.Capacity);
+        if (name.ToString() != "#32770") return true;
+        found = window;
+        return false;
+    }, IntPtr.Zero);
+    return found;
+}
+
+public static string Title(IntPtr window) {
+    var text = new System.Text.StringBuilder(256);
+    GetWindowText(window, text, text.Capacity);
+    return text.ToString();
+}
+
+// Press a message box's No button.
+public static void AnswerNo(IntPtr dialog) { PostMessage(dialog, 0x0111, (IntPtr)7, IntPtr.Zero); }
 
 // What is drawn, without the invisible border Windows resizes a window by.
 public static RECT Frame(IntPtr window) {
@@ -466,6 +493,60 @@ try {
         }
         Stop-App $app
     }
+
+    # ---- A crash, and the launch after it ------------------------------------
+    # The browser pane is still saved as open. xd is told to crash on its UI
+    # thread, as the released build did by itself.
+    $crashLog = Join-Path $env:XDG_DATA_HOME "$dataName\crash.log"
+    $env:XD_CRASH_TEST = '1'
+    try {
+        $app = Start-App
+        $crashed = $app.Process.WaitForExit(30000)
+    } finally {
+        Remove-Item Env:XD_CRASH_TEST
+    }
+    Add-Result 'a crash ends xd' $crashed `
+        $(if ($crashed) { "the process ended with code $($app.Process.ExitCode)" } else { 'still running' })
+    $reported = (Test-Path -LiteralPath $crashLog) -and
+        (Get-Content -LiteralPath $crashLog -Raw) -match 'XD_CRASH_TEST asked for this crash'
+    Add-Result 'the crash is written to a report' $reported $crashLog
+    # A second xd, started by the first as it fell, says what happened.
+    $dialog = [IntPtr]::Zero
+    $reporter = $null
+    for ($attempt = 0; $attempt -lt 75 -and $dialog -eq [IntPtr]::Zero; $attempt++) {
+        Start-Sleep -Milliseconds 200
+        foreach ($candidate in @(Get-Process -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -eq $executablePath })) {
+            $dialog = [Xd.Desktop]::FindDialog($candidate.Id)
+            if ($dialog -ne [IntPtr]::Zero) { $reporter = $candidate; break }
+        }
+    }
+    $shown = $dialog -ne [IntPtr]::Zero
+    Add-Result 'xd says that it crashed' $shown `
+        $(if ($shown) { "a dialog titled '$([Xd.Desktop]::Title($dialog))'" } else { 'no dialog appeared' })
+    if ($shown) {
+        Start-Sleep -Milliseconds 500
+        Save-Screenshot '06-crash-dialog' ([Xd.Desktop]::Frame($dialog))
+        # "Open xd again?" No: the next launch is this test's own.
+        [Xd.Desktop]::AnswerNo($dialog)
+        if (-not $reporter.WaitForExit(10000)) { $reporter.Kill() }
+    }
+
+    $app = Start-App
+    $alive = $app.Window -ne [IntPtr]::Zero -and -not $app.Process.HasExited
+    Add-Result 'xd opens again after a crash' $alive `
+        $(if ($alive) { 'running' } else { "the process ended with code $($app.Process.ExitCode)" })
+    if ($alive) {
+        Start-Sleep -Seconds 3
+        $frame = [Xd.Desktop]::Frame($app.Window)
+        Save-Screenshot '07-after-a-crash' $frame
+        # Whatever crashed it is not walked straight back into.
+        $page = Measure-Colour ($frame.Right - 440) ($frame.Top + 120) ($frame.Right - 20) `
+            ($frame.Bottom - 20) ([Drawing.Color]::FromArgb(0, 166, 81))
+        Add-Result 'the browser pane stays closed after a crash' ($page -lt 0.05) `
+            ("{0:P0} of where the pane was is the page" -f $page)
+    }
+    Stop-App $app
 } finally {
     Stop-App $app
     if ($null -ne $server -and -not $server.HasExited) { $server.Kill() }
