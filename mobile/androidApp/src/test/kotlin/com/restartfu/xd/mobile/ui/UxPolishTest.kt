@@ -119,7 +119,7 @@ class UxPolishTest {
         click("Files")
         await { shows("README.md") }
         click("README.md")
-        await { exists(hasText("Save") and hasClickAction()) }
+        await { shows("Save") }
         showKeyboard(compose.activity, px(KEYBOARD).toInt(), px(NAVIGATION).toInt())
         idle()
         val root = compose.onNode(isRoot()).fetchSemanticsNode().boundsInRoot

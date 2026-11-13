@@ -22,6 +22,7 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasScrollToKeyAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.AndroidComposeTestRule
@@ -484,7 +485,10 @@ class ProjectsScreenshotTest {
         longTree = true
         try {
             shoot(name, theme) {
-                check(shows("Quota bars") && shows("New"))
+                // Each session is a lazy row, so on a short screen "Quota bars" is held by
+                // the list without being laid out: ask the list rather than the screen.
+                val list = this@ProjectsScreenshotTest.compose.onNode(hasScrollToKeyAction()).fetchSemanticsNode()
+                check(list.config[SemanticsProperties.IndexForKey]("session-x10") >= 0 && shows("New"))
                 // The round button sits above the bar at any width, so neither covers the other.
                 val usage = bounds { hasContentDescription("Usage") }
                 val button = bounds { hasContentDescription("New") }
