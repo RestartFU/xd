@@ -35,6 +35,12 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -58,27 +64,27 @@ import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.terminal.Cell
 import com.restartfu.xd.terminal.TerminalKey
 
-/** The xterm 16-colour palette, so SGR codes land on recognisable colours. */
-private val PALETTE = listOf(
-    // The desktop terminal palette, colour for colour.
-    Color(0xFF23232A), Color(0xFFE06C75), Color(0xFF98C379), Color(0xFFD19A66),
-    Color(0xFF61AFEF), Color(0xFFC678DD), Color(0xFF56B6C2), Color(0xFFB8BCC8),
-    Color(0xFF5C6370), Color(0xFFE06C75), Color(0xFF98C379), Color(0xFFD19A66),
-    Color(0xFF61AFEF), Color(0xFFC678DD), Color(0xFF56B6C2), Color(0xFFE6E6EC),
-)
-
 /**
- * Keys a soft keyboard has no way to send, and a shell cannot do without.
+ * Keys a soft keyboard has no way to send, and a shell cannot do without,
+ * each with the name a screen reader says for it.
  * Ctrl is sticky: it applies to the next character typed.
  */
 private val KEY_BAR = listOf(
-    "esc" to TerminalKey.ESCAPE,
-    "tab" to TerminalKey.TAB,
-    "↑" to TerminalKey.UP,
-    "↓" to TerminalKey.DOWN,
-    "←" to TerminalKey.LEFT,
-    "→" to TerminalKey.RIGHT,
+    Triple("esc", "Escape", TerminalKey.ESCAPE),
+    Triple("tab", "Tab", TerminalKey.TAB),
+    Triple("↑", "Up", TerminalKey.UP),
+    Triple("↓", "Down", TerminalKey.DOWN),
+    Triple("←", "Left", TerminalKey.LEFT),
+    Triple("→", "Right", TerminalKey.RIGHT),
 )
+
+/** The terminal's tap surface, its screen text, and the line it announces, for tests. */
+internal const val TERMINAL_SURFACE_TAG = "terminal-surface"
+internal const val TERMINAL_SCREEN_TAG = "terminal-screen"
+internal const val TERMINAL_LIVE_TAG = "terminal-live"
+
+/** How often, at most, a screen reader is told the line the cursor is on. */
+private const val TERMINAL_ANNOUNCE_MILLIS = 1_500L
 
 @Composable
 internal fun TerminalPaneContent(
@@ -90,6 +96,8 @@ internal fun TerminalPaneContent(
     var control by remember { mutableStateOf(false) }
     val terminalBackground = MaterialTheme.colorScheme.surface
     val terminalForeground = MaterialTheme.colorScheme.onSurface
+    // The theme's sixteen ANSI colours: Dark's pastels would wash out on Light's ground.
+    val palette = LocalXdTerminalPalette.current
 
     // The IME is driven through a field the reader never sees. Android
     // delivers typed characters as text edits rather than key events, so
@@ -136,11 +144,14 @@ internal fun TerminalPaneContent(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
+                    .testTag(TERMINAL_SURFACE_TAG)
+                    .semantics { contentDescription = "Terminal" }
                     // Tapping the screen focuses it, which raises the
                     // keyboard, exactly as tapping a terminal window does.
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
+                        onClickLabel = "Show keyboard",
                     ) { focus.requestFocus() },
             ) {
                 // The pty is told what fits here, so its lines break where the
@@ -153,9 +164,14 @@ internal fun TerminalPaneContent(
                 val rows = (constraints.maxHeight - gutter) / cell.height
                 LaunchedEffect(columns, rows) { model.resize(columns, rows) }
 
+                // What is on the screen, as one piece of text a screen reader
+                // reads through, rather than a stop for every row.
+                val screenText = remember(state.rows) { state.rows.screenText() }
                 Column(
                     Modifier
                         .fillMaxSize()
+                        .testTag(TERMINAL_SCREEN_TAG)
+                        .semanticsNode { text = AnnotatedString(screenText.ifEmpty { "No output yet" }) }
                         .verticalScroll(rememberScrollState())
                         .horizontalScroll(rememberScrollState())
                         .padding(6.dp),
@@ -163,8 +179,8 @@ internal fun TerminalPaneContent(
                     state.rows.forEachIndexed { index, row ->
                         val caret = if (index == state.cursorRow) state.cursorColumn else -1
                         Text(
-                            remember(row, caret, terminalForeground, terminalBackground) {
-                                row.render(caret, terminalForeground, terminalBackground)
+                            remember(row, caret, terminalForeground, terminalBackground, palette) {
+                                row.render(caret, terminalForeground, terminalBackground, palette)
                             },
                             fontFamily = XdMonoFamily,
                             style = MaterialTheme.typography.bodySmall,
@@ -173,6 +189,20 @@ internal fun TerminalPaneContent(
                         )
                     }
                 }
+
+                // New output is announced as the line the cursor is on, at a
+                // pace: a build can print hundreds of lines a second.
+                val cursorLine = state.rows.getOrNull(state.cursorRow)?.lineText().orEmpty()
+                val announced = rememberThrottled(cursorLine, TERMINAL_ANNOUNCE_MILLIS)
+                Box(
+                    Modifier
+                        .size(1.dp)
+                        .testTag(TERMINAL_LIVE_TAG)
+                        .semanticsNode {
+                            liveRegion = LiveRegionMode.Polite
+                            contentDescription = announced
+                        },
+                )
 
                 BasicTextField(
                     value = buffer,
@@ -183,6 +213,8 @@ internal fun TerminalPaneContent(
                     modifier = Modifier
                         .size(1.dp)
                         .focusRequester(focus)
+                        // The field holds only padding, so it is named for what typing into it does.
+                        .semantics { contentDescription = "Terminal input" }
                         .onKeyEvent { event ->
                             if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                             val key = when (event.key) {
@@ -222,13 +254,15 @@ internal fun TerminalPaneContent(
                 onClick = { control = !control },
                 label = { Text("Ctrl") },
                 enabled = state.id != null && !state.closed,
+                modifier = Modifier.semantics { contentDescription = "Control, for the next key" },
             )
-            KEY_BAR.forEach { (label, key) ->
+            KEY_BAR.forEach { (label, name, key) ->
                 FilterChip(
                     selected = false,
                     onClick = { model.press(key) },
                     label = { Text(label) },
                     enabled = state.id != null && !state.closed,
+                    modifier = Modifier.semantics { contentDescription = name },
                 )
             }
         }
@@ -291,17 +325,25 @@ private fun typed(
     else -> null
 }
 
+/** A row's characters, without the blank cells after the last one. */
+private fun List<Cell>.lineText(): String = buildString { this@lineText.forEach { append(it.char) } }.trimEnd()
+
+/** Every row with something on it, top to bottom. */
+private fun List<List<Cell>>.screenText(): String =
+    map { it.lineText() }.dropLastWhile(String::isEmpty).joinToString("\n")
+
 private fun List<Cell>.render(
     caret: Int,
     defaultForeground: Color,
     defaultBackground: Color,
+    palette: List<Color>,
 ): AnnotatedString = buildAnnotatedString {
     val trailing = indexOfLast { it.char != ' ' || it.background != null } + 1
     val visible = maxOf(trailing, if (caret >= 0) caret + 1 else 0)
     for (column in 0 until visible) {
         val cell = getOrNull(column) ?: Cell()
-        val foreground = cell.foreground?.let(::colour) ?: defaultForeground
-        val background = cell.background?.let(::colour) ?: Color.Unspecified
+        val foreground = cell.foreground?.let { palette.colour(it) } ?: defaultForeground
+        val background = cell.background?.let { palette.colour(it) } ?: Color.Unspecified
         // The caret is drawn as a block, the way a terminal draws it.
         val inverse = cell.inverse != (column == caret)
         withStyle(
@@ -316,7 +358,7 @@ private fun List<Cell>.render(
     }
 }
 
-private fun colour(index: Int): Color = PALETTE.getOrElse(index) { PALETTE[7] }
+private fun List<Color>.colour(index: Int): Color = getOrElse(index) { this[7] }
 
 private fun Color.orElse(other: Color): Color =
     if (this == Color.Unspecified) other else this

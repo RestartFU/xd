@@ -213,6 +213,29 @@ public fun xdGlass(theme: MinimalThemePreset): XdGlass = when (theme) {
 
 public val LocalXdGlass = staticCompositionLocalOf { xdGlass(MinimalThemePreset.DARK) }
 
+/**
+ * The terminal's sixteen ANSI colours: black, red, green, yellow, blue,
+ * magenta, cyan, white, then the bright eight. The desktop's, colour for
+ * colour. Light's are darkened so each reads at 4.5:1 or better on the light
+ * terminal ground, where Dark's pastels would wash out.
+ */
+public fun terminalPalette(theme: MinimalThemePreset): List<Color> = when (theme) {
+    MinimalThemePreset.DARK -> listOf(
+        Color(0xFF1F2329), Color(0xFFE06C75), Color(0xFF98C379), Color(0xFFE5C07B),
+        Color(0xFF61AFEF), Color(0xFFC678DD), Color(0xFF56B6C2), Color(0xFFD7DAE0),
+        Color(0xFF5C6370), Color(0xFFFF7A85), Color(0xFFB3E180), Color(0xFFFFD68A),
+        Color(0xFF7DBAFF), Color(0xFFD99BFF), Color(0xFF75D5E0), Color(0xFFFFFFFF),
+    )
+    MinimalThemePreset.LIGHT -> listOf(
+        Color(0xFF1B1E2C), Color(0xFFB3202F), Color(0xFF1A6B3C), Color(0xFF7A5200),
+        Color(0xFF2A52BE), Color(0xFF8A2DA5), Color(0xFF0E6471), Color(0xFF4B5165),
+        Color(0xFF5A6074), Color(0xFFC4283A), Color(0xFF1F7440), Color(0xFF855600),
+        Color(0xFF3558D6), Color(0xFF9C36B5), Color(0xFF0B6F80), Color(0xFF1B1E2C),
+    )
+}
+
+public val LocalXdTerminalPalette = staticCompositionLocalOf { terminalPalette(MinimalThemePreset.DARK) }
+
 /** Paints the glass backdrop behind everything. */
 public fun Modifier.glassBackdrop(glass: XdGlass): Modifier = background(glass.backdrop)
 
@@ -228,6 +251,7 @@ public fun XdTheme(theme: MinimalThemePreset, content: @Composable () -> Unit) {
     CompositionLocalProvider(
         LocalXdSignals provides xdSignals(theme),
         LocalXdGlass provides xdGlass(theme),
+        LocalXdTerminalPalette provides terminalPalette(theme),
     ) {
         MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography, content = content)
     }

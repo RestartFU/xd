@@ -76,6 +76,67 @@ class ThemeTest {
         }
     }
 
+    /** The desktop's sixteen ANSI colours for each theme, colour for colour. */
+    @Test fun theTerminalPaletteIsTheDesktopsForEachTheme() {
+        val expected = mapOf(
+            MinimalThemePreset.DARK to "1f2329 e06c75 98c379 e5c07b 61afef c678dd 56b6c2 d7dae0 " +
+                "5c6370 ff7a85 b3e180 ffd68a 7dbaff d99bff 75d5e0 ffffff",
+            MinimalThemePreset.LIGHT to "1b1e2c b3202f 1a6b3c 7a5200 2a52be 8a2da5 0e6471 4b5165 " +
+                "5a6074 c4283a 1f7440 855600 3558d6 9c36b5 0b6f80 1b1e2c",
+        )
+        for ((theme, colours) in expected) {
+            assertEquals(
+                "$theme",
+                colours.split(' ').map { Color(0xFF000000 or it.toLong(16)) },
+                terminalPalette(theme),
+            )
+        }
+    }
+
+    /** Light's terminal colours all read on the ground the terminal is drawn on. */
+    @Test fun lightTerminalColoursReadOnTheTerminalGround() {
+        val ground = minimalColors(MinimalThemePreset.LIGHT).surface
+        terminalPalette(MinimalThemePreset.LIGHT).forEachIndexed { index, colour ->
+            assertAtLeast(4.5, colour, ground, "Light terminal colour $index")
+        }
+        // Dark's own colours, bar its black, read on its ground too.
+        val dark = minimalColors(MinimalThemePreset.DARK).surface
+        terminalPalette(MinimalThemePreset.DARK).forEachIndexed { index, colour ->
+            if (index != 0 && index != 8) assertAtLeast(4.5, colour, dark, "Dark terminal colour $index")
+        }
+    }
+
+    /** A status mark is a shape to be made out, on a page or on a pane over it. */
+    @Test fun statusMarksStandOutFromEveryGround() {
+        for (theme in MinimalThemePreset.entries) {
+            val glass = xdGlass(theme)
+            val signals = xdSignals(theme)
+            for ((ground, color) in listOf(
+                "backdrop" to glass.backdrop,
+                "pane" to glass.pane.compositeOver(glass.backdrop),
+                "overlay" to glass.overlay(),
+                "menu" to minimalColors(theme).surfaceContainer,
+            )) {
+                for ((mark, colour) in listOf(
+                    "working" to signals.working, "waiting" to signals.waiting,
+                    "done" to signals.done, "paused" to signals.faint,
+                )) {
+                    assertAtLeast(3.0, colour, color, "$theme $mark mark on $ground")
+                }
+            }
+        }
+    }
+
+    /** The connection line's failure band keeps its text readable. */
+    @Test fun theConnectionLineReadsInBothThemes() {
+        for (theme in MinimalThemePreset.entries) {
+            val colors = minimalColors(theme)
+            assertAtLeast(4.5, colors.onErrorContainer, colors.errorContainer, "$theme failure line")
+            val pane = xdGlass(theme).pane.compositeOver(xdGlass(theme).backdrop)
+            assertAtLeast(4.5, colors.onSurfaceVariant, pane, "$theme connecting line")
+        }
+    }
+
     private fun assertAtLeast(minimum: Double, foreground: Color, background: Color, what: String) {
         val lighter = maxOf(foreground.luminance(), background.luminance())
         val darker = minOf(foreground.luminance(), background.luminance())
