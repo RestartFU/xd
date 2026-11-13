@@ -591,7 +591,9 @@ fn labelled_mark(
         .flex_none()
         .flex()
         .items_center()
-        .tooltip(pane_tooltip(label, colors))
+        .when(!under_a_dialog(), |mark| {
+            mark.tooltip(pane_tooltip(label, colors))
+        })
         .child(mark)
 }
 
@@ -648,6 +650,14 @@ thread_local! {
     /// place in the code that draws them, so the next frame gives each a
     /// tooltip that reads it out in full.
     static CUT_LABELS: RefCell<HashSet<u64>> = RefCell::default();
+    /// A menu or dialog is open over the window. What lies under it keeps
+    /// its tooltips to itself: one that came up after a right-click would
+    /// sit on top of the menu the click opened.
+    static UNDER_A_DIALOG: Cell<bool> = const { Cell::new(false) };
+}
+
+fn under_a_dialog() -> bool {
+    UNDER_A_DIALOG.with(Cell::get)
 }
 
 fn frame_colors() -> ThemeColors {
@@ -666,7 +676,7 @@ fn truncating_label(text: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> 
     let mut hasher = DefaultHasher::new();
     (text.as_ref(), site.file(), site.line(), site.column()).hash(&mut hasher);
     let key = hasher.finish();
-    let cut = CUT_LABELS.with(|cut| cut.borrow().contains(&key));
+    let cut = CUT_LABELS.with(|cut| cut.borrow().contains(&key)) && !under_a_dialog();
     let measured = text.clone();
     truncating_box(text.clone(), text.clone())
         // Measures the text in the style it is drawn in, against the room the
@@ -2896,10 +2906,12 @@ enum Discarded {
 }
 
 impl Discarded {
+    /// One word, as "Settled" is: the click it follows says what went, and
+    /// the footer has room for little more beside Undo.
     fn notice(&self) -> &'static str {
         match self {
-            Self::Draft { .. } => "Draft discarded",
-            Self::Queued { .. } => "Message removed",
+            Self::Draft { .. } => "Discarded",
+            Self::Queued { .. } => "Removed",
         }
     }
 }
@@ -17375,7 +17387,8 @@ impl XdDesktop {
                             .text_size(px(11.5))
                             .text_color(rgb(colors.faint))
                             .when_some(settle_notice, |notice, summary| {
-                                notice.child(div().flex_none().child(summary)).child(
+                                // Undo keeps its room; the words give way.
+                                notice.child(truncating_label(summary)).child(
                                     div()
                                         .id("minimal-settle-undo")
                                         .flex_none()
@@ -24462,9 +24475,12 @@ impl XdDesktop {
     /// Whether something that takes all input is open, so a shortcut for the
     /// workspace behind it would act out of sight.
     fn shortcuts_blocked(&self) -> bool {
-        self.minimal_theme_open
-            || self.usage_open
-            || self.image_preview.is_some()
+        self.minimal_theme_open || self.usage_open || self.dialog_open()
+    }
+
+    /// Whether a menu or a dialog is open over the window.
+    fn dialog_open(&self) -> bool {
+        self.image_preview.is_some()
             || self.image_viewer.is_some()
             || self.update_popup_open
             || self.native_option_open.is_some()
@@ -24945,6 +24961,7 @@ impl Render for XdDesktop {
         self.settle_key_cursor();
         self.frame_focus = window.focused(cx);
         FRAME_COLORS.with(|colors| colors.set(Some(self.settings.theme.colors())));
+        UNDER_A_DIALOG.with(|under| under.set(self.dialog_open() || self.new_chat_menu.is_some()));
         self.find_focused =
             self.frame_focus.as_ref() == Some(&self.catalog_find_input.read(cx).focus_handle(cx));
         self.key_targets.begin(
@@ -30945,7 +30962,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             desktop.model.queue = vec!["first".into(), "second".into(), "third".into()];
             desktop.drop_queued(1, cx);
             assert_eq!(desktop.model.queue, ["first", "third"]);
-            assert_eq!(desktop.undo_notice().as_deref(), Some("Message removed"));
+            assert_eq!(desktop.undo_notice().as_deref(), Some("Removed"));
         });
         assert_eq!(
             next_request_with_op(&mut requests, "drop-queue")["index"],
@@ -30992,7 +31009,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
 
             desktop.discard_project_draft("atlas", cx);
             assert!(desktop.new_chat_prompt.is_empty());
-            assert_eq!(desktop.undo_notice().as_deref(), Some("Draft discarded"));
+            assert_eq!(desktop.undo_notice().as_deref(), Some("Discarded"));
 
             desktop.undo_last(cx);
             assert_eq!(desktop.new_chat_prompt, "Port the palette");
@@ -31002,7 +31019,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         cx.update_window_entity(&desktop, |desktop, _, cx| {
             desktop.discard_project_draft("atlas", cx);
             desktop.discard_project_draft("atlas", cx);
-            assert_eq!(desktop.undo_notice().as_deref(), Some("Draft discarded"));
+            assert_eq!(desktop.undo_notice().as_deref(), Some("Discarded"));
             desktop.undo_last(cx);
             desktop.discard_project_draft("website", cx);
             assert_eq!(desktop.undo_notice(), None);
