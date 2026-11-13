@@ -697,6 +697,7 @@ impl Engine {
             Some("terminal-materialize-image") => self.terminal_materialize_image(&request),
             Some("terminal-paste-image") => self.terminal_paste_image(&request),
             Some("terminal-resize") => self.terminals.resize(&request).unwrap_or_else(error_reply),
+            Some("terminal-colors") => self.terminals.colors(&request).unwrap_or_else(error_reply),
             Some("terminal-kill") => self.terminals.kill(&request).unwrap_or_else(error_reply),
             Some(operation) => json!({
                 "ok": false,
