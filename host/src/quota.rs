@@ -3,9 +3,11 @@
 //! The assistants report usage per account, not per chat, so a chat's use is
 //! estimated: while a chat with a quota works, its account's limit is read
 //! about once a minute and when a turn ends, and each rise is shared evenly
-//! among the chats that worked on the account since the reading before. A chat
-//! whose share reaches its quota is stopped, and only the user's new quota lets
-//! it go on.
+//! among the chats that worked on the account since the reading before. An
+//! agent a chat started with xd's start_agent tool counts against that chat's
+//! quota, so a chat and its agents share one. A chat whose share reaches its
+//! quota is stopped, with its agents, and only the user's new quota lets them
+//! go on.
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -796,10 +798,20 @@ impl Pass {
                         continue;
                     }
                 };
-                self.events
-                    .publish(json!({"event": "changed", "chat": chat_id}));
+                // The quota is shared with the chat that started this one as
+                // an agent, or with the agents this one started.
+                let family = self
+                    .store
+                    .quota_family(&chat_id)
+                    .unwrap_or_else(|_| vec![chat_id.clone()]);
+                for chat in &family {
+                    self.events
+                        .publish(json!({"event": "changed", "chat": chat}));
+                }
                 if counted.spent() {
-                    (self.stopper)(&chat_id);
+                    for chat in &family {
+                        (self.stopper)(chat);
+                    }
                 }
             }
         }

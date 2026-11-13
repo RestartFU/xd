@@ -2014,7 +2014,9 @@ impl Engine {
     }
 
     /// Gives a chat a quota of its own, or hands it back to the default, and
-    /// continues it if it had stopped at its quota.
+    /// continues it if it had stopped at its quota. An agent another chat
+    /// started shares that chat's quota, so every chat sharing it that
+    /// stopped at it goes on too.
     fn set_chat_quota(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
@@ -2031,17 +2033,25 @@ impl Engine {
             Ok(gate) => gate,
             Err(error) => return error_reply(error),
         };
-        let Ok(_execution) = gate.lock() else {
+        let Ok(execution) = gate.lock() else {
             return error_reply("This session's agent state is unavailable.");
         };
-        let reached = match store.set_chat_quota(request) {
-            Ok(reached) => reached,
+        let stopped = match store.set_chat_quota(request) {
+            Ok(stopped) => stopped,
             Err(error) => return error_reply(error),
         };
-        self.events
-            .publish(json!({"event": "changed", "chat": chat_id}));
+        for chat in std::iter::once(chat_id).chain(stopped.iter().map(String::as_str)) {
+            self.events
+                .publish(json!({"event": "changed", "chat": chat}));
+        }
         self.events.publish(json!({"event": "tree"}));
+        let reached = stopped.first().is_some_and(|first| first == chat_id);
         let resumed = reached && self.resume_paused_chat(chat_id, &|_| true, true);
+        drop(execution);
+        // The others each under their own gate, taken one at a time.
+        for other in stopped.iter().filter(|other| *other != chat_id) {
+            self.resume_paused_chat(other, &|_| true, false);
+        }
         self.wake_quota_meter();
         json!({"ok": true, "resumed": resumed})
     }

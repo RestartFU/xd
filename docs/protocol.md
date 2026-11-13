@@ -848,6 +848,13 @@ quota cut short continues as [`resume-turn`](#resume-turn) would, and then its
 queue runs. `resumed` says whether it went on. The request publishes `changed`
 for the chat and `tree`.
 
+An agent a chat started with [`start-agent`](#agents-an-agent-starts) has no quota of its
+own: it shares the quota of the chat that started it, and what it uses counts
+there. Its `chat` reply shows that chat's `quota`, and `set-chat-quota` on it
+changes that chat's. A new quota lets every chat sharing it that stopped at it
+go on, the requested one first; `resumed` is about the requested chat. An agent
+whose starting chat was deleted has a quota of its own again.
+
 The `chat` reply has `quota:{percent, used, own}` while a quota applies to the
 chat. `percent` is the quota, `used` is how much of the limit the chat has used
 since its count began, in the same percentage points, and `own` is true when
@@ -862,7 +869,8 @@ reading, including chats without a quota, so the figure is an estimate. An
 account whose limits cannot be read, such as one signed in with an API key,
 uses nothing against a quota.
 
-Once `used` reaches `percent`, the host stops the chat as
+Once `used` reaches `percent`, the host stops the chat, and every agent
+sharing its quota, as
 [`pause-all`](#pause-all-and-resume-all) would: its turn ends and is
 `resumable`, its agent's background work stops, and anything sent to it waits
 in its queue. It is not `paused`. `resume-turn`, `steer-queue`, and
