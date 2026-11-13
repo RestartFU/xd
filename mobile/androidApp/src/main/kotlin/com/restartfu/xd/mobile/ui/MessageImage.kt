@@ -201,7 +201,8 @@ internal fun ImageViewerContent(bitmap: ImageBitmap, description: String, onClos
     var size by remember { mutableStateOf(IntSize.Zero) }
     // The theme's own ground, said outright: a dialog starts with no surface under it.
     Surface(
-        Modifier.fillMaxSize(),
+        // Its own page over the chat: said as it opens.
+        Modifier.fillMaxSize().page(description),
         color = LocalXdGlass.current.backdrop,
         contentColor = MaterialTheme.colorScheme.onSurface,
     ) {

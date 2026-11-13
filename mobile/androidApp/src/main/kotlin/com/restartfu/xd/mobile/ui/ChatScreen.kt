@@ -12,7 +12,6 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -44,7 +43,6 @@ import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.layout.Column
@@ -88,7 +86,6 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -312,11 +309,12 @@ internal fun ChatScreen(
         // While a turn runs the branch may still move, so only forget a stale link.
         model.refreshPullRequest(branch, fetch = !busy)
     }
-    // A screen reader is told when the turn ends: on screen the working row just goes away.
-    val chatView = LocalView.current
+    // A screen reader is told when the turn ends: on screen the working row
+    // just goes away. Said through a polite live region (see [TurnFinishedNotice]).
     var wasWorking by remember(state.chatId) { mutableStateOf(state.working) }
+    var turnFinished by remember(state.chatId) { mutableStateOf(false) }
     LaunchedEffect(state.working) {
-        if (wasWorking && !state.working) chatView.announceForAccessibility(TURN_FINISHED_ANNOUNCEMENT)
+        if (state.working) turnFinished = false else if (wasWorking) turnFinished = true
         wasWorking = state.working
     }
     val listState = rememberLazyListState()
@@ -540,7 +538,11 @@ internal fun ChatScreen(
             }
         }
     }
+    // The chat's name, said as the page appears and when another chat takes its place.
+    val chatName = sessionChats?.chats?.firstOrNull { it.id == sessionChats.selectedId }?.title?.ifBlank { null }
+        ?: state.title.ifEmpty { "New chat" }
     Scaffold(
+        modifier = Modifier.page(chatName),
         containerColor = GlassPage,
         contentColor = MaterialTheme.colorScheme.onSurface,
         topBar = {
@@ -585,40 +587,38 @@ internal fun ChatScreen(
                 // clear, so the title, the chat tabs and the views read as one.
                 Column(Modifier.background(glassPane())) {
                 productHeader()
-                TopAppBar(
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Transparent,
-                        scrolledContainerColor = Color.Transparent,
-                    ),
-                    windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top),
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column {
-                                Text(
-                                    sessionTitle.ifBlank { state.title.ifEmpty { "Session" } },
-                                    style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    if (projectName.isNotBlank()) Text(
-                                        projectName,
-                                        modifier = Modifier.weight(1f, fill = false),
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                            }
-                        }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = goBack) {
-                            Icon(painterResource(R.drawable.ic_back), contentDescription = "Back")
-                        }
-                    },
-                    actions = {
+                // A row rather than Material's top app bar, whose height is
+                // fixed: enlarged text makes the title's two lines taller, and
+                // the header grows with them instead of cutting them off.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .safeTopPadding()
+                        .heightIn(min = 64.dp)
+                        .padding(start = 4.dp, end = 4.dp)
+                        .testTag(TABLET_CHAT_HEADER_TAG),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = goBack) {
+                        Icon(painterResource(R.drawable.ic_back), contentDescription = "Back")
+                    }
+                    Column(Modifier.weight(1f).padding(start = 4.dp, end = 8.dp)) {
+                        Text(
+                            sessionTitle.ifBlank { state.title.ifEmpty { "Session" } },
+                            modifier = Modifier.pageHeading(),
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (projectName.isNotBlank()) Text(
+                            projectName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         // Beside the title rather than in its second line, so
                         // each link is a button of full touch size.
                         if (linkedPullRequests != null) {
@@ -664,8 +664,8 @@ internal fun ChatScreen(
                                 )
                             }
                         }
-                    },
-                )
+                    }
+                }
                 sessionTabs(agents, showPullRequests)
                 if (!sideBySide) TabRow(
                     selectedTabIndex = pane.ordinal,
@@ -690,6 +690,7 @@ internal fun ChatScreen(
         },
         bottomBar = { if (!sideBySide && pane == Pane.CHAT) composerBar() },
     ) { scaffoldPadding ->
+        TurnFinishedNotice(turnFinished)
         ChatPanes(
             sideBySide = sideBySide,
             pane = pane,
@@ -915,7 +916,11 @@ private fun ChatPanes(
         // keyboard counts only what the keyboard covers beyond them.
         val still = reducedMotion()
         panes.transition.AnimatedContent(transitionSpec = { pageMotion(still, fadeThrough()) }) { shown ->
-            if (shown != Pane.CHAT) Box(Modifier.padding(padding).consumeWindowInsets(padding)) { tool(shown) } else chat(padding)
+            if (shown != Pane.CHAT) {
+                Box(Modifier.padding(padding).consumeWindowInsets(padding).page(shown.label)) { tool(shown) }
+            } else {
+                chat(padding)
+            }
         }
         return
     }
@@ -933,6 +938,7 @@ private fun ChatPanes(
                     Modifier
                         .weight(1f)
                         .testTag(TOOL_PANE_TAG)
+                        .page(pane.label)
                         .padding(bottom = padding.calculateBottomPadding())
                         .consumeWindowInsets(PaddingValues(bottom = padding.calculateBottomPadding())),
                 ) { tool(pane) }
@@ -943,6 +949,9 @@ private fun ChatPanes(
 
 /** The tool open beside the chat, and the conversation's list, for tests. */
 internal const val TOOL_PANE_TAG = "tool-pane"
+
+/** The tablet chat's header row, for tests. */
+internal const val TABLET_CHAT_HEADER_TAG = "tablet-chat-header"
 internal const val TRANSCRIPT_TAG = "transcript"
 
 /**
@@ -1241,7 +1250,8 @@ private fun Composer(
                     TextField(
                         value = composer,
                         onValueChange = model::updateDraft,
-                        modifier = Modifier.fillMaxWidth(),
+                        // Named even once it holds text and the placeholder is gone.
+                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = COMPOSER_NAME },
                         placeholder = {
                             Text(prompt.placeholder ?: "Ask anything, or describe a task…", color = LocalXdSignals.current.faint)
                         },
@@ -1430,7 +1440,8 @@ private fun CompactComposerRow(
                 androidx.compose.foundation.text.BasicTextField(
                     value = composer,
                     onValueChange = model::updateDraft,
-                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot),
+                    // Named even once it holds text and the placeholder is gone.
+                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot).semantics { contentDescription = COMPOSER_NAME },
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                     cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.onSurface),
                     maxLines = 6,
@@ -1513,6 +1524,30 @@ internal const val LARGE_TEXT_SCALE = 1.3f
 
 /** What a screen reader is told when the turn ends. */
 internal const val TURN_FINISHED_ANNOUNCEMENT = "Reply finished"
+
+/**
+ * Tells a screen reader that a reply finished, as a polite live region: the
+ * words are set when the turn ends, and cleared when the next one starts so
+ * the next ending is a change to tell again. Nothing is drawn.
+ */
+@Composable
+private fun TurnFinishedNotice(finished: Boolean) {
+    Box(
+        Modifier
+            .size(1.dp)
+            .testTag(TURN_FINISHED_TAG)
+            .semantics {
+                liveRegion = LiveRegionMode.Polite
+                if (finished) contentDescription = TURN_FINISHED_ANNOUNCEMENT
+            },
+    )
+}
+
+/** The live region that says a reply finished, for tests. */
+internal const val TURN_FINISHED_TAG = "turn-finished"
+
+/** What a screen reader calls the chat's composer, whatever it holds. */
+internal const val COMPOSER_NAME = "Message"
 
 /** What the composer's one round button does. */
 internal enum class SendAction { SEND, STOP, RESUME, SEND_ANSWER, ANSWER_BUSY }
@@ -1663,6 +1698,7 @@ private fun QueuedMessageDialog(
                     label = { Text("Message") },
                     minLines = 2,
                     maxLines = 6,
+                    colors = xdFieldColors(),
                 )
                 if (canMoveUp || canMoveDown) {
                     // Reordering moves the message as it was queued; an edit
@@ -1698,7 +1734,6 @@ private fun QueuedMessageDialog(
             Row {
                 if (working) {
                     TextButton(
-                    colors = xdFieldColors(),
                         onClick = { onSteer(text) },
                         enabled = !busy && canEdit && text.isNotBlank(),
                     ) { Text("Steer") }

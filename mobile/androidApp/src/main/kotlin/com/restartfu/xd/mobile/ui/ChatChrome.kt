@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,7 +34,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.mobile.R
 import com.restartfu.xd.model.ChatSummary
@@ -148,7 +151,7 @@ internal fun CompactChatBar(
                             style = MaterialTheme.typography.titleSmall,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
+                            modifier = Modifier.weight(1f, fill = false).pageHeading(),
                         )
                         Icon(
                             painterResource(R.drawable.ic_chevron_down), null,
@@ -156,36 +159,9 @@ internal fun CompactChatBar(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (subtitle.isNotBlank()) Text(
-                            subtitle,
-                            modifier = Modifier.weight(1f, fill = false),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        // Read here and opened from More: a line of small text
-                        // inside the title's button has no room for touch targets.
-                        if (linkedPullRequests != null) {
-                            // Every pull request linked to the chat, as the desktop's header lists them.
-                            LinkedPullRequestLabels(
-                                pullRequests = linkedPullRequests,
-                                limit = PullRequestChipLimit.PHONE,
-                                style = MaterialTheme.typography.labelSmall,
-                            )
-                        } else {
-                            // The branch's pull request, as the desktop's session header shows it.
-                            pullRequest?.let { url ->
-                                Text(
-                                    pullRequestLabel(url),
-                                    modifier = Modifier.semantics { contentDescription = "Pull request ${pullRequestLabel(url)}" },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                    }
+                    // Read here and opened from More: a line of small text
+                    // inside the title's button has no room for touch targets.
+                    HeaderSubtitle(subtitle, linkedPullRequests, pullRequest)
                 }
                 DropdownMenu(expanded = choosingChat, onDismissRequest = { choosingChat = false }) {
                     chats.chats.forEach { chat ->
@@ -331,5 +307,95 @@ internal fun CompactChatBar(
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    }
+}
+
+/** How the pull requests fit beside the subtitle in the phone header. */
+internal enum class SubtitleLinks { ALL, COUNT, NONE }
+
+/**
+ * Whether the pull request labels fit beside the subtitle: all of them, or
+ * a count in their place, or none. The subtitle names the session and keeps
+ * its room; the labels give theirs up first. Widths are in pixels.
+ */
+internal fun subtitleLinks(available: Int, subtitle: Int, labels: Int, count: Int?, gap: Int): SubtitleLinks = when {
+    labels == 0 -> SubtitleLinks.NONE
+    subtitle + gap + labels <= available -> SubtitleLinks.ALL
+    count != null && subtitle + gap + count <= available -> SubtitleLinks.COUNT
+    subtitle == 0 && count != null -> SubtitleLinks.COUNT
+    else -> SubtitleLinks.NONE
+}
+
+/**
+ * The phone header's second line: the session and project, then the chat's
+ * pull requests while they fit beside them. Enlarged text gives the line
+ * less room; the labels then collapse into a count, then step aside, rather
+ * than cut the session's name short. More lists them all either way.
+ */
+@Composable
+private fun HeaderSubtitle(subtitle: String, linkedPullRequests: List<LinkedPullRequest>?, pullRequest: String?) {
+    val style = MaterialTheme.typography.labelSmall
+    val gap = 8.dp
+    val labels = when {
+        linkedPullRequests != null -> shownPullRequests(linkedPullRequests, PullRequestChipLimit.PHONE).let { (shown, more) ->
+            shown.map { pullRequestLabel(it.url) } + listOfNotNull("+$more".takeIf { more > 0 })
+        }
+        pullRequest != null -> listOf(pullRequestLabel(pullRequest))
+        else -> emptyList()
+    }
+    val total = linkedPullRequests?.size ?: labels.size
+    // A count only stands in for two or more: one label is no wider than its count.
+    val countLabel = "$total PRs".takeIf { total > 1 }
+    val measurer = rememberTextMeasurer()
+    BoxWithConstraints {
+        val gapPx = with(LocalDensity.current) { gap.roundToPx() }
+        val fit = remember(subtitle, labels, countLabel, style, constraints.maxWidth, gapPx) {
+            fun width(text: String) = measurer.measure(text, style, maxLines = 1, softWrap = false).size.width
+            subtitleLinks(
+                available = constraints.maxWidth,
+                subtitle = if (subtitle.isBlank()) 0 else width(subtitle),
+                labels = labels.sumOf { width(it) } + gapPx * (labels.size - 1).coerceAtLeast(0),
+                count = countLabel?.let(::width),
+                gap = gapPx,
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+            if (subtitle.isNotBlank()) Text(
+                subtitle,
+                modifier = Modifier.weight(1f, fill = false),
+                style = style,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            when (fit) {
+                SubtitleLinks.ALL -> if (linkedPullRequests != null) {
+                    // Every pull request linked to the chat, as the desktop's header lists them.
+                    LinkedPullRequestLabels(
+                        pullRequests = linkedPullRequests,
+                        limit = PullRequestChipLimit.PHONE,
+                        style = style,
+                    )
+                } else {
+                    // The branch's pull request, as the desktop's session header shows it.
+                    pullRequest?.let { url ->
+                        Text(
+                            pullRequestLabel(url),
+                            modifier = Modifier.semantics { contentDescription = "Pull request ${pullRequestLabel(url)}" },
+                            style = style,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                SubtitleLinks.COUNT -> Text(
+                    countLabel.orEmpty(),
+                    modifier = Modifier.semantics { contentDescription = "$total pull requests" },
+                    style = style,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+                SubtitleLinks.NONE -> Unit
+            }
+        }
     }
 }

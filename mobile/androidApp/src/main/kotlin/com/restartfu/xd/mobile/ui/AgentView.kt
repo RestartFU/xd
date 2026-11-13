@@ -4,6 +4,7 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.foundation.clickable
@@ -450,7 +451,8 @@ internal fun AgentComposer(
                 BasicTextField(
                     value = draft,
                     onValueChange = onDraft,
-                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot),
+                    // Named even once it holds text and the placeholder is gone.
+                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot).semantics { contentDescription = "Message this agent" },
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
                     maxLines = 6,

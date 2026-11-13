@@ -15,7 +15,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -27,7 +31,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -35,18 +38,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.foundation.focusable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -209,13 +210,10 @@ internal fun SettingsPage(
     }
 
     // The workspace stays composed beneath the page, so Settings takes the
-    // focus and the keyboard from whatever editor or terminal had them.
-    val pageFocus = remember { FocusRequester() }
+    // focus (on its heading, see [pageHeading]) and the keyboard from
+    // whatever editor or terminal had them.
     val keyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(Unit) {
-        pageFocus.requestFocus()
-        keyboard?.hide()
-    }
+    LaunchedEffect(Unit) { keyboard?.hide() }
     // Search reads the quota's current share, so read it as soon as the host
     // says it has quotas, rather than only once its row is shown.
     LaunchedEffect(tree.chatQuotas) {
@@ -243,8 +241,8 @@ internal fun SettingsPage(
         modifier
             .fillMaxSize()
             .testTag(SETTINGS_PAGE_TAG)
-            .focusRequester(pageFocus)
-            .focusable(),
+            // Said as it opens, and again as a section opens or closes.
+            .page(open?.title ?: "Settings"),
         color = LocalXdGlass.current.backdrop,
     ) {
     Column(Modifier.fillMaxSize()) {
@@ -271,7 +269,9 @@ internal fun SettingsPage(
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .navigationBarsPadding(),
+                // Ends above the keyboard as well as the navigation bar, so
+                // every search result can scroll into view; the larger of the two.
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
             contentAlignment = Alignment.TopCenter,
         ) {
         Column(
@@ -367,7 +367,8 @@ private fun SettingsTopBar(title: String, onBack: () -> Unit) {
             }
             Text(
                 title,
-                modifier = Modifier.weight(1f).semantics { heading() },
+                // Takes the focus as Settings opens and as each section does.
+                modifier = Modifier.weight(1f).pageHeading(key = title),
                 style = MaterialTheme.typography.titleLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -384,7 +385,8 @@ private fun SettingsSearchField(query: String, onQuery: (String) -> Unit) {
     OutlinedTextField(
         value = query,
         onValueChange = onQuery,
-        modifier = Modifier.fillMaxWidth(),
+        // Named even once it holds a search and the placeholder is gone.
+        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Search settings" },
         singleLine = true,
         placeholder = { Text("Search settings") },
         leadingIcon = {

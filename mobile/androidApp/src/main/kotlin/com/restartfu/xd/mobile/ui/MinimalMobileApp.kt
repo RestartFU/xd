@@ -232,7 +232,7 @@ internal fun MinimalMobileApp(
     // Said once for the whole app: every page's connection line reads it.
     CompositionLocalProvider(
         LocalConnectionNotice provides rememberConnectionNotice(link),
-        // The line's Try now: the next attempt at once, in place of the wait.
+        // The line's Try again: the next attempt at once, in place of the wait.
         LocalConnectionRetry provides model.client::retryConnection,
     ) {
         MinimalMobileWorkspace(model, settings)
@@ -429,6 +429,14 @@ private fun MinimalMobileWorkspace(
                         )
                     },
                 ) { shown ->
+                // Each page says its name as it appears; a session's chat says its own.
+                val named = when (shown) {
+                    WorkspacePage.TERMINAL -> Modifier.page("Terminal")
+                    WorkspacePage.USAGE -> Modifier.page("Usage")
+                    WorkspacePage.PROJECTS -> Modifier.page("Projects")
+                    WorkspacePage.SESSION -> Modifier
+                }
+                Box(Modifier.fillMaxSize().then(named)) {
                 when (shown) {
                     WorkspacePage.TERMINAL -> MinimalGlobalTerminal(
                         model, barInset, onSettings = { settingsOpen = true },
@@ -532,7 +540,7 @@ private fun MinimalMobileWorkspace(
                                 )
                             }
                         } else {
-                            Column(Modifier.fillMaxSize()) {
+                            Column(Modifier.fillMaxSize().page(activeSession.title)) {
                                 ProductHeader(activeSession.title, onSettings = { settingsOpen = true })
                                 Column(Modifier.background(glassPane())) { tabStrip(AgentTabs(), null) }
                                 Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
@@ -563,6 +571,7 @@ private fun MinimalMobileWorkspace(
                             mobileDestination = MobileDestination.SESSIONS
                         },
                     )
+                }
                 }
                 }
                 if (showBottomNavigation) {
@@ -1514,7 +1523,8 @@ private fun ProductHeader(
         )
         Text(
             title,
-            modifier = Modifier.weight(1f).semantics { heading() },
+            // Where the focus lands when the page appears.
+            modifier = Modifier.weight(1f).pageHeading(),
             style = MaterialTheme.typography.titleMedium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -2175,6 +2185,7 @@ private fun NewFolderDialog(
                     isError = nameError != null,
                     supportingText = nameError?.let { { Text(it) } },
                     modifier = Modifier.fillMaxWidth(),
+                    colors = xdFieldColors(),
                 )
                 OutlinedTextField(
                     value = organization,
@@ -2185,12 +2196,12 @@ private fun NewFolderDialog(
                     isError = organizationError,
                     supportingText = {
                         Text(
-                    colors = xdFieldColors(),
                             if (organizationError) "Enter a GitHub organization name, such as acme or github.com/acme."
                             else "Shows its avatar. Leave the name empty to use the organization's.",
                         )
                     },
                     modifier = Modifier.fillMaxWidth(),
+                    colors = xdFieldColors(),
                 )
                 Text(
                     "Folders hold projects and other folders. Use Move to on a project to put it in one.",
@@ -2201,7 +2212,6 @@ private fun NewFolderDialog(
         },
         confirmButton = {
             Button(
-                    colors = xdFieldColors(),
                 onClick = { onCreate(folderName, login) },
                 enabled = folderName.isNotEmpty() && nameError == null && !organizationError && !busy,
             ) { Text("Create folder") }
@@ -2671,6 +2681,7 @@ private fun NewProjectDialog(
                     label = { Text("Name") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
+                    colors = xdFieldColors(),
                 )
                 OutlinedTextField(
                     value = repository,
@@ -2681,13 +2692,13 @@ private fun NewProjectDialog(
                     trailingIcon = {
                         IconButton(onClick = { browsing = true }) {
                             Icon(
-                    colors = xdFieldColors(),
                                 painterResource(R.drawable.ic_folder),
                                 contentDescription = "Browse folders on the host",
                                 modifier = Modifier.size(20.dp),
                             )
                         }
                     },
+                    colors = xdFieldColors(),
                 )
             }
         },
@@ -2698,7 +2709,6 @@ private fun NewProjectDialog(
                 enabled = name.isNotBlank() && !busy,
             ) { Text("Create project") }
         },
-                    colors = xdFieldColors(),
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
     if (browsing) {
@@ -2994,6 +3004,7 @@ private fun NameDialog(
                 isError = error != null,
                 supportingText = error?.let { { Text(it) } },
                 modifier = Modifier.fillMaxWidth(),
+                colors = xdFieldColors(),
             )
         },
         confirmButton = {
@@ -3004,7 +3015,6 @@ private fun NameDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
-                colors = xdFieldColors(),
 
 private val NameDraftSaver = listSaver<Pair<String, String>, String>(
     save = { listOf(it.first, it.second) },

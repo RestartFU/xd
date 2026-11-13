@@ -9,6 +9,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -260,7 +263,8 @@ private fun TopBar(title: String, navigation: Navigation) {
         }
         Text(
             title,
-            modifier = Modifier.semantics { heading() },
+            // Where the focus lands as the sheet or its page appears.
+            modifier = Modifier.pageHeading(),
             style = MaterialTheme.typography.titleLarge,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -282,12 +286,15 @@ private fun ProjectStep(
 ) {
     var filter by rememberSaveable { mutableStateOf("") }
     val shown = choices.matching(filter)
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().page("New session")) {
         TopBar("New session", Navigation.Close(onClose))
+        // As wide as the sheet, so it scrolls from its margins too; its rows
+        // stop at the reading measure and sit in the middle of a wide window.
+        BoxWithConstraints(Modifier.weight(1f)) {
         LazyColumn(
             // Ends above the keyboard and navigation bar, so the last rows can scroll into view.
-            modifier = Modifier.weight(1f).windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
+            contentPadding = readingInset(maxWidth, 16.dp).let { side -> PaddingValues(start = side, end = side, top = 4.dp, bottom = 24.dp) },
         ) {
             item("question") {
                 Text(
@@ -306,6 +313,7 @@ private fun ProjectStep(
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                        colors = xdFieldColors(),
                     )
                 }
             }
@@ -313,7 +321,6 @@ private fun ProjectStep(
                 item("none") {
                     Text(
                         "No project matches “${filter.trim()}”",
-                        colors = xdFieldColors(),
                         modifier = Modifier.padding(start = 4.dp, top = 8.dp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyMedium,
@@ -335,6 +342,7 @@ private fun ProjectStep(
                     }
                 }
             }
+        }
         }
     }
 }
@@ -509,12 +517,21 @@ private fun SessionForm(
                     page = FormPage.FORM
                 },
             )
-            FormPage.FORM -> Column(Modifier.fillMaxSize()) {
+            FormPage.FORM -> Column(Modifier.fillMaxSize().page(if (chatTab) "New chat" else "New session")) {
                 TopBar(if (chatTab) "New chat" else "New session", navigation)
-                Column(
+                // Scrolls across the sheet's width; the form stops at the
+                // reading measure and sits in the middle of a wide window.
+                Box(
                     Modifier
                         .weight(1f)
-                        .verticalScroll(rememberScrollState())
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    contentAlignment = Alignment.TopCenter,
+                ) {
+                Column(
+                    Modifier
+                        .widthIn(max = ReadingMeasure + 32.dp)
+                        .fillMaxWidth()
                         .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(28.dp),
                 ) {
@@ -530,6 +547,7 @@ private fun SessionForm(
                             imeAction = ImeAction.Done,
                         ),
                         modifier = Modifier.fillMaxWidth(),
+                        colors = xdFieldColors(),
                     )
                     FormSection("Assistant") {
                         // Effort and accounts belong to one assistant.
@@ -547,7 +565,6 @@ private fun SessionForm(
                             }
                         }
                     }
-                        colors = xdFieldColors(),
                     if (places != null) {
                         FormSection("Workspace") {
                             WorkspaceSection(
@@ -575,6 +592,7 @@ private fun SessionForm(
                             onAccount = { account = it },
                         )
                     }
+                }
                 }
                 ActionBar(
                     label = if (chatTab) "Start chat" else "Start session",
@@ -850,9 +868,21 @@ private fun WorkspaceSection(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+            // Nothing to choose between: said, so the heading is not left over nothing.
+            if (places.worktrees.isEmpty() && !canNew && places.sourcesError == null && places.pullRequestError == null) {
+                Text(
+                    NO_WORKSPACE_CHOICE,
+                    modifier = Modifier.padding(start = 4.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }
+
+/** Said under Workspace when a project has no checkouts or branches to pick from. */
+internal const val NO_WORKSPACE_CHOICE = "Uses the project's own directory. There is no other checkout or branch to choose."
 
 /** The branch or pull request a new worktree starts from, chosen on its own page. */
 @Composable
@@ -1102,6 +1132,11 @@ private fun ActionBar(label: String, blocker: String?, busy: Boolean, onClick: (
         Column(
             Modifier
                 .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+                // Under the form it starts, as wide as it is.
+                .fillMaxWidth()
+                .wrapContentWidth(Alignment.CenterHorizontally)
+                .widthIn(max = ReadingMeasure + 32.dp)
+                .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -1166,12 +1201,13 @@ private fun BasePicker(
     val chosenBranch = (selected as? Ops.NewSessionWorktree.Branch)?.reference
     val (shownPulls, hiddenPulls) = limitPlaces(pulls, places?.pullRequests.orEmpty()) { it.number == chosenPull }
     val (shownBranches, hiddenBranches) = limitPlaces(branches, places?.branches.orEmpty()) { it.reference == chosenBranch }
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().page("Branch or pull request")) {
         TopBar("Branch or pull request", Navigation.Back(onBack))
+        BoxWithConstraints(Modifier.weight(1f)) {
         LazyColumn(
             // Ends above the keyboard and navigation bar, so the last rows can scroll into view.
-            modifier = Modifier.weight(1f).windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
+            contentPadding = readingInset(maxWidth, 16.dp).let { side -> PaddingValues(start = side, end = side, top = 4.dp, bottom = 24.dp) },
         ) {
             item("filter") {
                 OutlinedTextField(
@@ -1181,6 +1217,7 @@ private fun BasePicker(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp),
+                    colors = xdFieldColors(),
                 )
             }
             placeGroup(
@@ -1217,7 +1254,6 @@ private fun BasePicker(
                 else -> null
             }
             kept?.let { (label, detail) ->
-                    colors = xdFieldColors(),
                 item("kept") {
                     Group { ChoiceRow(label = label, detail = detail, chosen = true, onClick = onBack, mono = selected is Ops.NewSessionWorktree.Branch) }
                 }
@@ -1243,6 +1279,7 @@ private fun BasePicker(
                     )
                 }
             }
+        }
         }
     }
 }

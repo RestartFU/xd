@@ -52,7 +52,7 @@ internal val LocalConnectionNotice = staticCompositionLocalOf<State<ConnectionNo
 internal val LocalConnectionRetry = staticCompositionLocalOf<(() -> Unit)?> { null }
 
 /** The action on the line while it waits to try again. */
-internal const val TRY_NOW_LABEL = "Try now"
+internal const val CONNECTION_RETRY_LABEL = "Try again"
 
 /** The connection line, for tests. */
 internal const val CONNECTION_LINE_TAG = "connection-line"
@@ -129,7 +129,7 @@ internal fun ConnectionLine(modifier: Modifier = Modifier, divider: Color = Mate
             modifier = Modifier
                 .fillMaxWidth()
                 .background(if (notice.failure) colors.errorContainer else glassPane())
-                // Slim, and only as tall as its Try now needs while that shows.
+                // Slim, and only as tall as its Try again needs while that shows.
                 .heightIn(min = 28.dp)
                 .padding(start = 16.dp, end = if (retry != null) 4.dp else 16.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -172,7 +172,7 @@ internal fun ConnectionLine(modifier: Modifier = Modifier, divider: Color = Mate
                     colors = ButtonDefaults.textButtonColors(contentColor = content),
                     contentPadding = PaddingValues(horizontal = 12.dp),
                 ) {
-                    Text(TRY_NOW_LABEL, style = MaterialTheme.typography.labelLarge)
+                    Text(CONNECTION_RETRY_LABEL, style = MaterialTheme.typography.labelLarge)
                 }
             }
         }
