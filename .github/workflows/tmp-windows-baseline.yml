@@ -17,6 +17,7 @@ jobs:
   # The installer alone, around a stand-in executable, to check its authoring
   # in a couple of minutes instead of after a full build.
   msi:
+    if: false
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v5
@@ -102,7 +103,6 @@ jobs:
           Select-String -Path "$shared\install.log" -Pattern 'Property\(S\): (ALLUSERS|Privileged|AdminUser|INSTALLFOLDER)|Return value 3|Error ' | Select-Object -First 20 | ForEach-Object Line | Write-Host
 
   baseline:
-    if: false
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v5
