@@ -2975,6 +2975,61 @@ fn key_reach(
         })
 }
 
+/// Where a Tab stop's ring is drawn: around the control, in room it does
+/// not take, or just inside it, for a row of a list that clips at its edges.
+#[derive(Clone, Copy)]
+enum RingAt {
+    Around(f32),
+    Inside(f32),
+}
+
+/// A control of the transcript, or of a card in it, as a Tab stop: Enter
+/// and Space send the `action` its click sends, and `label` names it under
+/// the pointer and under the ring. Without `keys`, as where a test draws a
+/// card alone, it is the pointer's alone.
+fn key_action_stop(
+    control: gpui::Stateful<gpui::Div>,
+    keys: Option<&KeyTargets>,
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    ring: RingAt,
+    colors: ThemeColors,
+    action: impl gpui::Action,
+) -> gpui::Stateful<gpui::Div> {
+    let label = label.into();
+    let control = control.tooltip(pane_tooltip(label.clone(), colors));
+    let Some(keys) = keys else {
+        return control;
+    };
+    let id = id.into();
+    let on = keys.stop_on(&id);
+    let run: KeyRun = Rc::new(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx));
+    control
+        .child(keys.mark(KeyLayer::Page, KeyStop::Control(id, run)))
+        .when(on, |control| {
+            control
+                .child(match ring {
+                    RingAt::Around(radius) => focus_ring(colors, radius),
+                    RingAt::Inside(radius) => div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(radius))
+                        .border_2()
+                        .border_color(rgb(colors.selected_border)),
+                })
+                .child(focus_tooltip(label, colors))
+        })
+}
+
+/// What a card's disclosure says it does, under the pointer and the ring.
+fn details_label(expanded: bool) -> &'static str {
+    if expanded {
+        "Hide details"
+    } else {
+        "Show details"
+    }
+}
+
 /// How far under its control a name shown for the Tab ring sits: clear of
 /// the ring.
 const FOCUS_TOOLTIP_GAP: f32 = FOCUS_RING_GAP + 4.0;
@@ -4105,7 +4160,19 @@ enum AskAnswer {
         request_id: String,
         question_id: String,
     },
+    /// An approval: the answer is one of [`APPROVAL_DECISIONS`].
+    Approval { request_id: String },
 }
+
+/// An approval's answers, in the order they are drawn and numbered: what
+/// each button says, and the decision it sends. The first is what Enter
+/// takes once the keyboard is in the approval; nothing is ever approved
+/// without a key or a click on one of them.
+const APPROVAL_DECISIONS: [(&str, &str); 3] = [
+    ("Allow once", "accept"),
+    ("Allow for session", "acceptForSession"),
+    ("Deny", "decline"),
+];
 
 /// What taking an answer came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4162,6 +4229,15 @@ struct AskChoices {
     key: String,
     target: AskAnswer,
     choices: Vec<(String, Option<String>)>,
+}
+
+impl AskChoices {
+    /// An approval's buttons stand in a row under it, the first nearest the
+    /// keys: Up from the message box goes to it, where a question's rows
+    /// stand over the box and Up goes to the last.
+    fn in_a_row(&self) -> bool {
+        matches!(self.target, AskAnswer::Approval { .. })
+    }
 }
 
 fn question_from_event(body: &Value) -> Option<OpenQuestion> {
@@ -11814,7 +11890,12 @@ impl XdDesktop {
             });
         let pane = cx.new(|cx| BrowserPane::with_session(session, colors, window, cx));
         let scope = key.clone();
-        cx.subscribe(&pane, move |this, _, event, cx| match event {
+        cx.subscribe_in(&pane, window, move |this, _, event, window, cx| match event {
+            BrowserEvent::AppShortcut(keys) => {
+                if scope == this.browser_scope_key() {
+                    this.page_shortcut(keys, window, cx);
+                }
+            }
             BrowserEvent::SessionChanged(session) => {
                 if let Some(state) = this.settings.browser_sessions.get_mut(&scope)
                     && state.session != *session
@@ -11861,6 +11942,21 @@ impl XdDesktop {
         .detach();
         self.browser_panes.insert(key, pane.clone());
         pane
+    }
+
+    /// One of the window's shortcuts, pressed while the browser's page had
+    /// the keyboard, which it has given back: the window acts on the keys as
+    /// if they had been pressed in it.
+    fn page_shortcut(&mut self, keys: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.root_focus);
+        cx.notify();
+        let Ok(keystroke) = gpui::Keystroke::parse(keys) else {
+            return;
+        };
+        // After this update: the keys reach this view's own handlers.
+        window.defer(cx, move |window, cx| {
+            window.dispatch_keystroke(keystroke, cx);
+        });
     }
 
     /// Takes the browser's part of a host update: an agent's command for its
@@ -14797,6 +14893,17 @@ impl XdDesktop {
     /// The docked question's choices, for the pointer and the keyboard.
     fn ask_choices(&self) -> Option<AskChoices> {
         match self.docked_ask()? {
+            DockedAsk::Interaction if self.docked_approval().is_some() => {
+                let request_id = self.docked_approval()?;
+                Some(AskChoices {
+                    key: format!("approval\n{request_id}"),
+                    target: AskAnswer::Approval { request_id },
+                    choices: APPROVAL_DECISIONS
+                        .iter()
+                        .map(|(label, _)| ((*label).to_owned(), None))
+                        .collect(),
+                })
+            }
             DockedAsk::Interaction => {
                 let (request_id, question, ..) = self.pending_input_question()?;
                 let question_id = question["id"].as_str()?.to_owned();
@@ -14840,6 +14947,34 @@ impl XdDesktop {
         }
     }
 
+    /// The request id of the approval docked in the composer, when the
+    /// docked request is one and not a request for input.
+    fn docked_approval(&self) -> Option<String> {
+        let pending = self.model.interactions.first()?;
+        (pending["method"].as_str() != Some("item/tool/requestUserInput"))
+            .then(|| pending["request_id"].as_str().map(str::to_owned))
+            .flatten()
+    }
+
+    /// Answers the docked approval with the `index`th of
+    /// [`APPROVAL_DECISIONS`].
+    fn answer_approval(
+        &mut self,
+        request_id: String,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> Answered {
+        self.ask_focus = None;
+        let Some((_, decision)) = APPROVAL_DECISIONS.get(index) else {
+            return Answered::No;
+        };
+        if self.respond_interaction(request_id, serde_json::json!({ "decision": decision }), cx) {
+            Answered::Sent
+        } else {
+            Answered::No
+        }
+    }
+
     /// Where Send puts the composer's words while the docked question takes
     /// a typed answer. A secret one has its own masked field instead.
     fn typed_answer(&self) -> Option<AskAnswer> {
@@ -14879,6 +15014,15 @@ impl XdDesktop {
                 request_id,
                 question_id,
             } => self.answer_interaction(request_id, question_id, answer, cx),
+            AskAnswer::Approval { request_id } => {
+                let index = APPROVAL_DECISIONS
+                    .iter()
+                    .position(|(label, _)| *label == answer);
+                match index {
+                    Some(index) => self.answer_approval(request_id, index, cx),
+                    None => Answered::No,
+                }
+            }
         }
     }
 
@@ -14956,6 +15100,7 @@ impl XdDesktop {
         };
         let last = choices.choices.len() - 1;
         let next = match (self.focused_ask_choice(&choices), up) {
+            (None, true) if choices.in_a_row() => Some(0),
             (None, true) => Some(last),
             (None, false) => return false,
             (Some(index), true) => Some(index.saturating_sub(1)),
@@ -20364,6 +20509,7 @@ impl XdDesktop {
         index: usize,
         activity_id: i64,
         expanded: bool,
+        keys: Option<&KeyTargets>,
     ) -> gpui::AnyElement {
         let failed = card.kind == ActivityKind::Failure;
         let status_color = match card.kind {
@@ -20415,13 +20561,22 @@ impl XdDesktop {
             .border_color(rgb(if failed { colors.danger } else { colors.border }))
             .bg(rgb(colors.surface))
             .child(
-                div()
-                    .id(("native-activity-toggle", index))
-                    .cursor_pointer()
-                    .on_click(move |_, window, cx| {
-                        window.dispatch_action(Box::new(ToggleActivity { id: activity_id }), cx);
-                    })
-                    .flex()
+                key_action_stop(
+                    div()
+                        .id(("native-activity-toggle", index))
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
+                            window
+                                .dispatch_action(Box::new(ToggleActivity { id: activity_id }), cx);
+                        }),
+                    keys,
+                    format!("native-activity-toggle:{index}"),
+                    details_label(expanded),
+                    RingAt::Around(FOCUS_RING_RADIUS),
+                    colors,
+                    ToggleActivity { id: activity_id },
+                )
+                .flex()
                     .items_center()
                     .gap_2()
                     .child(
@@ -20558,6 +20713,7 @@ impl XdDesktop {
         agents: &[RunningAgent],
         workers: &[TrayWorker],
         open: bool,
+        keys: &KeyTargets,
     ) -> Option<gpui::AnyElement> {
         if agents.is_empty() && workers.is_empty() {
             return None;
@@ -20571,18 +20727,27 @@ impl XdDesktop {
             .chain(agents.iter().map(|agent| Self::tray_task(&agent.view)))
             .collect::<Vec<_>>()
             .join(", ");
-        let summary = div()
-            .id("agents-tray-summary")
-            .debug_selector(|| "agents-tray-summary".into())
-            .w_full()
-            .h(px(38.0))
-            .px(px(14.0))
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .cursor_pointer()
-            .hover(|style| style.bg(rgb(colors.surface_high)))
-            .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleAgentsTray), cx))
+        let summary = key_action_stop(
+            div()
+                .id("agents-tray-summary")
+                .debug_selector(|| "agents-tray-summary".into())
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleAgentsTray), cx)),
+            Some(keys),
+            "agents-tray-summary",
+            if open { "Hide the agents" } else { "Show the agents" },
+            // Inside the tray, which clips what is outside it.
+            RingAt::Inside(RADIUS_PANEL),
+            colors,
+            ToggleAgentsTray,
+        )
+        .w_full()
+        .h(px(38.0))
+        .px(px(14.0))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(colors.surface_high)))
             .child(pulse_dot(
                 7.0,
                 if all_waiting {
@@ -20618,9 +20783,16 @@ impl XdDesktop {
         // Agent chats first: each is a chat of its own, which a row opens.
         let worker_rows = workers.iter().enumerate().map(|(index, worker)| {
             let chat = worker.chat.clone();
-            div()
-                .id(("agents-tray-worker", index))
-                .w_full()
+            key_action_stop(
+                div().id(("agents-tray-worker", index)),
+                Some(keys),
+                format!("agents-tray-worker:{index}"),
+                format!("Open {}", worker.title),
+                RingAt::Inside(RADIUS_CONTROL),
+                colors,
+                OpenAgentChat { chat: chat.clone() },
+            )
+            .w_full()
                 .h(px(TRAY_ROW_HEIGHT))
                 .px(px(12.0))
                 .flex()
@@ -20672,9 +20844,16 @@ impl XdDesktop {
                 .view
                 .started_at
                 .map(|started| activity::compact_duration(now.saturating_sub(started)));
-            div()
-                .id(("agents-tray-row", index))
-                .w_full()
+            key_action_stop(
+                div().id(("agents-tray-row", index)),
+                Some(keys),
+                format!("agents-tray-row:{index}"),
+                "Open this agent in a tab",
+                RingAt::Inside(RADIUS_CONTROL),
+                colors,
+                OpenAgentTab { key: key.clone() },
+            )
+            .w_full()
                 .h(px(TRAY_ROW_HEIGHT))
                 .px(px(12.0))
                 .flex()
@@ -20760,6 +20939,7 @@ impl XdDesktop {
         log_key: i64,
         log_expanded: bool,
         expanded: bool,
+        keys: Option<&KeyTargets>,
     ) -> gpui::AnyElement {
         let head = run.position == 0;
         let tail = run.position + 1 == run.len;
@@ -20793,10 +20973,25 @@ impl XdDesktop {
                         .child(format!("Work log · {} steps", run.len)),
                 )
                 .when(run.entries > WORK_LOG_VISIBLE, |header| {
+                    let toggle = ToggleWorkLog {
+                        id: log_key,
+                        rows: rows.clone(),
+                    };
                     header.child(
-                        div()
-                            .id(("work-log-toggle", index))
-                            .cursor_pointer()
+                        key_action_stop(
+                            div().id(("work-log-toggle", index)),
+                            keys,
+                            format!("work-log-toggle:{index}"),
+                            if hidden > 0 {
+                                "Show the earlier steps"
+                            } else {
+                                "Show only the latest steps"
+                            },
+                            RingAt::Around(FOCUS_RING_RADIUS),
+                            colors,
+                            toggle,
+                        )
+                        .cursor_pointer()
                             .text_color(rgb(colors.accent_ink))
                             .hover(|style| style.text_color(rgb(colors.text)))
                             .on_click(move |_, window, cx| {
@@ -20816,9 +21011,25 @@ impl XdDesktop {
                     )
                 })
         });
+        let opens = detail.is_some() || !card.items.is_empty();
         let entry = run.shows_entry(log_expanded).then(|| {
             div()
                 .id(("work-log-entry", index))
+                .map(|row| {
+                    if opens {
+                        key_action_stop(
+                            row,
+                            keys,
+                            format!("work-log-entry:{index}"),
+                            details_label(expanded),
+                            RingAt::Inside(RADIUS_CONTROL),
+                            colors,
+                            ToggleActivity { id: row_key },
+                        )
+                    } else {
+                        row
+                    }
+                })
                 .w_full()
                 .px(px(14.0))
                 .py(px(2.0))
@@ -21000,6 +21211,7 @@ impl XdDesktop {
         view: &SubagentView,
         live: Option<&AgentChatLive>,
         index: usize,
+        keys: Option<&KeyTargets>,
     ) -> gpui::AnyElement {
         let status = agent_chat_status(view.status, live);
         let (label, tone) = status.label(colors);
@@ -21015,9 +21227,16 @@ impl XdDesktop {
         };
         let icon = Self::assistant_mark(&view.provider);
         let chat = view.chat.clone();
-        div()
-            .id(("agent-chat-row", index))
-            .group("agent-chat-row")
+        key_action_stop(
+            div().id(("agent-chat-row", index)),
+            keys,
+            format!("agent-chat-row:{index}"),
+            "Open this agent's chat",
+            RingAt::Around(FOCUS_RING_RADIUS),
+            colors,
+            OpenAgentChat { chat: chat.clone() },
+        )
+        .group("agent-chat-row")
             .w_full()
             .my(px(2.0))
             .px(px(8.0))
@@ -21089,6 +21308,7 @@ impl XdDesktop {
         report: activity::AgentReport,
         live: Option<&AgentChatLive>,
         index: usize,
+        keys: Option<&KeyTargets>,
     ) -> gpui::AnyElement {
         let title = live
             .map(|live| live.title.clone())
@@ -21110,9 +21330,16 @@ impl XdDesktop {
             .gap(px(10.0))
             .child(div().h(px(1.0)).flex_1().bg(rgb(colors.border)))
             .child(
-                div()
-                    .id(("agent-report-link", index))
-                    .flex_none()
+                key_action_stop(
+                    div().id(("agent-report-link", index)),
+                    keys,
+                    format!("agent-report-link:{index}"),
+                    format!("Open {title}'s chat"),
+                    RingAt::Around(PILL_RING_RADIUS),
+                    colors,
+                    OpenAgentChat { chat: chat.clone() },
+                )
+                .flex_none()
                     .px(px(8.0))
                     .py(px(2.0))
                     .rounded_full()
@@ -21138,7 +21365,12 @@ impl XdDesktop {
     }
 
     /// The one way back from an agent's chat to the chat that started it.
-    fn render_started_by(colors: ThemeColors, parent: String, title: String) -> gpui::AnyElement {
+    fn render_started_by(
+        colors: ThemeColors,
+        parent: String,
+        title: String,
+        keys: Option<&KeyTargets>,
+    ) -> gpui::AnyElement {
         div()
             .w_full()
             .flex_none()
@@ -21146,9 +21378,18 @@ impl XdDesktop {
             .justify_center()
             .pb(px(10.0))
             .child(
-                div()
-                    .id("agent-started-by")
-                    .px(px(10.0))
+                key_action_stop(
+                    div().id("agent-started-by"),
+                    keys,
+                    "agent-started-by",
+                    "Open the chat that started this one",
+                    RingAt::Around(PILL_RING_RADIUS),
+                    colors,
+                    OpenAgentChat {
+                        chat: parent.clone(),
+                    },
+                )
+                .px(px(10.0))
                     .py(px(3.0))
                     .rounded_full()
                     .border_1()
@@ -21189,6 +21430,7 @@ impl XdDesktop {
         index: usize,
         card_id: i64,
         expanded: bool,
+        keys: Option<&KeyTargets>,
     ) -> gpui::AnyElement {
         let running = view.status == SubagentState::Running;
         let signal = match view.status {
@@ -21261,13 +21503,21 @@ impl XdDesktop {
         } else {
             Vec::new()
         };
-        let header = div()
-            .id(("native-subagent-toggle", index))
-            .cursor_pointer()
-            .on_click(move |_, window, cx| {
-                window.dispatch_action(Box::new(ToggleActivity { id: card_id }), cx);
-            })
-            .w_full()
+        let header = key_action_stop(
+            div()
+                .id(("native-subagent-toggle", index))
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(ToggleActivity { id: card_id }), cx);
+                }),
+            keys,
+            format!("native-subagent-toggle:{index}"),
+            details_label(expanded),
+            RingAt::Around(FOCUS_RING_RADIUS),
+            colors,
+            ToggleActivity { id: card_id },
+        )
+        .w_full()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -21318,9 +21568,23 @@ impl XdDesktop {
                     let action =
                         |id: &'static str, label: &'static str, verb: &'static str, tone: u32| {
                             let key = view.key.clone();
-                            div()
-                                .id((id, index))
-                                .flex_none()
+                            key_action_stop(
+                                div().id((id, index)),
+                                keys,
+                                format!("{id}:{index}"),
+                                if verb == "stop" {
+                                    "Stop this agent"
+                                } else {
+                                    "Let this agent run in the background"
+                                },
+                                RingAt::Around(FOCUS_RING_RADIUS),
+                                colors,
+                                ControlSubagent {
+                                    key: key.clone(),
+                                    action: verb.to_owned(),
+                                },
+                            )
+                            .flex_none()
                                 .h(hit_px(HIT_MIN))
                                 .px(px(8.0))
                                 .flex()
@@ -21366,9 +21630,16 @@ impl XdDesktop {
             )
             .child({
                 let key = view.key.clone();
-                div()
-                    .id(("native-subagent-open", index))
-                    .flex_none()
+                key_action_stop(
+                    div().id(("native-subagent-open", index)),
+                    keys,
+                    format!("native-subagent-open:{index}"),
+                    "Open this agent in a tab",
+                    RingAt::Around(FOCUS_RING_RADIUS),
+                    colors,
+                    OpenAgentTab { key: key.clone() },
+                )
+                .flex_none()
                     .h(hit_px(HIT_MIN))
                     .px(px(8.0))
                     .flex()
@@ -21644,6 +21915,7 @@ impl XdDesktop {
                     index,
                     message.id.unwrap_or(-(index as i64) - 1),
                     expanded,
+                    copy_keys,
                 ))
                 .into_any_element();
         }
@@ -21659,6 +21931,7 @@ impl XdDesktop {
                     index,
                     message.id.unwrap_or(-(index as i64) - 1),
                     expanded,
+                    copy_keys,
                 ))
                 .into_any_element();
         }
@@ -23027,22 +23300,42 @@ impl XdDesktop {
                         .child(permissions.to_string()),
                 );
             }
-            let decision = |index: usize, label: &'static str, decision: &'static str| {
-                let id = request_id.clone();
+            // Each is a Tab stop, and keys 1 to 3 or Up from the empty
+            // message box reach them as they reach a question's choices.
+            let focused = self
+                .ask_choices()
+                .and_then(|choices| self.focused_ask_choice(&choices));
+            let keys = self.key_targets.clone();
+            let decision = |index: usize| {
+                let (label, decision) = APPROVAL_DECISIONS[index];
                 let kind = match decision {
                     "accept" => ButtonKind::Primary,
                     "decline" => ButtonKind::DangerGhost,
                     _ => ButtonKind::Secondary,
                 };
+                let answer = {
+                    let id = request_id.clone();
+                    move |this: &mut XdDesktop, _: &mut Window, cx: &mut Context<XdDesktop>| {
+                        this.answer_approval(id.clone(), index, cx);
+                        cx.notify();
+                    }
+                };
+                let click = answer.clone();
                 ui_button(("interaction-decision", index), kind, colors)
                     .debug_selector(move || format!("interaction-decision-{index}"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.respond_interaction(
-                            id.clone(),
-                            serde_json::json!({"decision":decision}),
-                            cx,
-                        );
-                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| click(this, window, cx)))
+                    .key_reach(
+                        &keys,
+                        KeyLayer::Page,
+                        format!("interaction-decision-{index}"),
+                        None,
+                        FOCUS_RING_RADIUS,
+                        colors,
+                        answer,
+                    )
+                    .when(focused == Some(index), |button| {
+                        button.child(focus_ring(colors, FOCUS_RING_RADIUS))
+                    })
                     .child(label)
             };
             card = card.child(
@@ -23050,10 +23343,10 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(decision(0, "Allow once", "accept"))
-                    .child(decision(1, "Allow for session", "acceptForSession"))
+                    .child(decision(0))
+                    .child(decision(1))
                     .child(div().flex_1())
-                    .child(decision(2, "Deny", "decline")),
+                    .child(decision(2)),
             );
         }
         Some(card.into_any_element())
@@ -23124,6 +23417,7 @@ impl XdDesktop {
                         .title
                         .clone()
                         .unwrap_or_else(|| DEFAULT_CHAT_TITLE.into()),
+                    Some(&self.key_targets),
                 )
             });
         let messages = self.transcript_snapshot.clone();
@@ -23222,12 +23516,13 @@ impl XdDesktop {
                             view,
                             agent_chats.get(&view.chat),
                             index,
+                            Some(&copy_keys),
                         ))
                     }
                     _ if message.role == "user" => {
                         activity::agent_report(&message.content).map(|report| {
                             let live = agent_chats.get(&report.chat);
-                            Self::render_agent_report(colors, report, live, index)
+                            Self::render_agent_report(colors, report, live, index, Some(&copy_keys))
                         })
                     }
                     _ => None,
@@ -23279,6 +23574,7 @@ impl XdDesktop {
                                 log_key,
                                 log_expanded,
                                 expanded_activities.contains(&entry_key),
+                                Some(&copy_keys),
                             )))
                             .into_any_element();
                     }
@@ -23547,6 +23843,7 @@ impl XdDesktop {
             &self.transcript_snapshot.running_agents,
             &tray_workers,
             self.agents_tray_open,
+            &self.key_targets,
         );
         let supports_effort = self
             .model
@@ -30910,10 +31207,10 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             );
             assert!(desktop.typed_answer().is_none());
         });
-        // No choices to pick, so a number is typed.
-        cx.simulate_input("1");
+        // Once something is typed, a number is a word, as with a question.
+        cx.simulate_input("a1");
         cx.update_window_entity(&desktop, |desktop, _, _| {
-            assert_eq!(desktop.composer, "1");
+            assert_eq!(desktop.composer, "a1");
         });
         let deny = cx.debug_bounds("interaction-decision-2").unwrap();
         cx.simulate_click(deny.center(), gpui::Modifiers::default());
@@ -30921,6 +31218,81 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         let request = next_request_with_op(&mut requests, "respond");
         assert_eq!(request["request_id"], "approve-1");
         assert_eq!(request["response"]["decision"], "decline");
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn an_approval_is_answered_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.bind_keys(all_key_bindings()));
+        let (desktop, cx, mut requests, _updates) = docked_ask_fixture(cx);
+        let approval = |id: &str| {
+            serde_json::json!({
+                "request_id": id,
+                "method": "item/commandExecution/requestApproval",
+                "params": { "command": "cargo publish --dry-run" },
+            })
+        };
+        let dock = |cx: &mut gpui::VisualTestContext, id: &str| {
+            cx.update_window_entity(&desktop, |desktop, window, cx| {
+                desktop.model.start_working();
+                desktop.model.interactions = vec![approval(id)];
+                window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+            });
+            redraw(cx);
+        };
+        let decided = |requests: &mut std::io::BufReader<std::os::unix::net::UnixStream>| {
+            let request = next_request_with_op(requests, "respond");
+            (
+                request["request_id"].as_str().unwrap().to_owned(),
+                request["response"]["decision"].as_str().unwrap().to_owned(),
+            )
+        };
+
+        // From the empty message box, a number picks that answer.
+        dock(cx, "approve-1");
+        cx.simulate_keystrokes("2");
+        assert_eq!(
+            decided(&mut requests),
+            ("approve-1".into(), "acceptForSession".into())
+        );
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(desktop.composer.is_empty(), "the number is not typed");
+        });
+
+        // Up goes into the approval, on Allow once, which Enter takes.
+        dock(cx, "approve-2");
+        cx.simulate_keystrokes("up");
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(desktop.ask_focus.as_ref().map(|(_, index)| *index), Some(0));
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(decided(&mut requests), ("approve-2".into(), "accept".into()));
+
+        // Each answer is a Tab stop: Shift+Tab from the box reaches Deny
+        // first, and Enter presses the one the ring is on.
+        dock(cx, "approve-3");
+        cx.simulate_keystrokes("shift-tab");
+        redraw(cx);
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(
+                desktop.key_stop.as_ref().map(|id| id.as_ref()),
+                Some("interaction-decision-2")
+            );
+        });
+        cx.simulate_keystrokes("shift-tab");
+        redraw(cx);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            decided(&mut requests),
+            ("approve-3".into(), "acceptForSession".into())
+        );
+        // Deny stays in sight next to the others, and nothing went unasked.
+        dock(cx, "approve-4");
+        assert!(cx.debug_bounds("interaction-decision-2").is_some());
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(desktop.ask_focus.is_none(), "nothing is chosen for the user");
+        });
     }
 
     #[gpui::test]
@@ -33551,6 +33923,29 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         }
     }
 
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_shortcut_pressed_in_the_browsers_page_reaches_the_window(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        // The page had the keyboard, so nothing in the window did.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            window.blur();
+            desktop.page_shortcut("ctrl-,", window, cx);
+        });
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| assert!(desktop.minimal_theme_open));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.close_minimal_theme_popup(window, cx);
+            window.blur();
+            desktop.page_shortcut("ctrl-k", window, cx);
+        });
+        redraw(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            let find = desktop.catalog_find_input.read(cx).focus_handle(cx);
+            assert!(find.is_focused(window), "Ctrl+K from the page puts the keys in find");
+        });
+    }
+
     #[gpui::test]
     fn the_keyboard_alone_finds_opens_and_leaves_a_session(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = keyboard_window(cx);
@@ -34668,6 +35063,46 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         cx.simulate_keystrokes("shift-f10 escape");
         redraw(cx);
         desktop.read_with(cx, |desktop, _| assert!(desktop.message_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_transcript_cards_controls_are_tab_stops_in_order(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        let record = r#"subagent_run
+{"key":"toolu_1","task_id":"a1b2","provider":"Claude","agent":"Explore","description":"Read the parser","status":"completed","summary":"Read it.","steps":[{"tool":"Read","text":"src/parser.rs"}]}"#;
+        desktop.update(cx, |desktop, cx| {
+            desktop.transcript_snapshot.messages = Arc::new(vec![
+                Message::new(Some(1), "user", "Map the parser.", None),
+                Message::new(Some(2), "tool", record, None),
+            ]);
+            desktop.transcript_snapshot.sync_derived_rows();
+            desktop.sync_transcript_count(true);
+            cx.notify();
+        });
+        redraw(cx);
+        // The card's disclosure comes before its Open, in the order they
+        // are drawn, each with its name under the ring.
+        let passed = tab_to(&desktop, cx, "native-subagent-toggle:1");
+        assert!(!passed.iter().any(|on| on == "native-subagent-open:1"));
+        assert!(cx.debug_bounds("focus-tooltip").is_some());
+        // Enter opens it, as a click does, and Space closes it again.
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.expanded_activities.contains(&2));
+        });
+        cx.simulate_keystrokes("space");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(!desktop.expanded_activities.contains(&2));
+        });
+        cx.simulate_keystrokes("tab");
+        redraw(cx);
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("native-subagent-open:1")
+        );
     }
 
     #[gpui::test]

@@ -821,6 +821,77 @@ wrap_display_handler! {
     }
 }
 
+/// The modifier bits of a CEF key event that a shortcut is made of.
+const SHIFT: u32 = 1 << 1;
+const CONTROL: u32 = 1 << 2;
+const ALT: u32 = 1 << 3;
+const COMMAND: u32 = 1 << 7;
+
+/// The app's own window shortcut a key pressed in the page makes, as GPUI
+/// writes its keys, when it is one the page must not keep: pressed while the
+/// page has the keyboard, it goes to the app, so the keyboard can always
+/// leave the page. `windows_key_code` is Chromium's key code.
+pub(super) fn app_shortcut(windows_key_code: i32, modifiers: u32) -> Option<&'static str> {
+    let held = modifiers & (SHIFT | CONTROL | ALT | COMMAND);
+    Some(match (held, windows_key_code) {
+        (SHIFT, 0x1b) => "shift-escape",
+        (CONTROL, 0x4c) => "ctrl-l",
+        (CONTROL, 0x4b) => "ctrl-k",
+        (CONTROL, 0xbc) => "ctrl-,",
+        (CONTROL, 0x54) => "ctrl-t",
+        (CONTROL, 0xbe) => "ctrl-.",
+        (CONTROL, 0xc0) => "ctrl-`",
+        (CONTROL, 0x55) => "ctrl-u",
+        (CONTROL, 0x09) => "ctrl-tab",
+        (held, 0x09) if held == CONTROL | SHIFT => "ctrl-shift-tab",
+        (held, 0x54) if held == CONTROL | SHIFT => "ctrl-shift-t",
+        _ => return None,
+    })
+}
+
+wrap_keyboard_handler! {
+    struct ViewKeys {
+        events: NativeEvents,
+    }
+
+    impl KeyboardHandler {
+        /// Before Chromium sees a key: the app's way-out shortcuts go to the
+        /// app, and Chromium never hears them, nor the character they make.
+        fn on_pre_key_event(
+            &self,
+            _browser: Option<&mut Browser>,
+            event: Option<&KeyEvent>,
+            _os_event: Option<&mut sys::XEvent>,
+            _is_keyboard_shortcut: Option<&mut ::std::os::raw::c_int>,
+        ) -> ::std::os::raw::c_int {
+            let Some(event) = event else {
+                return 0;
+            };
+            let Some(keys) = app_shortcut(event.windows_key_code, event.modifiers) else {
+                return 0;
+            };
+            if event.type_ == KeyEventType::RAWKEYDOWN || event.type_ == KeyEventType::KEYDOWN {
+                self.events.send(NativeEvent::AppShortcut(keys));
+            }
+            1
+        }
+    }
+}
+
+wrap_focus_handler! {
+    struct ViewFocus {
+        events: NativeEvents,
+    }
+
+    impl FocusHandler {
+        /// Tab past the page's last control, or Shift+Tab before its first:
+        /// the keyboard comes back to the browser's toolbar.
+        fn on_take_focus(&self, _browser: Option<&mut Browser>, _next: ::std::os::raw::c_int) {
+            self.events.send(NativeEvent::TakeFocus);
+        }
+    }
+}
+
 wrap_download_handler! {
     struct ViewDownloads;
 
@@ -1348,6 +1419,14 @@ wrap_client! {
         fn download_handler(&self) -> Option<DownloadHandler> {
             Some(ViewDownloads::new())
         }
+
+        fn keyboard_handler(&self) -> Option<KeyboardHandler> {
+            Some(ViewKeys::new(self.events.clone()))
+        }
+
+        fn focus_handler(&self) -> Option<FocusHandler> {
+            Some(ViewFocus::new(self.events.clone()))
+        }
     }
 }
 
@@ -1684,6 +1763,25 @@ pub fn run_smoke_test_if_requested() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_apps_way_out_keys_leave_the_page_and_the_rest_stay_in_it() {
+        // Shift+Escape and Ctrl+L, Ctrl+K, Ctrl+, go to the app.
+        assert_eq!(app_shortcut(0x1b, SHIFT), Some("shift-escape"));
+        assert_eq!(app_shortcut(0x4c, CONTROL), Some("ctrl-l"));
+        assert_eq!(app_shortcut(0x4b, CONTROL), Some("ctrl-k"));
+        assert_eq!(app_shortcut(0xbc, CONTROL), Some("ctrl-,"));
+        assert_eq!(app_shortcut(0x09, CONTROL | SHIFT), Some("ctrl-shift-tab"));
+        // Caps Lock and Num Lock make no difference.
+        assert_eq!(app_shortcut(0x4c, CONTROL | 1 | 1 << 8), Some("ctrl-l"));
+        // The page keeps Escape, typing, Ctrl+C and anything with more keys.
+        assert_eq!(app_shortcut(0x1b, 0), None);
+        assert_eq!(app_shortcut(0x4c, 0), None);
+        assert_eq!(app_shortcut(0x4c, SHIFT), None);
+        assert_eq!(app_shortcut(0x43, CONTROL), None);
+        assert_eq!(app_shortcut(0x4c, CONTROL | ALT), None);
+        assert_eq!(app_shortcut(0x09, 0), None);
+    }
 
     #[test]
     fn reads_the_download_directory_from_user_dirs() {

@@ -70,6 +70,9 @@ pub use chromium::{run_smoke_test_if_requested, run_subprocess_if_requested};
 #[derive(Clone, Debug)]
 pub enum BrowserEvent {
     Close,
+    /// One of the app's shortcuts, pressed in the page, as GPUI writes its
+    /// keys. The page has given the keyboard back; the app acts on the keys.
+    AppShortcut(&'static str),
     SessionChanged(BrowserSession),
     AuxiliarySelected(Option<SideTab>),
     AuxiliaryClosed(SideTab),
@@ -124,6 +127,12 @@ enum TabEvent {
     /// The page closed itself, which closes its tab.
     #[cfg(target_os = "linux")]
     Closed,
+    /// See [`NativeEvent::AppShortcut`].
+    #[cfg(target_os = "linux")]
+    AppShortcut(&'static str),
+    /// See [`NativeEvent::TakeFocus`].
+    #[cfg(target_os = "linux")]
+    TakeFocus,
 }
 
 enum NativeEvent {
@@ -159,6 +168,13 @@ enum NativeEvent {
     /// The page closed itself, so there is no browser left in its tab.
     #[cfg(target_os = "linux")]
     Closed,
+    /// One of the app's shortcuts was pressed while the page had the
+    /// keyboard, as GPUI writes its keys: it goes to the app.
+    #[cfg(target_os = "linux")]
+    AppShortcut(&'static str),
+    /// Tab went past the page's last control, or Shift+Tab before its first.
+    #[cfg(target_os = "linux")]
+    TakeFocus,
 }
 
 #[derive(Default)]
@@ -661,6 +677,26 @@ impl BrowserPane {
                 }
                 #[cfg(target_os = "linux")]
                 TabEvent::Closed => pane.close_tab(index, window, cx),
+                // The keyboard leaves the page for the app, which acts on
+                // the shortcut.
+                #[cfg(target_os = "linux")]
+                TabEvent::AppShortcut(keys) => {
+                    if index == pane.session.active_tab {
+                        pane.release_page_keyboard(cx);
+                        cx.emit(BrowserEvent::AppShortcut(keys));
+                    }
+                    return;
+                }
+                // Past either end of the page, the keyboard goes to the
+                // toolbar's address field, the control next to the page.
+                #[cfg(target_os = "linux")]
+                TabEvent::TakeFocus => {
+                    if index == pane.session.active_tab {
+                        pane.release_page_keyboard(cx);
+                        let tab = pane.tabs[index].entity.read(cx);
+                        tab.address.read(cx).focus_handle(cx).focus(window);
+                    }
+                }
             }
             cx.notify();
         })
@@ -747,6 +783,15 @@ impl BrowserPane {
                 self.visible && self.auxiliary.is_none() && index == self.session.active_tab,
                 self.covered,
             );
+        }
+    }
+
+    /// Takes the keyboard back from the page on screen, to the app's window.
+    #[cfg(target_os = "linux")]
+    fn release_page_keyboard(&self, cx: &mut Context<Self>) {
+        let tab = self.tabs[self.session.active_tab].entity.read(cx);
+        if let Some(native) = tab.display.native() {
+            native.with_view(blur_native_view);
         }
     }
 
@@ -1325,6 +1370,21 @@ impl BrowserTab {
             #[cfg(target_os = "linux")]
             NativeEvent::Closed => {
                 cx.emit(TabEvent::Closed);
+                return;
+            }
+            // Only from the page on screen, which alone has the keyboard.
+            #[cfg(target_os = "linux")]
+            NativeEvent::AppShortcut(keys) => {
+                if self.display.native_visible.get() {
+                    cx.emit(TabEvent::AppShortcut(keys));
+                }
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            NativeEvent::TakeFocus => {
+                if self.display.native_visible.get() {
+                    cx.emit(TabEvent::TakeFocus);
+                }
                 return;
             }
             // This arrives several times a second, so it must only redraw when
@@ -2640,6 +2700,50 @@ mod tests {
                 tab.native_event(NativeEvent::HistoryGesture(true), cx);
                 assert_eq!(tab.loading_generation, started);
             });
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn the_page_on_screen_hands_the_keyboard_back_for_the_apps_keys_and_past_its_ends(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                Some("example.com".into()),
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        let shortcuts = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let shortcuts = shortcuts.clone();
+            cx.subscribe(&pane, move |_, event: &BrowserEvent, _| {
+                if let BrowserEvent::AppShortcut(keys) = event {
+                    shortcuts.borrow_mut().push(*keys);
+                }
+            })
+            .detach();
+        });
+        let tab = pane.read_with(cx, |pane, _| pane.tabs[0].entity.clone());
+        let send = |cx: &mut gpui::VisualTestContext, event: NativeEvent| {
+            cx.update(|_, cx| tab.update(cx, |tab, cx| tab.native_event(event, cx)));
+            cx.run_until_parked();
+        };
+        // A page that is not on screen has no keyboard to give back.
+        tab.read_with(cx, |tab, _| tab.display.native_visible.set(false));
+        send(cx, NativeEvent::AppShortcut("ctrl-l"));
+        assert!(shortcuts.borrow().is_empty());
+        tab.read_with(cx, |tab, _| tab.display.native_visible.set(true));
+        send(cx, NativeEvent::AppShortcut("ctrl-l"));
+        send(cx, NativeEvent::AppShortcut("shift-escape"));
+        assert_eq!(*shortcuts.borrow(), ["ctrl-l", "shift-escape"]);
+        // Tab past the page's last control goes to the address field.
+        send(cx, NativeEvent::TakeFocus);
+        cx.update(|window, cx| {
+            let tab = tab.read(cx);
+            assert!(tab.address.read(cx).focus_handle(cx).is_focused(window));
         });
     }
 
