@@ -72,19 +72,17 @@ class UxAuditShotsTest {
         shoot("android-chat-fontscale2-dark", MinimalThemePreset.DARK, fontScale = 2f) { openChat() }
 
     /**
-     * The title's menu of the session's chats. The first menu a test opens is
-     * never painted, so it is opened, closed by picking the open chat in it,
-     * and opened once more.
+     * The title's menu of the session's chats. A menu's window is laid out
+     * only once something draws it, so it is drawn once before the capture.
      */
     @Test fun chatMenu() = shoot("android-chat-menu-dark", MinimalThemePreset.DARK) {
         openChat()
         click("Fix reconnect backoff")
-        // The row in the menu, which is a window of its own over the page.
-        val page = compose.onAllNodes(hasText("3 tool calls")).fetchSemanticsNodes().first().root
-        val named = compose.onAllNodes(hasText("Fix reconnect backoff"), useUnmergedTree = true)
-        named[named.fetchSemanticsNodes().indexOfFirst { it.root !== page }].performClick()
-        settle()
-        click("Fix reconnect backoff")
+        repeat(3) {
+            capture()
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
     }
 
     @Test @Config(qualifiers = "w840dp-h1200dp-320dpi")
