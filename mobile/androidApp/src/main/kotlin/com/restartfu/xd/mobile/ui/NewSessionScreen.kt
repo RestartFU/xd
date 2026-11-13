@@ -3,12 +3,6 @@ package com.restartfu.xd.mobile.ui
 import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -217,9 +211,7 @@ private data class FormHeader(
     val session: Boolean = false,
 )
 
-private fun pageTransition(forward: Boolean) =
-    (slideInHorizontally(tween(220)) { width -> if (forward) width / 5 else -width / 5 } + fadeIn(tween(220)))
-        .togetherWith(slideOutHorizontally(tween(180)) { width -> if (forward) -width / 5 else width / 5 } + fadeOut(tween(180)))
+private fun pageTransition(forward: Boolean) = sharedAxisX(forward)
 
 /** A whole-screen surface over the app, rising from the bottom as a full-screen dialog does. */
 @Composable
