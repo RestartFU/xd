@@ -14,6 +14,8 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextDecoration
@@ -307,6 +309,8 @@ internal fun ChatScreen(
     val settledRows = transcript.settled
     val rows = transcript.rows
     val answered = transcript.answered
+    // Who a reply is from, said first when a screen reader reads it.
+    val assistantName = DisplayLabels.backend(state.backend, catalog)
     val transcriptEmpty = transcript.isEmpty
     // The chat's agents by record key: the host rewrites one record per agent,
     // so each key is one row holding the agent's newest snapshot.
@@ -811,7 +815,7 @@ internal fun ChatScreen(
                         if (report != null) {
                             AgentReportLine(report, agentChats[report.chatId]) { openChat(report.chatId) }
                         } else {
-                            TranscriptRow(row.item, model, answered[row.item.id], liveText)
+                            TranscriptRow(row.item, model, assistantName, answered[row.item.id], liveText)
                         }
                     }
                     is TranscriptRow.Tools -> ToolGroupRow(row)
@@ -2027,6 +2031,8 @@ private fun AccountSwitchNotice(sentence: String) {
 private fun TranscriptRow(
     row: TranscriptItem,
     model: ChatViewModel,
+    /** The chat's assistant by name, as a screen reader says who a reply is from. */
+    assistantName: String,
     answering: String? = null,
     /** The words of the reply streaming in, as they stand now. */
     liveText: () -> String = { row.text },
@@ -2061,16 +2067,21 @@ private fun TranscriptRow(
     }
     if (item.kind != TranscriptKind.USER) {
         // A reply is the page itself, without a name over it; only system
-        // text keeps its label, so it cannot be mistaken for the agent.
+        // text keeps its label, so it cannot be mistaken for the agent. A
+        // screen reader is told the name instead.
+        if (item.kind == TranscriptKind.ASSISTANT) {
+            SpokenMessage(assistantName, Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                SelectableMessageBody(item, model)
+            }
+            return
+        }
         Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-            if (item.kind == TranscriptKind.SYSTEM) {
-                item.label?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = LocalXdSignals.current.faint,
-                    )
-                }
+            item.label?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = LocalXdSignals.current.faint,
+                )
             }
             SelectableMessageBody(item, model)
         }
@@ -2084,7 +2095,9 @@ private fun TranscriptRow(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         contentAlignment = Alignment.CenterEnd,
     ) {
-        Column(Modifier.fillMaxWidth(0.86f), horizontalAlignment = Alignment.End) {
+        // The bubble's side and tint say whose it is; a screen reader is told.
+        SpokenMessage(YOU, Modifier.fillMaxWidth(0.86f)) {
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
             // What the message answers, attached above it like a reply's quote.
             (answering?.let(::answeredQuestionLabel) ?: relay?.let { agentRelayLabel(it.description) })?.let { caption ->
                 Row(
@@ -2118,6 +2131,25 @@ private fun TranscriptRow(
                 }
             }
         }
+        }
+    }
+}
+
+/** Who the reader's own messages are from, to a screen reader. */
+internal const val YOU = "You"
+
+/**
+ * One message as one stop for a screen reader, starting with who it is from.
+ * The name is a node of its own under the message, first in it, so it is
+ * read before the words; the stop itself carries no text, so a screen reader
+ * reads all it holds. Links, pictures and anything else that acts on its own
+ * stay stops of their own, and selection is untouched.
+ */
+@Composable
+private fun SpokenMessage(speaker: String, modifier: Modifier, content: @Composable () -> Unit) {
+    Box(modifier.semantics(mergeDescendants = true) {}) {
+        Box(Modifier.matchParentSize().semantics { text = AnnotatedString(speaker) })
+        content()
     }
 }
 
