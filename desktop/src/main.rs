@@ -849,8 +849,9 @@ impl Render for PaneTooltip {
 }
 
 /// The most of its list the Paired devices dialog shows before it scrolls,
-/// which keeps the whole dialog inside the smallest window.
-const PAIRED_DEVICES_LIST_HEIGHT: f32 = 336.0;
+/// which keeps the whole dialog inside the smallest window: five rows and
+/// half of the next, its name cut through, so a longer list is seen to go on.
+const PAIRED_DEVICES_LIST_HEIGHT: f32 = 319.0;
 
 /// How far a [`ClearTooltip`] stays from the pointer, above or below it.
 const CLEAR_TOOLTIP_GAP: f32 = 18.0;
@@ -16927,17 +16928,13 @@ impl XdDesktop {
                         .text_color(rgb(colors.faint))
                         .child(format!("and {count} more"))
                 };
-                // Continue is the page's one filled action; with no session
-                // to continue, starting one is.
-                let start_kind = if resume.is_some() {
-                    ButtonKind::Secondary
+                // The filled action is Continue, or the first session's start:
+                // beside sessions that wait or work, starting another is not
+                // the thing to reach for.
+                let (start_kind, start_ink) = if sessions == 0 {
+                    (ButtonKind::Primary, colors.accent_text)
                 } else {
-                    ButtonKind::Primary
-                };
-                let start_ink = if resume.is_some() {
-                    colors.text
-                } else {
-                    colors.accent_text
+                    (ButtonKind::Secondary, colors.text)
                 };
                 page.child(heading(title).debug_selector(|| "home-heading".into()))
                     .when(quiet && sessions > 0, |page| {
