@@ -5261,6 +5261,165 @@ mod tests {
         });
     }
 
+    /// The full page with one host's summary, and xd's real keys.
+    #[cfg(unix)]
+    fn usage_page(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<XdDesktop>, &mut gpui::VisualTestContext) {
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (host, updates) = xd_desktop::host::HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            std::path::PathBuf::from("usage-keys-test"),
+        );
+        // The host end stays open for the test's length; nothing reads it.
+        std::mem::forget((server, updates));
+        crate::install_embedded_fonts(cx.text_system()).unwrap();
+        cx.update(|cx| {
+            cx.bind_keys(crate::base_key_bindings());
+            cx.bind_keys(crate::app_key_bindings());
+        });
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1180.0), px(780.0)));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.host = Some(host);
+            desktop.settings.usage_metric = "cost".into();
+            desktop.toggle_usage(window, cx);
+            desktop.usage.full_page = true;
+            desktop.usage.environments[0].summary =
+                summary_event(1).get("summary").and_then(Summary::parse);
+            desktop.usage.environments[0].summary_window =
+                Some((desktop.settings.usage_window_days, 1));
+        });
+        draw(cx);
+        (desktop, cx)
+    }
+
+    #[cfg(unix)]
+    fn draw(cx: &mut gpui::VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+
+    #[cfg(unix)]
+    fn ring(desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext) -> Option<String> {
+        cx.update_window_entity(desktop, |desktop, window, _| {
+            desktop
+                .key_stop
+                .as_ref()
+                .filter(|_| desktop.stop_focus.is_focused(window))
+                .map(|stop| stop.to_string())
+        })
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_usage_page_is_reached_with_tab(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = usage_page(cx);
+        let mut passed = Vec::new();
+        for _ in 0..40 {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+            let on = ring(&desktop, cx).unwrap_or_default();
+            if passed.contains(&on) {
+                break;
+            }
+            passed.push(on);
+        }
+        for id in [
+            "usage-environment-filter",
+            "usage-provider-filter",
+            "usage-window-30",
+            "usage-metric-tokens",
+            "usage-refresh",
+            "usage-close",
+            "usage-breakdown-time",
+            "usage-table-row-0",
+        ] {
+            assert!(
+                passed.iter().any(|on| on == id),
+                "Tab misses {id}: {passed:?}"
+            );
+        }
+        // Tab again to the 30 days segment, and Space picks it.
+        while ring(&desktop, cx).as_deref() != Some("usage-window-30") {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+        }
+        cx.simulate_keystrokes("space");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.settings.usage_window_days, 30)
+        });
+        // Close is an icon alone: its name shows while the ring is on it.
+        while ring(&desktop, cx).as_deref() != Some("usage-close") {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+        }
+        assert!(cx.debug_bounds("focus-tooltip").is_some());
+        // Enter on a filter opens its menu, which takes the arrow keys.
+        while ring(&desktop, cx).as_deref() != Some("usage-provider-filter") {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+        }
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.usage.menu == Some(UsageMenu::Provider));
+            assert!(desktop.menu_has_keys());
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_merged_figures_are_worked_out_once_per_summary_and_filters(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = usage_page(cx);
+        let runs = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| desktop.usage.merged_runs.get())
+        };
+        let first = runs(&desktop, cx);
+        assert!(first >= 1);
+        for _ in 0..3 {
+            draw(cx);
+        }
+        assert_eq!(runs(&desktop, cx), first, "frames reuse the figures");
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            desktop.settings.usage_hidden_providers = vec!["codex".into()];
+        });
+        draw(cx);
+        assert_eq!(
+            runs(&desktop, cx),
+            first + 1,
+            "a filter works them out again"
+        );
+    }
+
+    #[test]
+    fn the_chart_redraws_only_when_the_hovered_period_changes() {
+        let mut hover = None;
+        let at = |x: f32| ChartHover {
+            chart: "chart",
+            index: chart_hover_index(x, 300.0, 7),
+        };
+        assert!(set_chart_hover(&mut hover, at(10.0)));
+        // Moving within the first period changes nothing on screen.
+        assert!(!set_chart_hover(&mut hover, at(12.0)));
+        assert!(!set_chart_hover(&mut hover, at(24.0)));
+        // The next period does.
+        assert!(set_chart_hover(&mut hover, at(50.0)));
+        assert_eq!(hover.map(|hover| hover.index), Some(1));
+        assert_eq!(chart_hover_index(-5.0, 300.0, 7), 0);
+        assert_eq!(chart_hover_index(900.0, 300.0, 7), 6);
+        assert_eq!(chart_hover_index(10.0, 300.0, 1), 0);
+        // And the chart's mouse handler goes through the gate.
+        let source = include_str!("usage_view.rs");
+        assert!(source.contains("if set_chart_hover(&mut this.usage.hover, next) {"));
+    }
+
     #[gpui::test]
     fn shortcuts_switch_views_only_outside_dialogs(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);

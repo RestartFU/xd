@@ -3993,6 +3993,19 @@ struct SidebarContextMenu {
     target: SidebarTarget,
     title: String,
     position: Point<Pixels>,
+    /// Showing where a project or folder can move to, after Move to….
+    moving: bool,
+}
+
+/// A place Move to… offers: a folder, or the top level.
+struct MoveDestination {
+    folder: Option<String>,
+    name: String,
+    /// How far in the menu sets it: the top level, then each folder by its
+    /// place in the tree.
+    depth: usize,
+    /// It is there now.
+    here: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12425,6 +12438,7 @@ impl XdDesktop {
             target,
             title,
             position,
+            moving: false,
         });
         self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         cx.notify();
@@ -12554,6 +12568,63 @@ impl XdDesktop {
             Err(error) => self.model.connection_error = Some(error),
         }
         cx.notify();
+    }
+
+    /// Where Move to… offers to put a project or folder: the top level, then
+    /// every folder it is not itself or inside, in sidebar order. `None`
+    /// when the host cannot move it or there is no folder to move between.
+    fn move_destinations(&self, item: &str) -> Option<Vec<MoveDestination>> {
+        let folders = &self.model.folders;
+        let source = folders.iter().find(|folder| folder.id == item)?;
+        if !self.model.folder_reorder_supported || !self.model.folder_groups_supported {
+            return None;
+        }
+        let parent = source
+            .parent
+            .as_deref()
+            .filter(|parent| folders.iter().any(|folder| folder.id == *parent));
+        let mut destinations = vec![MoveDestination {
+            folder: None,
+            name: "Top level".into(),
+            depth: 0,
+            here: parent.is_none(),
+        }];
+        for row in folder_tree(folders) {
+            let folder = &folders[row.index];
+            if folder.group && !folder_within(folders, &folder.id, item) {
+                destinations.push(MoveDestination {
+                    folder: Some(folder.id.clone()),
+                    name: folder.name.clone(),
+                    depth: row.depth + 1,
+                    here: parent == Some(folder.id.as_str()),
+                });
+            }
+        }
+        (destinations.len() > 1).then_some(destinations)
+    }
+
+    /// Moves a project or folder into `parent`, or to the end of the top
+    /// level. Where it already is, nothing happens.
+    fn move_project_to(&mut self, item: &str, parent: Option<&str>, cx: &mut Context<Self>) {
+        let current = self
+            .model
+            .folders
+            .iter()
+            .find(|folder| folder.id == item)
+            .and_then(|folder| folder.parent.clone());
+        if current.as_deref() == parent {
+            return;
+        }
+        match parent {
+            Some(folder) => self.move_project_into_from_drop(
+                ProjectMoveInto {
+                    project_id: item.to_owned(),
+                    folder_id: folder.to_owned(),
+                },
+                cx,
+            ),
+            None => self.move_project_to_top_level_end(item, cx),
+        }
     }
 
     fn close_sidebar_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -23793,111 +23864,189 @@ impl XdDesktop {
                     run,
                 )
                 .child(label)
+                .into_any_element()
             };
             let mut rows = Vec::new();
-            if let Some(folder_id) = group {
-                for (id, label, kind) in [
-                    (
-                        "catalog-folder-new-project",
-                        "New project here",
-                        WorkspaceCreateKind::Project,
-                    ),
-                    (
-                        "catalog-folder-new-folder",
-                        "New folder here",
-                        WorkspaceCreateKind::Folder,
-                    ),
-                ] {
-                    let parent = folder_id.clone();
+            let destinations = match &menu.target {
+                SidebarTarget::Folder(folder_id) => self.move_destinations(folder_id),
+                _ => None,
+            };
+            if menu.moving
+                && let (SidebarTarget::Folder(item), Some(destinations)) =
+                    (&menu.target, &destinations)
+            {
+                rows.push(menu_note(format!("Move {} to", menu.title), colors).into_any_element());
+                for destination in destinations {
+                    let item = item.clone();
+                    let parent = destination.folder.clone();
+                    let id = match &parent {
+                        Some(folder) => SharedString::from(format!("catalog-move-to-{folder}")),
+                        None => "catalog-move-to-top".into(),
+                    };
+                    rows.push(
+                        key_row(
+                            &keys,
+                            KeyLayer::Menu,
+                            "sidebar-menu",
+                            menu_row(id, colors),
+                            colors.surface_high,
+                            cx,
+                            move |this, window, cx| {
+                                this.close_sidebar_context_menu(window, cx);
+                                this.move_project_to(&item, parent.as_deref(), cx);
+                            },
+                        )
+                        .child(menu_check(destination.here, colors))
+                        .child(
+                            div()
+                                .pl(px(destination.depth as f32 * CATALOG_INDENT))
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(icon(
+                                    if destination.folder.is_some() {
+                                        FOLDER_ICON
+                                    } else {
+                                        FOLDERS_ICON
+                                    },
+                                    14.0,
+                                    colors.muted,
+                                ))
+                                .child(truncating_label(destination.name.clone())),
+                        )
+                        .into_any_element(),
+                    );
+                }
+            }
+            let move_rows = std::mem::take(&mut rows);
+            // Only the rows on show are built: each one built takes a place
+            // among the rows the arrow keys move through.
+            if !menu.moving {
+                if let Some(folder_id) = group {
+                    for (id, label, kind) in [
+                        (
+                            "catalog-folder-new-project",
+                            "New project here",
+                            WorkspaceCreateKind::Project,
+                        ),
+                        (
+                            "catalog-folder-new-folder",
+                            "New folder here",
+                            WorkspaceCreateKind::Folder,
+                        ),
+                    ] {
+                        let parent = folder_id.clone();
+                        rows.push(row(
+                            id,
+                            label,
+                            false,
+                            Box::new(move |this, window, cx| {
+                                this.sidebar_context_menu = None;
+                                this.begin_workspace_create_in(
+                                    kind,
+                                    Some(parent.clone()),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        ));
+                    }
+                }
+                rows.push(row(
+                    if project {
+                        "minimal-rename-project"
+                    } else {
+                        "minimal-rename-session"
+                    },
+                    if folder_group {
+                        "Rename folder"
+                    } else if project {
+                        "Rename project"
+                    } else if chat {
+                        "Rename chat"
+                    } else {
+                        "Rename session"
+                    },
+                    false,
+                    Box::new(move |this, window, cx| {
+                        this.begin_sidebar_edit(
+                            rename_target.clone(),
+                            rename_title.clone(),
+                            window,
+                            cx,
+                        );
+                    }),
+                ));
+                if destinations.is_some() {
                     rows.push(row(
-                        id,
-                        label,
+                        "catalog-move-to",
+                        "Move to…",
                         false,
-                        Box::new(move |this, window, cx| {
-                            this.sidebar_context_menu = None;
-                            this.begin_workspace_create_in(kind, Some(parent.clone()), window, cx);
+                        Box::new(|this, _, cx| {
+                            if let Some(menu) = &mut this.sidebar_context_menu {
+                                menu.moving = true;
+                            }
+                            // The keys start on the first place it can go.
+                            this.key_cursor = Some(("sidebar-menu", 0));
+                            cx.notify();
                         }),
                     ));
                 }
-            }
-            rows.push(row(
-                if project {
-                    "minimal-rename-project"
-                } else {
-                    "minimal-rename-session"
-                },
-                if folder_group {
-                    "Rename folder"
-                } else if project {
-                    "Rename project"
-                } else if chat {
-                    "Rename chat"
-                } else {
-                    "Rename session"
-                },
-                false,
-                Box::new(move |this, window, cx| {
-                    this.begin_sidebar_edit(
-                        rename_target.clone(),
-                        rename_title.clone(),
-                        window,
-                        cx,
-                    );
-                }),
-            ));
-            if let Some((session_id, (settled, auto_disabled))) = settlement {
-                let settle_session = session_id.clone();
-                rows.push(row(
-                    "minimal-settle-session",
-                    if settled {
-                        "Bring back session"
-                    } else {
-                        "Settle session"
-                    },
-                    false,
-                    Box::new(move |this, window, cx| {
-                        this.close_sidebar_context_menu(window, cx);
+                if let Some((session_id, (settled, auto_disabled))) = settlement {
+                    let settle_session = session_id.clone();
+                    rows.push(row(
+                        "minimal-settle-session",
                         if settled {
-                            this.unsettle_session(&settle_session, cx);
+                            "Bring back session"
                         } else {
-                            this.settle_session(&settle_session, cx);
-                        }
-                    }),
-                ));
+                            "Settle session"
+                        },
+                        false,
+                        Box::new(move |this, window, cx| {
+                            this.close_sidebar_context_menu(window, cx);
+                            if settled {
+                                this.unsettle_session(&settle_session, cx);
+                            } else {
+                                this.settle_session(&settle_session, cx);
+                            }
+                        }),
+                    ));
+                    rows.push(row(
+                        "minimal-session-auto-settle",
+                        if auto_disabled {
+                            "Enable auto-settle"
+                        } else {
+                            "Disable auto-settle"
+                        },
+                        false,
+                        Box::new(move |this, window, cx| {
+                            this.close_sidebar_context_menu(window, cx);
+                            this.set_session_auto_settle(&session_id, auto_disabled, cx);
+                        }),
+                    ));
+                }
                 rows.push(row(
-                    "minimal-session-auto-settle",
-                    if auto_disabled {
-                        "Enable auto-settle"
+                    if project {
+                        "minimal-delete-project"
                     } else {
-                        "Disable auto-settle"
+                        "minimal-delete-session"
                     },
-                    false,
+                    if folder_group {
+                        "Delete folder"
+                    } else if project {
+                        "Delete project"
+                    } else if chat {
+                        "Delete chat"
+                    } else {
+                        "Delete session"
+                    },
+                    true,
                     Box::new(move |this, window, cx| {
-                        this.close_sidebar_context_menu(window, cx);
-                        this.set_session_auto_settle(&session_id, auto_disabled, cx);
+                        this.begin_sidebar_delete(delete_target.clone(), window, cx);
                     }),
                 ));
             }
-            rows.push(row(
-                if project {
-                    "minimal-delete-project"
-                } else {
-                    "minimal-delete-session"
-                },
-                if folder_group {
-                    "Delete folder"
-                } else if project {
-                    "Delete project"
-                } else if chat {
-                    "Delete chat"
-                } else {
-                    "Delete session"
-                },
-                true,
-                Box::new(move |this, window, cx| {
-                    this.begin_sidebar_delete(delete_target.clone(), window, cx);
-                }),
-            ));
             div()
                 .occlude()
                 .absolute()
@@ -23915,8 +24064,22 @@ impl XdDesktop {
                     menu.position,
                     menu_shell(colors)
                         .debug_selector(|| "sidebar-context-menu".into())
-                        .w(px(188.0))
-                        .children(rows),
+                        .w(px(if menu.moving { 240.0 } else { 188.0 }))
+                        .when(menu.moving, |menu| {
+                            menu.max_h(px(menu_under_max_height(0.0, 420.0)))
+                        })
+                        .when(!menu.moving, |shell| shell.children(rows))
+                        .when(menu.moving, |shell| {
+                            shell.child(
+                                div()
+                                    .id("catalog-move-list")
+                                    .min_h_0()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_y_scroll()
+                                    .children(move_rows),
+                            )
+                        }),
                 ))
                 .into_any_element()
         });
@@ -32959,6 +33122,168 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             .advance_clock(UNDO_LIFETIME + Duration::from_secs(1));
         redraw(cx);
         desktop.read_with(cx, |desktop, _| assert_eq!(desktop.undo_notice(), None));
+    }
+
+    /// Presses Tab until the ring is on `id`, and says the controls it
+    /// passed on the way.
+    fn tab_to(
+        desktop: &Entity<XdDesktop>,
+        cx: &mut gpui::VisualTestContext,
+        id: &str,
+    ) -> Vec<String> {
+        let mut passed = Vec::new();
+        for _ in 0..80 {
+            cx.simulate_keystrokes("tab");
+            redraw(cx);
+            match ring(desktop, cx) {
+                Some(on) if on == id => return passed,
+                Some(on) => passed.push(on),
+                None => passed.push(String::new()),
+            }
+        }
+        panic!("Tab never reached {id}; it passed {passed:?}");
+    }
+
+    #[gpui::test]
+    fn the_files_list_is_reached_with_tab_and_walked_with_the_arrows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = long_chat_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, _| {
+            desktop.diff_panel = Some(DiffPanel {
+                files_mode: true,
+                browse_entries: (0..60)
+                    .map(|index| BrowseEntry {
+                        name: format!("file-{index:02}.rs"),
+                        directory: false,
+                    })
+                    .collect(),
+                ..DiffPanel::default()
+            });
+            desktop.set_browser_open(true);
+            desktop.native_pane = NativePane::Files;
+            window.focus(&desktop.root_focus);
+        });
+        redraw(cx);
+        tab_to(&desktop, cx, "native-file:0");
+        cx.simulate_keystrokes("down down");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("native-file:2"));
+        // Past the rows in view: the list scrolls and the ring goes with it.
+        for _ in 0..40 {
+            cx.simulate_keystrokes("down");
+            redraw(cx);
+        }
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("native-file:42"));
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.files_scroll.0.borrow().base_handle.offset().y < px(0.0));
+        });
+        cx.simulate_keystrokes("up");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("native-file:41"));
+        // Enter opens the file the ring is on.
+        cx.simulate_keystrokes("enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.diff_panel.as_ref().unwrap().file_loading);
+        });
+    }
+
+    #[gpui::test]
+    fn the_browser_panes_tabs_and_buttons_are_reached_with_tab(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = long_chat_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, _| {
+            desktop.set_browser_open(true);
+            window.focus(&desktop.root_focus);
+        });
+        redraw(cx);
+        let passed = tab_to(&desktop, cx, "browser-new-tab");
+        assert!(
+            passed.iter().any(|on| on.starts_with("browser-tab-")),
+            "{passed:?}"
+        );
+        // An icon alone says what it is while the ring is on it.
+        assert!(cx.debug_bounds("focus-tooltip").is_some());
+        let tabs = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            cx.update_window_entity(desktop, |desktop, window, cx| {
+                desktop
+                    .sync_browser_pane(window, cx)
+                    .unwrap()
+                    .read(cx)
+                    .session()
+                    .tabs
+                    .len()
+            })
+        };
+        let before = tabs(&desktop, cx);
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        assert_eq!(tabs(&desktop, cx), before + 1);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn move_to_puts_a_project_in_a_folder_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.bind_keys(all_key_bindings()));
+        let (desktop, cx, mut requests, _updates) = docked_ask_fixture(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model.folders.push(Folder {
+                id: "clients".into(),
+                parent: None,
+                name: "Clients".into(),
+                owner: None,
+                group: true,
+            });
+            desktop.model.folder_reorder_supported = true;
+            desktop.model.folder_groups_supported = true;
+            desktop.open_sidebar_context_menu(
+                SidebarTarget::Folder("atlas".into()),
+                "Atlas".into(),
+                point(px(200.0), px(200.0)),
+                window,
+                cx,
+            );
+        });
+        redraw(cx);
+        // Rename project, Move to…, Delete project.
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(
+                desktop.key_rows(),
+                Some((KeyLayer::Menu, "sidebar-menu", 3))
+            );
+        });
+        cx.simulate_keystrokes("down down enter");
+        redraw(cx);
+        // The menu now lists where it can go: the top level, where it is,
+        // and the folder.
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.sidebar_context_menu.as_ref().unwrap().moving);
+            assert_eq!(
+                desktop.key_rows(),
+                Some((KeyLayer::Menu, "sidebar-menu", 2))
+            );
+            assert_eq!(desktop.key_row_at(), Some(0));
+        });
+        cx.simulate_keystrokes("down enter");
+        let request = next_request_with_op(&mut requests, "move-folder");
+        assert_eq!(request["folder"], "atlas");
+        assert_eq!(request["parent"], "clients");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.sidebar_context_menu.is_none());
+        });
+        // A session has no folder to move to: its menu offers nothing.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_sidebar_context_menu(
+                SidebarTarget::Session("workspace".into()),
+                "Workspace switcher".into(),
+                point(px(200.0), px(200.0)),
+                window,
+                cx,
+            );
+        });
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.move_destinations("workspace").is_none());
+        });
     }
 
     #[gpui::test]
