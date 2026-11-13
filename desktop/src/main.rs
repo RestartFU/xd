@@ -35,11 +35,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
     Decorations, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, HighlightStyle, Image,
-    KeyBinding, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point,
-    Render, ResizeEdge, ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer,
-    TitlebarOptions, WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*,
-    px, relative, rgb, rgba, size, svg,
+    KeyBinding, ListAlignment, ListHorizontalSizingBehavior, ListOffset, ListState, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ResizeEdge, ScrollHandle, ScrollWheelEvent,
+    SharedString, StyledText, TextRun, Timer, TitlebarOptions, WeakFocusHandle, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowDecorations, WindowOptions,
+    canvas, div, img, list, point, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -730,6 +730,17 @@ fn ui_button(
     }
 }
 
+/// A button that cannot be pressed now: the shape of [`ui_button`] in the
+/// quiet fill a disabled send button has, with nothing that reacts.
+fn disabled_button(
+    id: impl Into<gpui::ElementId>,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    ui_button_shape(id)
+        .bg(rgb(colors.surface_high))
+        .text_color(rgb(colors.faint))
+}
+
 /// A drawn stroke icon from the embedded set, tinted to the surrounding text.
 fn icon(path: &'static str, size: f32, color: u32) -> gpui::AnyElement {
     svg()
@@ -848,6 +859,143 @@ fn patch_view_lines(patch: &str) -> impl Iterator<Item = (PatchLine, &str)> {
             line,
         ))
     })
+}
+
+/// How many of a patch's lines the Changes pane draws. A longer patch ends with
+/// a line that says so.
+const PATCH_VIEW_LINES: usize = 4_000;
+
+/// One row of the Changes pane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PatchRow {
+    Line(PatchLine, SharedString),
+    /// The space above every file but the first.
+    Gap,
+    /// Closes a patch that was cut at [`PATCH_VIEW_LINES`].
+    Cut,
+}
+
+/// A patch as the Changes pane's rows, built once when the patch arrives so a
+/// frame draws only the rows in view and never reads the patch again.
+#[derive(Clone, Default)]
+struct PatchView {
+    rows: Rc<[PatchRow]>,
+    /// The row with the most text, which sets how far the pane scrolls sideways.
+    widest: Option<usize>,
+}
+
+impl PatchView {
+    fn new(patch: &str) -> Self {
+        let mut lines = patch_view_lines(patch);
+        let mut rows = Vec::new();
+        let mut widest: Option<(usize, usize)> = None;
+        for (kind, line) in lines.by_ref().take(PATCH_VIEW_LINES) {
+            if kind == PatchLine::File && !rows.is_empty() {
+                rows.push(PatchRow::Gap);
+            }
+            let width = line.chars().count();
+            if widest.is_none_or(|(_, most)| width > most) {
+                widest = Some((rows.len(), width));
+            }
+            rows.push(PatchRow::Line(kind, SharedString::new(line)));
+        }
+        if lines.next().is_some() {
+            rows.push(PatchRow::Cut);
+        }
+        Self {
+            rows: rows.into(),
+            widest: widest.map(|(index, _)| index),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// Whether the Changes pane can commit, and what to tell the user when not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CommitState {
+    Ready,
+    /// A Git operation is running; the button shows what it is.
+    Busy(String),
+    /// Nothing to press, with the reason for the button's tooltip.
+    Blocked(&'static str),
+}
+
+impl CommitState {
+    fn of(diff: &DiffPanel, message: &str) -> Self {
+        if let Some(action) = &diff.action {
+            return Self::Busy(action.clone());
+        }
+        match &diff.status {
+            None => Self::Blocked("Checking for changes…"),
+            Some(status) if status.conflicted > 0 => Self::Blocked("Resolve the conflicts first."),
+            Some(status) if status.clean => Self::Blocked("No changes to commit."),
+            Some(_) if message.trim().is_empty() => Self::Blocked("Enter a commit message."),
+            Some(_) => Self::Ready,
+        }
+    }
+}
+
+/// The line above the commit box: what went wrong last, or what stands in the
+/// way of a commit that the user has to deal with outside this pane.
+fn commit_notice(diff: &DiffPanel) -> Option<String> {
+    if let Some(error) = &diff.action_error {
+        return Some(error.clone());
+    }
+    match diff.status.as_ref()?.conflicted {
+        0 => None,
+        1 => Some("1 file is in conflict. Resolve it to commit.".into()),
+        files => Some(format!(
+            "{files} files are in conflict. Resolve them to commit."
+        )),
+    }
+}
+
+/// The height every row of the Changes pane shares, so only those in view are
+/// laid out.
+const PATCH_ROW_HEIGHT: f32 = 19.0;
+
+fn patch_row(row: &PatchRow, colors: ThemeColors) -> gpui::Div {
+    let base = div()
+        .h(px(PATCH_ROW_HEIGHT))
+        .px_3()
+        .flex()
+        .items_center()
+        .whitespace_nowrap()
+        .font_family(MONO)
+        .text_size(px(12.0));
+    let (kind, line) = match row {
+        PatchRow::Gap => return base,
+        PatchRow::Cut => {
+            return base
+                .font_family(UI_FONT)
+                .text_color(rgb(colors.muted))
+                .child(format!(
+                    "Showing the first {} lines.",
+                    xd_desktop::usage::format_count(PATCH_VIEW_LINES as u64)
+                ));
+        }
+        PatchRow::Line(kind, line) => (*kind, line.clone()),
+    };
+    let (fg, bg) = match kind {
+        PatchLine::File => (colors.text, Some(colors.surface_high)),
+        PatchLine::Added => (colors.text, Some(colors.diff_added)),
+        PatchLine::Removed => (colors.text, Some(colors.diff_removed)),
+        PatchLine::Context => (colors.muted, None),
+        PatchLine::Detail => (colors.faint, None),
+    };
+    base.text_color(rgb(fg))
+        .when_some(bg, |row, bg| row.bg(rgb(bg)))
+        .when(kind == PatchLine::File, |row| {
+            row.font_weight(FontWeight::MEDIUM)
+        })
+        .child(if line.is_empty() {
+            SharedString::new_static(" ")
+        } else {
+            line
+        })
 }
 
 /// The newer path in `a/old b/new`. An unrenamed file repeats one path, which
@@ -1157,7 +1305,7 @@ struct BrowseEntry {
 
 #[derive(Clone, Default)]
 struct DiffPanel {
-    patch: String,
+    patch: PatchView,
     branch: bool,
     base: Option<String>,
     files_mode: bool,
@@ -1170,7 +1318,7 @@ struct DiffPanel {
     action: Option<String>,
     action_error: Option<String>,
     browse_path: String,
-    browse_entries: Vec<BrowseEntry>,
+    browse_entries: Rc<[BrowseEntry]>,
     file_preview: Option<FilePreview>,
     file_loading: bool,
     pr_url: Option<String>,
@@ -5765,7 +5913,7 @@ impl XdDesktop {
                     }
                 } else {
                     if let Some(diff) = &mut self.diff_panel {
-                        diff.patch = output.clone();
+                        diff.patch = PatchView::new(&output);
                     }
                     self.prepare_diff(output, generation, cx);
                 }
@@ -5827,7 +5975,7 @@ impl XdDesktop {
                     Ok(entries) => {
                         if let Some(diff) = &mut self.diff_panel {
                             diff.browse_path = path;
-                            diff.browse_entries = entries;
+                            diff.browse_entries = entries.into();
                             diff.file_preview = None;
                             diff.loading = false;
                             diff.error = None;
@@ -10288,18 +10436,16 @@ impl XdDesktop {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        let can_commit = self.diff_panel.as_ref().is_some_and(|diff| {
-            diff.action.is_none()
-                && diff.status.as_ref().is_some_and(|status| {
-                    !status.clean && status.conflicted == 0 && !message.is_empty()
-                })
-        });
+        let can_commit = self
+            .diff_panel
+            .as_ref()
+            .is_some_and(|diff| CommitState::of(diff, &message) == CommitState::Ready);
         if !can_commit {
             return;
         }
         let generation = self.diff_generation;
         if let Some(diff) = &mut self.diff_panel {
-            diff.action = Some("Committing all changes…".into());
+            diff.action = Some("Committing…".into());
             diff.action_error = None;
         }
         let result = self
@@ -20568,22 +20714,76 @@ impl XdDesktop {
         let pane_content = match self.native_pane {
             NativePane::Chat => None,
             NativePane::Terminal => Some(self.render_minimal_terminal(colors, window, cx)),
-            NativePane::Files => Some({
-                let panel = self.diff_panel.clone().unwrap_or_default();
-                let mut rows = Vec::new();
-                for (index, entry) in panel.browse_entries.iter().enumerate() {
-                    let path = if panel.browse_path.is_empty() {
-                        entry.name.clone()
-                    } else {
-                        format!("{}/{}", panel.browse_path, entry.name)
-                    };
-                    let directory = entry.directory;
-                    let label = entry.name.clone();
-                    let open = panel
-                        .file_preview
-                        .as_ref()
-                        .is_some_and(|preview| preview.path == path);
-                    rows.push(
+            NativePane::Files => Some(self.render_files_pane(colors, window, cx)),
+            NativePane::Diff => Some(self.render_changes_pane(colors, window, cx)),
+        };
+        pane_content.unwrap_or_else(|| div().into_any_element())
+    }
+
+    /// One folder's entries. Only the rows in view are built, and a frame
+    /// borrows the panel instead of copying it and the file it has open.
+    fn render_files_pane(
+        &mut self,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let default_panel = DiffPanel::default();
+        let panel = self.diff_panel.as_ref().unwrap_or(&default_panel);
+        let entries = panel.browse_entries.clone();
+        let browse_path = panel.browse_path.clone();
+        let open_path = panel
+            .file_preview
+            .as_ref()
+            .map(|preview| preview.path.clone());
+        let preview = panel
+            .file_preview
+            .as_ref()
+            .map(|preview| (preview.path.clone(), preview.saving));
+        let loading = panel.loading;
+        let file_loading = panel.file_loading;
+        let error = panel.error.clone();
+        let empty = entries.is_empty() && !loading && error.is_none();
+        // The list takes the whole pane until there is something to
+        // show beside it, and leaves room for that at any pane width.
+        let detail_open = preview.is_some() || file_loading || error.is_some();
+        let list_width = (browser_pane_width(
+            self.settings.browser_width,
+            f32::from(window.viewport_size().width),
+        ) * 0.42)
+            .clamp(140.0, 220.0);
+        let at_root = browse_path.is_empty();
+        let location = if at_root {
+            "Project root".to_owned()
+        } else {
+            browse_path.clone()
+        };
+        let note = |text: &'static str| {
+            div()
+                .h(px(28.0))
+                .mx(px(6.0))
+                .px_2()
+                .flex_none()
+                .flex()
+                .items_center()
+                .text_size(px(12.5))
+                .text_color(rgb(colors.muted))
+                .child(text)
+        };
+        let rows = uniform_list(
+            "native-file-list",
+            entries.len(),
+            cx.processor(move |_, range: Range<usize>, _, cx| {
+                range
+                    .map(|index| {
+                        let entry = &entries[index];
+                        let path = if browse_path.is_empty() {
+                            entry.name.clone()
+                        } else {
+                            format!("{browse_path}/{}", entry.name)
+                        };
+                        let directory = entry.directory;
+                        let open = open_path.as_deref() == Some(path.as_str());
                         div()
                             .id(("native-file", index))
                             .h(px(28.0))
@@ -20610,399 +20810,366 @@ impl XdDesktop {
                                     .text_color(rgb(colors.faint)),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(chat) = this.model.selected_chat.clone() {
-                                    if let Some(panel) = &mut this.diff_panel {
-                                        panel.file_preview = None;
-                                        if directory {
-                                            panel.browse_path = path.clone();
-                                            panel.loading = true;
-                                        } else {
-                                            panel.file_loading = true;
-                                        }
-                                    }
+                                this.open_browse_entry(path.clone(), directory, cx);
+                            }))
+                            .child(div().min_w_0().truncate().child(entry.name.clone()))
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .flex_1()
+        .min_h_0()
+        .px(px(6.0));
+        let list = div()
+            .h_full()
+            .flex()
+            .flex_col()
+            .pt(px(6.0))
+            .when(loading, |list| list.child(note("Loading…")))
+            .when(empty, |list| list.child(note("This folder is empty.")))
+            .child(rows);
+        let detail = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .when(file_loading, |pane| {
+                pane.child(
+                    div()
+                        .p_3()
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.muted))
+                        .child("Loading…"),
+                )
+            })
+            .when_some(error, |pane, error| {
+                pane.child(
+                    div()
+                        .p_3()
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.danger))
+                        .child(error),
+                )
+            })
+            .when_some(preview, |pane, (path, saving)| {
+                pane.child(
+                    div()
+                        .h(px(browser::TAB_BAR_HEIGHT))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_3()
+                        .border_b_1()
+                        .border_color(rgb(colors.border))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .font_family(MONO)
+                                .text_size(px(12.0))
+                                .text_color(rgb(colors.muted))
+                                .child(path),
+                        )
+                        .child(
+                            ui_button("native-save-file", ButtonKind::Secondary, colors)
+                                .h(px(26.0))
+                                .on_click(cx.listener(|this, _, _, cx| this.save_browse_file(cx)))
+                                .child(if saving { "Saving…" } else { "Save" }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .p_2()
+                        .text_size(px(12.5))
+                        .child(self.file_editor.clone()),
+                )
+            });
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .text_color(rgb(colors.text))
+            .child(
+                div()
+                    .h(px(browser::TAB_BAR_HEIGHT))
+                    .bg(glass::pane(colors))
+                    .flex_none()
+                    .pl_2()
+                    .pr_3()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .when(!at_root, |row| {
+                        row.child(
+                            pane_icon_button(
+                                "native-files-up",
+                                "Parent directory",
+                                ARROW_LEFT_ICON,
+                                false,
+                                colors,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let (Some(chat), Some(panel)) =
+                                    (this.model.selected_chat.clone(), &mut this.diff_panel)
+                                {
+                                    panel.browse_path = Path::new(&panel.browse_path)
+                                        .parent()
+                                        .map(|p| p.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    panel.loading = true;
+                                    panel.file_preview = None;
+                                    let path = panel.browse_path.clone();
                                     if let Some(host) = this.active_host() {
-                                        let result = if directory {
-                                            host.file_browse_list(
-                                                &chat,
-                                                &path,
-                                                this.diff_generation,
-                                            )
-                                        } else {
-                                            host.file_browse_read(
-                                                &chat,
-                                                &path,
-                                                this.diff_generation,
-                                            )
-                                        };
-                                        if let Err(error) = result {
-                                            this.model.connection_error = Some(error);
-                                        }
+                                        let _ = host.file_browse_list(
+                                            &chat,
+                                            &path,
+                                            this.diff_generation,
+                                        );
                                     }
                                 }
                                 cx.notify();
-                            }))
-                            .child(div().min_w_0().truncate().child(label))
-                            .into_any_element(),
-                    );
-                }
-                let empty = rows.is_empty() && !panel.loading && panel.error.is_none();
-                // The list takes the whole pane until there is something to
-                // show beside it, and leaves room for that at any pane width.
-                let detail_open =
-                    panel.file_preview.is_some() || panel.file_loading || panel.error.is_some();
-                let list_width = (browser_pane_width(
-                    self.settings.browser_width,
-                    f32::from(window.viewport_size().width),
-                ) * 0.42)
-                    .clamp(140.0, 220.0);
-                let at_root = panel.browse_path.is_empty();
-                let location = if at_root {
-                    "Project root".to_owned()
-                } else {
-                    panel.browse_path.clone()
-                };
-                let list = div()
-                    .id("native-file-list")
-                    .h_full()
-                    .overflow_y_scroll()
-                    .p(px(6.0))
-                    .when(panel.loading, |list| {
-                        list.child(
-                            div()
-                                .h(px(28.0))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .text_size(px(12.5))
-                                .text_color(rgb(colors.muted))
-                                .child("Loading…"),
+                            })),
                         )
                     })
-                    .when(empty, |list| {
-                        list.child(
-                            div()
-                                .h(px(28.0))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .text_size(px(12.5))
-                                .text_color(rgb(colors.muted))
-                                .child("This folder is empty."),
-                        )
-                    })
-                    .children(rows);
-                let detail = div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .when(panel.file_loading, |pane| {
-                        pane.child(
-                            div()
-                                .p_3()
-                                .text_size(px(12.5))
-                                .text_color(rgb(colors.muted))
-                                .child("Loading…"),
-                        )
-                    })
-                    .when_some(panel.error, |pane, error| {
-                        pane.child(
-                            div()
-                                .p_3()
-                                .text_size(px(12.5))
-                                .text_color(rgb(colors.danger))
-                                .child(error),
-                        )
-                    })
-                    .when_some(panel.file_preview, |pane, preview| {
-                        pane.child(
-                            div()
-                                .h(px(browser::TAB_BAR_HEIGHT))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .px_3()
-                                .border_b_1()
-                                .border_color(rgb(colors.border))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .truncate()
-                                        .font_family(MONO)
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(colors.muted))
-                                        .child(preview.path),
-                                )
-                                .child(
-                                    ui_button("native-save-file", ButtonKind::Secondary, colors)
-                                        .h(px(26.0))
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.save_browse_file(cx)),
-                                        )
-                                        .child(if preview.saving { "Saving…" } else { "Save" }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h_0()
-                                .p_2()
-                                .text_size(px(12.5))
-                                .child(self.file_editor.clone()),
-                        )
-                    });
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .min_h_0()
-                    .text_color(rgb(colors.text))
                     .child(
                         div()
-                            .h(px(browser::TAB_BAR_HEIGHT))
-                            .bg(glass::pane(colors))
-                            .flex_none()
-                            .pl_2()
-                            .pr_3()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .border_b_1()
-                            .border_color(rgb(colors.border))
-                            .when(!at_root, |row| {
-                                row.child(
-                                    pane_icon_button(
-                                        "native-files-up",
-                                        "Parent directory",
-                                        ARROW_LEFT_ICON,
-                                        false,
-                                        colors,
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            if let (Some(chat), Some(panel)) = (
-                                                this.model.selected_chat.clone(),
-                                                &mut this.diff_panel,
-                                            ) {
-                                                panel.browse_path = Path::new(&panel.browse_path)
-                                                    .parent()
-                                                    .map(|p| p.to_string_lossy().into_owned())
-                                                    .unwrap_or_default();
-                                                panel.loading = true;
-                                                panel.file_preview = None;
-                                                let path = panel.browse_path.clone();
-                                                if let Some(host) = this.active_host() {
-                                                    let _ = host.file_browse_list(
-                                                        &chat,
-                                                        &path,
-                                                        this.diff_generation,
-                                                    );
-                                                }
-                                            }
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .when(at_root, |label| label.pl_1())
-                                    .truncate()
-                                    .when(!at_root, |label| label.font_family(MONO))
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(colors.muted))
-                                    .child(location),
-                            ),
-                    )
-                    .child(
-                        div()
+                            .min_w_0()
                             .flex_1()
-                            .min_h_0()
-                            .flex()
-                            .child(
-                                div()
-                                    .h_full()
-                                    .when(detail_open, |column| {
-                                        column
-                                            .w(px(list_width))
-                                            .flex_none()
-                                            .border_r_1()
-                                            .border_color(rgb(colors.border))
-                                    })
-                                    .when(!detail_open, |column| column.flex_1().min_w_0())
-                                    .child(list),
-                            )
-                            .when(detail_open, |split| split.child(detail)),
-                    )
-                    .into_any_element()
-            }),
-            NativePane::Diff => Some({
-                let panel = self.diff_panel.clone().unwrap_or_default();
-                let lines = patch_view_lines(&panel.patch)
-                    .take(4_000)
-                    .enumerate()
-                    .map(|(index, (kind, line))| {
-                        let (fg, bg) = match kind {
-                            PatchLine::File => (colors.text, Some(colors.surface_high)),
-                            PatchLine::Added => (colors.text, Some(colors.diff_added)),
-                            PatchLine::Removed => (colors.text, Some(colors.diff_removed)),
-                            PatchLine::Context => (colors.muted, None),
-                            PatchLine::Detail => (colors.faint, None),
-                        };
-                        div()
-                            .id(("native-diff-line", index))
-                            .px_3()
-                            .h(px(if kind == PatchLine::File { 26.0 } else { 19.0 }))
-                            .flex()
-                            .items_center()
-                            .whitespace_nowrap()
-                            .text_color(rgb(fg))
-                            .when_some(bg, |row, bg| row.bg(rgb(bg)))
-                            .when(kind == PatchLine::File, |row| {
-                                row.when(index > 0, |row| row.mt_3())
-                                    .font_weight(FontWeight::MEDIUM)
-                            })
-                            .child(if line.is_empty() {
-                                " ".to_owned()
-                            } else {
-                                line.to_owned()
-                            })
-                            .into_any_element()
-                    })
-                    .collect::<Vec<_>>();
-                let commit_focused = self
-                    .git_commit_input
-                    .read(cx)
-                    .focus_handle(cx)
-                    .is_focused(window);
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .text_color(rgb(colors.text))
-                    .child(
-                        div()
-                            .h(px(browser::TAB_BAR_HEIGHT))
-                            .bg(glass::pane(colors))
-                            .flex_none()
-                            .pl_3()
-                            .pr_2()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .border_b_1()
-                            .border_color(rgb(colors.border))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(colors.muted))
-                                    .child("Working tree"),
-                            )
-                            .child(
-                                pane_icon_button(
-                                    "native-refresh-diff",
-                                    "Refresh",
-                                    ROTATE_CW_ICON,
-                                    false,
-                                    colors,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| this.show_native_pane(NativePane::Diff, cx),
-                                )),
-                            ),
-                    )
-                    .when(panel.loading, |pane| {
-                        pane.child(
-                            div()
-                                .p_3()
-                                .text_size(px(12.5))
-                                .text_color(rgb(colors.muted))
-                                .child("Loading…"),
-                        )
-                    })
-                    .when_some(panel.error, |pane, error| {
-                        pane.child(
-                            div()
-                                .p_3()
-                                .text_size(px(12.5))
-                                .text_color(rgb(colors.danger))
-                                .child(error),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id("native-diff-output")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_scroll()
-                            .py_2()
-                            .font_family(MONO)
+                            .when(at_root, |label| label.pl_1())
+                            .truncate()
+                            .when(!at_root, |label| label.font_family(MONO))
                             .text_size(px(12.0))
-                            .children(lines)
-                            .when(panel.patch.is_empty() && !panel.loading, |output| {
-                                output.child(
-                                    div()
-                                        .px_3()
-                                        .font_family(UI_FONT)
-                                        .text_size(px(12.5))
-                                        .text_color(rgb(colors.muted))
-                                        .child("No changes."),
-                                )
-                            }),
-                    )
+                            .text_color(rgb(colors.muted))
+                            .child(location),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
                     .child(
                         div()
-                            .flex_none()
-                            .p_2()
+                            .h_full()
+                            .when(detail_open, |column| {
+                                column
+                                    .w(px(list_width))
+                                    .flex_none()
+                                    .border_r_1()
+                                    .border_color(rgb(colors.border))
+                            })
+                            .when(!detail_open, |column| column.flex_1().min_w_0())
+                            .child(list),
+                    )
+                    .when(detail_open, |split| split.child(detail)),
+            )
+            .into_any_element()
+    }
+
+    /// Opens a folder in the Files pane's list, or a file beside it.
+    fn open_browse_entry(&mut self, path: String, directory: bool, cx: &mut Context<Self>) {
+        if let Some(chat) = self.model.selected_chat.clone() {
+            if let Some(panel) = &mut self.diff_panel {
+                panel.file_preview = None;
+                if directory {
+                    panel.browse_path = path.clone();
+                    panel.loading = true;
+                } else {
+                    panel.file_loading = true;
+                }
+            }
+            if let Some(host) = self.active_host() {
+                let result = if directory {
+                    host.file_browse_list(&chat, &path, self.diff_generation)
+                } else {
+                    host.file_browse_read(&chat, &path, self.diff_generation)
+                };
+                if let Err(error) = result {
+                    self.model.connection_error = Some(error);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// The working tree's patch over a commit box. The patch's rows were
+    /// built when it arrived; a frame draws the ones in view.
+    fn render_changes_pane(
+        &mut self,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let default_panel = DiffPanel::default();
+        let panel = self.diff_panel.as_ref().unwrap_or(&default_panel);
+        let patch = panel.patch.clone();
+        let loading = panel.loading;
+        let error = panel.error.clone();
+        let commit = CommitState::of(panel, &self.git_commit_message);
+        let notice = commit_notice(panel);
+        let has_commit_notice = notice.is_some();
+        let no_changes = patch.is_empty() && !loading;
+        let rows = patch.rows.clone();
+        let output = uniform_list("native-diff-output", rows.len(), move |range, _, _| {
+            range
+                .map(|index| patch_row(&rows[index], colors))
+                .collect::<Vec<_>>()
+        })
+        .with_width_from_item(patch.widest)
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+        .flex_1()
+        .min_h_0()
+        .py_2();
+        let commit_focused = self
+            .git_commit_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let commit_button = match commit {
+            CommitState::Ready => ui_button("native-commit", ButtonKind::Primary, colors)
+                .on_click(cx.listener(|this, _, _, cx| this.commit_changes(cx)))
+                .child("Commit all"),
+            CommitState::Busy(action) => disabled_button("native-commit", colors).child(action),
+            CommitState::Blocked(reason) => disabled_button("native-commit", colors)
+                .tooltip(move |_, cx| {
+                    cx.new(|_| PaneTooltip {
+                        label: reason,
+                        colors,
+                    })
+                    .into()
+                })
+                .child("Commit all"),
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .text_color(rgb(colors.text))
+            .child(
+                div()
+                    .h(px(browser::TAB_BAR_HEIGHT))
+                    .bg(glass::pane(colors))
+                    .flex_none()
+                    .pl_3()
+                    .pr_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.muted))
+                            .child("Working tree"),
+                    )
+                    .child(
+                        pane_icon_button(
+                            "native-refresh-diff",
+                            "Refresh",
+                            ROTATE_CW_ICON,
+                            false,
+                            colors,
+                        )
+                        .on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.show_native_pane(NativePane::Diff, cx)
+                            }),
+                        ),
+                    ),
+            )
+            .when(loading, |pane| {
+                pane.child(
+                    div()
+                        .p_3()
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.muted))
+                        .child("Loading…"),
+                )
+            })
+            .when_some(error, |pane, error| {
+                pane.child(
+                    div()
+                        .p_3()
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.danger))
+                        .child(error),
+                )
+            })
+            .when(no_changes, |pane| {
+                pane.child(
+                    div()
+                        .px_3()
+                        .pt_2()
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.muted))
+                        .child("No changes."),
+                )
+            })
+            .child(output)
+            .when_some(notice, |pane, notice| {
+                pane.child(
+                    div()
+                        .flex_none()
+                        .px_3()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgb(colors.border))
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.danger))
+                        .child(notice),
+                )
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .p_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(!has_commit_notice, |row| {
+                        row.border_t_1().border_color(rgb(colors.border))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(30.0))
+                            .px(px(10.0))
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .border_t_1()
-                            .border_color(rgb(colors.border))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h(px(30.0))
-                                    .px(px(10.0))
-                                    .flex()
-                                    .items_center()
-                                    .cursor_text()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, window, cx| {
-                                            this.git_commit_input
-                                                .read(cx)
-                                                .focus_handle(cx)
-                                                .focus(window);
-                                        }),
-                                    )
-                                    .rounded(px(8.0))
-                                    .border_1()
-                                    .border_color(rgb(if commit_focused {
-                                        colors.selected_border
-                                    } else {
-                                        colors.border
-                                    }))
-                                    .bg(rgb(colors.surface))
-                                    .child(div().w_full().child(self.git_commit_input.clone())),
+                            .cursor_text()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.git_commit_input
+                                        .read(cx)
+                                        .focus_handle(cx)
+                                        .focus(window);
+                                }),
                             )
-                            .child(
-                                ui_button("native-commit", ButtonKind::Primary, colors)
-                                    .on_click(cx.listener(|this, _, _, cx| this.commit_changes(cx)))
-                                    .child("Commit all"),
-                            ),
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(rgb(if commit_focused {
+                                colors.selected_border
+                            } else {
+                                colors.border
+                            }))
+                            .bg(rgb(colors.surface))
+                            .child(div().w_full().child(self.git_commit_input.clone())),
                     )
-                    .into_any_element()
-            }),
-        };
-        pane_content.unwrap_or_else(|| div().into_any_element())
+                    .child(commit_button),
+            )
+            .into_any_element()
     }
 
     fn render_native_workspace(
@@ -24059,6 +24226,110 @@ Binary files /dev/null and b/image.png differ\n";
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn the_changes_pane_keeps_a_patch_as_rows_and_says_when_it_was_cut() {
+        use super::{PATCH_VIEW_LINES, PatchLine, PatchRow, PatchView};
+        let line = |kind, text: &'static str| PatchRow::Line(kind, text.into());
+        let view = PatchView::new(
+            "diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-old\n+a much longer new line\n\
+diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
+        );
+        assert_eq!(
+            view.rows.to_vec(),
+            vec![
+                line(PatchLine::File, "a.rs"),
+                line(PatchLine::Detail, "@@ -1 +1 @@"),
+                line(PatchLine::Removed, "-old"),
+                line(PatchLine::Added, "+a much longer new line"),
+                PatchRow::Gap,
+                line(PatchLine::File, "b.rs"),
+                line(PatchLine::Detail, "@@ -1 +1 @@"),
+                line(PatchLine::Added, "+b"),
+            ]
+        );
+        assert_eq!(view.widest, Some(3), "the row that sets the scroll width");
+        assert!(PatchView::new("").is_empty());
+        assert_eq!(PatchView::new("").widest, None);
+
+        let exact = format!(
+            "diff --git a/x b/x\n{}",
+            "+line\n".repeat(PATCH_VIEW_LINES - 1)
+        );
+        let exact = PatchView::new(&exact);
+        assert_eq!(exact.rows.len(), PATCH_VIEW_LINES);
+        assert_ne!(exact.rows.last(), Some(&PatchRow::Cut));
+
+        let long = format!("diff --git a/x b/x\n{}", "+line\n".repeat(PATCH_VIEW_LINES));
+        let long = PatchView::new(&long);
+        assert_eq!(long.rows.len(), PATCH_VIEW_LINES + 1);
+        assert_eq!(long.rows.last(), Some(&PatchRow::Cut));
+        assert_eq!(
+            xd_desktop::usage::format_count(PATCH_VIEW_LINES as u64),
+            "4,000"
+        );
+    }
+
+    #[test]
+    fn commit_all_says_why_it_cannot_be_pressed() {
+        use super::{CommitState, commit_notice};
+        let status = |clean, conflicted| {
+            Some(GitStatus {
+                branch: "main".into(),
+                base: String::new(),
+                upstream: String::new(),
+                ahead: 0,
+                conflicted,
+                clean,
+            })
+        };
+        let mut diff = DiffPanel::default();
+        assert_eq!(
+            CommitState::of(&diff, "message"),
+            CommitState::Blocked("Checking for changes…")
+        );
+        diff.status = status(true, 0);
+        assert_eq!(
+            CommitState::of(&diff, "message"),
+            CommitState::Blocked("No changes to commit.")
+        );
+        diff.status = status(false, 0);
+        assert_eq!(
+            CommitState::of(&diff, "  "),
+            CommitState::Blocked("Enter a commit message.")
+        );
+        assert_eq!(CommitState::of(&diff, "message"), CommitState::Ready);
+        assert_eq!(commit_notice(&diff), None);
+
+        diff.status = status(false, 2);
+        assert_eq!(
+            CommitState::of(&diff, "message"),
+            CommitState::Blocked("Resolve the conflicts first.")
+        );
+        assert_eq!(
+            commit_notice(&diff).as_deref(),
+            Some("2 files are in conflict. Resolve them to commit.")
+        );
+        diff.status = status(false, 1);
+        assert_eq!(
+            commit_notice(&diff).as_deref(),
+            Some("1 file is in conflict. Resolve it to commit.")
+        );
+
+        diff.status = status(false, 0);
+        diff.action = Some("Committing…".into());
+        assert_eq!(
+            CommitState::of(&diff, "message"),
+            CommitState::Busy("Committing…".into())
+        );
+        diff.action = None;
+        diff.action_error = Some("Git refused the commit.".into());
+        assert_eq!(
+            commit_notice(&diff).as_deref(),
+            Some("Git refused the commit.")
+        );
+        assert_eq!(CommitState::of(&diff, "message"), CommitState::Ready);
     }
 
     #[test]
@@ -29465,10 +29736,10 @@ Binary files /dev/null and b/image.png differ\n";
             desktop.native_pane = NativePane::Files;
             desktop.diff_panel = Some(DiffPanel {
                 files_mode: true,
-                browse_entries: vec![BrowseEntry {
+                browse_entries: Rc::from([BrowseEntry {
                     name: "old.txt".into(),
                     directory: false,
-                }],
+                }]),
                 ..Default::default()
             });
             desktop.close_side_tool(NativePane::Files, cx);
