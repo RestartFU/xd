@@ -605,7 +605,7 @@ internal fun ChatScreen(
                     Column(Modifier.weight(1f).padding(start = 4.dp, end = 8.dp)) {
                         Text(
                             sessionTitle.ifBlank { state.title.ifEmpty { "Session" } },
-                            modifier = Modifier.pageHeading(),
+                            modifier = Modifier.pageHeading(key = state.chatId),
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,

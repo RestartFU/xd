@@ -151,7 +151,9 @@ internal fun CompactChatBar(
                             style = MaterialTheme.typography.titleSmall,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false).pageHeading(),
+                            // Takes the focus as a chat opens, not as its name changes:
+                            // a title that arrives mid-message must not leave the composer.
+                            modifier = Modifier.weight(1f, fill = false).pageHeading(key = chats.selectedId),
                         )
                         Icon(
                             painterResource(R.drawable.ic_chevron_down), null,
