@@ -171,6 +171,7 @@ mod native {
                 },
             },
             UI::{
+                HiDpi::GetSystemMetricsForDpi,
                 Shell::{
                     DefSubclassProc, KF_FLAG_DEFAULT, RemoveWindowSubclass, SHGetKnownFolderPath,
                     SetCurrentProcessExplicitAppUserModelID, SetWindowSubclass,
@@ -178,8 +179,9 @@ mod native {
                 WindowsAndMessaging::{
                     ENDSESSION_CLOSEAPP, EnumWindows, GetWindowThreadProcessId, IDYES, IsIconic,
                     IsWindowVisible, MB_ICONERROR, MB_SETFOREGROUND, MB_YESNO, MessageBoxW,
-                    PostMessageW, PostQuitMessage, SW_RESTORE, SetForegroundWindow, ShowWindow,
-                    WM_CLOSE, WM_ENDSESSION, WM_NCDESTROY, WM_QUERYENDSESSION,
+                    PostMessageW, PostQuitMessage, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SW_RESTORE,
+                    SetForegroundWindow, ShowWindow, WM_CLOSE, WM_ENDSESSION, WM_NCDESTROY,
+                    WM_QUERYENDSESSION,
                 },
             },
         },
@@ -231,6 +233,15 @@ mod native {
                 let edges = |area: RECT| [area.left, area.top, area.right, area.bottom];
                 (edges(info.rcMonitor), edges(info.rcWork))
             })
+    }
+
+    /// How thick, in physical pixels, the invisible border is that Windows
+    /// resizes a window by at `dpi`. GPUI makes room for exactly this much.
+    pub fn resize_border(dpi: u32) -> i32 {
+        unsafe {
+            GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
+                + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
+        }
     }
 
     /// wry takes a quit off the message queue while it waits for WebView2.

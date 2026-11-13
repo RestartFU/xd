@@ -33949,17 +33949,17 @@ fn main() {
 #[cfg(target_os = "windows")]
 fn initial_window_bounds(window: gpui::Size<Pixels>, cx: &App) -> Option<Bounds<Pixels>> {
     let screen = cx.primary_display()?.bounds();
+    let screen = window_chrome::Rect {
+        x: f32::from(screen.origin.x),
+        y: f32::from(screen.origin.y),
+        width: f32::from(screen.size.width),
+        height: f32::from(screen.size.height),
+    };
     let (monitor, work) = windows::primary_monitor()?;
-    let area = window_chrome::work_area(
-        window_chrome::Rect {
-            x: f32::from(screen.origin.x),
-            y: f32::from(screen.origin.y),
-            width: f32::from(screen.size.width),
-            height: f32::from(screen.size.height),
-        },
-        monitor,
-        work,
-    )?;
+    let scale = window_chrome::monitor_scale(screen, monitor)?;
+    // Windows counts 96 dots to the inch at 100% scaling.
+    let border = windows::resize_border((scale * 96.0).round() as u32);
+    let area = window_chrome::work_area(screen, monitor, work, border)?;
     let fitted = window_chrome::fit_window(
         f32::from(window.width),
         f32::from(window.height),

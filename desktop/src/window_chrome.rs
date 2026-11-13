@@ -94,20 +94,33 @@ pub struct Rect {
     pub height: f32,
 }
 
+/// How many physical pixels of `monitor` make one of `screen`'s logical ones.
+/// `monitor` is left, top, right and bottom as Windows reports it; `screen`
+/// is the same monitor as GPUI describes it.
 #[cfg(any(target_os = "windows", test))]
-/// The part of a screen windows may cover, in logical pixels, from what
-/// Windows reports in physical ones. `monitor` and `work` are left, top, right
-/// and bottom; `screen` is the same monitor as GPUI describes it.
-pub fn work_area(screen: Rect, monitor: [i32; 4], work: [i32; 4]) -> Option<Rect> {
+pub fn monitor_scale(screen: Rect, monitor: [i32; 4]) -> Option<f32> {
     let scale = (monitor[2] - monitor[0]) as f32 / screen.width;
-    if !scale.is_finite() || scale <= 0.0 {
-        return None;
-    }
+    (scale.is_finite() && scale > 0.0).then_some(scale)
+}
+
+/// The part of a screen a window's bounds may cover, in logical pixels, from
+/// the monitor and its work area as Windows reports them in physical ones.
+///
+/// `frame` is the thickness, in physical pixels, of the invisible border
+/// Windows resizes a window by. GPUI places a window as if that border were
+/// as thick above the window as below it, when above there is next to none,
+/// so the window lands half a border higher than its bounds say. The room
+/// starts that much lower, and a window given all of it has its title bar
+/// just inside the screen instead of just outside.
+#[cfg(any(target_os = "windows", test))]
+pub fn work_area(screen: Rect, monitor: [i32; 4], work: [i32; 4], frame: i32) -> Option<Rect> {
+    let scale = monitor_scale(screen, monitor)?;
+    let lift = (frame / 2 + 1) as f32 / scale;
     let area = Rect {
         x: screen.x + (work[0] - monitor[0]) as f32 / scale,
-        y: screen.y + (work[1] - monitor[1]) as f32 / scale,
+        y: screen.y + (work[1] - monitor[1]) as f32 / scale + lift,
         width: (work[2] - work[0]) as f32 / scale,
-        height: (work[3] - work[1]) as f32 / scale,
+        height: (work[3] - work[1]) as f32 / scale - lift,
     };
     (area.width > 0.0 && area.height > 0.0).then_some(area)
 }
@@ -189,33 +202,56 @@ mod tests {
 
     #[test]
     fn the_work_area_is_converted_from_physical_to_logical_pixels() {
-        // A 1920x1080 laptop panel at 150%, with a 72-pixel taskbar.
+        // A 1920x1080 laptop panel at 150%, with a 72-pixel taskbar and the
+        // 12-pixel resize border Windows uses at that scaling.
         let screen = Rect {
             x: 0.0,
             y: 0.0,
             width: 1280.0,
             height: 720.0,
         };
+        assert_eq!(monitor_scale(screen, [0, 0, 1920, 1080]), Some(1.5));
+        // Seven physical pixels are kept clear above: half the border, and one.
+        let lift = 7.0 / 1.5;
         assert_eq!(
-            work_area(screen, [0, 0, 1920, 1080], [0, 0, 1920, 1008]),
+            work_area(screen, [0, 0, 1920, 1080], [0, 0, 1920, 1008], 12),
             Some(Rect {
                 x: 0.0,
-                y: 0.0,
+                y: lift,
                 width: 1280.0,
-                height: 672.0,
+                height: 672.0 - lift,
             })
         );
         // A taskbar on the left moves the origin as well.
         assert_eq!(
-            work_area(screen, [0, 0, 1920, 1080], [90, 0, 1920, 1080]),
+            work_area(screen, [0, 0, 1920, 1080], [90, 0, 1920, 1080], 12),
             Some(Rect {
                 x: 60.0,
-                y: 0.0,
+                y: lift,
                 width: 1220.0,
-                height: 720.0,
+                height: 720.0 - lift,
             })
         );
-        assert_eq!(work_area(screen, [0, 0, 0, 0], [0, 0, 0, 0]), None);
+        assert_eq!(work_area(screen, [0, 0, 0, 0], [0, 0, 0, 0], 12), None);
+    }
+
+    #[test]
+    fn a_window_given_the_whole_work_area_keeps_its_frame_on_screen() {
+        // Measured on Windows: at 100% the border is 8 pixels, and a window
+        // whose bounds started at 0 was drawn from 4 pixels above the screen
+        // to 2 short of its bounds' end.
+        let screen = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 720.0,
+        };
+        let area = work_area(screen, [0, 0, 1280, 720], [0, 0, 1280, 672], 8).unwrap();
+        let window = fit_window(1180.0, 780.0, (760.0, 560.0), area);
+        let drawn_from = window.y - 4.0;
+        let drawn_to = window.y + window.height - 2.0;
+        assert!((0.0..=2.0).contains(&drawn_from), "{drawn_from}");
+        assert!(drawn_to <= 672.0, "{drawn_to}");
     }
 
     #[test]
