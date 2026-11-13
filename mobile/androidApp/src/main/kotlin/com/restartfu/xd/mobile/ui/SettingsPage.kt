@@ -1,6 +1,7 @@
 package com.restartfu.xd.mobile.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -252,22 +253,38 @@ internal fun SettingsPage(
                 }
             },
         )
-        Column(
+        // Into a section and back out along one axis, as stepping into any page.
+        val still = reducedMotion()
+        AnimatedContent(
+            targetState = open,
+            modifier = Modifier.fillMaxSize(),
+            transitionSpec = { pageMotion(still, sharedAxisX(forward = targetState != null)) },
+            label = "settings-section",
+        ) { shown ->
+        // The page scrolls across its whole width; its rows stop at the
+        // reading measure and sit in the middle of a wide window.
+        Box(
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .navigationBarsPadding()
+                .navigationBarsPadding(),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+        Column(
+            Modifier
+                .widthIn(max = ReadingMeasure + 32.dp)
+                .fillMaxWidth()
                 .padding(horizontal = 16.dp)
                 .padding(top = 12.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (open != null) {
+            if (shown != null) {
                 Text(
-                    open.subtitle,
+                    shown.subtitle,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                SettingsCard(entries.filter { it.section == open })
+                SettingsCard(entries.filter { it.section == shown })
             } else {
                 SettingsSearchField(query) { query = it }
                 if (query.isBlank()) {
@@ -300,6 +317,8 @@ internal fun SettingsPage(
                 }
             }
         }
+        }
+        }
     }
     }
     if (updatingHost) {
@@ -328,7 +347,7 @@ private fun SettingsTopBar(title: String, onBack: () -> Unit) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .statusBarsPadding()
+                .safeTopPadding()
                 .heightIn(min = 56.dp)
                 .padding(start = 4.dp, end = 16.dp),
             verticalAlignment = Alignment.CenterVertically,

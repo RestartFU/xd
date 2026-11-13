@@ -33,6 +33,15 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.VerticalDivider
+import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -220,8 +229,13 @@ internal fun ChatScreen(
     workspacePane.chat = model.session
     var pane by workspacePane::pane
     // On a phone the workspace views replace the chat under one header, so
-    // Back returns to the chat before it leaves the session.
-    androidx.activity.compose.BackHandler(enabled = sessionChats != null && pane != Pane.CHAT) { pane = Pane.CHAT }
+    // Back returns to the chat before it leaves the session. Beside the chat
+    // on a wide window, Back closes the tool first, for the same reason.
+    androidx.activity.compose.BackHandler(enabled = (sessionChats != null || sideBySide) && pane != Pane.CHAT) {
+        pane = Pane.CHAT
+    }
+    // The conversation is on screen: always beside a tool, otherwise while no tool has taken its place.
+    val chatShown = sideBySide || pane == Pane.CHAT
     // An agent tab sits over the chat it belongs to, so Back returns to the chat.
     androidx.activity.compose.BackHandler(enabled = pane == Pane.CHAT && viewingAgent != null) { model.showChat() }
     var choosingModel by rememberSaveable(state.chatId) { mutableStateOf(false) }
@@ -308,7 +322,7 @@ internal fun ChatScreen(
     }
     // Kept while its agents are unchanged, so the tabs and header that take
     // it are not drawn again for every streamed word.
-    val agents = remember(agentTabKeys, agentRuns, viewingAgent, model, workspacePane) {
+    val agents = remember(agentTabKeys, agentRuns, viewingAgent, model, workspacePane, sideBySide) {
         AgentTabs(
             tabs = agentTabKeys.map { key ->
                 val run = agentRuns[key]
@@ -321,7 +335,8 @@ internal fun ChatScreen(
             },
             viewing = viewingAgent,
             open = { key ->
-                workspacePane.pane = Pane.CHAT
+                // An agent shows where the chat does, so a tool in its place gives way.
+                if (!sideBySide) workspacePane.pane = Pane.CHAT
                 model.openAgent(key)
             },
             close = model::closeAgent,
@@ -433,6 +448,65 @@ internal fun ChatScreen(
         }
     }
 
+    // A tool opening or closing beside the chat changes its width, and so
+    // where its lines break. A reader who was at the end is kept at the end;
+    // one who had scrolled away is left where they were.
+    val toolBeside = sideBySide && pane != Pane.CHAT
+    var toolWasBeside by remember { mutableStateOf(toolBeside) }
+    LaunchedEffect(toolBeside) {
+        if (toolBeside == toolWasBeside) return@LaunchedEffect
+        toolWasBeside = toolBeside
+        if (model.landed && following.value) {
+            // Once the chat has been laid out at its new width.
+            androidx.compose.runtime.withFrameNanos { }
+            listState.scrollToEnd(followTarget.value.lastIndex)
+        }
+    }
+
+    // What the reader writes into, under the conversation: the open agent's
+    // composer, or the chat's with its agents tray. No wider than the reading
+    // measure, so on a wide window it sits under the text it answers.
+    val composerBar: @Composable () -> Unit = {
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+            Box(Modifier.widthIn(max = ReadingMeasure + TranscriptEdge * 2)) {
+                if (viewingAgent != null) {
+                    val key = viewingAgent
+                    AgentComposer(
+                        run = shownAgent,
+                        draft = key?.let { agentDrafts[it] }.orEmpty(),
+                        onDraft = { text -> key?.let { model.updateAgentDraft(it, text) } },
+                        sending = messagingAgent,
+                        onSend = { shownAgent?.let(model::messageAgent) },
+                        compact = sessionChats != null,
+                    )
+                } else {
+                    Column {
+                        AgentsTray(
+                            running = runningAgents,
+                            open = trayOpen,
+                            onToggle = { trayOpen = !trayOpen },
+                            onOpenAgent = agents.open,
+                            compact = sessionChats != null,
+                            // The chat's agent chats as the tree has them now: their
+                            // rows may be far up the chat, or not loaded at all.
+                            workers = trayWorkers,
+                            onOpenChat = openChat,
+                        )
+                        Composer(
+                            state = state,
+                            composer = composer,
+                            sending = sending,
+                            cancelling = cancelling,
+                            steering = steering,
+                            model = model,
+                            compact = sessionChats != null,
+                            onModel = { choosingModel = true },
+                        )
+                    }
+                }
+            }
+        }
+    }
     Scaffold(
         containerColor = GlassPage,
         contentColor = MaterialTheme.colorScheme.onSurface,
@@ -474,8 +548,16 @@ internal fun ChatScreen(
                     ConnectionLine()
                 }
             } else Column {
+                // One pane of glass for the whole header: the bars on it are
+                // clear, so the title, the chat tabs and the views read as one.
+                Column(Modifier.background(glassPane())) {
                 productHeader()
                 TopAppBar(
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = Color.Transparent,
+                        scrolledContainerColor = Color.Transparent,
+                    ),
+                    windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top),
                     title = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column {
@@ -526,7 +608,9 @@ internal fun ChatScreen(
                                 )
                             }
                         }
-                        if (pane == Pane.CHAT) {
+                        // Beside the chat the tools are switches, not places: any of them opens next to it.
+                        if (sideBySide) ToolSwitches(pane) { pane = it }
+                        if (chatShown) {
                             TextButton(
                                 onClick = { choosingModel = true },
                                 colors = ButtonDefaults.textButtonColors(
@@ -550,9 +634,9 @@ internal fun ChatScreen(
                     },
                 )
                 sessionTabs(agents, showPullRequests)
-                TabRow(
+                if (!sideBySide) TabRow(
                     selectedTabIndex = pane.ordinal,
-                    containerColor = glassPane(),
+                    containerColor = Color.Transparent,
                     contentColor = MaterialTheme.colorScheme.onSurface,
                     divider = { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) },
                 ) {
@@ -566,50 +650,20 @@ internal fun ChatScreen(
                         )
                     }
                 }
+                }
+                // Its own line under the header, as on every page.
                 ConnectionLine()
             }
         },
-        bottomBar = {
-            if (pane == Pane.CHAT && viewingAgent != null) {
-                val key = viewingAgent
-                AgentComposer(
-                    run = shownAgent,
-                    draft = key?.let { agentDrafts[it] }.orEmpty(),
-                    onDraft = { text -> key?.let { model.updateAgentDraft(it, text) } },
-                    sending = messagingAgent,
-                    onSend = { shownAgent?.let(model::messageAgent) },
-                    compact = sessionChats != null,
-                )
-            } else if (pane == Pane.CHAT) {
-                Column {
-                    AgentsTray(
-                        running = runningAgents,
-                        open = trayOpen,
-                        onToggle = { trayOpen = !trayOpen },
-                        onOpenAgent = agents.open,
-                        compact = sessionChats != null,
-                        // The chat's agent chats as the tree has them now: their
-                        // rows may be far up the chat, or not loaded at all.
-                        workers = trayWorkers,
-                        onOpenChat = openChat,
-                    )
-                Composer(
-                    state = state,
-                    composer = composer,
-                    sending = sending,
-                    cancelling = cancelling,
-                    steering = steering,
-                    model = model,
-                    compact = sessionChats != null,
-                    onModel = { choosingModel = true },
-                )
-                }
-            }
-        },
-    ) { padding ->
-        if (pane != Pane.CHAT) {
-            Box(Modifier.padding(padding)) {
-                when (pane) {
+        bottomBar = { if (!sideBySide && pane == Pane.CHAT) composerBar() },
+    ) { scaffoldPadding ->
+        ChatPanes(
+            sideBySide = sideBySide,
+            pane = pane,
+            padding = scaffoldPadding,
+            composer = composerBar,
+            tool = { shown ->
+                when (shown) {
                     Pane.DIFF -> DiffPaneContent(
                         viewModel(
                             key = "diff-$workspaceId",
@@ -634,9 +688,8 @@ internal fun ChatScreen(
                     }
                     else -> Unit
                 }
-            }
-            return@Scaffold
-        }
+            },
+        ) chat@{ padding ->
         if (viewingAgent != null) {
             val address = shownAgent?.messageAddress
             val sent = remember(transcript.items, address) {
@@ -654,16 +707,18 @@ internal fun ChatScreen(
             val pending = viewingAgent?.let { subagentActions[it] }
             shownAgent?.let { SettleSubagentAction(it, pending, model) }
             androidx.compose.runtime.key(viewingAgent) {
-                AgentView(
-                    run = shownAgent,
-                    sent = sent,
-                    queued = queued,
-                    pendingAction = pending,
-                    onAction = model::controlSubagent,
-                    modifier = Modifier.padding(padding),
-                )
+                Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
+                    AgentView(
+                        run = shownAgent,
+                        sent = sent,
+                        queued = queued,
+                        pendingAction = pending,
+                        onAction = model::controlSubagent,
+                        modifier = Modifier.widthIn(max = ReadingMeasure + TranscriptEdge * 2),
+                    )
+                }
             }
-            return@Scaffold
+            return@chat
         }
         if (state.transcriptLoaded && !state.loading && !state.hasOlderMessages &&
             transcriptEmpty && state.error == null && !state.working
@@ -690,15 +745,19 @@ internal fun ChatScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                 }
             }
-            return@Scaffold
+            return@chat
         }
+        // The list is as wide as its pane, so it scrolls from its margins too;
+        // what it holds stops at the reading measure and sits in the middle.
+        BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
+        val side = readingInset(maxWidth, TranscriptEdge)
         LazyColumn(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
+                .testTag(TRANSCRIPT_TAG)
                 .nestedScroll(followReader),
-            contentPadding = PaddingValues(12.dp),
+            contentPadding = PaddingValues(horizontal = side, vertical = TranscriptEdge),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (startedBy != null) {
@@ -787,6 +846,86 @@ internal fun ChatScreen(
                     }
                 }
             }
+        }
+        }
+        }
+    }
+}
+
+/** The space between the conversation and the edge of its pane, and beside the composer. */
+private val TranscriptEdge = 12.dp
+
+/**
+ * Lays the conversation out with the tool beside it or in its place.
+ *
+ * On a window wide enough for two panes the chat and its [composer] are
+ * always here: a tool opens to their right and takes the room left once the
+ * chat has its reading measure. The chat stays the same piece of the screen
+ * whether a tool is open or not, so it keeps its place when one opens.
+ * Anywhere else a tool takes the chat's place, as it always has, and the
+ * composer is the page's bottom bar.
+ */
+@Composable
+private fun ChatPanes(
+    sideBySide: Boolean,
+    pane: Pane,
+    padding: PaddingValues,
+    composer: @Composable () -> Unit,
+    tool: @Composable (Pane) -> Unit,
+    chat: @Composable (PaddingValues) -> Unit,
+) {
+    if (!sideBySide) {
+        if (pane != Pane.CHAT) Box(Modifier.padding(padding)) { tool(pane) } else chat(padding)
+        return
+    }
+    BoxWithConstraints(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
+        val open = pane != Pane.CHAT
+        val chatWidth = chatPaneWidth(maxWidth, TranscriptEdge)
+        Row(Modifier.fillMaxSize()) {
+            Column(if (open) Modifier.width(chatWidth) else Modifier.weight(1f)) {
+                Box(Modifier.weight(1f)) { chat(PaddingValues(0.dp)) }
+                composer()
+            }
+            if (open) {
+                VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .testTag(TOOL_PANE_TAG)
+                        .padding(bottom = padding.calculateBottomPadding()),
+                ) { tool(pane) }
+            }
+        }
+    }
+}
+
+/** The tool open beside the chat, and the conversation's list, for tests. */
+internal const val TOOL_PANE_TAG = "tool-pane"
+internal const val TRANSCRIPT_TAG = "transcript"
+
+/**
+ * Changes, Files and Terminal as switches in the tablet header: each opens its
+ * tool beside the chat, and closes it again.
+ */
+@Composable
+private fun ToolSwitches(pane: Pane, onPane: (Pane) -> Unit) {
+    Row(
+        Modifier.padding(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Pane.entries.filter { it != Pane.CHAT }.forEach { tool ->
+            val open = pane == tool
+            FilterChip(
+                selected = open,
+                onClick = { onPane(if (open) Pane.CHAT else tool) },
+                label = { Text(tool.label) },
+                leadingIcon = if (open) {
+                    { Icon(painterResource(R.drawable.ic_check), contentDescription = null, modifier = Modifier.size(18.dp)) }
+                } else {
+                    null
+                },
+            )
         }
     }
 }

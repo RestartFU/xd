@@ -222,7 +222,12 @@ private fun FullScreenSheet(onDismiss: () -> Unit, content: @Composable () -> Un
     ) {
         val window = (LocalView.current.parent as? DialogWindowProvider)?.window
         LaunchedEffect(window) { window?.setWindowAnimations(android.R.style.Animation_InputMethod) }
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) { content() }
+        // Its own window, so its bars are set here: the activity's do not reach it.
+        DialogSystemBars()
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+            // Clear of a cutout or a navigation bar at either side.
+            Box(Modifier.fillMaxSize().safeSidesPadding()) { content() }
+        }
     }
 }
 
@@ -231,7 +236,7 @@ private fun TopBar(title: String, navigation: Navigation) {
     Row(
         Modifier
             .fillMaxWidth()
-            .statusBarsPadding()
+            .safeTopPadding()
             .height(64.dp)
             .padding(start = 4.dp, end = 16.dp),
         verticalAlignment = Alignment.CenterVertically,

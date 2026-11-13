@@ -123,7 +123,7 @@ internal fun CompactChatBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(glassPane())
-                .statusBarsPadding()
+                .safeTopPadding()
                 // One 56dp row; taller only when enlarged text needs the room.
                 .heightIn(min = 56.dp)
                 .padding(start = 4.dp, end = 4.dp),

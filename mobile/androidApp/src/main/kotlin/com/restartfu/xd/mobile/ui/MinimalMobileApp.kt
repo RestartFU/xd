@@ -2,6 +2,10 @@
 
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -169,6 +173,12 @@ private enum class MobileDestination {
     USAGE,
 }
 
+/**
+ * The page drawn for a destination. Projects stands in for a session that
+ * went away, so this is what the transition between pages follows.
+ */
+private enum class WorkspacePage { PROJECTS, SESSION, TERMINAL, USAGE }
+
 private const val GLOBAL_TERMINAL_CHAT_ID = "global:mobile"
 
 private val ChatSelectionsSaver = listSaver<Map<String, String>, String>(
@@ -333,10 +343,11 @@ private fun MinimalMobileWorkspace(
         }
     }
     BackHandler(enabled = mobileDestination != MobileDestination.PROJECTS, onBack = showProjects)
-    val expanded = LocalConfiguration.current.screenWidthDp >= 600
+    // Which layout the window gets, from its width and its height: see [WindowLayout].
+    val layout = rememberWindowLayout()
     val imeVisible = WindowInsets.isImeVisible
     val chatOpen = mobileDestination == MobileDestination.SESSIONS && activeChat != null
-    val showBottomNavigation = !expanded && !imeVisible && !chatOpen
+    val showBottomNavigation = !layout.rail && !imeVisible && !chatOpen
     // The floating bar is drawn over the page, which keeps this much of its bottom clear.
     val barInset = if (showBottomNavigation) FloatingBarClearance else 0.dp
     // Projects also stands in for a session that went away, so this follows the page shown.
@@ -363,7 +374,20 @@ private fun MinimalMobileWorkspace(
         if (result == SnackbarResult.ActionPerformed) model.undoSettle(notice)
         model.consumeSettledNotice(notice)
     }
-    Box(Modifier.fillMaxSize()) {
+    // Animations turned off cut straight from one page to the next.
+    val still = reducedMotion()
+    val page = when {
+        mobileDestination == MobileDestination.TERMINAL -> WorkspacePage.TERMINAL
+        mobileDestination == MobileDestination.USAGE -> WorkspacePage.USAGE
+        mobileDestination == MobileDestination.SESSIONS && activeSession != null -> WorkspacePage.SESSION
+        else -> WorkspacePage.PROJECTS
+    }
+    // A brief word to the reader goes on the app's one snackbar, not a system toast.
+    val notify: (String) -> Unit = remember(scope, snackbar) { { text -> scope.launch { snackbar.showSnackbar(text) } } }
+    CompositionLocalProvider(LocalNotice provides notify) {
+    // Clear of a cutout or a navigation bar at either side, as a phone on its
+    // side has: the backdrop still runs under them, nothing else does.
+    Box(Modifier.fillMaxSize().safeSidesPadding()) {
     Row(
         Modifier
             .fillMaxSize()
@@ -371,16 +395,33 @@ private fun MinimalMobileWorkspace(
             // Settings covers it; neither TalkBack nor a search should find what is beneath.
             .then(if (settingsOpen) Modifier.clearAndSetSemantics {} else Modifier),
     ) {
-        if (expanded) {
+        if (layout.rail) {
             XdNavigationRail(mobileDestination, showProjects, showTerminal, showUsage)
         }
         Column(Modifier.weight(1f)) {
             Box(Modifier.weight(1f)) {
-                when {
-                    mobileDestination == MobileDestination.TERMINAL -> MinimalGlobalTerminal(
+                AnimatedContent(
+                    targetState = page,
+                    modifier = Modifier.fillMaxSize(),
+                    // Into a session and back out along one axis; between the
+                    // places the bar switches, a fade through.
+                    transitionSpec = {
+                        pageMotion(
+                            still,
+                            when {
+                                targetState == WorkspacePage.SESSION -> sharedAxisX(forward = true)
+                                initialState == WorkspacePage.SESSION -> sharedAxisX(forward = false)
+                                else -> fadeThrough()
+                            },
+                        )
+                    },
+                    label = "page",
+                ) { shown ->
+                when (shown) {
+                    WorkspacePage.TERMINAL -> MinimalGlobalTerminal(
                         model, barInset, onSettings = { settingsOpen = true },
                     )
-                    mobileDestination == MobileDestination.USAGE -> Column(
+                    WorkspacePage.USAGE -> Column(
                         Modifier.fillMaxSize().background(GlassPage),
                     ) {
                         ProductHeader(title = "Usage", onSettings = { settingsOpen = true })
@@ -392,7 +433,8 @@ private fun MinimalMobileWorkspace(
                         )
                         UsageContent(usage, bottomInset = barInset)
                     }
-                    mobileDestination == MobileDestination.SESSIONS && activeSession != null -> {
+                    // Gone while its page is still leaving: nothing is drawn for those frames.
+                    WorkspacePage.SESSION -> if (activeSession != null) {
                         val selectTab = { id: String ->
                             // A tab picked: a chat still starting does not take its place.
                             model.stopOpeningStartingSessions()
@@ -409,7 +451,7 @@ private fun MinimalMobileWorkspace(
                         }
                         val tabStrip: @Composable (AgentTabs, (() -> Unit)?) -> Unit = { agents, showPullRequests ->
                             SessionTabStrip(
-                                compact = !expanded,
+                                compact = !layout.tabletChat,
                                 chats = sessionChats,
                                 hiddenChatIds = hiddenChatIds,
                                 selectedChatId = activeChat?.id,
@@ -444,8 +486,10 @@ private fun MinimalMobileWorkspace(
                                     workspaceOwner = stores.workspace(activeSession.id),
                                     sessionTabs = tabStrip,
                                     // A phone keeps one header row and moves the
-                                    // tabs into it; a tablet has room for the tabs.
-                                    sessionChats = if (expanded) null else SessionChats(
+                                    // tabs into it, upright or on its side; a
+                                    // window with a tablet's height has room for the tabs.
+                                    sideBySide = layout.sideBySide,
+                                    sessionChats = if (layout.tabletChat) null else SessionChats(
                                         chats = sessionChats,
                                         selectedId = activeChat.id,
                                         select = selectTab,
@@ -478,7 +522,7 @@ private fun MinimalMobileWorkspace(
                         } else {
                             Column(Modifier.fillMaxSize()) {
                                 ProductHeader(activeSession.title, onSettings = { settingsOpen = true })
-                                tabStrip(AgentTabs(), null)
+                                Column(Modifier.background(glassPane())) { tabStrip(AgentTabs(), null) }
                                 Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                         Text("Your chats are saved", style = MaterialTheme.typography.titleLarge)
@@ -488,8 +532,8 @@ private fun MinimalMobileWorkspace(
                                 }
                             }
                         }
-                    }
-                    else -> MinimalProjectsHome(
+                    } else Unit
+                    WorkspacePage.PROJECTS -> MinimalProjectsHome(
                         model, settings, projects, tree.loading, tree.error,
                         onSettings = { settingsOpen = true },
                         listState = projectsList,
@@ -507,6 +551,7 @@ private fun MinimalMobileWorkspace(
                             mobileDestination = MobileDestination.SESSIONS
                         },
                     )
+                }
                 }
                 if (showBottomNavigation) {
                     XdNavigationBar(
@@ -533,8 +578,13 @@ private fun MinimalMobileWorkspace(
                 },
             ),
     )
-    if (settingsOpen) {
-        // Over everything, rail and bars included: Settings is its own page.
+    // Over everything, rail and bars included: Settings is its own page,
+    // stepped into from whichever page its button was on.
+    AnimatedVisibility(
+        visible = settingsOpen,
+        enter = if (still) EnterTransition.None else sharedAxisEnter(forward = true),
+        exit = if (still) ExitTransition.None else sharedAxisExit(forward = false),
+    ) {
         SettingsPage(
             model = model,
             settings = settings,
@@ -544,6 +594,7 @@ private fun MinimalMobileWorkspace(
                 model.forget()
             },
         )
+    }
     }
     }
     val shortcutEditor by model.shortcutEditor.collectAsStateWithLifecycle()
@@ -816,10 +867,13 @@ private fun MinimalProjectsHome(
                 contentAlignment = Alignment.Center,
             ) { CircularProgressIndicator() }
 
-            else -> Box(Modifier.fillMaxSize()) { LazyColumn(
+            else -> BoxWithConstraints(Modifier.fillMaxSize()) {
+            // As wide as the page, so it scrolls from its margins; its rows stop at the reading measure.
+            val side = readingInset(maxWidth, 12.dp)
+            LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 state = listState,
-                contentPadding = PaddingValues(12.dp, 14.dp, 12.dp, if (newSessionAboveBar) NewSessionBottom + FloatingBarHeight + 12.dp else 96.dp),
+                contentPadding = PaddingValues(side, 14.dp, side, if (newSessionAboveBar) NewSessionBottom + FloatingBarHeight + 12.dp else 96.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 (treeError ?: operationError)?.let { error ->
@@ -1170,7 +1224,8 @@ private fun SessionTabStrip(
 ) {
     var openMenu by remember { mutableStateOf(false) }
     Row(
-        modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = 8.dp),
+        // Clear: it sits on its header's one pane of glass.
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -1327,7 +1382,7 @@ private fun ProductHeader(
         modifier = Modifier
             .fillMaxWidth()
             .background(glassPane())
-            .statusBarsPadding()
+            .safeTopPadding()
             // At least, not exactly: enlarged text makes the title taller.
             .heightIn(min = 56.dp)
             .padding(start = 16.dp, end = 4.dp),
