@@ -757,6 +757,7 @@ impl XdDesktop {
             .when(starting, |view| {
                 view.child(self.render_new_chat_starting(width, colors, window))
             })
+            .child(composer::composer_room(self.composer_room.clone()))
             .child(composer.mb_2())
             .child(
                 context

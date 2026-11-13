@@ -3782,6 +3782,9 @@ struct XdDesktop {
     /// and the section it last showed: each section starts at its top.
     settings_scroll: ScrollHandle,
     settings_scroll_key: Option<usize>,
+    /// How wide the column the composer sits in was last drawn, which sets
+    /// the composer's own width.
+    composer_room: Rc<Cell<Option<Pixels>>>,
     /// The sidebar rows a context menu opens for from the keyboard: the open
     /// session's, and the current project's. Noted as each frame is drawn.
     key_menu_session: Option<KeyMenuRow>,
@@ -4672,6 +4675,7 @@ impl XdDesktop {
             key_stop_return: None,
             settings_scroll: ScrollHandle::new(),
             settings_scroll_key: None,
+            composer_room: Rc::default(),
             key_menu_session: None,
             key_menu_project: None,
             key_targets: KeyTargets::default(),
@@ -22117,6 +22121,7 @@ impl XdDesktop {
                         .children(queued),
                 )
             })
+            .child(composer::composer_room(self.composer_room.clone()))
             .child(composer.mb(px(if context_row.is_some() { 8.0 } else { 16.0 })))
             .when_some(context_row, |chat, row| {
                 chat.child(row.w_full().max_w(composer_width).mb(px(10.0)))
@@ -31925,6 +31930,41 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         );
         // Loading takes the offer's place until the page arrives.
         desktop.update(cx, |desktop, _| assert!(desktop.transcript_loading));
+    }
+
+    #[gpui::test]
+    fn options_that_wrap_at_the_composers_full_width_stay_inside_it(cx: &mut gpui::TestAppContext) {
+        // Wide enough that the composer is at its widest: 660 in an empty chat.
+        let (desktop, cx) = open_implementation_chat(cx, 1180.0, 780.0);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.chat_accounts_supported = true;
+            desktop.model.account = Some("0123456789ab".into());
+            desktop.auth_providers = serde_json::from_value(serde_json::json!([
+                {"provider": "claude", "state": "signed-in", "accounts": [
+                    {"id": "default", "default": true, "label": "a@example.com",
+                     "state": "signed-in", "in_use": true},
+                    {"id": "0123456789ab", "label": "a-long-account-name@example.com",
+                     "state": "signed-in"},
+                ]},
+            ]))
+            .unwrap();
+            cx.notify();
+        });
+        // The column is measured as it is first drawn.
+        redraw(cx);
+        redraw(cx);
+        let composer = cx.debug_bounds("chat-composer").unwrap();
+        let model = cx.debug_bounds("native-option-model").unwrap();
+        let account = cx.debug_bounds("native-option-account").unwrap();
+        assert_eq!(composer.size.width, px(660.0));
+        // Two rows in the composer, where the page's width would hold one.
+        assert!(account.top() > model.top());
+        assert!(
+            account.bottom() < composer.bottom(),
+            "the second row ends at {:?}, the composer at {:?}",
+            account.bottom(),
+            composer.bottom()
+        );
     }
 
     #[gpui::test]

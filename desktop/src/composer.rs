@@ -17,6 +17,36 @@ pub(super) fn composer_text_width(width: Pixels) -> Pixels {
     width - px(2.0 * COMPOSER_INSET)
 }
 
+/// The padding at each side of the page a composer is centred on.
+const PAGE_INSET: f32 = 24.0;
+/// The shell's border and padding on each side.
+const SHELL_INSET: f32 = 1.0 + 8.0;
+
+/// Notes how wide the page's column is, for the composer on it, and draws
+/// again when that has changed. The composer's row of options needs its
+/// width in pixels. The composer is as wide as the column up to a maximum,
+/// and such a box is measured for its height at the column's width before
+/// the maximum applies: where the options fit one row at that width and two
+/// at the real one, as an account's name makes them, the second row hung out
+/// of the box. Give this to the page's own column.
+pub(super) fn composer_room(room: Rc<Cell<Option<Pixels>>>) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let width = bounds.size.width;
+            if room.get() != Some(width) {
+                room.set(Some(width));
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left(px(PAGE_INSET))
+    .right(px(PAGE_INSET))
+    .h_0()
+}
+
 /// What differs between the composers. Everything else is drawn the same.
 pub(super) struct ComposerParts {
     pub owner: DraftOwner,
@@ -452,6 +482,14 @@ impl XdDesktop {
                     .flex()
                     .items_end()
                     .gap_1()
+                    // In pixels where the page is wider than the box, so the
+                    // options wrap the same when the box is measured as when
+                    // it is drawn; see [`composer_room`]. Where the page is
+                    // the narrower, the box is measured at its real width.
+                    .when(
+                        self.composer_room.get().is_some_and(|room| room > width),
+                        |row| row.w(width - px(2.0 * SHELL_INSET)),
+                    )
                     .child(
                         div()
                             .flex_1()
