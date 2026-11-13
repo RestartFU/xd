@@ -2,13 +2,13 @@ package com.restartfu.xd.mobile.ui
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -92,7 +92,8 @@ internal fun PipelineCard(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { expanded = !expanded }
+                    .disclosure(expanded) { expanded = !expanded }
+                    .heightIn(min = 48.dp)
                     .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
                 Text(
@@ -153,10 +154,7 @@ internal fun PipelineCard(
                         )
                     }
                     Spacer(Modifier.width(8.dp))
-                    Text(
-                        if (expanded) "▾" else "▸",
-                        color = MaterialTheme.colorScheme.outline,
-                    )
+                    DisclosureChevron(expanded)
                 }
             }
 

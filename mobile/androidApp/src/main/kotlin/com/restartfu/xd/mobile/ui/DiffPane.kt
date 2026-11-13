@@ -26,7 +26,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Button
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,7 +47,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -109,7 +110,7 @@ internal fun DiffPaneContent(model: DiffViewModel) {
             }
             state.patch.isBlank() -> Centered {
                 Text(
-                    if (state.branch) "No branch changes" else "Nothing changed",
+                    if (state.branch) "No branch changes." else "No changes.",
                     color = MaterialTheme.colorScheme.outline,
                 )
             }
@@ -291,12 +292,13 @@ private fun DiffFileHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(role = Role.Button, onClick = onToggle)
+            .disclosure(expanded = !collapsed, onToggle = onToggle)
+            .heightIn(min = 48.dp)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(if (collapsed) "▸" else "▾", color = MaterialTheme.colorScheme.outline)
+        DisclosureChevron(expanded = !collapsed)
         Text(
             file.path,
             modifier = Modifier.weight(1f),
@@ -305,8 +307,16 @@ private fun DiffFileHeader(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        Text("+${file.additions}", color = LocalXdSignals.current.working)
-        Text("−${file.deletions}", color = MaterialTheme.colorScheme.error)
+        Text(
+            "+${file.additions}",
+            modifier = Modifier.semantics { contentDescription = "${file.additions} added" },
+            color = LocalXdSignals.current.working,
+        )
+        Text(
+            "−${file.deletions}",
+            modifier = Modifier.semantics { contentDescription = "${file.deletions} removed" },
+            color = MaterialTheme.colorScheme.error,
+        )
     }
 }
 

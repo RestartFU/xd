@@ -3,7 +3,6 @@ package com.restartfu.xd.mobile.ui
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -97,7 +96,7 @@ internal fun SubagentCard(
                 shape,
             )
             .background(MaterialTheme.colorScheme.surfaceContainer)
-            .clickable { expanded = !expanded }
+            .disclosure(expanded) { expanded = !expanded }
             .animateContentSize(),
     ) {
         Column(
@@ -120,6 +119,7 @@ internal fun SubagentCard(
                     modifier = Modifier.weight(1f),
                 )
                 if (run.background) StatusPill("Background", signals.faint)
+                // Its words follow, so the dot itself says nothing.
                 if (running) PulseDot(signal)
                 Text(
                     run.status,

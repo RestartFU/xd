@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -42,7 +43,13 @@ import com.restartfu.xd.model.agentChatStatus
  * it in the chat and in the tray.
  */
 @Composable
-internal fun AgentAvatar(tone: Color, size: Dp = 28.dp, mark: @Composable () -> Unit) {
+internal fun AgentAvatar(
+    tone: Color,
+    size: Dp = 28.dp,
+    /** How it stands, drawn as the shared mark; a plain dot in [tone] when it has none. */
+    status: StatusMark? = null,
+    mark: @Composable () -> Unit,
+) {
     Box(Modifier.size(size)) {
         Box(
             Modifier
@@ -52,18 +59,32 @@ internal fun AgentAvatar(tone: Color, size: Dp = 28.dp, mark: @Composable () -> 
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh),
             contentAlignment = Alignment.Center,
         ) { mark() }
+        // The words beside the avatar say how it stands; the badge is its shape.
         Box(
             Modifier
                 .align(Alignment.BottomEnd)
-                .offset(x = 2.dp, y = 2.dp)
-                .size(11.dp)
+                .offset(x = 3.dp, y = 3.dp)
+                .size(13.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.background)
-                .padding(2.dp)
-                .clip(CircleShape)
-                .background(tone),
-        )
+                .background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (status != null) {
+                StatusMarkIcon(status, size = 9.dp, labelled = false, still = true)
+            } else {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(tone))
+            }
+        }
     }
+}
+
+/** The shared mark for an agent chat's status; failed and stopped ones keep a plain dot. */
+private fun AgentChatStatus.mark(): StatusMark? = when (this) {
+    AgentChatStatus.RUNNING -> StatusMark.WORKING
+    AgentChatStatus.NEEDS_YOU -> StatusMark.WAITING
+    AgentChatStatus.DONE -> StatusMark.DONE
+    AgentChatStatus.PAUSED -> StatusMark.PAUSED
+    AgentChatStatus.FAILED, AgentChatStatus.STOPPED -> null
 }
 
 /** The colour each status of an agent chat is told in, as on the desktop. */
@@ -89,7 +110,7 @@ internal fun AgentChatRow(run: SubagentRun, chat: ChatSummary?, onOpen: () -> Un
     val signals = LocalXdSignals.current
     val status = agentChatStatus(run, chat)
     val tone = status.tone()
-    val title = chat?.title?.takeIf { it.isNotBlank() && it != "New Chat" }
+    val title = chat?.title?.takeIf { it.isNotBlank() && !it.equals("New chat", ignoreCase = true) }
         ?: run.identity.takeIf { it.isNotBlank() && it != "Agent" }
         ?: firstLine(run.prompt)
     val detail = when (status) {
@@ -101,13 +122,13 @@ internal fun AgentChatRow(run: SubagentRun, chat: ChatSummary?, onOpen: () -> Un
             .fillMaxWidth()
             .padding(vertical = 2.dp)
             .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onOpen)
+            .clickable(role = Role.Button, onClickLabel = "Open chat", onClick = onOpen)
             .heightIn(min = 56.dp)
             .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        AgentAvatar(tone) { BackendIcon(run.provider.lowercase(), size = 14.dp) }
+        AgentAvatar(tone, status = status.mark()) { BackendIcon(run.provider.lowercase(), size = 14.dp) }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
                 title,
@@ -127,7 +148,7 @@ internal fun AgentChatRow(run: SubagentRun, chat: ChatSummary?, onOpen: () -> Un
         Text(status.label, style = MaterialTheme.typography.labelMedium, color = tone)
         Icon(
             painterResource(R.drawable.ic_chevron_right),
-            contentDescription = "Open $title",
+            contentDescription = null,
             tint = signals.faint,
             modifier = Modifier.size(14.dp),
         )
@@ -157,7 +178,7 @@ internal fun AgentReportLine(report: AgentReport, chat: ChatSummary?, onOpen: ()
         Row(
             modifier = Modifier
                 .clip(CircleShape)
-                .clickable(onClick = onOpen)
+                .clickable(role = Role.Button, onClickLabel = "Open chat", onClick = onOpen)
                 .heightIn(min = 32.dp)
                 .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -186,7 +207,7 @@ internal fun StartedByPill(parent: ChatSummary, onOpen: () -> Unit) {
             modifier = Modifier
                 .clip(CircleShape)
                 .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
-                .clickable(onClick = onOpen)
+                .clickable(role = Role.Button, onClickLabel = "Open chat", onClick = onOpen)
                 .heightIn(min = 32.dp)
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -194,7 +215,7 @@ internal fun StartedByPill(parent: ChatSummary, onOpen: () -> Unit) {
         ) {
             Text("Started by", style = MaterialTheme.typography.labelMedium, color = signals.faint)
             Text(
-                parent.title.ifBlank { "New Chat" },
+                parent.title.ifBlank { "New chat" },
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
