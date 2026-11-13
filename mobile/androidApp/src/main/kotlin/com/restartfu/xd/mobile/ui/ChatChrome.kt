@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -35,7 +34,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.mobile.R
@@ -54,6 +52,8 @@ internal class SessionChats(
     /** Null where the host cannot settle sessions or this one already is. */
     val settleSession: (() -> Unit)? = null,
     val renameSession: () -> Unit = {},
+    /** How a chat stands, marked on its row in the chat menu; null for a quiet one. */
+    val statusOf: (ChatSummary) -> StatusMark? = { null },
 )
 
 /** A delegated agent opened as its own tab inside the chat that started it. */
@@ -125,7 +125,8 @@ internal fun CompactChatBar(
                 .fillMaxWidth()
                 .background(glassPane())
                 .statusBarsPadding()
-                .height(56.dp)
+                // One 56dp row; taller only when enlarged text needs the room.
+                .heightIn(min = 56.dp)
                 .padding(start = 4.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -165,24 +166,23 @@ internal fun CompactChatBar(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        // Read here and opened from More: a line of small text
+                        // inside the title's button has no room for touch targets.
                         if (linkedPullRequests != null) {
                             // Every pull request linked to the chat, as the desktop's header lists them.
-                            LinkedPullRequestChips(
+                            LinkedPullRequestLabels(
                                 pullRequests = linkedPullRequests,
                                 limit = PullRequestChipLimit.PHONE,
                                 style = MaterialTheme.typography.labelSmall,
-                                open = openPullRequest,
-                                showAll = { showPullRequests?.invoke() },
                             )
                         } else {
                             // The branch's pull request, as the desktop's session header shows it.
                             pullRequest?.let { url ->
                                 Text(
                                     pullRequestLabel(url),
-                                    modifier = Modifier.clickable(role = Role.Button) { openPullRequest(url) },
+                                    modifier = Modifier.semantics { contentDescription = "Pull request ${pullRequestLabel(url)}" },
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = LocalXdSignals.current.link,
-                                    textDecoration = TextDecoration.Underline,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
@@ -190,11 +190,22 @@ internal fun CompactChatBar(
                 }
                 DropdownMenu(expanded = choosingChat, onDismissRequest = { choosingChat = false }) {
                     chats.chats.forEach { chat ->
+                        val open = chat.id == chats.selectedId && agents.viewing == null
+                        // How the chat stands, as the desktop's tabs mark it.
+                        val status = chats.statusOf(chat)
                         DropdownMenuItem(
                             text = { Text(chat.title.ifBlank { "New chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             leadingIcon = { BackendIcon(chat.backend, size = 18.dp) },
-                            trailingIcon = if (chat.id == chats.selectedId && agents.viewing == null) {
-                                { Icon(painterResource(R.drawable.ic_check), "Open", Modifier.size(18.dp)) }
+                            trailingIcon = if (open || status != null) {
+                                {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    ) {
+                                        status?.let { StatusMarkIcon(it) }
+                                        if (open) Icon(painterResource(R.drawable.ic_check), "Open", Modifier.size(18.dp))
+                                    }
+                                }
                             } else {
                                 null
                             },
@@ -210,7 +221,7 @@ internal fun CompactChatBar(
                                 leadingIcon = { BackendIcon(agent.provider.lowercase(), size = 18.dp) },
                                 trailingIcon = {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        if (agent.running) PulseDot(LocalXdSignals.current.working)
+                                        if (agent.running) StatusMarkIcon(StatusMark.WORKING)
                                         if (agent.key == agents.viewing) {
                                             Icon(
                                                 painterResource(R.drawable.ic_check), "Open",
@@ -249,7 +260,7 @@ internal fun CompactChatBar(
                     modifier = Modifier.semantics { contentDescription = "Workspace view: ${pane.label}" },
                 ) {
                     Row(
-                        modifier = Modifier.height(32.dp).padding(start = 10.dp, end = 6.dp),
+                        modifier = Modifier.heightIn(min = 32.dp).padding(start = 10.dp, end = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
@@ -294,6 +305,16 @@ internal fun CompactChatBar(
                         HorizontalDivider()
                         DropdownMenuItem(text = { Text("Close chat") }, onClick = { more = false; chats.close(selected.id) })
                         DropdownMenuItem(text = { Text("Rename chat") }, onClick = { more = false; chats.rename(selected) })
+                        // Each pull request the header names opens from here.
+                        val openable = linkedPullRequests
+                            ?.let { shownPullRequests(it, PullRequestChipLimit.PHONE).first.map(LinkedPullRequest::url) }
+                            ?: listOfNotNull(pullRequest)
+                        openable.forEach { url ->
+                            DropdownMenuItem(
+                                text = { Text(openPullRequestLabel(url)) },
+                                onClick = { more = false; openPullRequest(url) },
+                            )
+                        }
                         showPullRequests?.let { show ->
                             DropdownMenuItem(text = { Text("Pull requests") }, onClick = { more = false; show() })
                         }

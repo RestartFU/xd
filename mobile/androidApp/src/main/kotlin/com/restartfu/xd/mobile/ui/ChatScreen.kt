@@ -6,6 +6,16 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -252,6 +262,13 @@ internal fun ChatScreen(
         // While a turn runs the branch may still move, so only forget a stale link.
         model.refreshPullRequest(branch, fetch = !busy)
     }
+    // A screen reader is told when the turn ends: on screen the working row just goes away.
+    val chatView = LocalView.current
+    var wasWorking by remember(state.chatId) { mutableStateOf(state.working) }
+    LaunchedEffect(state.working) {
+        if (wasWorking && !state.working) chatView.announceForAccessibility(TURN_FINISHED_ANNOUNCEMENT)
+        wasWorking = state.working
+    }
     val listState = rememberLazyListState()
     // A run of ordinary tool calls collapses to one line; inline diffs keep
     // their own file-change row, and a lone call shows its command. Grouped
@@ -432,6 +449,8 @@ internal fun ChatScreen(
                         linkedPullRequests = linkedPullRequests,
                         showPullRequests = showPullRequests,
                     )
+                    // Nothing while connected, so the header stays one row.
+                    ConnectionLine()
                 }
             } else Column {
                 productHeader()
@@ -454,27 +473,6 @@ internal fun ChatScreen(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
-                                    if (linkedPullRequests != null) {
-                                        // Every pull request linked to the chat, as the desktop's header lists them.
-                                        LinkedPullRequestChips(
-                                            pullRequests = linkedPullRequests,
-                                            limit = PullRequestChipLimit.TABLET,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            open = openLink,
-                                            showAll = { showingPullRequests = true },
-                                        )
-                                    } else {
-                                        // The branch's pull request, as the desktop's session header shows it.
-                                        pullRequest?.let { url ->
-                                            Text(
-                                                pullRequestLabel(url),
-                                                modifier = Modifier.clickable(role = Role.Button) { openLink(url) },
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = LocalXdSignals.current.link,
-                                                textDecoration = TextDecoration.Underline,
-                                            )
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -485,6 +483,28 @@ internal fun ChatScreen(
                         }
                     },
                     actions = {
+                        // Beside the title rather than in its second line, so
+                        // each link is a button of full touch size.
+                        if (linkedPullRequests != null) {
+                            // Every pull request linked to the chat, as the desktop's header lists them.
+                            LinkedPullRequestButtons(
+                                pullRequests = linkedPullRequests,
+                                limit = PullRequestChipLimit.TABLET,
+                                open = openLink,
+                                showAll = { showingPullRequests = true },
+                            )
+                        } else {
+                            // The branch's pull request, as the desktop's session header shows it.
+                            pullRequest?.let { url ->
+                                PullRequestButton(
+                                    label = pullRequestLabel(url),
+                                    description = "Pull request ${pullRequestLabel(url)}",
+                                    color = LocalXdSignals.current.link,
+                                    decoration = TextDecoration.Underline,
+                                    onClick = { openLink(url) },
+                                )
+                            }
+                        }
                         if (pane == Pane.CHAT) {
                             TextButton(
                                 onClick = { choosingModel = true },
@@ -525,6 +545,7 @@ internal fun ChatScreen(
                         )
                     }
                 }
+                ConnectionLine()
             }
         },
         bottomBar = {
@@ -678,10 +699,27 @@ internal fun ChatScreen(
                 }
             }
             if (state.loading && transcriptEmpty) {
-                item { CircularProgressIndicator() }
+                item {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                }
             }
             state.error?.let { error ->
-                item { Text(error, color = MaterialTheme.colorScheme.error) }
+                item {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            error,
+                            // Told to a screen reader when it appears: nothing else says the chat failed.
+                            modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        // A transcript that did not load is read again from here.
+                        if (state.loadFailed) {
+                            TextButton(onClick = model::reload, enabled = !state.loading) { Text("Try again") }
+                        }
+                    }
+                }
             }
             items(rows, key = { it.key }, contentType = ::rowContentType) { row ->
                 when (row) {
@@ -888,19 +926,30 @@ private fun Composer(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     state.todos.forEach { todo ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
+                        Row(
+                            // One stop for a screen reader, which hears how the task stands in words.
+                            modifier = Modifier.semantics(mergeDescendants = true) {
+                                stateDescription = when (todo.status) {
+                                    TodoStatus.PENDING -> "Not started"
+                                    TodoStatus.IN_PROGRESS -> "In progress"
+                                    TodoStatus.COMPLETED -> "Done"
+                                }
+                            },
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            // A ring, a dot or a check, level with the first line of the task.
+                            Box(
+                                Modifier.height(with(LocalDensity.current) { 16.sp.toDp() }),
+                                contentAlignment = Alignment.Center,
+                            ) {
                                 when (todo.status) {
-                                    TodoStatus.PENDING -> "○"
-                                    TodoStatus.IN_PROGRESS -> "●"
-                                    TodoStatus.COMPLETED -> "✓"
-                                },
-                                color = when (todo.status) {
-                                    TodoStatus.PENDING -> MaterialTheme.colorScheme.onSurfaceVariant
-                                    TodoStatus.IN_PROGRESS -> MaterialTheme.colorScheme.primary
-                                    TodoStatus.COMPLETED -> MaterialTheme.colorScheme.tertiary
-                                },
-                            )
+                                    TodoStatus.PENDING -> BackgroundRing(MaterialTheme.colorScheme.onSurfaceVariant, size = 9.dp)
+                                    TodoStatus.IN_PROGRESS -> Box(
+                                        Modifier.size(9.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
+                                    )
+                                    TodoStatus.COMPLETED -> StatusMarkIcon(StatusMark.DONE, labelled = false)
+                                }
+                            }
                             Text(
                                 todo.text,
                                 style = MaterialTheme.typography.bodySmall,
@@ -1161,11 +1210,14 @@ private fun CompactComposerRow(
     ) {
         Column {
             prompt.section?.invoke()
-            Row(
-                modifier = Modifier.padding(4.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                IconButton(onClick = onAttach, enabled = attached < Limits.MAX_IMAGES, modifier = Modifier.size(40.dp)) {
+            // No padding of its own: each control sits in a 48dp slot that is
+            // its touch target and no neighbour's, drawn at 40dp inside it.
+            Row(verticalAlignment = Alignment.Bottom) {
+                IconButton(
+                    onClick = onAttach,
+                    enabled = attached < Limits.MAX_IMAGES,
+                    modifier = Modifier.size(ComposerSlot),
+                ) {
                     Icon(
                         painterResource(R.drawable.ic_add),
                         contentDescription = "Attach images",
@@ -1176,7 +1228,7 @@ private fun CompactComposerRow(
                 androidx.compose.foundation.text.BasicTextField(
                     value = composer,
                     onValueChange = model::updateDraft,
-                    modifier = Modifier.weight(1f).heightIn(min = 40.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                     cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.onSurface),
                     maxLines = 6,
@@ -1191,7 +1243,7 @@ private fun CompactComposerRow(
                         },
                     ),
                     decorationBox = { field ->
-                        Box(Modifier.padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), contentAlignment = Alignment.CenterStart) {
+                        Box(Modifier.padding(end = 4.dp, top = 12.dp, bottom = 12.dp), contentAlignment = Alignment.CenterStart) {
                             if (composer.isEmpty()) {
                                 Text(
                                     prompt.placeholder ?: "Ask anything…",
@@ -1206,49 +1258,59 @@ private fun CompactComposerRow(
                         }
                     },
                 )
-                // Drawn at 32dp in the 40dp control line. The platform still
-                // extends its touch area to 48dp around it.
-                Box(Modifier.height(40.dp), contentAlignment = Alignment.Center) {
-                CompositionLocalProvider(androidx.compose.material3.LocalMinimumInteractiveComponentSize provides 0.dp) {
-                Surface(
-                    onClick = onModel,
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color.Transparent,
-                    modifier = Modifier.padding(horizontal = 2.dp),
+                // The agent and model: the whole slot's height takes the tap,
+                // and nothing is drawn around it until it is pressed.
+                val modelLabel = DisplayLabels.model(state.model, state.backend, catalog)
+                // With enlarged text the name would leave the message no room,
+                // so the agent's mark stands alone and the name is spoken.
+                val nameShown = LocalDensity.current.fontScale <= LARGE_TEXT_SCALE
+                Row(
+                    modifier = Modifier
+                        .height(ComposerSlot)
+                        .widthIn(min = ComposerSlot)
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable(role = Role.Button, onClickLabel = "Choose model", onClick = onModel)
+                        .semantics { if (!nameShown) contentDescription = modelLabel }
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
                 ) {
-                    Row(
-                        modifier = Modifier.height(32.dp).padding(horizontal = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        BackendIcon(state.backend, size = 14.dp)
-                        Text(
-                            DisplayLabels.model(state.model, state.backend, catalog),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.widthIn(max = 96.dp),
-                        )
-                    }
+                    BackendIcon(state.backend, size = if (nameShown) 14.dp else 18.dp)
+                    if (nameShown) Text(
+                        modelLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 96.dp),
+                    )
                 }
+                Box(Modifier.size(ComposerSlot), contentAlignment = Alignment.Center) {
+                    SendButton(
+                        state = state,
+                        empty = composer.isBlank() && attached == 0,
+                        sending = sending,
+                        cancelling = cancelling,
+                        steering = steering,
+                        model = model,
+                        size = 40.dp,
+                        answer = prompt.answer?.takeIf { composer.isNotBlank() },
+                        submittingAnswer = prompt.submitting,
+                    )
                 }
-                }
-                SendButton(
-                    state = state,
-                    empty = composer.isBlank() && attached == 0,
-                    sending = sending,
-                    cancelling = cancelling,
-                    steering = steering,
-                    model = model,
-                    size = 40.dp,
-                    answer = prompt.answer?.takeIf { composer.isNotBlank() },
-                    submittingAnswer = prompt.submitting,
-                )
             }
         }
     }
 }
+
+/** The touch target each control of the one-row composer gets, around its 40dp drawing. */
+internal val ComposerSlot = 48.dp
+
+/** The font scale past which rows drop words they have no room for. */
+internal const val LARGE_TEXT_SCALE = 1.3f
+
+/** What a screen reader is told when the turn ends. */
+internal const val TURN_FINISHED_ANNOUNCEMENT = "Reply finished"
 
 /** What the composer's one round button does. */
 internal enum class SendAction { SEND, STOP, RESUME, SEND_ANSWER, ANSWER_BUSY }
@@ -1547,7 +1609,8 @@ private fun AnalysisDisclosure(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { expanded = !expanded }
+                    .disclosure(expanded) { expanded = !expanded }
+                    .heightIn(min = 48.dp)
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1557,7 +1620,7 @@ private fun AnalysisDisclosure(
                     color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Disclosure(expanded)
+                DisclosureChevron(expanded)
             }
             if (expanded && section.text.isNotBlank()) {
                 MarkdownText(
@@ -1644,40 +1707,31 @@ private fun ToolGroupRow(row: TranscriptRow.Tools) {
         shape = RoundedCornerShape(14.dp),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { expanded = !expanded }
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.fillMaxWidth()) {
+            // The line itself is the button; the calls under it have their own.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .disclosure(expanded) { expanded = !expanded }
+                    .heightIn(min = 48.dp)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
                     row.label,
                     modifier = Modifier.weight(1f),
                     color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Disclosure(expanded)
+                DisclosureChevron(expanded)
             }
             if (expanded) {
-                Spacer(Modifier.height(8.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 6.dp)) {
                     row.items.forEach { ToolRow(it, nested = true) }
                 }
             }
         }
     }
-}
-
-/** The chevron at the end of anything that opens. */
-@Composable
-private fun Disclosure(expanded: Boolean) {
-    Icon(
-        painterResource(if (expanded) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
-        contentDescription = if (expanded) "Collapse" else "Expand",
-        tint = LocalXdSignals.current.faint,
-        modifier = Modifier.size(14.dp),
-    )
 }
 
 /**
@@ -1699,13 +1753,14 @@ private fun ToolRow(item: TranscriptItem, nested: Boolean = false) {
         shape = RoundedCornerShape(if (nested) 8.dp else 14.dp),
         border = if (nested) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .let { if (detail == null) it else it.clickable { expanded = !expanded } }
-                .padding(horizontal = if (nested) 0.dp else 14.dp, vertical = if (nested) 5.dp else 10.dp),
-        ) {
+        Column(Modifier.fillMaxWidth()) {
+            // A full-height row whether it opens or not, so a run of calls keeps one rhythm.
             Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .disclosure(expanded, enabled = detail != null) { expanded = !expanded }
+                    .heightIn(min = 48.dp)
+                    .padding(horizontal = if (nested) 0.dp else 14.dp, vertical = if (nested) 5.dp else 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -1718,20 +1773,21 @@ private fun ToolRow(item: TranscriptItem, nested: Boolean = false) {
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = XdMonoFamily,
                 )
-                if (detail != null) Disclosure(expanded)
+                if (detail != null) DisclosureChevron(expanded)
             }
             if (expanded && detail != null) {
-                Spacer(Modifier.height(8.dp))
-                if (isPatch) {
-                    DiffText(detail)
-                } else {
-                    Text(
-                        detail,
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        fontFamily = XdMonoFamily,
-                        style = MaterialTheme.typography.bodySmall,
-                        softWrap = false,
-                    )
+                Box(Modifier.padding(start = if (nested) 0.dp else 14.dp, end = if (nested) 0.dp else 14.dp, bottom = 10.dp)) {
+                    if (isPatch) {
+                        DiffText(detail)
+                    } else {
+                        Text(
+                            detail,
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            fontFamily = XdMonoFamily,
+                            style = MaterialTheme.typography.bodySmall,
+                            softWrap = false,
+                        )
+                    }
                 }
             }
         }

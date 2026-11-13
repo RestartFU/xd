@@ -15,7 +15,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -62,21 +66,30 @@ internal fun ConnectScreen(model: MainViewModel) {
     }
 }
 
+/**
+ * The host cannot be reached with this pairing. A failure another attempt can
+ * get past offers Try again first, and asks before forgetting a pairing that
+ * may still be good; one that needs a new pairing goes straight to it.
+ */
 @Composable
 internal fun FatalScreen(
     fatal: Link.Fatal,
     operationError: String?,
+    retry: () -> Unit,
     forget: () -> Unit,
 ) {
     val hostKeyMismatch = fatal.reason == FatalReason.HOST_KEY_MISMATCH
+    var confirmingForget by rememberSaveable { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         verticalArrangement = Arrangement.Center,
     ) {
         Text(
             if (hostKeyMismatch) "Machine identity changed" else "Host connection failed",
+            modifier = Modifier.semantics { heading() },
             style = MaterialTheme.typography.headlineMedium,
         )
         Spacer(Modifier.height(12.dp))
@@ -92,6 +105,35 @@ internal fun FatalScreen(
             Text(it, color = MaterialTheme.colorScheme.error)
         }
         Spacer(Modifier.height(24.dp))
-        Button(onClick = forget) { Text("Forget pairing") }
+        if (fatal.retryable) {
+            Button(onClick = retry) { Text("Try again") }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = { confirmingForget = true }) { Text(FORGET_HOST_TITLE) }
+        } else {
+            Button(onClick = forget) { Text(FORGET_HOST_TITLE) }
+        }
     }
+    if (confirmingForget) {
+        ForgetHostDialog(
+            onForget = {
+                confirmingForget = false
+                forget()
+            },
+            onDismiss = { confirmingForget = false },
+        )
+    }
+}
+
+/** Asks before erasing the pairing: getting it back takes a new code from the host. */
+@Composable
+internal fun ForgetHostDialog(onForget: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Forget this host?") },
+        text = { Text("This device will need a new pairing code to connect again.") },
+        confirmButton = {
+            TextButton(onClick = onForget) { Text("Forget", color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

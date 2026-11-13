@@ -76,7 +76,7 @@ internal const val QUOTA_PER_CHAT_DETAIL = "A chat's own quota, chosen when it s
 internal const val SETTLE_MERGED_DETAIL =
     "Settle a session when its pull request merges. A closed pull request settles it while either rule here is on."
 internal const val SETTLE_INACTIVE_DETAIL =
-    "Sessions with no activity for a while settle on their own. Any new activity un-settles them."
+    "Sessions with no activity for a while settle on their own. Any new activity brings them back."
 internal const val SETTLE_DAYS_DETAIL = "How long a session sits without activity before it settles."
 internal const val SETTLE_KEEP_PR_DETAIL =
     "Inactivity does not settle sessions with a pull request. Merge and close still do."
@@ -107,7 +107,8 @@ internal fun SettingsPage(
     model: MainViewModel,
     settings: MobileSettings,
     onClose: () -> Unit,
-    onDisconnect: () -> Unit,
+    /** Erases this device's pairing with the host, once the reader has confirmed it. */
+    onForget: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val theme by settings.theme.collectAsStateWithLifecycle()
@@ -123,6 +124,7 @@ internal fun SettingsPage(
     var updatingHost by rememberSaveable { mutableStateOf(false) }
     var accountsOpen by rememberSaveable { mutableStateOf(false) }
     var secretsOpen by rememberSaveable { mutableStateOf(false) }
+    var confirmingForget by rememberSaveable { mutableStateOf(false) }
 
     val entries = buildList {
         add(SettingsEntry(SettingsSection.APPEARANCE, listOf("Theme", "Dark", "Light")) {
@@ -189,8 +191,15 @@ internal fun SettingsPage(
                 ) { AutoSettleSettings(model) },
             )
         }
-        add(SettingsEntry(SettingsSection.DEVICES, listOf("Disconnect", DISCONNECT_DETAIL, "remote", "host")) {
-            SettingAction(title = "Disconnect", detail = DISCONNECT_DETAIL, action = "Disconnect", onClick = onDisconnect)
+        // Found under its old name too: it used to be called Disconnect.
+        add(SettingsEntry(SettingsSection.DEVICES, listOf(FORGET_HOST_TITLE, FORGET_HOST_DETAIL, "disconnect", "unpair", "remote")) {
+            SettingAction(
+                title = FORGET_HOST_TITLE,
+                detail = FORGET_HOST_DETAIL,
+                // The dots say a question follows: nothing is forgotten on this tap.
+                action = "Forget…",
+                destructive = true,
+            ) { confirmingForget = true }
         })
         add(SettingsEntry(SettingsSection.UPDATES, listOf("Host updates", UPDATES_DETAIL)) {
             SettingAction(title = "Host updates", detail = UPDATES_DETAIL, action = "Check") { updatingHost = true }
@@ -303,6 +312,15 @@ internal fun SettingsPage(
     if (secretsOpen) {
         AgentSecretsDialog(model = model, folderId = null, title = "Agent secrets", onDismiss = { secretsOpen = false })
     }
+    if (confirmingForget) {
+        ForgetHostDialog(
+            onForget = {
+                confirmingForget = false
+                onForget()
+            },
+            onDismiss = { confirmingForget = false },
+        )
+    }
 }
 
 @Composable
@@ -312,7 +330,7 @@ private fun SettingsTopBar(title: String, onBack: () -> Unit) {
             Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .height(56.dp)
+                .heightIn(min = 56.dp)
                 .padding(start = 4.dp, end = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -334,6 +352,8 @@ private fun SettingsTopBar(title: String, onBack: () -> Unit) {
             )
         }
         HorizontalDivider(color = glassEdge())
+        // Settings changes the host too, so it says when the host is out of reach.
+        ConnectionLine(divider = glassEdge())
     }
 }
 
@@ -466,5 +486,6 @@ private const val ACCOUNTS_DETAIL = "Manage sign-in and the installed assistant 
 private const val PERMISSIONS_DETAIL =
     "New chats pass the agent's unrestricted flag: no approvals or sandbox where the CLI supports it."
 private const val SECRETS_DETAIL = "Environment variables the host gives every agent."
-private const val DISCONNECT_DETAIL = "Disconnect from this host and forget it on this phone."
+internal const val FORGET_HOST_TITLE = "Forget this host"
+private const val FORGET_HOST_DETAIL = "Remove this device's pairing with the connected host."
 private const val UPDATES_DETAIL = "Check for a new xd build on the connected machine."

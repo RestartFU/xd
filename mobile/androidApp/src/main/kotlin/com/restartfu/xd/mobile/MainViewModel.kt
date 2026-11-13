@@ -669,7 +669,7 @@ class MainViewModel @JvmOverloads constructor(
         plan: Boolean? = null,
     ) {
         _error.value = null
-        val named = title.takeIf(String::isNotBlank) ?: if (sessionId == null) "New Session" else "New chat"
+        val named = title.takeIf(String::isNotBlank) ?: "New chat"
         val starting = StartingSession(++startingIds, folderId, sessionId, named, agent)
         _startingSessions.update { it + starting }
         // Only the newest opens when made: one started earlier and made
@@ -732,7 +732,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun createWorkspace(name: String, repository: String? = null, parentId: String? = null) =
-        createInTree("Could not create the workspace") {
+        createInTree("Could not create the project") {
             client.createFolder(name = name, parentId = parentId, repository = repository)
         }
 
@@ -1772,6 +1772,11 @@ class ChatViewModel(
 
     fun loadOlder() {
         launchGuarded { session.loadOlder() }
+    }
+
+    /** Reads the chat again after a load that failed. */
+    fun reload() {
+        session.reload()
     }
 
     /** False, with a notice saying so, when the queue moved on since a message was opened. */

@@ -90,7 +90,7 @@ private fun XdMobileApp(
     } else if (!hasCredentials) {
         ConnectScreen(model)
     } else if (link is Link.Fatal) {
-        FatalScreen(link as Link.Fatal, operationError, model::forget)
+        FatalScreen(link as Link.Fatal, operationError, retry = model.client::retryConnection, forget = model::forget)
     } else {
         MinimalMobileApp(model, link, settings)
     }

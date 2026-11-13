@@ -61,7 +61,10 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.material3.ButtonDefaults
 import androidx.lifecycle.ViewModel
 import com.restartfu.xd.model.ChatSummary
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -82,6 +85,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -211,8 +215,22 @@ internal fun MinimalMobileApp(
     link: Link,
     settings: MobileSettings,
 ) {
+    // Said once for the whole app: every page's connection line reads it.
+    CompositionLocalProvider(LocalConnectionNotice provides rememberConnectionNotice(link)) {
+        MinimalMobileWorkspace(model, settings)
+    }
+}
+
+@Composable
+private fun MinimalMobileWorkspace(
+    model: MainViewModel,
+    settings: MobileSettings,
+) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
     val waitingChats by model.client.waitingChats.collectAsStateWithLifecycle()
+    val unreadChats by model.client.unreadChats.collectAsStateWithLifecycle()
+    // How each of the open session's chats stands, for its tab and menu row.
+    val chatStatusOf = { chat: ChatSummary -> chatStatus(chat, chat.id in waitingChats, chat.id in unreadChats) }
     val created by model.createdDirectSession.collectAsStateWithLifecycle()
     val operationError by model.error.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -356,12 +374,12 @@ internal fun MinimalMobileApp(
             Box(Modifier.weight(1f)) {
                 when {
                     mobileDestination == MobileDestination.TERMINAL -> MinimalGlobalTerminal(
-                        model, link, showProjects, barInset, onSettings = { settingsOpen = true },
+                        model, barInset, onSettings = { settingsOpen = true },
                     )
                     mobileDestination == MobileDestination.USAGE -> Column(
                         Modifier.fillMaxSize().background(GlassPage),
                     ) {
-                        ProductHeader(link = link, title = "Usage", onSettings = { settingsOpen = true })
+                        ProductHeader(title = "Usage", onSettings = { settingsOpen = true })
                         // Kept with the other per-host stores, so leaving Usage keeps what it read.
                         val usage: UsageViewModel = viewModel(
                             key = "usage",
@@ -400,6 +418,7 @@ internal fun MinimalMobileApp(
                                 actions = sessionActions,
                                 agents = agents,
                                 showPullRequests = showPullRequests,
+                                statusOf = chatStatusOf,
                             )
                         }
                         if (activeChat != null) {
@@ -433,6 +452,7 @@ internal fun MinimalMobileApp(
                                         settleSession = { sessionActions.settle(activeSession) }
                                             .takeIf { sessionActions.settlement && !activeSession.settled },
                                         renameSession = { sessionActions.rename(activeSession) },
+                                        statusOf = chatStatusOf,
                                     ),
                                     linkedPullRequests = activeChat.pullRequests.takeIf { tree.linkedPullRequests },
                                     agentChats = tree.chats.filter { it.parentId == activeChat.id }
@@ -453,7 +473,7 @@ internal fun MinimalMobileApp(
                             }
                         } else {
                             Column(Modifier.fillMaxSize()) {
-                                ProductHeader(link, activeSession.title, onSettings = { settingsOpen = true })
+                                ProductHeader(activeSession.title, onSettings = { settingsOpen = true })
                                 tabStrip(AgentTabs(), null)
                                 Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -466,7 +486,7 @@ internal fun MinimalMobileApp(
                         }
                     }
                     else -> MinimalProjectsHome(
-                        model, settings, link, projects, tree.loading, tree.error, showTerminal,
+                        model, settings, projects, tree.loading, tree.error,
                         onSettings = { settingsOpen = true },
                         listState = projectsList,
                         newSessionAboveBar = showBottomNavigation,
@@ -515,7 +535,7 @@ internal fun MinimalMobileApp(
             model = model,
             settings = settings,
             onClose = { settingsOpen = false },
-            onDisconnect = {
+            onForget = {
                 settingsOpen = false
                 model.forget()
             },
@@ -609,11 +629,16 @@ internal fun MinimalMobileApp(
     deleteChat?.let { chat ->
         AlertDialog(
             onDismissRequest = { if (!deleting) deleteChat = null },
-            title = { Text("Delete this chat?") },
-            text = { Text("This permanently deletes “${chat.title}” and its history. Other chats in this session stay saved.") },
+            title = { Text("Delete chat?") },
+            text = {
+                Text(
+                    "This permanently removes ${chat.title.ifBlank { "New chat" }} and its conversation from xd. " +
+                        "Project files are kept.",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { model.deleteChat(chat.id); deleteChat = null }, enabled = !deleting) {
-                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                    Text("Delete chat", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = { TextButton(onClick = { deleteChat = null }, enabled = !deleting) { Text("Cancel") } },
@@ -646,11 +671,9 @@ internal fun MinimalMobileApp(
 private fun MinimalProjectsHome(
     model: MainViewModel,
     settings: MobileSettings,
-    link: Link,
     projects: List<MinimalProject>,
     loading: Boolean,
     treeError: String?,
-    onTerminal: () -> Unit,
     onSettings: () -> Unit,
     listState: LazyListState,
     newSessionAboveBar: Boolean,
@@ -766,7 +789,7 @@ private fun MinimalProjectsHome(
                 }
             }
         }
-        ProductHeader(link = link, title = "Projects", onSettings = onSettings)
+        ProductHeader(title = "Projects", onSettings = onSettings)
         when {
             loading && projects.isEmpty() -> Box(
                 Modifier.fillMaxSize(),
@@ -790,7 +813,7 @@ private fun MinimalProjectsHome(
                 }
                 if (rows.isEmpty()) {
                     item("empty-projects") {
-                        EmptyCard("Create a workspace, then start a Codex or Claude session.")
+                        EmptyCard("Create a project, then start a Codex or Claude session in it.")
                     }
                 } else {
                     items(rows, key = ProjectTreeRow::id) { row ->
@@ -1055,8 +1078,6 @@ private fun MinimalProjectsHome(
 @Composable
 private fun MinimalGlobalTerminal(
     model: MainViewModel,
-    link: Link,
-    onProjects: () -> Unit,
     bottomInset: Dp,
     onSettings: () -> Unit,
 ) {
@@ -1072,6 +1093,7 @@ private fun MinimalGlobalTerminal(
             chatId = GLOBAL_TERMINAL_CHAT_ID,
         ),
     )
+    val state by terminal.state.collectAsStateWithLifecycle()
 
     Column(
         Modifier
@@ -1079,21 +1101,19 @@ private fun MinimalGlobalTerminal(
             .background(GlassPage)
             .navigationBarsPadding(),
     ) {
-        ProductHeader(link = link, title = "Terminal", onSettings = onSettings)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(54.dp)
-                .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Terminal", modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-            TextButton(onClick = terminal::kill) {
-                Text("Stop", color = MaterialTheme.colorScheme.error)
+        // The header names the page once and holds the shell's one action,
+        // in place of a second row that only repeated "Terminal".
+        ProductHeader(title = "Terminal", onSettings = onSettings) {
+            if (state.closed || state.error != null) {
+                TextButton(onClick = terminal::open) { Text("Reopen") }
+            } else {
+                TextButton(
+                    onClick = terminal::kill,
+                    enabled = state.id != null,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Stop") }
             }
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -1105,7 +1125,6 @@ private fun MinimalGlobalTerminal(
             TerminalPaneContent(terminal, showSessionBar = false)
         }
     }
-
 }
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -1126,6 +1145,8 @@ private fun SessionTabStrip(
     agents: AgentTabs = AgentTabs(),
     /** Opens the open chat's Pull requests list; null where the host cannot link them. */
     showPullRequests: (() -> Unit)? = null,
+    /** How a chat stands, marked on its tab as on the desktop's; null for a quiet one. */
+    statusOf: (ChatSummary) -> StatusMark? = { null },
 ) {
     var openMenu by remember { mutableStateOf(false) }
     Row(
@@ -1163,6 +1184,7 @@ private fun SessionTabStrip(
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.labelLarge,
                                 color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                            statusOf(chat)?.let { StatusMarkIcon(it) }
                         }
                         if (!compact) {
                             IconButton(onClick = { closeTab(chat.id) }, modifier = Modifier.size(48.dp)) {
@@ -1185,9 +1207,11 @@ private fun SessionTabStrip(
             }
             DropdownMenu(expanded = openMenu, onDismissRequest = { openMenu = false }) {
                 chats.forEach { chat ->
+                    val status = statusOf(chat)
                     DropdownMenuItem(
                         text = { Text(chat.title.ifBlank { "New chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         leadingIcon = { BackendIcon(chat.backend, size = 18.dp) },
+                        trailingIcon = status?.let { { StatusMarkIcon(it) } },
                         onClick = { openMenu = false; selectTab(chat.id) },
                     )
                 }
@@ -1259,7 +1283,7 @@ private fun AgentTabChip(agent: AgentTab, selected: Boolean, agents: AgentTabs) 
                     style = MaterialTheme.typography.labelLarge,
                     color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (agent.running) PulseDot(LocalXdSignals.current.working)
+                if (agent.running) StatusMarkIcon(StatusMark.WORKING)
             }
             IconButton(onClick = { agents.close(agent.key) }, modifier = Modifier.size(48.dp)) {
                 Icon(painterResource(R.drawable.ic_close), "Close ${agent.title}", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1268,18 +1292,24 @@ private fun AgentTabChip(agent: AgentTab, selected: Boolean, agents: AgentTabs) 
     }
 }
 
+/**
+ * A top-level page's header: the mark, the page's name, its own action if it
+ * has one, a dot while the host is connected, and Settings. While the host is
+ * not connected the dot is gone and the line below says so in words.
+ */
 @Composable
 private fun ProductHeader(
-    link: Link,
     title: String,
     onSettings: () -> Unit,
+    action: (@Composable () -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(glassPane())
             .statusBarsPadding()
-            .height(56.dp)
+            // At least, not exactly: enlarged text makes the title taller.
+            .heightIn(min = 56.dp)
             .padding(start = 16.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -1292,25 +1322,25 @@ private fun ProductHeader(
         )
         Text(
             title,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).semantics { heading() },
             style = MaterialTheme.typography.titleMedium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        val up = link is Link.Up
+        action?.invoke()
         Box(
             modifier = Modifier.size(48.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Box(
-                Modifier
-                    .size(9.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (up) LocalXdSignals.current.working
-                        else MaterialTheme.colorScheme.error,
-                    ),
-            )
+            if (LocalConnectionNotice.current.value == null) {
+                Box(
+                    Modifier
+                        .size(9.dp)
+                        .clip(CircleShape)
+                        .background(LocalXdSignals.current.working)
+                        .semantics { contentDescription = "Connected" },
+                )
+            }
         }
         IconButton(onClick = onSettings, modifier = Modifier.size(48.dp)) {
             Icon(
@@ -1321,6 +1351,7 @@ private fun ProductHeader(
         }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    ConnectionLine()
 }
 
 /**
@@ -1454,56 +1485,65 @@ private fun XdNavigationRail(
 }
 
 /** What a session's signal tab says about its agent, as on the desktop. */
-private enum class SessionSignal(val label: String) {
+internal enum class SessionSignal(val label: String, val mark: StatusMark? = null) {
     IDLE("Idle"),
-    WORKING("Working"),
-    WAITING("Waiting on you"),
+    WORKING("Working", StatusMark.WORKING),
+    WAITING("Waiting on you", StatusMark.WAITING),
     /** No turn running, but background agents or shells are. */
     BACKGROUND("Waiting on background tasks"),
     /** Stopped by pausing every chat; resuming them continues it. */
-    PAUSED("Paused"),
-    DONE("Done"),
+    PAUSED("Paused", StatusMark.PAUSED),
+    DONE("Done", StatusMark.DONE),
 }
 
 @Composable
-private fun SessionSignal.color(): Color {
-    val signals = LocalXdSignals.current
-    return when (this) {
-        SessionSignal.IDLE, SessionSignal.PAUSED -> signals.faint
-        SessionSignal.WORKING -> signals.working
-        SessionSignal.BACKGROUND -> MaterialTheme.colorScheme.onSurfaceVariant
-        SessionSignal.WAITING -> signals.waiting
-        SessionSignal.DONE -> signals.done
-    }
-}
+private fun SessionSignal.color(): Color =
+    mark?.color() ?: if (this == SessionSignal.BACKGROUND) MaterialTheme.colorScheme.onSurfaceVariant
+    else LocalXdSignals.current.faint
 
 /**
- * The small status mark at the end of a session row: a dot for work and
- * unread turns, nothing for a quiet session. Waiting on the user is the one
- * state that also says so in words.
+ * What a closed row says of the sessions it hides, for a screen reader: how
+ * many stand each way, the ones that need the reader first. Quiet and paused
+ * sessions are left out, as their marks are.
+ */
+internal fun signalSummary(signals: List<SessionSignal>): String =
+    listOf(SessionSignal.WAITING, SessionSignal.WORKING, SessionSignal.BACKGROUND, SessionSignal.DONE)
+        .mapNotNull { signal ->
+            val count = signals.count { it == signal }
+            if (count == 0) null else "$count ${signal.label.lowercase()}"
+        }
+        .joinToString(", ")
+
+/**
+ * The status at the end of a session row: nothing for a quiet session, the
+ * shared mark for work and unread turns, and the mark with its words for the
+ * two states that ask something of the reader. [wordless] leaves the words
+ * out where the row says them elsewhere.
  */
 @Composable
-private fun SignalMark(signal: SessionSignal, modifier: Modifier = Modifier, backgroundTasks: Int = 0) {
+private fun SignalMark(
+    signal: SessionSignal,
+    modifier: Modifier = Modifier,
+    backgroundTasks: Int = 0,
+    wordless: Boolean = false,
+) {
     when (signal) {
         SessionSignal.IDLE -> Unit
-        SessionSignal.WAITING -> StatusPill("Waiting", signal.color(), modifier)
-        SessionSignal.PAUSED -> StatusPill("Paused", signal.color(), modifier)
-        SessionSignal.WORKING -> PulseDot(signal.color(), modifier)
+        SessionSignal.WAITING, SessionSignal.PAUSED -> {
+            val mark = checkNotNull(signal.mark)
+            if (wordless) StatusMarkIcon(mark, modifier, labelled = false)
+            else StatusPill(signal.label, signal.color(), modifier, mark = mark)
+        }
+        SessionSignal.WORKING, SessionSignal.DONE -> StatusMarkIcon(checkNotNull(signal.mark), modifier)
         // The count beside a still ring; the words are for screen readers.
         SessionSignal.BACKGROUND -> Row(
-            modifier.semantics { contentDescription = backgroundTasksLabel(backgroundTasks) },
+            modifier.clearAndSetSemantics { contentDescription = backgroundTasksLabel(backgroundTasks) },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text("$backgroundTasks", color = signal.color(), fontSize = 11.sp)
+            Text("$backgroundTasks", color = signal.color(), style = MaterialTheme.typography.labelSmall)
             BackgroundRing(signal.color())
         }
-        SessionSignal.DONE -> Box(
-            modifier
-                .size(7.dp)
-                .clip(CircleShape)
-                .background(signal.color()),
-        )
     }
 }
 
@@ -1529,7 +1569,12 @@ private fun DrawerRow(
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(10.dp))
-            .clickable(onClickLabel = if (open) "Close project" else "Open project", onClick = onClick)
+            .clickable(
+                role = Role.Button,
+                onClickLabel = if (open) "Close project" else "Open project",
+                onClick = onClick,
+            )
+            .semantics { stateDescription = if (open) "Expanded" else "Collapsed" }
             .padding(start = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1563,7 +1608,8 @@ private fun DrawerRow(
             )
             Text(
                 project.sessions.toString(),
-                fontSize = 12.sp,
+                modifier = Modifier.semantics { contentDescription = counted(project.sessions, "session") },
+                style = MaterialTheme.typography.labelMedium,
                 color = faint,
             )
         }
@@ -1584,25 +1630,29 @@ private fun DrawerRow(
     }
 }
 
-/** A dot for each of up to five sessions that need a look; quiet ones draw nothing. */
+/** "1 session", "3 sessions": a bare count, said with what it counts. */
+private fun counted(count: Int, noun: String): String = "$count $noun${if (count == 1) "" else "s"}"
+
+/**
+ * A mark for each of up to five sessions that need a look; quiet ones draw
+ * nothing. Each state has its own shape, and a screen reader hears the count
+ * of each instead of the marks one by one.
+ */
 @Composable
 private fun SignalDots(signals: List<SessionSignal>) {
+    // A paused session is quiet until resumed; the header's Resume button says so.
+    val shown = signals.filter { it != SessionSignal.IDLE && it != SessionSignal.PAUSED }
+    if (shown.isEmpty()) return
+    val summary = signalSummary(shown)
     Row(
+        modifier = Modifier.clearAndSetSemantics { contentDescription = summary },
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // A paused session is quiet until resumed; the header's Resume button says so.
-        signals.filter { it != SessionSignal.IDLE && it != SessionSignal.PAUSED }.take(5).forEach { signal ->
-            if (signal == SessionSignal.BACKGROUND) {
-                BackgroundRing(signal.color(), size = 6.dp)
-            } else {
-                Box(
-                    Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(signal.color()),
-                )
-            }
+        shown.take(5).forEach { signal ->
+            val mark = signal.mark
+            if (mark == null) BackgroundRing(signal.color(), size = 8.dp)
+            else StatusMarkIcon(mark, labelled = false, still = true)
         }
     }
 }
@@ -1757,7 +1807,12 @@ private fun FolderRow(
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(10.dp))
-            .clickable(onClickLabel = if (open) "Close folder" else "Open folder", onClick = toggle)
+            .clickable(
+                role = Role.Button,
+                onClickLabel = if (open) "Close folder" else "Open folder",
+                onClick = toggle,
+            )
+            .semantics { stateDescription = if (open) "Expanded" else "Collapsed" }
             .padding(start = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1783,7 +1838,12 @@ private fun FolderRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(folder.items.toString(), fontSize = 12.sp, color = faint)
+            Text(
+                folder.items.toString(),
+                modifier = Modifier.semantics { contentDescription = counted(folder.items, "item") },
+                style = MaterialTheme.typography.labelMedium,
+                color = faint,
+            )
         }
         // A closed folder shows which of the sessions inside need a look.
         if (!open) SignalDots(signals)
@@ -2143,6 +2203,10 @@ private fun SessionRow(
     fold: SessionFold? = null,
 ) {
     val signals = LocalXdSignals.current
+    // With enlarged text the words of a status would squeeze the title out of
+    // the row, so they move to the line under it and the mark stays at the end.
+    val wordsBelow = LocalDensity.current.fontScale > 1.3f &&
+        (signal == SessionSignal.WAITING || signal == SessionSignal.PAUSED)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -2166,7 +2230,7 @@ private fun SessionRow(
             )
             .heightIn(min = 64.dp)
             .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
+            .clickable(role = Role.Button, onClickLabel = "Open session", onClick = onClick)
             .padding(start = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -2180,6 +2244,13 @@ private fun SessionRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (wordsBelow) Text(
+                    signal.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = signal.color(),
+                    maxLines = 1,
+                )
                 Text(
                     subtitle ?: "${session.chatIds.size} chat${if (session.chatIds.size == 1) "" else "s"}",
                     style = MaterialTheme.typography.labelMedium,
@@ -2201,12 +2272,17 @@ private fun SessionRow(
         // Folded, it says how many sessions it hides and which of them need a
         // look, the way a closed project does.
         if (fold?.folded == true) {
-            Text("${fold.workers}", fontSize = 12.sp, color = signals.faint)
+            Text(
+                "${fold.workers}",
+                modifier = Modifier.semantics { contentDescription = counted(fold.workers, "agent session") },
+                style = MaterialTheme.typography.labelMedium,
+                color = signals.faint,
+            )
             SignalDots(fold.hidden)
         }
-        SignalMark(signal, backgroundTasks = session.backgroundTasks)
+        SignalMark(signal, backgroundTasks = session.backgroundTasks, wordless = wordsBelow)
         if (fold != null) {
-            IconButton(onClick = fold.toggle, modifier = Modifier.size(40.dp)) {
+            IconButton(onClick = fold.toggle, modifier = Modifier.size(48.dp)) {
                 Icon(
                     painterResource(if (fold.folded) R.drawable.ic_chevron_right else R.drawable.ic_chevron_down),
                     contentDescription = if (fold.folded) {
@@ -2312,7 +2388,7 @@ private fun SettledShelf(
                 .fillMaxWidth()
                 .heightIn(min = 48.dp)
                 .clip(RoundedCornerShape(10.dp))
-                .clickable(onClick = toggle)
+                .disclosure(expanded, onToggle = toggle)
                 .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2330,7 +2406,12 @@ private fun SettledShelf(
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text(settled.size.toString(), fontSize = 12.sp, color = faint)
+            Text(
+                settled.size.toString(),
+                modifier = Modifier.semantics { contentDescription = counted(settled.size, "session") },
+                style = MaterialTheme.typography.labelMedium,
+                color = faint,
+            )
         }
         if (expanded) {
             settled.forEach { entry ->
@@ -2346,43 +2427,6 @@ private fun SettledShelf(
             }
         }
     }
-}
-
-/** A small status label on a soft tint of its own colour. */
-@Composable
-internal fun StatusPill(label: String, color: Color, modifier: Modifier = Modifier) {
-    Text(
-        label,
-        modifier = modifier
-            .clip(RoundedCornerShape(50))
-            .background(color.copy(alpha = 0.14f))
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-        color = color,
-        style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.Medium,
-    )
-}
-
-/** A dot that breathes while something works. */
-@Composable
-internal fun PulseDot(color: Color, modifier: Modifier = Modifier, size: Dp = 7.dp) {
-    val transition = androidx.compose.animation.core.rememberInfiniteTransition(label = "pulse")
-    val alpha by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1f,
-        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-            androidx.compose.animation.core.tween(800),
-            androidx.compose.animation.core.RepeatMode.Reverse,
-        ),
-        label = "pulse-alpha",
-    )
-    Box(
-        modifier
-            .size(size)
-            .graphicsLayer { this.alpha = alpha }
-            .clip(CircleShape)
-            .background(color),
-    )
 }
 
 @Composable
@@ -2706,6 +2750,8 @@ internal fun SettingAction(
     title: String,
     detail: String,
     action: String,
+    /** The action removes something that cannot be brought back with a tap. */
+    destructive: Boolean = false,
     onClick: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2717,7 +2763,11 @@ internal fun SettingAction(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        TextButton(onClick = onClick) { Text(action) }
+        TextButton(
+            onClick = onClick,
+            colors = if (destructive) ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+            else ButtonDefaults.textButtonColors(),
+        ) { Text(action) }
     }
 }
 
