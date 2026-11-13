@@ -41,6 +41,8 @@ public data class ChatState(
     val effort: String? = null,
     /** `read-only`, `edit` or `full`. Ignored by the host while [plan] is on. */
     val access: String? = null,
+    /** The id of the account the chat is set to run on; null while the host chooses. */
+    val account: String? = null,
     val newWorktree: Boolean = false,
     /** True when this chat is in Git and has not locked its checkout yet. */
     val canCreateWorktree: Boolean = false,

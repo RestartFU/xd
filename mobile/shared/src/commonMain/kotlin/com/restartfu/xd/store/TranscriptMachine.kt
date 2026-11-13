@@ -339,6 +339,7 @@ public object TranscriptMachine {
                 model = chat.model,
                 effort = chat.effort,
                 access = chat.access,
+                account = chat.account,
                 newWorktree = chat.newWorktree,
                 interactions = if (chat.interactionEpoch != state.interactionEpoch || chat.interactionRevision >= state.interactionRevision) chat.interactions.map { it.toModel() } else state.interactions,
                 interactionRevision = if (chat.interactionEpoch != state.interactionEpoch) chat.interactionRevision else maxOf(chat.interactionRevision, state.interactionRevision),

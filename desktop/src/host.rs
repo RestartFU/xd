@@ -264,6 +264,8 @@ pub struct FirstMessage<'a> {
     pub effort: Option<&'a str>,
     pub access: Option<&'a str>,
     pub plan: Option<bool>,
+    /// The account the chat runs on, or none to let the host choose.
+    pub account: Option<&'a str>,
     pub attachments: &'a [Attachment],
     pub worktree_backend: Option<&'a str>,
     pub worktree_model: Option<&'a str>,
@@ -825,6 +827,15 @@ impl HostHandle {
         self.send(RequestKind::AgentAuth, json!({"op": "agent-auth"}))
     }
 
+    /// Lists the assistants' accounts without the host checking each again,
+    /// to offer them for a chat.
+    pub fn agent_accounts(&self) -> Result<(), String> {
+        self.send(
+            RequestKind::AgentAuth,
+            json!({"op": "agent-auth", "check": false}),
+        )
+    }
+
     pub fn agent_clis(&self) -> Result<(), String> {
         self.send(RequestKind::AgentClis, json!({"op": "agent-clis"}))
     }
@@ -1319,6 +1330,9 @@ impl HostHandle {
             }
             if let Some(plan) = message.plan {
                 body["plan"] = json!(plan);
+            }
+            if let Some(account) = message.account {
+                body["account"] = json!(account);
             }
         }
         // A worktree made with the chat is named for what the chat is for:
@@ -2381,6 +2395,22 @@ impl HostHandle {
                 "chat": chat_id,
                 "option": "access",
                 "value": access,
+            }),
+        )
+    }
+
+    /// Sets the account the chat runs on; an empty `account` lets the host
+    /// choose again.
+    pub fn set_account(&self, chat_id: &str, account: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::SetOption {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({
+                "op": "set-option",
+                "chat": chat_id,
+                "option": "account",
+                "value": account,
             }),
         )
     }
@@ -3992,6 +4022,7 @@ mod tests {
                     effort: None,
                     access: None,
                     plan: None,
+                    account: None,
                     text,
                     worktree_backend: Some("claude"),
                     worktree_model: Some("claude-sonnet-5"),

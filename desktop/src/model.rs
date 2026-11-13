@@ -827,6 +827,9 @@ pub struct AppModel {
     /// The connected host can limit each chat to a share of its account's
     /// usage limit.
     pub chat_quotas_supported: bool,
+    /// The connected host can set a chat to run on one of its assistant's
+    /// accounts.
+    pub chat_accounts_supported: bool,
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
@@ -864,6 +867,8 @@ pub struct AppModel {
     pub access: String,
     pub plan: bool,
     pub fast: bool,
+    /// The account the open chat is set to run on; `None` lets the host choose.
+    pub account: Option<String>,
     pub context_used: u64,
     pub context_window: u64,
     pub auth_state: String,
@@ -915,6 +920,9 @@ struct TreeSnapshot {
     /// hosts leave this out.
     #[serde(default)]
     chat_quotas: bool,
+    /// The host can set a chat to run on one account; older hosts leave this out.
+    #[serde(default)]
+    chat_accounts: bool,
     #[serde(default)]
     terminal_activity_epoch: Option<String>,
     #[serde(default)]
@@ -1286,6 +1294,7 @@ impl AppModel {
         self.pause_folders_supported = snapshot.pause_folders;
         self.linked_pull_requests_supported = snapshot.linked_pull_requests;
         self.chat_quotas_supported = snapshot.chat_quotas;
+        self.chat_accounts_supported = snapshot.chat_accounts;
         self.refresh_session_activity();
         self.connected = true;
         self.unread_chats
@@ -1313,6 +1322,7 @@ impl AppModel {
             self.access.clear();
             self.plan = false;
             self.fast = false;
+            self.account = None;
             self.context_used = 0;
             self.context_window = 0;
             self.auth_state.clear();
@@ -1358,6 +1368,7 @@ impl AppModel {
         self.access.clear();
         self.plan = false;
         self.fast = false;
+        self.account = None;
         self.context_used = 0;
         self.context_window = 0;
         self.auth_state.clear();
@@ -1478,6 +1489,10 @@ impl AppModel {
         self.plan = body.get("plan").and_then(Value::as_bool).unwrap_or(false);
         self.fast =
             self.backend == "codex" && body.get("fast").and_then(Value::as_bool).unwrap_or(false);
+        self.account = body
+            .get("account")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         self.context_used = body
             .get("context_used")
             .and_then(Value::as_u64)
@@ -2189,6 +2204,7 @@ impl AppModel {
             pause_folders_supported: false,
             linked_pull_requests_supported: false,
             chat_quotas_supported: false,
+            chat_accounts_supported: false,
             folders: vec![Folder {
                 id: "workspace-xd".into(),
                 name: "xd".into(),
@@ -2269,6 +2285,7 @@ impl AppModel {
             access: "edit".into(),
             plan: false,
             fast: false,
+            account: None,
             context_used: 16_948,
             context_window: 272_000,
             auth_state: "signed-in".into(),
@@ -2547,6 +2564,32 @@ mod tests {
         assert_eq!(ChatQuotaSettings::step(12, false), Some(10));
         assert_eq!(ChatQuotaSettings::step(100, true), None);
         assert_eq!(ChatQuotaSettings::step(1, false), None);
+    }
+
+    #[test]
+    fn a_chats_account_is_absent_while_the_host_chooses() {
+        let mut model = AppModel::default();
+        model.apply_tree(&grouped_tree()).unwrap();
+        assert!(
+            !model.chat_accounts_supported,
+            "an older host leaves it out"
+        );
+        let mut tree = grouped_tree();
+        tree["chat_accounts"] = json!(true);
+        model.apply_tree(&tree).unwrap();
+        assert!(model.chat_accounts_supported);
+
+        let chat = model.chats[0].id.clone();
+        model.select_chat(chat);
+        model.apply_chat(&json!({"working": false, "account": "b7c8d9e0f1a2"}));
+        assert_eq!(model.account.as_deref(), Some("b7c8d9e0f1a2"));
+        model.apply_chat(&json!({"working": false}));
+        assert_eq!(model.account, None);
+        // Another chat does not open showing this one's account.
+        model.apply_chat(&json!({"working": false, "account": "default"}));
+        let other = model.chats[1].id.clone();
+        model.select_chat(other);
+        assert_eq!(model.account, None);
     }
 
     #[test]

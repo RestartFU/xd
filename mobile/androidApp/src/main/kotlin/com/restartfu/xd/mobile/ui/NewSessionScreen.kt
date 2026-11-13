@@ -80,6 +80,7 @@ import com.restartfu.xd.mobile.R
 import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.model.ProjectChoice
 import com.restartfu.xd.model.matching
+import com.restartfu.xd.protocol.AgentAccountReply
 import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.BranchSourceReply
 import com.restartfu.xd.protocol.Ops
@@ -100,6 +101,8 @@ internal data class NewSessionRequest(
     val effort: String?,
     val access: String?,
     val plan: Boolean,
+    /** The account the chat runs on, or null to let the host choose. */
+    val account: String? = null,
 )
 
 /**
@@ -120,6 +123,8 @@ internal fun NewSessionFlow(
     backends: List<BackendReply>,
     catalogError: String?,
     retryCatalog: () -> Unit,
+    /** By assistant, the accounts a chat can be set to run on; null until they are listed. See [chatAccountChoices]. */
+    accounts: Map<String, List<AgentAccountReply>>? = emptyMap(),
     places: suspend (projectId: String) -> NewSessionPlaces,
     onDismiss: () -> Unit,
     onCreate: (projectId: String, NewSessionRequest) -> Unit,
@@ -147,6 +152,7 @@ internal fun NewSessionFlow(
                     backends = backends,
                     catalogError = catalogError,
                     retryCatalog = retryCatalog,
+                    accounts = accounts,
                     chatTab = false,
                     places = { places(id) },
                     navigation = if (returnsToList) Navigation.Back { onChoose(null) } else Navigation.Close(onDismiss),
@@ -169,6 +175,7 @@ internal fun NewSessionDialog(
     backends: List<BackendReply> = emptyList(),
     catalogError: String? = null,
     retryCatalog: (() -> Unit)? = null,
+    accounts: Map<String, List<AgentAccountReply>>? = emptyMap(),
     chatTab: Boolean = false,
     /** Where a new session can work; null for a chat joining an existing session. */
     places: (suspend () -> NewSessionPlaces)? = null,
@@ -187,6 +194,7 @@ internal fun NewSessionDialog(
             backends = backends,
             catalogError = catalogError,
             retryCatalog = retryCatalog,
+            accounts = accounts,
             chatTab = chatTab,
             places = places,
             navigation = Navigation.Close(onDismiss),
@@ -390,6 +398,7 @@ private fun SessionForm(
     backends: List<BackendReply>,
     catalogError: String?,
     retryCatalog: (() -> Unit)?,
+    accounts: Map<String, List<AgentAccountReply>>?,
     chatTab: Boolean,
     places: (suspend () -> NewSessionPlaces)?,
     navigation: Navigation,
@@ -408,6 +417,7 @@ private fun SessionForm(
     var effort by rememberSaveable(draftKey) { mutableStateOf(restored.optString("effort").takeIf(String::isNotBlank)) }
     var access by rememberSaveable(draftKey) { mutableStateOf(restored.optString("access").takeIf(String::isNotBlank)) }
     var plan by rememberSaveable(draftKey) { mutableStateOf(restored.optBoolean("plan")) }
+    var account by rememberSaveable(draftKey) { mutableStateOf(restored.optString("account").takeIf(String::isNotBlank)) }
     var startFromRemote by rememberSaveable(draftKey) { mutableStateOf(restored.optBoolean("startFromRemote", true)) }
     var loaded by remember { mutableStateOf<NewSessionPlaces?>(null) }
     var placesError by remember { mutableStateOf<String?>(null) }
@@ -420,12 +430,13 @@ private fun SessionForm(
             drafts.edit().putString(
                 key,
                 JSONObject().put("title", title).put("agent", agent.wire)
-                    .put("effort", effort).put("access", access).put("plan", plan).put("startFromRemote", startFromRemote)
+                    .put("effort", effort).put("access", access).put("plan", plan).put("account", account)
+                    .put("startFromRemote", startFromRemote)
                     .put("worktree", worktree?.let(::worktreeToJson)).toString(),
             ).apply()
         }
     }
-    LaunchedEffect(draftKey, title, agent, effort, access, plan, worktree, startFromRemote) { saveDraft() }
+    LaunchedEffect(draftKey, title, agent, effort, access, plan, account, worktree, startFromRemote) { saveDraft() }
     if (places != null) {
         LaunchedEffect(Unit) {
             try {
@@ -445,6 +456,7 @@ private fun SessionForm(
     if (navigation is Navigation.Back) BackHandler(onBack = navigation.action)
 
     val efforts = backends.firstOrNull { it.id == agent.wire }?.efforts.orEmpty()
+    val accountChoices = accounts?.get(agent.wire).orEmpty()
     val catalogMissing = retryCatalog != null && backends.isEmpty()
     // Wait for the choices, as the desktop does; if they cannot be read, the
     // host's own default checkout still works. A project with no checkout to
@@ -472,6 +484,10 @@ private fun SessionForm(
                 effort = effort?.takeIf { it in efforts },
                 access = access,
                 plan = plan,
+                // One removed since it was chosen is not sent. Until the
+                // accounts are listed it is sent as picked: the host keeps
+                // it only if the assistant offers it.
+                account = account?.takeIf { id -> accounts == null || accountChoices.any { it.id == id } },
             ),
         )
     }
@@ -514,7 +530,8 @@ private fun SessionForm(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     FormSection("Assistant") {
-                        AgentTiles(agent) { agent = it; effort = null }
+                        // Effort and accounts belong to one assistant.
+                        AgentTiles(agent) { agent = it; effort = null; account = null }
                         // Loading is said once, above Start; a failure is said here, with its fix.
                         if (catalogMissing && catalogError != null) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -550,6 +567,9 @@ private fun SessionForm(
                             onAccess = { access = it },
                             plan = plan,
                             onPlan = { plan = it },
+                            accounts = accountChoices,
+                            account = account,
+                            onAccount = { account = it },
                         )
                     }
                 }
@@ -937,6 +957,9 @@ private fun OptionsGroup(
     onAccess: (String?) -> Unit,
     plan: Boolean,
     onPlan: (Boolean) -> Unit,
+    accounts: List<AgentAccountReply> = emptyList(),
+    account: String? = null,
+    onAccount: (String?) -> Unit = {},
 ) {
     Group {
         Row(
@@ -989,6 +1012,19 @@ private fun OptionsGroup(
                 onSelect = { label -> onEffort(efforts.firstOrNull { effortLabel(it) == label }) },
             )
         }
+        if (accounts.isNotEmpty()) {
+            val now = rememberMinuteClock()
+            val chosen = accounts.firstOrNull { it.id == account }
+            GroupDivider()
+            ValueRow(
+                label = "Account",
+                detail = if (chosen == null) "The first account with room left" else null,
+                value = chosen?.label ?: "Automatic",
+                choices = listOf("Automatic") + accounts.map { chatAccountLabel(it, now) },
+                chosen = chosen?.let { chatAccountLabel(it, now) } ?: "Automatic",
+                onSelect = { label -> onAccount(accounts.firstOrNull { chatAccountLabel(it, now) == label }?.id) },
+            )
+        }
     }
 }
 
@@ -1005,6 +1041,8 @@ private fun ValueRow(
     value: String,
     choices: List<String>,
     enabled: Boolean = true,
+    /** The choice marked as chosen, when the row shows it in fewer words. */
+    chosen: String = value,
     onSelect: (String) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
@@ -1036,7 +1074,7 @@ private fun ValueRow(
                 choices.forEach { choice ->
                     DropdownMenuItem(
                         text = { Text(choice) },
-                        trailingIcon = if (choice == value) {
+                        trailingIcon = if (choice == chosen) {
                             { Icon(painterResource(R.drawable.ic_check), contentDescription = "Chosen", modifier = Modifier.size(16.dp)) }
                         } else null,
                         onClick = { open = false; onSelect(choice) },

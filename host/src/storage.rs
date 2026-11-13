@@ -238,6 +238,9 @@ pub struct TurnSpec {
     pub session_account: Option<String>,
     /// The account the turn runs on, chosen when it starts.
     pub account: String,
+    /// The account the user set the chat to run on, if any; otherwise xd
+    /// chooses. See [`StateStore::chosen_account`].
+    pub chosen_account: Option<String>,
     /// The turn starts a new session in a new process, even if the chat has a
     /// process it could reuse: its session could not move to `account`.
     pub fresh_session: bool,
@@ -977,6 +980,8 @@ impl StateStore {
             // Chats and sessions name the chat and session whose agent
             // started them; older hosts never start one.
             "child_chats": true,
+            // A chat can be set to run on one of its assistant's accounts.
+            "chat_accounts": true,
         }))
     }
 
@@ -1072,6 +1077,7 @@ impl StateStore {
             |row| row.get(0),
         )?;
         let shortcuts = effective_shortcuts(&database, &self.workspace_root, &row.0)?;
+        let account = chosen_account(&database, chat_id)?;
         let context_backend = row.2.as_str();
         let context_usage = database
             .query_row(
@@ -1186,7 +1192,28 @@ impl StateStore {
         if let Some(access) = row.6 {
             response["access"] = Value::String(access);
         }
+        if let Some(account) = account {
+            response["account"] = Value::String(account);
+        }
         Ok(response)
+    }
+
+    /// The assistant a chat runs on.
+    pub fn chat_backend(&self, chat_id: &str) -> Result<String, StorageError> {
+        let database = self.reader()?;
+        database
+            .query_row("SELECT backend FROM chats WHERE id = ?", [chat_id], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))
+    }
+
+    /// The account the user set a chat to run on, or `None` when xd chooses.
+    /// It may name an account that has since been removed.
+    pub fn chosen_account(&self, chat_id: &str) -> Result<Option<String>, StorageError> {
+        let database = self.reader()?;
+        chosen_account(&database, chat_id)
     }
 
     pub fn terminal_owner_aliases(&self) -> Result<HashMap<String, String>, StorageError> {
@@ -1681,6 +1708,18 @@ impl StateStore {
                 "UPDATE chats SET access = ?, updated_at = ? WHERE id = ?",
                 params![value, now, chat_id],
             )?,
+            // The caller has checked that the account is one of the
+            // assistant's; an empty value lets xd choose again.
+            "account" => {
+                let account = value.filter(|account| !account.is_empty());
+                if account.is_some_and(|account| !crate::accounts::valid_id(account)) {
+                    return Err(StorageError::InvalidRequest("No such account.".into()));
+                }
+                transaction.execute(
+                    "UPDATE chats SET account = ?, updated_at = ? WHERE id = ?",
+                    params![account, now, chat_id],
+                )?
+            }
             "plan" => {
                 update_boolean_option(&transaction, chat_id, "plan", value == Some("true"), now)?
             }
@@ -5449,7 +5488,18 @@ impl StateStore {
     }
 
     pub fn new_chat(&self, request: &Value) -> Result<Value, StorageError> {
-        self.new_chat_under(request, None)
+        self.new_chat_under(request, None, &|_, _| true)
+    }
+
+    /// [`Self::new_chat`] for a client's request. The account it names is
+    /// kept only when `offers` says the chat's assistant has it to choose;
+    /// any other is ignored, as one removed since the form was filled in is.
+    pub fn new_chat_offering(
+        &self,
+        request: &Value,
+        offers: &dyn Fn(&str, &str) -> bool,
+    ) -> Result<Value, StorageError> {
+        self.new_chat_under(request, None, offers)
     }
 
     /// A chat another chat's agent started with xd's start_agent tool. It
@@ -5460,7 +5510,7 @@ impl StateStore {
         parent: &str,
         reports: bool,
     ) -> Result<Value, StorageError> {
-        self.new_chat_under(request, Some((parent, reports)))
+        self.new_chat_under(request, Some((parent, reports)), &|_, _| false)
     }
 
     /// The worktree a new chat asks for, chosen and checked out before the
@@ -5507,6 +5557,7 @@ impl StateStore {
         &self,
         request: &Value,
         parent: Option<(&str, bool)>,
+        offers: &dyn Fn(&str, &str) -> bool,
     ) -> Result<Value, StorageError> {
         let requested_folder = optional_string(request, "folder")?;
         let requested_session = optional_string(request, "session")?;
@@ -5672,6 +5723,25 @@ impl StateStore {
             ));
         }
         let access = access.map(str::to_owned).or(defaults.1);
+        let account = optional_string(request, "account")?;
+        let account = match parent {
+            // The account asked for, when the chat's assistant has it to
+            // choose. One it has not, or not yet, is never kept: it would
+            // take effect later, once an account of that id is in the list.
+            None => account
+                .filter(|account| crate::accounts::valid_id(account) && offers(&backend, account))
+                .map(str::to_owned),
+            // A chat an agent starts on its own assistant works on the
+            // account the user set its parent to, if any.
+            Some((parent, _)) => transaction
+                .query_row(
+                    "SELECT account FROM chats WHERE id = ? AND backend = ?",
+                    params![parent, backend],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten(),
+        };
         let plan = request
             .get("plan")
             .and_then(Value::as_bool)
@@ -5731,8 +5801,8 @@ impl StateStore {
             "INSERT INTO chats \
              (id, folder_id, title, backend, model, effort, access, plan, fast, claude_mode, \
               workdir, original_workdir, sort_order, created_at, updated_at, last_user_message_at, session_mode, workspace_session_id, new_worktree, \
-              parent_chat_id, report_to_parent) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              parent_chat_id, report_to_parent, account) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id,
                 folder_id,
@@ -5755,6 +5825,7 @@ impl StateStore {
                 shared.as_ref().is_some_and(|shared| shared.3),
                 parent.map(|(parent, _)| parent),
                 parent.is_some_and(|(_, reports)| reports),
+                account,
             ],
         )?;
         let attachments =
@@ -7479,6 +7550,11 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
             "ALTER TABLE chats ADD COLUMN report_to_parent INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
+    }
+    // The assistant account the user set the chat to run on; null lets xd
+    // choose one for each turn.
+    if !columns.contains("account") {
+        database.execute("ALTER TABLE chats ADD COLUMN account TEXT", [])?;
     }
     Ok(())
 }
@@ -11120,6 +11196,16 @@ fn with_cut_off_note(
     ))
 }
 
+/// The account the user set the chat to run on; see [`StateStore::chosen_account`].
+fn chosen_account(database: &Connection, chat_id: &str) -> Result<Option<String>, StorageError> {
+    Ok(database
+        .query_row("SELECT account FROM chats WHERE id = ?", [chat_id], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .optional()?
+        .flatten())
+}
+
 /// What a chat's first message names its worktree after.
 fn turn_worktree_hint<'a>(text: &'a str, worktree_name: Option<&'a str>) -> Option<&'a str> {
     worktree_name.or_else(|| text.lines().find(|line| !line.trim().is_empty()))
@@ -11230,6 +11316,7 @@ fn prepare_turn(
         )
         .optional()?
         .unwrap_or_default();
+    let chosen = chosen_account(transaction, chat_id)?;
     let ui_instructions = agent_ui_instructions(&chat.1);
     let system_prompt = effective_instructions(transaction, workspace_root, &chat.0)?
         .map(|instructions| format!("{instructions}\n\n{ui_instructions}"))
@@ -11280,6 +11367,7 @@ fn prepare_turn(
             .map(|_| session_account.unwrap_or_else(|| "default".into())),
         session_id,
         account: "default".into(),
+        chosen_account: chosen,
         fresh_session: false,
         label: format!(
             "{} · {}{}",
@@ -15933,6 +16021,67 @@ mod tests {
             SendDisposition::Start { turn, .. } => turn,
             SendDisposition::Queued { .. } => panic!("a first message starts a turn"),
         }
+    }
+
+    #[test]
+    fn a_chat_keeps_the_account_it_was_set_to_until_xd_may_choose_again() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let chat = new_chat_on(&store, &folder, "claude");
+        let id = chat["id"].as_str().unwrap();
+        assert!(chat.get("account").is_none(), "xd chooses by default");
+        assert_eq!(store.chosen_account(id).unwrap(), None);
+
+        pick(&store, &chat, "account", "0123456789ab");
+        assert_eq!(store.chat(id).unwrap()["account"], "0123456789ab");
+        let turn = first_turn(&store, &chat);
+        assert_eq!(turn.chosen_account.as_deref(), Some("0123456789ab"));
+
+        pick(&store, &chat, "account", "");
+        assert!(store.chat(id).unwrap().get("account").is_none());
+        assert_eq!(store.chosen_account(id).unwrap(), None);
+
+        // A new chat can be made on one, and nothing but an account id is kept.
+        let made = store
+            .new_chat(&json!({"folder": folder, "backend": "codex", "account": "default"}))
+            .unwrap();
+        let made = made["id"].as_str().unwrap();
+        assert_eq!(
+            store.chosen_account(made).unwrap().as_deref(),
+            Some("default")
+        );
+        assert_eq!(store.chat_backend(made).unwrap(), "codex");
+        // What could not name an account, or one the assistant does not
+        // offer, is ignored: the chat is made, and the host chooses.
+        let other = store
+            .new_chat(&json!({"folder": folder, "account": "../elsewhere"}))
+            .unwrap();
+        assert_eq!(
+            store.chosen_account(other["id"].as_str().unwrap()).unwrap(),
+            None
+        );
+        let other = store
+            .new_chat_offering(
+                &json!({"folder": folder, "backend": "codex", "account": "0123456789ab"}),
+                &|backend, account| backend == "claude" && account == "0123456789ab",
+            )
+            .unwrap();
+        assert_eq!(
+            store.chosen_account(other["id"].as_str().unwrap()).unwrap(),
+            None
+        );
+
+        // An agent's chat on the same assistant works where its parent does.
+        pick(&store, &chat, "account", "0123456789ab");
+        let child = |backend: &str| {
+            let made = store
+                .new_child_chat(&json!({"folder": folder, "backend": backend}), id, false)
+                .unwrap();
+            store.chosen_account(made["id"].as_str().unwrap()).unwrap()
+        };
+        assert_eq!(child("claude").as_deref(), Some("0123456789ab"));
+        assert_eq!(child("codex"), None, "accounts belong to one assistant");
     }
 
     #[test]

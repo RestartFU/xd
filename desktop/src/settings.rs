@@ -71,6 +71,8 @@ pub struct NewChatChoices {
     pub effort: Option<String>,
     pub access: Option<String>,
     pub plan: Option<bool>,
+    /// The id of the account the chat runs on, or none to let the host choose.
+    pub account: Option<String>,
 }
 
 impl Default for NewChatChoices {
@@ -85,6 +87,7 @@ impl Default for NewChatChoices {
             effort: None,
             access: None,
             plan: None,
+            account: None,
         }
     }
 }

@@ -117,7 +117,7 @@ impl XdDesktop {
         let keys = self.key_targets.clone();
         let mut rows = Vec::new();
         match menu {
-            Some(option @ ("effort" | "access" | "mode")) => {
+            Some(option @ ("effort" | "access" | "mode" | "account")) => {
                 let choices: Vec<(String, String)> = match option {
                     "effort" => self
                         .model
@@ -135,6 +135,7 @@ impl XdDesktop {
                         .into_iter()
                         .map(|a| (a.to_owned(), presentation::access_name(a).to_owned()))
                         .collect(),
+                    "account" => self.new_chat_account_choices(colors),
                     _ => vec![
                         ("false".into(), "Build".into()),
                         ("true".into(), "Plan".into()),
@@ -143,6 +144,8 @@ impl XdDesktop {
                 let current = match option {
                     "effort" => self.new_chat_remembered.effort.clone(),
                     "access" => self.new_chat_remembered.access.clone(),
+                    // The first choice, with no id, lets the host choose.
+                    "account" => Some(self.new_chat_account().unwrap_or_default()),
                     _ => Some(self.new_chat_remembered.plan.unwrap_or(false).to_string()),
                 };
                 for (index, (value, label)) in choices.into_iter().enumerate() {
@@ -151,7 +154,8 @@ impl XdDesktop {
                     }
                     rows.push(
                         menu_row(("draft-option-choice", index), colors)
-                            .child(div().flex_1().min_w_0().child(label))
+                            // An account's label can be longer than the picker.
+                            .child(truncating_label(label).flex_1())
                             .child(menu_check(current.as_deref() == Some(&value), colors))
                             .key_row(
                                 &keys,
@@ -166,6 +170,10 @@ impl XdDesktop {
                                         }
                                         "access" => {
                                             this.new_chat_remembered.access = Some(value.clone())
+                                        }
+                                        "account" => {
+                                            this.new_chat_remembered.account =
+                                                (!value.is_empty()).then(|| value.clone())
                                         }
                                         _ => this.new_chat_remembered.plan = Some(value == "true"),
                                     }
@@ -242,8 +250,10 @@ impl XdDesktop {
                                 cx,
                                 move |this, window, cx| {
                                     window.focus(&this.new_chat_input.read(cx).focus_handle(cx));
+                                    // Effort and accounts belong to one assistant.
                                     if this.minimal_new_session_agent != agent {
                                         this.new_chat_remembered.effort = None;
+                                        this.new_chat_remembered.account = None;
                                     }
                                     this.minimal_new_session_agent = agent;
                                     this.new_chat_model = id.clone();
@@ -502,6 +512,7 @@ impl XdDesktop {
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if this.minimal_new_session_agent != agent {
                                                     this.new_chat_remembered.effort = None;
+                                                    this.new_chat_remembered.account = None;
                                                     this.minimal_new_session_agent = agent;
                                                     this.new_chat_model = None;
                                                 }
@@ -608,9 +619,14 @@ impl XdDesktop {
                     .unwrap_or("Default access".into()),
             ),
             ("mode", if plan { "Plan" } else { "Build" }.to_owned()),
+            ("account", self.new_chat_account_label()),
         ];
+        let offers_accounts = !self.new_chat_account_choices(colors).is_empty();
         for (option, label) in options {
             if option == "effort" && !supports_effort {
+                continue;
+            }
+            if option == "account" && !offers_accounts {
                 continue;
             }
             let label = if option == "access" && plan {
@@ -622,7 +638,7 @@ impl XdDesktop {
                 SharedString::from(format!("draft-{option}")),
                 None,
                 label,
-                160.0,
+                if option == "account" { 220.0 } else { 160.0 },
                 colors,
             );
             let chip = if option == "access" && plan {

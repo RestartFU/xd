@@ -228,6 +228,22 @@ class RepliesTest {
     }
 
     @Test
+    fun aChatsAccountIsAbsentWhileTheHostChooses() {
+        val older = WireJson.parseToJsonElement("""{"ok":true,"folders":[],"chats":[]}""")
+            .jsonObject.decodeReply<TreeReply>()
+        assertFalse(older.chatAccounts)
+        val newer = WireJson.parseToJsonElement("""{"ok":true,"chat_accounts":true,"folders":[],"chats":[]}""")
+            .jsonObject.decodeReply<TreeReply>()
+        assertTrue(newer.chatAccounts)
+        val chat = """{"ok":true,"title":"T","backend":"claude","plan":false,"working":false,"new_worktree":false,"has_messages":true"""
+        assertNull(WireJson.parseToJsonElement("$chat}").jsonObject.decodeReply<ChatReply>().account)
+        assertEquals(
+            "0123456789ab",
+            WireJson.parseToJsonElement("""$chat,"account":"0123456789ab"}""").jsonObject.decodeReply<ChatReply>().account,
+        )
+    }
+
+    @Test
     fun chatQuotaMembersAreAbsentOnOlderHosts() {
         val older = WireJson.parseToJsonElement(
             """{"ok":true,"folders":[],"chats":[{"id":"one","folder":"p","title":"One","backend":"codex","working":false}]}""",
