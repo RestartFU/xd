@@ -330,7 +330,7 @@ fn usage_tooltip(
 
 fn section_title(label: impl Into<SharedString>, colors: ThemeColors) -> gpui::Div {
     div()
-        .text_size(px(13.5))
+        .text_size(px(TEXT_CONTROL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(colors.text))
         .child(label.into())
@@ -402,13 +402,10 @@ fn usage_menu_row(
     .child(menu_check(checked, colors))
 }
 
-/// A filter's menu, hung under the filter and kept inside the window.
+/// A filter's menu, hung under the filter, or over it where the window ends
+/// too soon under it.
 fn usage_menu_under(menu: gpui::Div) -> gpui::Div {
-    div()
-        .absolute()
-        .top(px(30.0))
-        .left_0()
-        .child(menu_popover(gpui::Corner::TopLeft, menu))
+    menu_under(gpui::Corner::TopLeft, CONTROL_HEIGHT_COMPACT, menu)
 }
 
 fn metric_cell(
@@ -2241,7 +2238,7 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let viewport = f32::from(window.viewport_size().width);
+        let viewport = logical(window.viewport_size().width);
         let flyout = self.usage_flyout_open();
         let panel = if flyout {
             self.render_usage_flyout(colors, cx)
@@ -3444,7 +3441,7 @@ impl XdDesktop {
             let column = chart.columns.get(hover.index)?;
             let height = 44.0 + providers.len() as f32 * 18.0;
             let width = 184.0;
-            let plot_width = f32::from(bounds_cell.get().size.width);
+            let plot_width = logical(bounds_cell.get().size.width);
             let gap = 12.0;
             let left = if hover.x + gap + width <= plot_width {
                 hover.x + gap
@@ -3568,14 +3565,14 @@ impl XdDesktop {
                             .on_mouse_move(cx.listener(
                                 move |this, event: &MouseMoveEvent, _, cx| {
                                     let bounds = move_bounds.get();
-                                    let width = f32::from(bounds.size.width);
+                                    let width = logical(bounds.size.width);
                                     if width <= 0.0 || period_count == 0 {
                                         return;
                                     }
-                                    let x = f32::from(event.position.x - bounds.left())
-                                        .clamp(0.0, width);
-                                    let y = f32::from(event.position.y - bounds.top())
-                                        .clamp(0.0, f32::from(bounds.size.height));
+                                    let x =
+                                        logical(event.position.x - bounds.left()).clamp(0.0, width);
+                                    let y = logical(event.position.y - bounds.top())
+                                        .clamp(0.0, logical(bounds.size.height));
                                     let index =
                                         ((x / width) * (period_count - 1) as f32).round() as usize;
                                     this.usage.hover = Some(ChartHover {
@@ -4622,8 +4619,8 @@ fn paint_usage_chart(
     muted: u32,
     window: &mut Window,
 ) {
-    let width = f32::from(bounds.size.width);
-    let height = f32::from(bounds.size.height);
+    let width = logical(bounds.size.width);
+    let height = logical(bounds.size.height);
     let at = |x: f32, y: f32| {
         point(
             bounds.left() + px(x / VIEW_WIDTH * width),

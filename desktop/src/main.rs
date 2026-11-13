@@ -39,7 +39,7 @@ use gpui::{
     MouseDownEvent, Pixels, Point, Render, ResizeEdge, ScrollHandle, ScrollWheelEvent,
     SharedString, StyledText, TextRun, Timer, TitlebarOptions, WeakFocusHandle, Window,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowDecorations, WindowOptions,
-    canvas, div, img, list, point, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
+    canvas, div, img, list, point, prelude::*, relative, rgb, rgba, size, svg, uniform_list,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -121,8 +121,8 @@ use input::{
 };
 use metrics::{
     CONTROL_HEIGHT, CONTROL_HEIGHT_COMPACT, DIALOG_RADIUS, HIT_MIN, RADIUS_COMPOSER,
-    RADIUS_CONTROL, RADIUS_PANEL, RADIUS_TAB, TEXT_BODY, TEXT_CAPTION, TEXT_CONTROL, TEXT_HEADING,
-    TEXT_LABEL, TEXT_MONO, TEXT_PROSE_H2, TEXT_TITLE,
+    RADIUS_CONTROL, RADIUS_PANEL, RADIUS_TAB, REM, TEXT_BODY, TEXT_CAPTION, TEXT_CONTROL,
+    TEXT_HEADING, TEXT_LABEL, TEXT_MONO, TEXT_PROSE_H2, TEXT_TITLE, logical, px, window_px,
 };
 use minimal::{
     AgentCli, MinimalRoute, ProjectCard, SessionCard, SettledCard, age_label, folder_tree,
@@ -204,6 +204,15 @@ const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// The least height of window, in logical pixels, that shows the worktree
+/// and branch under a chat's composer. The smallest window is taller than
+/// this at 100 %.
+const CONTEXT_ROW_MIN_WINDOW: f32 = 480.0;
+/// The smallest the window can be made, in its own pixels. At a larger
+/// Interface size the same window holds less, so the layout's breakpoints,
+/// which are in logical pixels, fold it down sooner.
+const MIN_WINDOW_WIDTH: u16 = 760;
+const MIN_WINDOW_HEIGHT: u16 = 560;
 /// Narrowest the catalog sidebar, which holds project drawers and session
 /// cards, can be dragged.
 const CATALOG_MIN_WIDTH: f32 = 220.0;
@@ -657,6 +666,9 @@ thread_local! {
     /// The theme the frame is drawn in, for a tooltip built where no colours
     /// are at hand.
     static FRAME_COLORS: Cell<Option<ThemeColors>> = const { Cell::new(None) };
+    /// The window's width and height as the frame is drawn, for a helper
+    /// that sizes something to the window with no window at hand.
+    static FRAME_VIEWPORT: Cell<(f32, f32)> = const { Cell::new((1180.0, 780.0)) };
     /// The labels the last frames had to cut short, by their text and the
     /// place in the code that draws them, so the next frame gives each a
     /// tooltip that reads it out in full.
@@ -680,6 +692,14 @@ fn frame_colors() -> ThemeColors {
 /// One line of text as wide as it needs, down to whatever room its row leaves,
 /// ending in an ellipsis when that is too little. Size it from the outside.
 /// While it is cut short, the pointer over it shows the whole of it.
+///
+/// GPUI's own `.truncate()` is not used. It cuts the text to the first width
+/// it is measured at and keeps that result, and layout may measure a label
+/// at more than one width: first with none, in a flexible row, or at a width
+/// an outer box gives up later. The whole text got shaped, then clipped
+/// mid-letter. So the label lays out as an unseen copy of its text, which
+/// gives it its natural width and its line's height, and the text is drawn
+/// over that once the label has its place, cut to the room it really has.
 #[track_caller]
 fn truncating_label(text: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
     let text = text.into();
@@ -688,21 +708,24 @@ fn truncating_label(text: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> 
     (text.as_ref(), site.file(), site.line(), site.column()).hash(&mut hasher);
     let key = hasher.finish();
     let cut = CUT_LABELS.with(|cut| cut.borrow().contains(&key)) && !under_a_dialog();
-    let measured = text.clone();
-    truncating_box(text.clone(), text.clone())
-        // Measures the text in the style it is drawn in, against the room the
-        // label was given.
+    let drawn = text.clone();
+    div()
+        .relative()
+        .min_w_0()
+        .overflow_hidden()
+        .child(div().invisible().whitespace_nowrap().child(text.clone()))
         .child(
             canvas(
                 move |bounds, window, _| {
                     let style = window.text_style();
                     let size = style.font_size.to_pixels(window.rem_size());
-                    let run = style.to_run(measured.len());
-                    let width = window
-                        .text_system()
-                        .shape_line(measured.clone(), size, &[run], None)
-                        .width;
-                    let over = width > bounds.size.width + px(0.5);
+                    let shape = |text: SharedString| {
+                        let run = style.to_run(text.len());
+                        window.text_system().shape_line(text, size, &[run], None)
+                    };
+                    let room = bounds.size.width + gpui::px(0.5);
+                    let whole = shape(drawn.clone());
+                    let over = whole.width > room;
                     CUT_LABELS.with(|cut| {
                         let mut cut = cut.borrow_mut();
                         if !over {
@@ -715,11 +738,25 @@ fn truncating_label(text: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> 
                             cut.insert(key);
                         }
                     });
+                    let line = if over {
+                        let short =
+                            cut_to_fit(&drawn, |text| shape(text.to_owned().into()).width <= room);
+                        shape(short.into())
+                    } else {
+                        whole
+                    };
+                    if cfg!(test) {
+                        DRAWN_LABELS.with(|labels| labels.borrow_mut().push(line.text.to_string()));
+                    }
+                    (line, window.line_height())
                 },
-                |_, _, _, _| {},
+                |bounds, (line, line_height), window, cx| {
+                    let _ = line.paint(bounds.origin, line_height, window, cx);
+                },
             )
+            // Over the unseen copy, not after it.
             .absolute()
-            .size_full(),
+            .inset_0(),
         )
         .id(gpui::ElementId::NamedInteger("label".into(), key))
         .when(cut, |label| {
@@ -727,20 +764,246 @@ fn truncating_label(text: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> 
         })
 }
 
-/// `.truncate()` alone is not enough inside a flexible row: GPUI truncates only
-/// on its first measure and keeps that result, and layout first measures a flex
-/// item with no width. The whole text gets shaped, then cut off mid-letter.
-///
-/// So a hidden copy, `sizer`, gives the box its natural width, and `shown` is
-/// positioned over it. Layout places positioned children last, once the box has
-/// its final width, so the first measure `shown` sees is the one to truncate to.
-fn truncating_box(sizer: impl IntoElement, shown: impl IntoElement) -> gpui::Div {
-    div()
-        .relative()
-        .min_w_0()
-        .overflow_hidden()
-        .child(div().invisible().whitespace_nowrap().child(sizer))
-        .child(div().absolute().inset_0().truncate().child(shown))
+thread_local! {
+    /// What each [`truncating_label`] of the last frames drew, in order.
+    /// Kept only while the tests run, which read it back.
+    static DRAWN_LABELS: RefCell<Vec<String>> = RefCell::default();
+}
+
+/// The most of `text` that `fits` with an ellipsis after it, and the
+/// ellipsis. Spaces before the ellipsis are dropped. Where nothing fits it
+/// is the ellipsis alone.
+fn cut_to_fit(text: &str, mut fits: impl FnMut(&str) -> bool) -> String {
+    let ends = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let cut = |kept: usize| format!("{}…", text[..ends[kept]].trim_end());
+    // `ends[kept]` is where the text ends with `kept` characters kept. More
+    // text never fits where less did not, so the most that fits is found by
+    // halving.
+    let (mut fitting, mut over) = (0, ends.len());
+    while fitting + 1 < over {
+        let middle = (fitting + over) / 2;
+        if fits(&cut(middle)) {
+            fitting = middle;
+        } else {
+            over = middle;
+        }
+    }
+    if ends.is_empty() {
+        "…".into()
+    } else {
+        cut(fitting)
+    }
+}
+
+/// How wide `text` is on one line, in the face and size given.
+fn line_width(
+    text: &str,
+    family: &'static str,
+    weight: FontWeight,
+    size: f32,
+    window: &Window,
+) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let run = TextRun {
+        len: text.len(),
+        font: gpui::Font {
+            weight,
+            ..gpui::font(family)
+        },
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window
+        .text_system()
+        .shape_line(text.to_owned().into(), px(size), &[run], None);
+    logical(line.width).ceil()
+}
+
+/// The least of a session's title its header keeps while the chips beside
+/// it still have something to give: about a dozen letters.
+const HEADER_TITLE_FLOOR: f32 = 96.0;
+/// The least of a branch's name its chip shows: six letters and the
+/// ellipsis. With less room than that the chip is its icon alone.
+const BRANCH_CHIP_NAME_FLOOR: f32 = 52.0;
+/// A header chip's padding at each end, and the gap after its icon.
+const CHIP_PAD: f32 = 8.0;
+const CHIP_GAP: f32 = 6.0;
+const CHIP_ICON: f32 = 12.0;
+
+/// What a session's header holds besides its title, as the widths each part
+/// takes, so the header can tell what it has room for before it is drawn.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct HeaderParts {
+    /// The least of the title: [`HEADER_TITLE_FLOOR`], or all of a short one.
+    title: f32,
+    /// The assistant's chip as its mark alone, and what its name adds.
+    agent: Option<(f32, f32)>,
+    /// The branch chip as its icon alone, and what the least of its name
+    /// adds: [`BRANCH_CHIP_NAME_FLOOR`], or all of a short name.
+    branch: Option<(f32, f32)>,
+    /// Each pull request chip, in order.
+    pull_requests: Vec<f32>,
+    /// What the pull requests need whatever else shows: the button that
+    /// links one.
+    pull_request_tools: f32,
+    /// The status stamp.
+    stamp: Option<f32>,
+    /// The buttons at the right end, which always show.
+    tools: f32,
+}
+
+/// What of a session's header fits the room it has. The side pane and
+/// terminal buttons always do, and the title down to its floor. The rest
+/// gives way in this order, the most dispensable first: pull request chips
+/// one at a time, the branch's name and then the assistant's (their icons
+/// stay), the status stamp (the chat's tab and the sidebar say it too), the
+/// branch and the pull request button, and last the assistant's mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HeaderFit {
+    pull_requests: usize,
+    branch_name: bool,
+    agent_name: bool,
+    stamp: bool,
+    chips: bool,
+    agent: bool,
+}
+
+impl HeaderParts {
+    /// The header's padding at each side, and the gap between its parts.
+    const PAD: f32 = 20.0;
+    const GAP: f32 = 10.0;
+
+    fn width(&self, fit: HeaderFit) -> f32 {
+        let mut parts = vec![self.title, self.tools];
+        if let Some((mark, name)) = self.agent.filter(|_| fit.agent) {
+            parts.push(mark + if fit.agent_name { name } else { 0.0 });
+        }
+        if fit.chips {
+            parts.extend(
+                self.branch
+                    .map(|(icon, name)| icon + if fit.branch_name { name } else { 0.0 }),
+            );
+            let shown = &self.pull_requests[..fit.pull_requests.min(self.pull_requests.len())];
+            let more = shown.len() < self.pull_requests.len();
+            let pieces =
+                shown.len() + usize::from(more) + usize::from(self.pull_request_tools > 0.0);
+            if pieces > 0 {
+                parts.push(
+                    shown.iter().sum::<f32>()
+                        + if more { PULL_REQUESTS_MORE_WIDTH } else { 0.0 }
+                        + self.pull_request_tools
+                        + (pieces - 1) as f32 * CHIP_GAP,
+                );
+            }
+        }
+        parts.extend(self.stamp.filter(|_| fit.stamp));
+        2.0 * Self::PAD + parts.iter().sum::<f32>() + (parts.len() - 1) as f32 * Self::GAP
+    }
+
+    fn fit(&self, room: f32) -> HeaderFit {
+        let all = HeaderFit {
+            pull_requests: self.pull_requests.len().min(HEADER_PULL_REQUEST_CHIPS),
+            branch_name: true,
+            agent_name: true,
+            stamp: true,
+            chips: true,
+            agent: true,
+        };
+        let fewer = (0..all.pull_requests).rev().map(|pull_requests| HeaderFit {
+            pull_requests,
+            ..all
+        });
+        let none = HeaderFit {
+            pull_requests: 0,
+            ..all
+        };
+        let steps = [
+            HeaderFit {
+                branch_name: false,
+                ..none
+            },
+            HeaderFit {
+                branch_name: false,
+                agent_name: false,
+                ..none
+            },
+            HeaderFit {
+                branch_name: false,
+                agent_name: false,
+                stamp: false,
+                ..none
+            },
+            HeaderFit {
+                branch_name: false,
+                agent_name: false,
+                stamp: false,
+                chips: false,
+                ..none
+            },
+        ];
+        let least = HeaderFit {
+            pull_requests: 0,
+            branch_name: false,
+            agent_name: false,
+            stamp: false,
+            chips: false,
+            agent: false,
+        };
+        std::iter::once(all)
+            .chain(fewer)
+            .chain(steps)
+            .find(|fit| self.width(*fit) <= room)
+            .unwrap_or(least)
+    }
+}
+
+/// The "+2" chip that stands for the pull requests the header does not show.
+const PULL_REQUESTS_MORE_WIDTH: f32 = 34.0;
+
+/// A header chip's width around a label `text` wide, after an icon.
+fn chip_width(icon: f32, text: f32) -> f32 {
+    2.0 * CHIP_PAD + icon + CHIP_GAP + text
+}
+
+/// The branch a session is on, in the session header. With `name_floor` it
+/// shows the branch's name, cut short as the header narrows but never to
+/// less than that much of it; without, it is its icon alone. A name cut to a
+/// letter or two says nothing. The pointer reads the whole name either way.
+fn branch_chip(
+    branch: String,
+    name_floor: Option<f32>,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    let branch = SharedString::from(branch);
+    let chip = div()
+        .id("minimal-session-branch")
+        .debug_selector(|| "minimal-session-branch".into())
+        .h(px(HIT_MIN))
+        .px(px(CHIP_PAD))
+        .flex()
+        .items_center()
+        .gap(px(CHIP_GAP))
+        .rounded_full()
+        .bg(rgb(colors.surface_high))
+        .font_family(MONO)
+        .text_size(px(TEXT_LABEL))
+        .text_color(rgb(colors.muted))
+        .child(icon(GIT_BRANCH_ICON, CHIP_ICON, colors.muted));
+    match name_floor {
+        // The name's own tooltip reads it out while it is cut short.
+        Some(floor) => chip
+            .min_w(px(chip_width(CHIP_ICON, floor)))
+            .flex_shrink()
+            .child(truncating_label(branch).min_w_0()),
+        None => chip.flex_none().tooltip(pane_tooltip(branch, colors)),
+    }
 }
 
 /// The action a session row offers. While the pointer is over the row it
@@ -1273,6 +1536,46 @@ fn menu_popover(corner: gpui::Corner, menu: impl IntoElement) -> gpui::Deferred 
     .with_priority(1)
 }
 
+/// The gap between a control and the menu it opens.
+const MENU_GAP: f32 = 4.0;
+
+/// Hangs a menu from the control this is put in, which is a `relative` box
+/// `control_height` tall: under the control, by its left or its right edge,
+/// and above it where the window has no room below. The control is never
+/// under its own menu, so the menu can be closed where it was opened.
+///
+/// The menu is anchored by its top to the control's top, behind an unseen
+/// stand-in as tall as the control. Turned over to stand on that edge, it
+/// ends where the control begins.
+fn menu_under(corner: gpui::Corner, control_height: f32, menu: impl IntoElement) -> gpui::Div {
+    let slot = div().absolute().top_0();
+    let slot = if corner == gpui::Corner::TopRight {
+        slot.right_0()
+    } else {
+        slot.left_0()
+    };
+    slot.child(
+        gpui::deferred(
+            gpui::anchored().anchor(corner).child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().h(px(control_height)))
+                    .child(div().py(px(MENU_GAP)).child(menu)),
+            ),
+        )
+        .with_priority(1),
+    )
+}
+
+/// The tallest a menu hung by [`menu_under`] may be and still fit on one
+/// side of its control wherever the control is in the window; past that it
+/// scrolls.
+fn menu_under_max_height(control_height: f32, most: f32) -> f32 {
+    let window = FRAME_VIEWPORT.with(Cell::get).1;
+    (window / 2.0 - control_height - 2.0 * MENU_GAP).clamp(3.0 * 32.0, most)
+}
+
 /// [`menu_popover`] at a point in the window, such as where the pointer was.
 fn menu_at(position: Point<Pixels>, menu: impl IntoElement) -> gpui::Deferred {
     gpui::deferred(
@@ -1617,7 +1920,10 @@ gpui::actions!(
         KeyPress,
         NextField,
         PreviousField,
-        OpenContextMenu
+        OpenContextMenu,
+        InterfaceLarger,
+        InterfaceSmaller,
+        InterfaceReset
     ]
 );
 
@@ -1647,6 +1953,14 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-escape", FocusComposer, context),
         KeyBinding::new("ctrl-k", FocusFind, context),
         KeyBinding::new("cmd-k", FocusFind, context),
+        // Interface size. Neither the terminal nor a text box has a use for
+        // these keys, so they reach the window from both.
+        KeyBinding::new("ctrl-=", InterfaceLarger, context),
+        KeyBinding::new("cmd-=", InterfaceLarger, context),
+        KeyBinding::new("ctrl--", InterfaceSmaller, context),
+        KeyBinding::new("cmd--", InterfaceSmaller, context),
+        KeyBinding::new("ctrl-0", InterfaceReset, context),
+        KeyBinding::new("cmd-0", InterfaceReset, context),
         // Menus, pickers, dialogs and the landing page. A text box or the
         // terminal that binds one of these keeps it.
         KeyBinding::new("up", KeyUp, context),
@@ -1988,8 +2302,8 @@ impl KeyRow for gpui::Stateful<gpui::Div> {
 
 /// How far the focus ring stands off the control it is around.
 const FOCUS_RING_GAP: f32 = 3.0;
-/// The ring's corners around a button.
-const FOCUS_RING_RADIUS: f32 = 10.0;
+/// The ring's corners around a button: the button's own, moved out by the gap.
+const FOCUS_RING_RADIUS: f32 = RADIUS_CONTROL + FOCUS_RING_GAP;
 
 /// The ring that shows Tab is on a control. It is drawn around the control,
 /// in room the control does not take, so nothing moves when it shows.
@@ -2662,7 +2976,7 @@ fn terminal_geometry(width: f32, height: f32, cell_width: f32, line_height: f32)
 }
 
 fn terminal_scroll_is_at_bottom(scroll: &ScrollHandle) -> bool {
-    let remaining = f32::from(scroll.max_offset().height) + f32::from(scroll.offset().y);
+    let remaining = logical(scroll.max_offset().height) + logical(scroll.offset().y);
     remaining <= 2.0
 }
 
@@ -3686,7 +4000,7 @@ struct XdDesktop {
     /// The host's chat title settings; `None` until it answers, or if it is too
     /// old to have them, which hides the controls.
     chat_title_settings: Option<workspace_settings::ChatTitleSettings>,
-    chat_title_model_menu: Option<&'static str>,
+    settings_menu: Option<&'static str>,
     expanded_activities: HashSet<i64>,
     background_expanded: Option<(ChatEndpoint, String)>,
     background_generation: u64,
@@ -4570,6 +4884,7 @@ impl XdDesktop {
             settings.active_connection.as_deref() != Some(active_connection.as_str());
         settings.active_connection = Some(active_connection);
         set_reduce_motion(settings.reduce_motion);
+        metrics::set_interface_size(settings.interface_size);
         let settings_load_error = settings.load_error().map(str::to_owned);
         let remote_configured = settings.remote_credentials.is_some();
         let minimal_popup_focus = cx.focus_handle();
@@ -4610,7 +4925,7 @@ impl XdDesktop {
             native_option_open: None,
             settings_section: 0,
             chat_title_settings: None,
-            chat_title_model_menu: None,
+            settings_menu: None,
             expanded_activities: HashSet::new(),
             background_expanded: None,
             background_generation: 0,
@@ -4978,12 +5293,15 @@ impl XdDesktop {
         let mut changed = self.settings.window_maximized != maximized;
         self.settings.window_maximized = maximized;
         if !maximized {
+            // The window's size on screen, in its own pixels: the Interface
+            // size changes what is drawn in the window, never the window.
             let width = f32::from(bounds.size.width)
                 .round()
-                .clamp(760.0, u16::MAX as f32) as u16;
+                .clamp(f32::from(MIN_WINDOW_WIDTH), u16::MAX as f32) as u16;
             let height = f32::from(bounds.size.height)
                 .round()
-                .clamp(560.0, u16::MAX as f32) as u16;
+                .clamp(f32::from(MIN_WINDOW_HEIGHT), u16::MAX as f32)
+                as u16;
             changed |= self.settings.window_width != width || self.settings.window_height != height;
             self.settings.window_width = width;
             self.settings.window_height = height;
@@ -5293,7 +5611,7 @@ impl XdDesktop {
         self.minimal_route = MinimalRoute::default();
         self.pending_minimal_session = None;
         self.request_agent_catalog();
-        self.chat_title_model_menu = None;
+        self.settings_menu = None;
         self.chat_title_settings = None;
         self.request_chat_title_settings();
         self.chat_quota = None;
@@ -10674,7 +10992,7 @@ impl XdDesktop {
     }
 
     fn minimal_workspace_width(&self, window: &Window) -> f32 {
-        let width = f32::from(window.viewport_size().width);
+        let width = logical(window.viewport_size().width);
         width
             - if self.browser_compacts_sidebar(window) {
                 0.0
@@ -10694,7 +11012,7 @@ impl XdDesktop {
 
     /// Window width left of the browser, shared by the catalog and the session.
     fn catalog_room(&self, window: &Window) -> f32 {
-        let width = f32::from(window.viewport_size().width);
+        let width = logical(window.viewport_size().width);
         if self.browser_is_open() {
             width - browser_pane_width(self.settings.browser_width, width)
         } else {
@@ -10704,10 +11022,10 @@ impl XdDesktop {
 
     fn browser_compacts_sidebar(&self, window: &Window) -> bool {
         self.browser_is_open()
-            && f32::from(window.viewport_size().width)
+            && logical(window.viewport_size().width)
                 - browser_pane_width(
                     self.settings.browser_width,
-                    f32::from(window.viewport_size().width),
+                    logical(window.viewport_size().width),
                 )
                 < 640.0
     }
@@ -15001,7 +15319,7 @@ impl XdDesktop {
             .track_scroll(&self.terminal_scroll)
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 let delta = event.delta.pixel_delta(px(19.0)).y;
-                let bytes = terminal_mouse_scroll_bytes(f32::from(delta));
+                let bytes = terminal_mouse_scroll_bytes(logical(delta));
                 if !bytes.is_empty() {
                     this.send_terminal_input(&bytes, cx);
                     cx.stop_propagation();
@@ -15038,10 +15356,10 @@ impl XdDesktop {
                         &[run],
                         None,
                     );
-                    let cell_width = f32::from(line.width) / SAMPLE.len() as f32;
+                    let cell_width = logical(line.width) / SAMPLE.len() as f32;
                     let geometry = terminal_geometry(
-                        f32::from(bounds.size.width),
-                        f32::from(bounds.size.height),
+                        logical(bounds.size.width),
+                        logical(bounds.size.height),
                         cell_width,
                         19.0,
                     );
@@ -15248,11 +15566,13 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap_3()
-            .pl(px(if titlebar && cfg!(target_os = "macos") {
-                86.0
+            // On macOS the platform's window buttons stand in the bar's
+            // first 70 pixels, at their own size whatever the interface's.
+            .pl(if titlebar && cfg!(target_os = "macos") {
+                window_px(70.0) + px(16.0)
             } else {
-                16.0
-            }))
+                px(16.0)
+            })
             .bg(glass::pane(colors))
             .border_b_1()
             .border_color(glass::edge(colors))
@@ -15359,6 +15679,7 @@ impl XdDesktop {
     fn render_minimal_context_toolbar(
         &mut self,
         colors: ThemeColors,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let (chat_id, route_agent) = match &self.minimal_route {
@@ -15414,6 +15735,60 @@ impl XdDesktop {
             .and_then(TerminalPanel::selected)
             .is_some();
 
+        let title_floor = line_width(&title, UI_FONT, FontWeight::MEDIUM, TEXT_BODY, window)
+            .min(HEADER_TITLE_FLOOR);
+        let agent_name = selected_agent.map(|agent| {
+            if agent == AgentCli::Other {
+                "Unsupported assistant"
+            } else {
+                presentation::provider_name(agent.protocol_name())
+            }
+        });
+        let label =
+            |text: &str, family| line_width(text, family, FontWeight::NORMAL, TEXT_LABEL, window);
+        let parts = HeaderParts {
+            title: title_floor,
+            agent: agent_name.map(|name| (2.0 * CHIP_PAD + 13.0, CHIP_GAP + label(name, UI_FONT))),
+            branch: branch.as_ref().map(|branch| {
+                (
+                    CHIP_ICON + 2.0 * CHIP_PAD,
+                    CHIP_GAP + label(branch, MONO).min(BRANCH_CHIP_NAME_FLOOR),
+                )
+            }),
+            pull_requests: match (&linked_pull_requests, &pull_request_url) {
+                (Some(links), _) => links
+                    .iter()
+                    .map(|link| chip_width(CHIP_ICON, label(&pull_request_label(&link.url), MONO)))
+                    .collect(),
+                (None, Some(url)) => {
+                    vec![chip_width(CHIP_ICON, label(&pull_request_label(url), MONO))]
+                }
+                (None, None) => Vec::new(),
+            },
+            pull_request_tools: if linked_pull_requests.is_some() {
+                HIT_MIN
+            } else {
+                0.0
+            },
+            stamp: (signal != SessionSignal::Idle).then(|| {
+                14.0 + line_width(
+                    &signal.label(),
+                    UI_FONT,
+                    FontWeight::MEDIUM,
+                    TEXT_CAPTION,
+                    window,
+                )
+            }),
+            // Its margin, the side pane's button, and the terminal's.
+            tools: 8.0
+                + CONTROL_HEIGHT_COMPACT
+                + if self.native_session() {
+                    2.0 + CONTROL_HEIGHT_COMPACT
+                } else {
+                    0.0
+                },
+        };
+        let fit = parts.fit(self.minimal_workspace_width(window));
         div()
             .id("minimal-context-toolbar")
             .h(px(browser::SESSION_HEADER_HEIGHT))
@@ -15426,108 +15801,110 @@ impl XdDesktop {
             .bg(glass::pane(colors))
             .child(
                 truncating_label(title)
-                    .min_w_0()
+                    // The title gives way to the chips beside it only down
+                    // to a dozen letters of itself.
+                    .min_w(px(title_floor))
                     .flex_shrink()
                     .text_size(px(TEXT_BODY))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(colors.text)),
             )
-            .when_some(selected_agent, |toolbar, agent| {
-                toolbar.child(
-                    div()
-                        .id("minimal-session-agent")
-                        .h(px(HIT_MIN))
-                        .px(px(8.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .rounded_full()
-                        .bg(rgb(colors.surface_high))
-                        .text_size(px(TEXT_LABEL))
-                        .text_color(rgb(colors.muted))
-                        .child(assistant_icon(
-                            agent_icon(agent),
-                            13.0,
-                            colors.muted,
-                            colors,
-                        ))
-                        .child(if agent == AgentCli::Other {
-                            "Unsupported assistant"
-                        } else {
-                            presentation::provider_name(agent.protocol_name())
-                        }),
-                )
-            })
-            .when_some(branch, |toolbar, branch| {
-                toolbar.child(
-                    div()
-                        .h(px(HIT_MIN))
-                        .px(px(8.0))
-                        .min_w_0()
-                        .flex_shrink()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .rounded_full()
-                        .bg(rgb(colors.surface_high))
-                        .font_family(MONO)
-                        .text_size(px(TEXT_LABEL))
-                        .text_color(rgb(colors.muted))
-                        .child(
-                            svg()
-                                .path(GIT_BRANCH_ICON)
-                                .size(px(12.0))
-                                .flex_none()
-                                .text_color(rgb(colors.muted)),
-                        )
-                        .child(truncating_label(branch).min_w_0()),
-                )
-            })
-            .when_some(pull_request_url, |toolbar, url| {
-                let label = pull_request_label(&url);
-                toolbar.child(
-                    div()
-                        .id("minimal-session-pull-request")
-                        .debug_selector(|| "minimal-session-pull-request".into())
-                        .h(px(HIT_MIN))
-                        .px(px(8.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .rounded_full()
-                        .bg(rgb(colors.surface_high))
-                        .font_family(MONO)
-                        .text_size(px(TEXT_LABEL))
-                        .text_color(rgb(colors.muted))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(colors.selected_surface)))
-                        .tooltip(move |_, cx| {
-                            cx.new(|_| PaneTooltip {
-                                label: "Open pull request".into(),
+            .when_some(
+                selected_agent.zip(agent_name).filter(|_| fit.agent),
+                |toolbar, (agent, name)| {
+                    toolbar.child(
+                        div()
+                            .id("minimal-session-agent")
+                            .debug_selector(|| "minimal-session-agent".into())
+                            .h(px(HIT_MIN))
+                            .px(px(CHIP_PAD))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(CHIP_GAP))
+                            .rounded_full()
+                            .bg(rgb(colors.surface_high))
+                            .text_size(px(TEXT_LABEL))
+                            .text_color(rgb(colors.muted))
+                            .child(assistant_icon(
+                                agent_icon(agent),
+                                13.0,
+                                colors.muted,
                                 colors,
+                            ))
+                            // With no room for its name the mark stands alone,
+                            // and says the name under the pointer.
+                            .map(|chip| {
+                                if fit.agent_name {
+                                    chip.child(name)
+                                } else {
+                                    chip.tooltip(pane_tooltip(name, colors))
+                                }
+                            }),
+                    )
+                },
+            )
+            .when_some(branch.filter(|_| fit.chips), |toolbar, branch| {
+                let name_floor = fit
+                    .branch_name
+                    .then(|| label(&branch, MONO).min(BRANCH_CHIP_NAME_FLOOR));
+                toolbar.child(branch_chip(branch, name_floor, colors))
+            })
+            .when_some(
+                pull_request_url.filter(|_| fit.chips && fit.pull_requests > 0),
+                |toolbar, url| {
+                    let label = pull_request_label(&url);
+                    toolbar.child(
+                        div()
+                            .id("minimal-session-pull-request")
+                            .debug_selector(|| "minimal-session-pull-request".into())
+                            .h(px(HIT_MIN))
+                            .px(px(8.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .rounded_full()
+                            .bg(rgb(colors.surface_high))
+                            .font_family(MONO)
+                            .text_size(px(TEXT_LABEL))
+                            .text_color(rgb(colors.muted))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(colors.selected_surface)))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| PaneTooltip {
+                                    label: "Open pull request".into(),
+                                    colors,
+                                })
+                                .into()
                             })
-                            .into()
-                        })
-                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                            this.open_link(&url, event, window, cx);
-                        }))
-                        .child(
-                            svg()
-                                .path(GIT_PULL_REQUEST_ICON)
-                                .size(px(12.0))
-                                .flex_none()
-                                .text_color(rgb(colors.muted)),
-                        )
-                        .child(label),
-                )
-            })
-            .when_some(linked_pull_requests, |toolbar, links| {
-                toolbar.child(self.render_linked_pull_requests(links, colors, cx))
-            })
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                this.open_link(&url, event, window, cx);
+                            }))
+                            .child(
+                                svg()
+                                    .path(GIT_PULL_REQUEST_ICON)
+                                    .size(px(12.0))
+                                    .flex_none()
+                                    .text_color(rgb(colors.muted)),
+                            )
+                            .child(label),
+                    )
+                },
+            )
+            .when_some(
+                linked_pull_requests.filter(|_| fit.chips),
+                |toolbar, links| {
+                    toolbar.child(self.render_linked_pull_requests(
+                        links,
+                        fit.pull_requests,
+                        colors,
+                        cx,
+                    ))
+                },
+            )
             .child(div().flex_1())
-            .when(signal != SessionSignal::Idle, |toolbar| {
+            .when(signal != SessionSignal::Idle && fit.stamp, |toolbar| {
                 toolbar.child(stamp(signal.label(), signal.color(colors)))
             })
             .child(
@@ -15546,6 +15923,7 @@ impl XdDesktop {
                         )
                         .active(self.browser_is_open())
                         .build()
+                        .debug_selector(|| "toggle-side-pane".into())
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
                     )
                     .when(self.native_session(), |controls| {
@@ -15558,6 +15936,7 @@ impl XdDesktop {
                             )
                             .active(self.bottom_terminal_open)
                             .build()
+                            .debug_selector(|| "toggle-bottom-pane".into())
                             .on_click(cx.listener(
                                 |this, _, window, cx| this.toggle_bottom_terminal(window, cx),
                             )),
@@ -15587,9 +15966,12 @@ impl XdDesktop {
 
     /// The chat's linked pull requests, the button that links more, and the
     /// popover listing them all.
+    /// The session's pull requests as chips, as many of the first few as
+    /// the header has room for, with the rest counted in a "+N" chip.
     fn render_linked_pull_requests(
         &mut self,
         links: Vec<LinkedPullRequest>,
+        room: usize,
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -15610,10 +15992,11 @@ impl XdDesktop {
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(colors.selected_surface)))
         };
-        let hidden = links.len().saturating_sub(HEADER_PULL_REQUEST_CHIPS);
+        let shown = room.min(HEADER_PULL_REQUEST_CHIPS);
+        let hidden = links.len().saturating_sub(shown);
         let chips = links
             .iter()
-            .take(HEADER_PULL_REQUEST_CHIPS)
+            .take(shown)
             .enumerate()
             .map(|(index, link)| {
                 let url = link.url.clone();
@@ -22009,7 +22392,10 @@ impl XdDesktop {
                         }
                     }))
             });
-        let context_row = metadata_ready
+        // A window too short for it, as the smallest is at the largest
+        // Interface sizes, gives the row's height to the composer above it.
+        let context_row = (metadata_ready
+            && FRAME_VIEWPORT.with(Cell::get).1 >= CONTEXT_ROW_MIN_WINDOW)
             .then(|| self.render_chat_context_row(colors))
             .flatten();
         div()
@@ -22337,7 +22723,7 @@ impl XdDesktop {
         let detail_open = preview.is_some() || file_loading || error.is_some();
         let list_width = (browser_pane_width(
             self.settings.browser_width,
-            f32::from(window.viewport_size().width),
+            logical(window.viewport_size().width),
         ) * 0.42)
             .clamp(140.0, 220.0);
         let at_root = browse_path.is_empty();
@@ -22780,7 +23166,7 @@ impl XdDesktop {
             .then(|| self.render_minimal_terminal(colors, window, cx));
         let height = bottom_terminal_height(
             self.settings.terminal_height,
-            f32::from(window.viewport_size().height) - 86.0,
+            logical(window.viewport_size().height) - 86.0,
         );
         div()
             .size_full()
@@ -22812,7 +23198,7 @@ impl XdDesktop {
                                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                                             cx.stop_propagation();
                                             this.dock_drag =
-                                                Some((f32::from(event.position.y), height as u16));
+                                                Some((logical(event.position.y), height as u16));
                                             cx.notify();
                                         }),
                                     ),
@@ -22973,7 +23359,7 @@ impl XdDesktop {
         .then(|| self.render_native_side_content(colors, window, cx));
         let browser_width = browser_pane_width(
             self.settings.browser_width,
-            f32::from(window.viewport_size().width),
+            logical(window.viewport_size().width),
         );
         let route = self.minimal_route.clone();
         // A new chat open takes the place of the chat that was, there and in
@@ -23002,8 +23388,7 @@ impl XdDesktop {
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        this.catalog_drag =
-                            Some((f32::from(event.position.x), catalog_width as u16));
+                        this.catalog_drag = Some((logical(event.position.x), catalog_width as u16));
                         cx.notify();
                     }),
                 )
@@ -23012,7 +23397,7 @@ impl XdDesktop {
             Some(self.render_new_chat_toolbar(colors, cx))
         } else {
             matches!(&route, MinimalRoute::Cli { .. })
-                .then(|| self.render_minimal_context_toolbar(colors, cx))
+                .then(|| self.render_minimal_context_toolbar(colors, window, cx))
         };
         let content = if self.creating_chat_folder.is_some() {
             self.render_new_chat(colors, window, cx)
@@ -24155,11 +24540,11 @@ impl XdDesktop {
                     if let Some((start_y, start_height)) = this.dock_drag {
                         if event.dragging() {
                             this.settings.terminal_height = bottom_terminal_height(
-                                (f32::from(start_height) + start_y - f32::from(event.position.y))
+                                (f32::from(start_height) + start_y - logical(event.position.y))
                                     .round()
                                     .clamp(0.0, u16::MAX as f32)
                                     as u16,
-                                f32::from(window.viewport_size().height) - 86.0,
+                                logical(window.viewport_size().height) - 86.0,
                             ) as u16;
                             cx.notify();
                         } else {
@@ -24169,11 +24554,11 @@ impl XdDesktop {
                     if let Some((start_x, start_width)) = this.browser_drag {
                         if event.dragging() {
                             // The cast saturates; browser_pane_width sets the range.
-                            let moved = start_x - f32::from(event.position.x);
+                            let moved = start_x - logical(event.position.x);
                             let requested = (f32::from(start_width) + moved).round() as u16;
                             this.settings.browser_width = browser_pane_width(
                                 requested,
-                                f32::from(window.viewport_size().width),
+                                logical(window.viewport_size().width),
                             ) as u16;
                             cx.notify();
                         } else {
@@ -24182,7 +24567,7 @@ impl XdDesktop {
                     }
                     if let Some((start_x, start_width)) = this.catalog_drag {
                         if event.dragging() {
-                            let requested = (f32::from(start_width) + f32::from(event.position.x)
+                            let requested = (f32::from(start_width) + logical(event.position.x)
                                 - start_x)
                                 .round()
                                 .clamp(0.0, u16::MAX as f32)
@@ -24276,6 +24661,15 @@ impl XdDesktop {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &InterfaceLarger, window, cx| {
+                this.step_interface_size(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &InterfaceSmaller, window, cx| {
+                this.step_interface_size(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &InterfaceReset, window, cx| {
+                this.set_interface_size(metrics::DEFAULT_INTERFACE_SIZE, window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 this.focus_composer(window, cx);
@@ -24403,7 +24797,7 @@ impl XdDesktop {
                     cx.notify();
                     return;
                 }
-                if this.minimal_theme_open && this.chat_title_model_menu.take().is_some() {
+                if this.minimal_theme_open && this.settings_menu.take().is_some() {
                     cx.notify();
                     return;
                 }
@@ -24512,7 +24906,7 @@ impl XdDesktop {
                                                 move |this, event: &MouseDownEvent, _, cx| {
                                                     cx.stop_propagation();
                                                     this.browser_drag = Some((
-                                                        f32::from(event.position.x),
+                                                        logical(event.position.x),
                                                         browser_width as u16,
                                                     ));
                                                     cx.notify();
@@ -24656,7 +25050,7 @@ impl XdDesktop {
     /// chat's picker, a Usage filter, or a Settings dropdown.
     fn menu_open(&self) -> bool {
         self.new_chat_menu.is_some()
-            || (self.minimal_theme_open && self.chat_title_model_menu.is_some())
+            || (self.minimal_theme_open && self.settings_menu.is_some())
             || self.usage_menu_open()
     }
 
@@ -24906,6 +25300,52 @@ impl XdDesktop {
     }
 
     /// Opens Settings, or leaves it. A dialog over the window keeps the key.
+    /// One Interface size larger or smaller, stopping at the ends.
+    fn step_interface_size(&mut self, larger: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let size = metrics::interface_size_step(self.settings.interface_size, larger);
+        self.set_interface_size(size, window, cx);
+    }
+
+    /// Draws the interface at `percent` from the next frame on, and saves
+    /// the choice. Called from a key or a click, so never while a frame is
+    /// being drawn: a frame is laid out, painted and hit-tested at one size.
+    ///
+    /// Nothing saved is rewritten: the sidebar's and the panes' sizes are
+    /// logical pixels, which [`px`] draws at the new size, and the window
+    /// keeps its size on screen. The layout's breakpoints are logical too,
+    /// so at a larger size the same window folds down as a smaller one does.
+    pub(crate) fn set_interface_size(
+        &mut self,
+        percent: u16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let percent = metrics::nearest_interface_size(percent);
+        if self.settings.interface_size == percent {
+            return;
+        }
+        let before = metrics::interface_scale();
+        self.settings.interface_size = percent;
+        metrics::set_interface_size(percent);
+        let grown = metrics::interface_scale() / before;
+        // The transcript keeps the heights it measured its rows at. They are
+        // measured again, with the row at the top of the view held there.
+        let top = self.transcript.logical_scroll_top();
+        let count = self.transcript.item_count();
+        self.transcript.splice(0..count, count);
+        self.transcript.scroll_to(ListOffset {
+            item_ix: top.item_ix,
+            offset_in_item: top.offset_in_item * grown,
+        });
+        // GPUI's own spacing and type helpers follow through the rem.
+        window.set_rem_size(px(REM));
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+        window.refresh();
+        cx.notify();
+    }
+
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.minimal_theme_open {
             self.close_minimal_theme_popup(window, cx);
@@ -25303,6 +25743,11 @@ impl Render for XdDesktop {
         self.key_menu_project = None;
         self.frame_focus = window.focused(cx);
         FRAME_COLORS.with(|colors| colors.set(Some(self.settings.theme.colors())));
+        // GPUI's own spacing and type helpers are in rems: one rem is sixteen
+        // logical pixels, at the Interface size like every other length.
+        window.set_rem_size(px(REM));
+        let viewport = window.viewport_size();
+        FRAME_VIEWPORT.with(|frame| frame.set((logical(viewport.width), logical(viewport.height))));
         UNDER_A_DIALOG.with(|under| under.set(self.dialog_open() || self.menu_open()));
         self.find_focused =
             self.frame_focus.as_ref() == Some(&self.catalog_find_input.read(cx).focus_handle(cx));
@@ -26990,24 +27435,21 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         });
     }
 
-    /// Text in each kind of box the sidebar puts it in, keeping hold of what GPUI
-    /// actually shaped and where the box ended up.
+    /// Text in each kind of box the sidebar puts it in. What each label drew
+    /// is read back from [`DRAWN_LABELS`].
     struct TruncatingLabelProbe {
         text: &'static str,
-        shaped: std::rc::Rc<std::cell::RefCell<Vec<gpui::TextLayout>>>,
     }
 
     impl TruncatingLabelProbe {
-        fn label(&self, selector: &'static str) -> gpui::Div {
-            let shown = StyledText::new(self.text);
-            self.shaped.borrow_mut().push(shown.layout().clone());
-            truncating_box(self.text, shown).debug_selector(|| selector.into())
+        #[track_caller]
+        fn label(&self, selector: &'static str) -> gpui::Stateful<gpui::Div> {
+            truncating_label(self.text).debug_selector(|| selector.into())
         }
     }
 
     impl Render for TruncatingLabelProbe {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            self.shaped.borrow_mut().clear();
             let row = || div().w(px(240.0)).flex().items_center().gap(px(8.0));
             div()
                 .size_full()
@@ -27036,19 +27478,15 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         cx: &mut gpui::TestAppContext,
         text: &'static str,
     ) -> (Vec<String>, gpui::Bounds<Pixels>, gpui::Bounds<Pixels>) {
-        let shaped = std::rc::Rc::<std::cell::RefCell<Vec<gpui::TextLayout>>>::default();
-        let probe_shaped = std::rc::Rc::clone(&shaped);
-        let (_, cx) = cx.add_window_view(move |_, _| TruncatingLabelProbe {
-            text,
-            shaped: probe_shaped,
-        });
+        let (_, cx) = cx.add_window_view(move |_, _| TruncatingLabelProbe { text });
         cx.simulate_resize(size(px(1180.0), px(560.0)));
         cx.run_until_parked();
+        DRAWN_LABELS.with(|labels| labels.borrow_mut().clear());
         cx.update(|window, cx| {
             window.refresh();
             window.draw(cx).clear();
         });
-        let texts = shaped.borrow().iter().map(|layout| layout.text()).collect();
+        let texts = DRAWN_LABELS.with(|labels| labels.borrow().clone());
         let hugs = cx.debug_bounds("hugs").unwrap();
         let count = cx.debug_bounds("count").unwrap();
         (texts, hugs, count)
@@ -27083,15 +27521,11 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
 
     /// A title laid out as a chat tab lays one out: in a width-capped box beside
     /// the things that keep their size, inside a horizontal scroller.
-    struct SessionChatTabProbe {
-        shaped: std::rc::Rc<std::cell::RefCell<Option<gpui::TextLayout>>>,
-    }
+    struct SessionChatTabProbe;
 
     impl Render for SessionChatTabProbe {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             const TITLE: &str = "A conversation title far too long to fit in one tab";
-            let shown = StyledText::new(TITLE);
-            *self.shaped.borrow_mut() = Some(shown.layout().clone());
             div()
                 .id("probe-scroll")
                 .size_full()
@@ -27109,7 +27543,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                         .px_2()
                         .text_size(px(TEXT_LABEL))
                         .child(div().size(px(13.0)).flex_none())
-                        .child(truncating_box(TITLE, shown))
+                        .child(truncating_label(TITLE))
                         .child(
                             div()
                                 .debug_selector(|| "close".into())
@@ -27122,18 +27556,15 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
 
     #[gpui::test]
     fn chat_tab_title_gets_an_ellipsis_inside_the_scroller(cx: &mut gpui::TestAppContext) {
-        let shaped = std::rc::Rc::<std::cell::RefCell<Option<gpui::TextLayout>>>::default();
-        let probe_shaped = std::rc::Rc::clone(&shaped);
-        let (_, cx) = cx.add_window_view(move |_, _| SessionChatTabProbe {
-            shaped: probe_shaped,
-        });
+        let (_, cx) = cx.add_window_view(move |_, _| SessionChatTabProbe);
         cx.simulate_resize(size(px(1180.0), px(560.0)));
         cx.run_until_parked();
+        DRAWN_LABELS.with(|labels| labels.borrow_mut().clear());
         cx.update(|window, cx| {
             window.refresh();
             window.draw(cx).clear();
         });
-        let title = shaped.borrow().as_ref().unwrap().text();
+        let title = DRAWN_LABELS.with(|labels| labels.borrow().last().cloned().unwrap());
         assert!(title.starts_with("A conv"), "shaped {title:?}");
         assert!(title.ends_with('…'), "shaped {title:?}");
         let tab = cx.debug_bounds("tab").unwrap();
@@ -27172,7 +27603,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         }
         desktop.update(cx, |desktop, _| {
             let scroll = &desktop.session_chat_tabs_scroll;
-            let width = |index| f32::from(scroll.bounds_for_item(index).unwrap().size.width);
+            let width = |index| logical(scroll.bounds_for_item(index).unwrap().size.width);
             assert!(width(0) < 210.0, "a short title keeps a narrow tab");
             assert_eq!(width(1), 210.0);
         });
@@ -30348,7 +30779,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert!(
             bounds.size.height >= px(120.0),
             "wrapped text was painted into a card only {}px tall",
-            f32::from(bounds.size.height)
+            logical(bounds.size.height)
         );
     }
 
@@ -30465,10 +30896,10 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         }));
         agents_with(settings, cx);
         desktop.update_in(cx, |desktop, _, cx| {
-            desktop.toggle_chat_title_model_menu("codex", cx);
-            assert_eq!(desktop.chat_title_model_menu, Some("codex"));
-            desktop.toggle_chat_title_model_menu("codex", cx);
-            assert_eq!(desktop.chat_title_model_menu, None);
+            desktop.toggle_settings_menu("codex", cx);
+            assert_eq!(desktop.settings_menu, Some("codex"));
+            desktop.toggle_settings_menu("codex", cx);
+            assert_eq!(desktop.settings_menu, None);
         });
     }
 
@@ -31019,6 +31450,12 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             "shift-escape",
             "ctrl-k",
             "cmd-k",
+            "ctrl-=",
+            "cmd-=",
+            "ctrl--",
+            "cmd--",
+            "ctrl-0",
+            "cmd-0",
             "up",
             "down",
             "enter",
@@ -31097,6 +31534,9 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             "ctrl-,",
             "shift-escape",
             "alt-down",
+            "ctrl-=",
+            "ctrl--",
+            "ctrl-0",
         ] {
             let is = key_action(&after, key, &["XdDesktop", "TerminalInput"]).unwrap();
             assert!(is.starts_with("xd::"), "{key} in the terminal reaches {is}");
@@ -31663,7 +32103,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         cx.simulate_keystrokes("space");
         redraw(cx);
         desktop.read_with(cx, |desktop, _| {
-            assert_eq!(desktop.chat_title_model_menu, Some("codex"));
+            assert_eq!(desktop.settings_menu, Some("codex"));
             assert_eq!(
                 desktop.key_rows(),
                 Some((KeyLayer::Menu, "settings-menu", 2))
@@ -31674,7 +32114,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         cx.simulate_keystrokes("escape");
         redraw(cx);
         desktop.read_with(cx, |desktop, _| {
-            assert_eq!(desktop.chat_title_model_menu, None);
+            assert_eq!(desktop.settings_menu, None);
             assert!(desktop.minimal_theme_open);
         });
         // A switch flips with Space, and the ring stays on it.
@@ -31865,6 +32305,341 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         desktop.read_with(cx, |desktop, _| assert!(desktop.settings.reduce_motion));
         assert!(reduce_motion());
         set_reduce_motion(false);
+    }
+
+    /// A window `width` by `height` of its own pixels, drawn at `percent`.
+    fn sized_window(
+        cx: &mut gpui::TestAppContext,
+        percent: u16,
+        width: f32,
+        height: f32,
+    ) -> (Entity<XdDesktop>, &mut gpui::VisualTestContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.simulate_resize(size(window_px(width), window_px(height)));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.set_interface_size(percent, window, cx)
+        });
+        redraw(cx);
+        (desktop, cx)
+    }
+
+    #[gpui::test]
+    fn interface_size_keys_step_through_the_sizes_and_apply_at_once(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        // With a transcript on screen, whose rows are measured again each time.
+        cx.simulate_keystrokes("alt-down");
+        redraw(cx);
+        let size = |cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| desktop.settings.interface_size)
+        };
+        let saved = |cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| {
+                let settings = &desktop.settings;
+                (
+                    settings.catalog_width,
+                    settings.browser_width,
+                    settings.terminal_height,
+                    settings.window_width,
+                    settings.window_height,
+                )
+            })
+        };
+        // The sidebar's width on screen: its footer and its one-pixel edge.
+        let sidebar = |cx: &mut gpui::VisualTestContext| {
+            f32::from(cx.debug_bounds("catalog-footer").unwrap().size.width) + 1.0
+        };
+        assert_eq!(size(cx), 100);
+        assert_eq!(metrics::interface_scale(), 1.0);
+        let (at_100, saved_at_100) = (sidebar(cx), saved(cx));
+        assert_eq!(at_100, 256.0);
+
+        // One step up, drawn in the next frame: the sidebar is wider on
+        // screen, and what is saved for it is what it was.
+        cx.simulate_keystrokes("ctrl-=");
+        redraw(cx);
+        assert_eq!(size(cx), 115);
+        assert_eq!(metrics::interface_scale(), 1.15);
+        assert!((sidebar(cx) - 256.0 * 1.15).abs() < 1.0, "{}", sidebar(cx));
+        assert_eq!(saved(cx), saved_at_100);
+        cx.update(|window, _| assert_eq!(window.rem_size(), gpui::px(16.0 * 1.15)));
+
+        // Up stops at the largest size, down at the smallest.
+        cx.simulate_keystrokes("ctrl-= ctrl-= ctrl-= ctrl-=");
+        redraw(cx);
+        assert_eq!(size(cx), 150);
+        assert!((sidebar(cx) - 384.0).abs() < 1.0, "{}", sidebar(cx));
+        cx.simulate_keystrokes("ctrl-0");
+        redraw(cx);
+        assert_eq!(size(cx), 100);
+        assert_eq!(sidebar(cx), at_100);
+        cx.simulate_keystrokes("ctrl-- ctrl-- ctrl--");
+        redraw(cx);
+        assert_eq!(size(cx), 90);
+        assert!((sidebar(cx) - 256.0 * 0.9).abs() < 1.0, "{}", sidebar(cx));
+        // Cmd does the same where it is the platform's key.
+        cx.simulate_keystrokes("cmd-0 cmd-=");
+        redraw(cx);
+        assert_eq!(size(cx), 115);
+        assert_eq!(saved(cx), saved_at_100);
+        metrics::set_interface_size(100);
+    }
+
+    #[gpui::test]
+    fn at_150_percent_the_layout_clamps_and_drags_in_logical_pixels(cx: &mut gpui::TestAppContext) {
+        // 1180 of the window's pixels hold 786.67 logical ones at 150 %.
+        let (desktop, cx) = sized_window(cx, 150, 1180.0, 780.0);
+        // The sidebar's width on screen: its footer and its one-pixel edge.
+        let sidebar = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("catalog-footer").unwrap().size.width + window_px(1.0)
+        };
+        let want = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext, width: u16| {
+            cx.update_window_entity(desktop, |desktop, _, cx| {
+                desktop.settings.catalog_width = width;
+                cx.notify();
+            });
+            redraw(cx);
+        };
+
+        // A sidebar asked to be 480 wide still leaves the session its 384:
+        // both are logical, so the clamp is the one a 787px window has.
+        want(&desktop, cx, 480);
+        let room = 1180.0 / 1.5;
+        assert_eq!(
+            catalog_pane_width(480, room),
+            room - CATALOG_SESSION_MIN_WIDTH
+        );
+        assert!((logical(sidebar(cx)) - (room - CATALOG_SESSION_MIN_WIDTH)).abs() < 1.0);
+        assert!((f32::from(sidebar(cx)) - (1180.0 - CATALOG_SESSION_MIN_WIDTH * 1.5)).abs() < 1.5);
+
+        // Dragging its edge 60 of the window's pixels makes it 40 logical
+        // pixels wider: the pointer is read in the same units as the layout.
+        want(&desktop, cx, 256);
+        let edge = 256.0 * 1.5;
+        cx.simulate_mouse_down(
+            point(window_px(edge + 2.0), window_px(300.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(window_px(edge + 62.0), window_px(300.0)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(window_px(edge + 62.0), window_px(300.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.settings.catalog_width, 296)
+        });
+        assert!((f32::from(sidebar(cx)) - 296.0 * 1.5).abs() < 1.0);
+
+        // The smallest window holds 507 by 373 logical pixels at 150 %: the
+        // sidebar comes down to its narrowest and the session has the rest.
+        cx.simulate_resize(size(
+            window_px(f32::from(MIN_WINDOW_WIDTH)),
+            window_px(f32::from(MIN_WINDOW_HEIGHT)),
+        ));
+        redraw(cx);
+        assert!((logical(sidebar(cx)) - CATALOG_MIN_WIDTH).abs() < 1.0);
+        desktop.read_with(cx, |desktop, _| {
+            // What is saved is what was asked for, not what fits today.
+            assert_eq!(desktop.settings.catalog_width, 296);
+        });
+        metrics::set_interface_size(100);
+    }
+
+    #[gpui::test]
+    fn interface_size_is_chosen_and_found_in_settings(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            let colors = desktop.settings.theme.colors();
+            // By its name, which its keys in Settings › Keyboard share, and
+            // by the words and sizes people look for.
+            for (word, alone) in [
+                ("interface", false),
+                ("zoom", false),
+                ("130", true),
+                ("scale", true),
+            ] {
+                let found = desktop.settings_search_results(&[word.to_owned()], 600.0, colors, cx);
+                let titles = found
+                    .iter()
+                    .flat_map(|(_, rows)| rows)
+                    .map(|row| row.title.to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(titles[0], "Interface size", "{word}");
+                assert_eq!(titles.len() == 1, alone, "{word}: {titles:?}");
+                assert_eq!(found[0].0, 0, "it is an Appearance setting");
+            }
+        });
+        cx.simulate_keystrokes("ctrl-,");
+        redraw(cx);
+        let button = cx
+            .debug_bounds("workspace-settings-interface-size")
+            .unwrap();
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        redraw(cx);
+        let menu = cx.debug_bounds("settings-menu").unwrap();
+        // Under its button, which stays in sight.
+        assert!(menu.top() >= button.bottom());
+        // The sizes in order, a row each: the last is 150 %.
+        let last = point(menu.center().x, menu.bottom() - px(4.0 + 16.0));
+        cx.simulate_click(last, gpui::Modifiers::default());
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.settings.interface_size, 150);
+            assert_eq!(desktop.settings_menu, None);
+        });
+        assert_eq!(metrics::interface_scale(), 1.5);
+        let larger = cx
+            .debug_bounds("workspace-settings-interface-size")
+            .unwrap();
+        assert!((larger.size.height - button.size.height * 1.5).abs() < gpui::px(1.0));
+        metrics::set_interface_size(100);
+    }
+
+    #[test]
+    fn a_session_header_gives_way_in_order_and_keeps_its_buttons() {
+        let parts = HeaderParts {
+            title: HEADER_TITLE_FLOOR,
+            agent: Some((29.0, 80.0)),
+            branch: Some((28.0, 58.0)),
+            pull_requests: vec![50.0, 50.0, 50.0, 50.0],
+            pull_request_tools: HIT_MIN,
+            stamp: Some(95.0),
+            tools: 66.0,
+        };
+        let all = HeaderFit {
+            pull_requests: HEADER_PULL_REQUEST_CHIPS,
+            branch_name: true,
+            agent_name: true,
+            stamp: true,
+            chips: true,
+            agent: true,
+        };
+        assert_eq!(parts.fit(2000.0), all);
+        // Whatever it is given, what it chooses fits, or is the least there is.
+        let mut last = all;
+        for room in (0..=900).rev().map(|room| room as f32) {
+            let fit = parts.fit(room);
+            assert!(parts.width(fit) <= room || !fit.agent, "{fit:?} in {room}");
+            // It only ever gives something up as the room shrinks.
+            assert!(fit.pull_requests <= last.pull_requests, "{room}");
+            for (now, before) in [
+                (fit.branch_name, last.branch_name),
+                (fit.agent_name, last.agent_name),
+                (fit.stamp, last.stamp),
+                (fit.chips, last.chips),
+                (fit.agent, last.agent),
+            ] {
+                assert!(!now || before, "{fit:?} after {last:?} at {room}");
+            }
+            // In that order: chips of pull requests, the branch's name, the
+            // assistant's, the stamp, the branch and pull request button,
+            // and the assistant's mark.
+            assert!(fit.pull_requests == 0 || fit.branch_name);
+            assert!(!fit.branch_name || fit.agent_name);
+            assert!(!fit.agent_name || fit.stamp);
+            assert!(!fit.stamp || fit.chips);
+            assert!(!fit.chips || fit.agent);
+            last = fit;
+        }
+        assert!(
+            !last.agent,
+            "with no room at all only the title and buttons stay"
+        );
+        // A header with nothing but its title and buttons asks for nothing.
+        let bare = HeaderParts {
+            title: 40.0,
+            tools: 66.0,
+            ..HeaderParts::default()
+        };
+        assert_eq!(bare.width(all), 40.0 + 40.0 + 66.0 + 10.0);
+    }
+
+    #[test]
+    fn a_label_is_cut_to_the_most_that_fits_before_an_ellipsis() {
+        // A letter is ten wide and so is the ellipsis.
+        let fits = |room: usize| move |text: &str| text.chars().count() * 10 <= room;
+        assert_eq!(
+            cut_to_fit("Review the schematic PR", fits(120)),
+            "Review the…"
+        );
+        assert_eq!(
+            cut_to_fit("Review the schematic PR", fits(110)),
+            "Review the…"
+        );
+        assert_eq!(
+            cut_to_fit("Review the schematic PR", fits(100)),
+            "Review th…"
+        );
+        // All but the last letter, when that is what fits.
+        assert_eq!(cut_to_fit("main", fits(40)), "mai…");
+        // Nothing fits: the ellipsis alone says there is more.
+        assert_eq!(cut_to_fit("main", fits(5)), "…");
+        assert_eq!(cut_to_fit("", fits(100)), "…");
+        // Never cut inside a character.
+        assert_eq!(cut_to_fit("résumé naïve", fits(50)), "résu…");
+    }
+
+    #[test]
+    fn a_docked_ask_leaves_the_editor_in_sight_in_a_short_window() {
+        // From the smallest window at 100 % up, half the window as before.
+        for window in [560.0, 780.0, 1200.0] {
+            assert_eq!(composer::ask_max_height(window), window * 0.5);
+        }
+        // The smallest window at 150 % is 373 logical pixels high.
+        let short = f32::from(MIN_WINDOW_HEIGHT) / 1.5;
+        assert_eq!(composer::ask_max_height(short), 96.0);
+        assert!(composer::ask_max_height(450.0) < 225.0);
+    }
+
+    #[gpui::test]
+    fn the_smallest_window_at_150_percent_keeps_the_header_buttons_in_reach(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = sized_window(
+            cx,
+            150,
+            f32::from(MIN_WINDOW_WIDTH),
+            f32::from(MIN_WINDOW_HEIGHT),
+        );
+        cx.simulate_keystrokes("alt-down");
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            let chat = desktop.model.selected_chat.clone().unwrap();
+            let chat = desktop
+                .model
+                .chats
+                .iter_mut()
+                .find(|known| known.id == chat)
+                .unwrap();
+            chat.branch = Some("xd/a-branch-with-a-long-name".into());
+            chat.working = true;
+            cx.notify();
+        });
+        redraw(cx);
+        let window = window_px(f32::from(MIN_WINDOW_WIDTH));
+        for button in ["toggle-side-pane", "toggle-bottom-pane"] {
+            let bounds = cx.debug_bounds(button).unwrap();
+            assert!(
+                bounds.right() <= window,
+                "{button} ends at {:?}",
+                bounds.right()
+            );
+            assert!(bounds.size.width >= window_px(HIT_MIN * 1.5));
+        }
+        // The same window at 100 % has room for the branch as well.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.set_interface_size(100, window, cx)
+        });
+        redraw(cx);
+        let branch = cx.debug_bounds("minimal-session-branch").unwrap();
+        assert!(branch.size.width >= px(chip_width(CHIP_ICON, BRANCH_CHIP_NAME_FLOOR)));
+        assert!(cx.debug_bounds("toggle-bottom-pane").unwrap().right() <= window);
+        metrics::set_interface_size(100);
     }
 
     #[test]
@@ -37230,8 +38005,8 @@ fn main() {
             let bounds = Bounds::centered(
                 None,
                 size(
-                    px(f32::from(settings.window_width.max(760))),
-                    px(f32::from(settings.window_height.max(560))),
+                    window_px(f32::from(settings.window_width.max(MIN_WINDOW_WIDTH))),
+                    window_px(f32::from(settings.window_height.max(MIN_WINDOW_HEIGHT))),
                 ),
                 cx,
             );
@@ -37246,13 +38021,16 @@ fn main() {
                         focus: true,
                         window_bounds: Some(window_bounds),
                         is_resizable: true,
-                        window_min_size: Some(size(px(760.0), px(560.0))),
+                        window_min_size: Some(size(
+                            window_px(f32::from(MIN_WINDOW_WIDTH)),
+                            window_px(f32::from(MIN_WINDOW_HEIGHT)),
+                        )),
                         window_background: WindowBackgroundAppearance::Opaque,
                         titlebar: Some(TitlebarOptions {
                             title: Some("xd".into()),
                             appears_transparent: true,
                             traffic_light_position: cfg!(target_os = "macos")
-                                .then(|| point(px(12.0), px(10.0))),
+                                .then(|| point(window_px(12.0), window_px(10.0))),
                         }),
                         window_decorations: Some(WindowDecorations::Client),
                         app_id: Some(xd_desktop::channel::app_id()),

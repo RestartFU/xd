@@ -195,6 +195,8 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ("Show or hide the terminal under the chat", "Ctrl `".into()),
                 ("Settings", format!("{m} ,")),
                 ("Usage", format!("{m} U")),
+                ("Larger / smaller interface", format!("{m} = / {m} -")),
+                ("Interface size back to 100 %", format!("{m} 0")),
                 ("Copy the selected text", format!("{m} C")),
                 (
                     "Close a dialog or menu, clear a search, or leave the chat",
@@ -424,6 +426,9 @@ fn settings_step_button(
 
 /// The list the arrow keys are in while a Settings dropdown is open.
 const SETTINGS_MENU: &str = "settings-menu";
+/// The Interface size dropdown, among the page's dropdowns.
+const INTERFACE_SIZE_MENU: &str = "interface-size";
+const INTERFACE_SIZE_DESCRIPTION: &str = "Scales everything in the window: text, controls, spacing and the terminal. Pages in the browser keep their own size.";
 
 /// A setting that is a switch. A click anywhere on its row flips it; Tab
 /// stops on the switch itself, which Space and Enter flip.
@@ -555,18 +560,14 @@ impl XdDesktop {
         cx.notify();
     }
 
-    pub(super) fn toggle_chat_title_model_menu(
-        &mut self,
-        backend: &'static str,
-        cx: &mut Context<Self>,
-    ) {
-        self.chat_title_model_menu =
-            (self.chat_title_model_menu != Some(backend)).then_some(backend);
+    /// Opens one of the page's dropdowns, or closes it if it is the one open.
+    pub(super) fn toggle_settings_menu(&mut self, menu: &'static str, cx: &mut Context<Self>) {
+        self.settings_menu = (self.settings_menu != Some(menu)).then_some(menu);
         cx.notify();
     }
 
     fn choose_chat_title_model(&mut self, backend: &str, model: String, cx: &mut Context<Self>) {
-        self.chat_title_model_menu = None;
+        self.settings_menu = None;
         let result = match self.active_host() {
             Some(host) => host.set_chat_title_model(backend, &model),
             None => return,
@@ -625,78 +626,139 @@ impl XdDesktop {
                     presentation::model_name(selected, name)
                 },
             );
-            let open = self.chat_title_model_menu == Some(backend);
             let models = catalog.map_or(&[][..], |catalog| catalog.models.as_slice());
-            // A menu under its button, as every dropdown is.
-            let menu = open.then(|| {
-                div()
-                    .absolute()
-                    .top_full()
-                    .right_0()
-                    .mt(px(4.0))
-                    .child(menu_popover(
-                        gpui::Corner::TopRight,
-                        menu_shell(colors)
-                            .id((row, usize::MAX))
-                            .debug_selector(|| "settings-menu".into())
-                            .min_w(px(220.0))
-                            .max_h(px(320.0))
-                            .overflow_y_scroll()
-                            .track_scroll(&self.key_scroll)
-                            .children(models.iter().enumerate().map(|(index, model)| {
-                                let id = model.id.clone();
-                                menu_row((row, index + 1), colors)
-                                    .key_row(
-                                        &keys,
-                                        KeyLayer::Menu,
-                                        SETTINGS_MENU,
-                                        colors.surface_high,
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.choose_chat_title_model(backend, id.clone(), cx)
-                                        },
-                                    )
-                                    .key_child(&keys, index)
-                                    .child(div().flex_1().min_w_0().child(
-                                        presentation::model_name(&model.id, Some(&model.name)),
-                                    ))
-                                    .child(menu_check(
-                                        selected.as_deref() == Some(model.id.as_str()),
-                                        colors,
-                                    ))
-                            })),
-                    ))
-            });
-            rows.push(SettingRow::custom(
+            let choices = models
+                .iter()
+                .map(|model| {
+                    let id = model.id.clone();
+                    let choose: KeyRun = Rc::new(move |this, _, cx| {
+                        this.choose_chat_title_model(backend, id.clone(), cx)
+                    });
+                    (
+                        presentation::model_name(&model.id, Some(&model.name)),
+                        selected.as_deref() == Some(model.id.as_str()),
+                        choose,
+                    )
+                })
+                .collect();
+            rows.push(self.dropdown_row(
+                row,
+                backend,
                 title,
                 description,
-                settings_row(row, title, description, colors).child(
-                    div()
-                        .relative()
-                        .flex_none()
-                        .child(
-                            ui_button((row, 0_usize), ButtonKind::Secondary, colors)
-                                // The press that opens the menu is not one
-                                // outside it, which would close it again.
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .key_stop(
-                                    &keys,
-                                    KeyLayer::Overlay,
-                                    row,
-                                    colors,
-                                    cx,
-                                    move |this, _, cx| {
-                                        this.toggle_chat_title_model_menu(backend, cx)
-                                    },
-                                )
-                                .child(label)
-                                .child(icon(CHEVRON_DOWN_ICON, 12.0, colors.muted)),
-                        )
-                        .children(menu),
-                ),
+                label,
+                220.0,
+                choices,
+                colors,
+                cx,
             ));
         }
         rows
+    }
+
+    /// A setting chosen from a short list: a button that names the choice in
+    /// force and opens the list under it, or over it where the window ends
+    /// too soon under it. `menu` names the list among the page's dropdowns,
+    /// one of which is open at a time.
+    #[allow(clippy::too_many_arguments)]
+    fn dropdown_row(
+        &self,
+        row: &'static str,
+        menu: &'static str,
+        title: &'static str,
+        description: &'static str,
+        label: String,
+        width: f32,
+        choices: Vec<(String, bool, KeyRun)>,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> SettingRow {
+        let keys = self.key_targets.clone();
+        let list = (self.settings_menu == Some(menu)).then(|| {
+            div().child(menu_under(
+                gpui::Corner::TopRight,
+                CONTROL_HEIGHT,
+                menu_shell(colors)
+                    .id((row, usize::MAX))
+                    .debug_selector(|| "settings-menu".into())
+                    .min_w(px(width))
+                    .max_h(px(menu_under_max_height(CONTROL_HEIGHT, 320.0)))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.key_scroll)
+                    .children(choices.into_iter().enumerate().map(
+                        |(index, (name, chosen, choose))| {
+                            menu_row((row, index + 1), colors)
+                                .key_row(
+                                    &keys,
+                                    KeyLayer::Menu,
+                                    SETTINGS_MENU,
+                                    colors.surface_high,
+                                    cx,
+                                    move |this, window, cx| choose(this, window, cx),
+                                )
+                                .key_child(&keys, index)
+                                .child(div().flex_1().min_w_0().child(name))
+                                .child(menu_check(chosen, colors))
+                        },
+                    )),
+            ))
+        });
+        SettingRow::custom(
+            title,
+            description,
+            settings_row(row, title, description, colors).child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .child(
+                        ui_button((row, 0_usize), ButtonKind::Secondary, colors)
+                            .debug_selector(move || row.into())
+                            // The press that opens the menu is not one
+                            // outside it, which would close it again.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .key_stop(
+                                &keys,
+                                KeyLayer::Overlay,
+                                row,
+                                colors,
+                                cx,
+                                move |this, _, cx| this.toggle_settings_menu(menu, cx),
+                            )
+                            .child(label)
+                            .child(icon(CHEVRON_DOWN_ICON, 12.0, colors.muted)),
+                    )
+                    .children(list),
+            ),
+        )
+    }
+
+    /// The Interface size, as a dropdown of the sizes xd offers.
+    fn interface_size_row(&self, colors: ThemeColors, cx: &mut Context<Self>) -> SettingRow {
+        let chosen = self.settings.interface_size;
+        let name = |size: u16| format!("{size} %");
+        let choices = crate::metrics::INTERFACE_SIZES
+            .into_iter()
+            .map(|size| {
+                let choose: KeyRun = Rc::new(move |this, window, cx| {
+                    this.settings_menu = None;
+                    this.set_interface_size(size, window, cx);
+                });
+                (name(size), size == chosen, choose)
+            })
+            .collect();
+        self.dropdown_row(
+            "workspace-settings-interface-size",
+            INTERFACE_SIZE_MENU,
+            "Interface size",
+            INTERFACE_SIZE_DESCRIPTION,
+            name(chosen),
+            120.0,
+            choices,
+            colors,
+            cx,
+        )
+        // Search finds it by its sizes and by the words people look for.
+        .searchable("90 % 100 % 115 % 130 % 150 % zoom scale text size larger smaller")
     }
 
     /// The connected host's settling rules, or nothing while it has not said
@@ -1463,6 +1525,7 @@ impl XdDesktop {
                 label: None,
                 rows: vec![
                     self.theme_row(column, colors, cx),
+                    self.interface_size_row(colors, cx),
                     Self::local_switch(
                         "workspace-settings-reduce-motion",
                         "Reduce motion",
@@ -1779,7 +1842,7 @@ impl XdDesktop {
 
     /// Opens a section, leaving any search.
     fn open_settings_section(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.chat_title_model_menu = None;
+        self.settings_menu = None;
         self.settings_section = index;
         if index == AGENTS_SECTION {
             self.request_agent_accounts();
@@ -1812,9 +1875,9 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         if !self.minimal_theme_open {
-            self.chat_title_model_menu = None;
+            self.settings_menu = None;
         }
-        let window_width = f32::from(window.viewport_size().width);
+        let window_width = logical(window.viewport_size().width);
         let narrow = window_width < SETTINGS_NARROW_WINDOW;
         let column = settings_column_width(window_width);
         let section = self.settings_section.min(SETTINGS_SECTIONS.len() - 1);
@@ -2102,7 +2165,7 @@ impl XdDesktop {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
-                    if this.chat_title_model_menu.take().is_some() {
+                    if this.settings_menu.take().is_some() {
                         cx.notify();
                     }
                 }),

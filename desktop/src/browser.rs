@@ -14,7 +14,7 @@
 
 use crate::metrics::{
     CONTROL_HEIGHT, CONTROL_HEIGHT_COMPACT, HIT_MIN, RADIUS_CONTROL, RADIUS_TAB, TEXT_CAPTION,
-    TEXT_CONTROL, TEXT_HEADING, TEXT_LABEL,
+    TEXT_CONTROL, TEXT_HEADING, TEXT_LABEL, px,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -29,7 +29,7 @@ use async_channel::Sender;
 use gpui::{
     App, Bounds, Context, DispatchPhase, ElementId, Entity, EventEmitter, Focusable, FontWeight,
     GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseDownEvent, Pixels, Render,
-    RenderImage, ScrollHandle, Style, Timer, Window, div, prelude::*, px, relative, rgb, rgba,
+    RenderImage, ScrollHandle, Style, Timer, Window, div, prelude::*, relative, rgb, rgba,
 };
 #[cfg(not(target_os = "linux"))]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle, WindowHandle};

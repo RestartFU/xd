@@ -11,6 +11,16 @@ use serde::{Deserialize, Serialize};
 pub use xd_desktop::theme::ThemePreset;
 
 use crate::browser::BrowserSession;
+use crate::metrics::{DEFAULT_INTERFACE_SIZE, nearest_interface_size};
+
+/// A saved Interface size, as the nearest size xd offers: a file edited by
+/// hand, or written by a version with other steps, still loads.
+fn offered_interface_size<'de, D: serde::Deserializer<'de>>(source: D) -> Result<u16, D::Error> {
+    let saved = f64::deserialize(source)?;
+    Ok(nearest_interface_size(
+        saved.clamp(0.0, 1000.0).round() as u16
+    ))
+}
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default)]
@@ -104,6 +114,13 @@ pub struct AppSettings {
     /// Holds the pulsing status marks steady and stops the usage refresh
     /// icon turning.
     pub reduce_motion: bool,
+    /// How large the interface is drawn, in percent: one of
+    /// [`INTERFACE_SIZES`]. Everything in the window scales with it. The
+    /// widths and heights saved below are in logical pixels, what they
+    /// measure at 100 %, so they mean the same at every size; only the
+    /// window's own size is in the screen's pixels.
+    #[serde(deserialize_with = "offered_interface_size")]
+    pub interface_size: u16,
     pub git_writer: GitWriter,
     pub git_writer_model: Option<String>,
     pub build_source: String,
@@ -165,6 +182,7 @@ impl Default for AppSettings {
             allow_all_permissions: false,
             auto_resume_chats: false,
             reduce_motion: false,
+            interface_size: DEFAULT_INTERFACE_SIZE,
             git_writer: GitWriter::Chat,
             git_writer_model: None,
             build_source: String::new(),
@@ -514,6 +532,7 @@ mod tests {
             allow_all_permissions: true,
             auto_resume_chats: true,
             reduce_motion: true,
+            interface_size: 130,
             git_writer: GitWriter::Claude,
             git_writer_model: Some("claude-opus-5".into()),
             build_source: "#128".into(),
@@ -646,6 +665,64 @@ mod tests {
             serde_json::to_value(enabled).unwrap()["reduce_motion"],
             true
         );
+    }
+
+    #[test]
+    fn interface_size_is_100_unless_chosen_and_loads_as_a_size_xd_offers() {
+        let defaults = serde_json::to_value(AppSettings::default()).unwrap();
+        assert_eq!(defaults["interface_size"], 100);
+        let older: AppSettings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
+        assert_eq!(older.interface_size, 100);
+        for size in crate::metrics::INTERFACE_SIZES {
+            let saved: AppSettings =
+                serde_json::from_str(&format!(r#"{{"interface_size":{size}}}"#)).unwrap();
+            assert_eq!(saved.interface_size, size);
+            assert_eq!(serde_json::to_value(saved).unwrap()["interface_size"], size);
+        }
+        // A size xd does not offer loads as the nearest one it does.
+        for (saved, loaded) in [
+            (0, 90),
+            (95, 90),
+            (97, 100),
+            (120, 115),
+            (125, 130),
+            (400, 150),
+        ] {
+            let settings: AppSettings =
+                serde_json::from_str(&format!(r#"{{"interface_size":{saved}}}"#)).unwrap();
+            assert_eq!(settings.interface_size, loaded, "{saved}");
+        }
+        let fraction: AppSettings = serde_json::from_str(r#"{"interface_size":114.6}"#).unwrap();
+        assert_eq!(fraction.interface_size, 115);
+    }
+
+    /// The widths and heights a layout saves are logical pixels, so loading
+    /// them at another Interface size, or saving them again, changes nothing.
+    #[test]
+    fn saved_sizes_do_not_change_with_the_interface_size() {
+        let mut settings = AppSettings {
+            catalog_width: 300,
+            browser_width: 520,
+            terminal_height: 280,
+            window_width: 1400,
+            window_height: 900,
+            ..AppSettings::default()
+        };
+        for size in crate::metrics::INTERFACE_SIZES {
+            settings.interface_size = size;
+            let saved = serde_json::to_string(&settings).unwrap();
+            let loaded: AppSettings = serde_json::from_str(&saved).unwrap();
+            assert_eq!(loaded, settings, "{size} %");
+            assert_eq!(
+                (
+                    loaded.catalog_width,
+                    loaded.browser_width,
+                    loaded.terminal_height
+                ),
+                (300, 520, 280)
+            );
+            assert_eq!((loaded.window_width, loaded.window_height), (1400, 900));
+        }
     }
 
     #[test]

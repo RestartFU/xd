@@ -5,11 +5,11 @@ use gpui::{
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
-    fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
+    fill, hsla, point, prelude::*, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::metrics::{TEXT_BODY, TEXT_CONTROL};
+use crate::metrics::{TEXT_BODY, TEXT_CONTROL, px};
 use xd_desktop::theme::{ThemeColors, ThemePreset};
 
 use crate::{
@@ -87,7 +87,8 @@ actions!(
     ]
 );
 
-const CARET_WIDTH: Pixels = px(2.);
+/// The caret is a hairline: two of the window's pixels at any Interface size.
+const CARET_WIDTH: Pixels = gpui::px(2.);
 
 /// How far to scroll a single-line box so the caret stays inside it: never past
 /// what the text overflows by, and only when the caret would otherwise leave.

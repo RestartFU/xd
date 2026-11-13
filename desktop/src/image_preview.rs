@@ -329,7 +329,7 @@ impl ImagePreview {
 }
 
 fn point_tuple(point: Point<Pixels>) -> (f32, f32) {
-    (f32::from(point.x), f32::from(point.y))
+    (logical(point.x), logical(point.y))
 }
 
 fn unavailable_image(colors: ThemeColors) -> gpui::AnyElement {
@@ -708,7 +708,7 @@ impl XdDesktop {
             return;
         };
         let viewport = window.viewport_size();
-        let window_size = (f32::from(viewport.width), f32::from(viewport.height));
+        let window_size = (logical(viewport.width), logical(viewport.height));
         self.image_preview = Some(ImagePreview::new(preview_owner, images, index, window_size));
         // Closing goes back to the editor the tile belongs to, whatever the click
         // on the tile did to the focus.
@@ -785,7 +785,7 @@ impl XdDesktop {
         }
         let focus = self.minimal_popup_focus.clone();
         let viewport = window.viewport_size();
-        let window_size = (f32::from(viewport.width), f32::from(viewport.height));
+        let window_size = (logical(viewport.width), logical(viewport.height));
         let preview = self.image_preview.as_mut()?;
         preview.fit_window(window_size);
         let layout = preview.layout();
@@ -844,7 +844,7 @@ impl XdDesktop {
                 let delta = event.delta.pixel_delta(px(WHEEL_LINE_HEIGHT)).y;
                 if let Some(preview) = &mut this.image_preview {
                     preview.wheel(
-                        f32::from(delta),
+                        logical(delta),
                         event.modifiers.control,
                         point_tuple(event.position),
                     );

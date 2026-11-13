@@ -7,11 +7,12 @@
 
 use std::ops::Range;
 
+use crate::metrics::px;
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, Global,
     GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, TextLayout, Window,
-    fill, point, px, rgba,
+    fill, point, rgba,
 };
 
 /// The theme's selection fill, as `0xRRGGBBAA`: the one `ThemeColors::selection`

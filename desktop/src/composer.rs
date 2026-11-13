@@ -51,6 +51,17 @@ pub(super) fn composer_room(room: Rc<Cell<Option<Pixels>>>) -> impl IntoElement 
     .h_0()
 }
 
+/// The most of the window a docked ask takes before it scrolls: half the
+/// window's height, and less in a window too short for that to leave the
+/// editor and its options in sight under it, down to room for the question
+/// and a choice.
+pub(super) fn ask_max_height(window: f32) -> f32 {
+    /// What the title bar, the session's header and tabs, and the editor and
+    /// options under the ask take of the window.
+    const AROUND: f32 = 280.0;
+    (window * 0.5).min(window - AROUND).max(96.0)
+}
+
 /// What differs between the composers. Everything else is drawn the same.
 pub(super) struct ComposerParts {
     pub owner: DraftOwner,
@@ -436,7 +447,9 @@ impl XdDesktop {
                             .id("composer-ask")
                             .debug_selector(|| "composer-ask".into())
                             .flex_shrink_0()
-                            .max_h(window.viewport_size().height * 0.5)
+                            .max_h(px(ask_max_height(crate::logical(
+                                window.viewport_size().height,
+                            ))))
                             .overflow_y_scroll()
                             // Choice rows reach into its padding; patches and
                             // commands scroll inside their own boxes.

@@ -5,11 +5,11 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, ImageFormat, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, Window, actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    UTF16Selection, Window, actions, div, fill, point, prelude::*, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::metrics::{TEXT_CONTROL, TEXT_LABEL, TEXT_MONO};
+use crate::metrics::{TEXT_CONTROL, TEXT_LABEL, TEXT_MONO, px};
 
 use xd_desktop::markdown::{self, CodeKind, CodeSpan};
 
