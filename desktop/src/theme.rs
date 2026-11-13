@@ -58,6 +58,31 @@ pub struct ThemeColors {
     pub glass: Glass,
     /// Source highlighting in the file editor.
     pub syntax: Syntax,
+    /// Usage's bars and charts.
+    pub chart: ChartInk,
+    /// The thumb that shows how far a scroll area has scrolled, as
+    /// `0xRRGGBBAA`.
+    pub scroll_thumb: u32,
+    /// The wash under an icon button on a tinted banner, such as the error
+    /// banner's close button, as `0xRRGGBBAA` of the banner's ink.
+    pub banner_wash: u32,
+    /// A pill's fill: a quiet tint of its ink, as the alpha that tint takes.
+    pub pill_alpha: u8,
+}
+
+/// Usage's figures in shades of the text ink over the page, so colour stays
+/// reserved for status. Each shade is opaque and already mixed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChartInk {
+    /// The empty part of a bar.
+    pub track: u32,
+    /// Four steps from faint to strong, for the parts of a share bar and for
+    /// providers told apart by shade; the text ink is the fifth.
+    pub shades: [u32; 4],
+    /// The wash under a chart's line, as `0xRRGGBBAA`: Claude's line, and
+    /// every other line, which is drawn in the text ink.
+    pub claude_area: u32,
+    pub area: u32,
 }
 
 /// The colours source code is highlighted with; anything else is `text`.
@@ -178,6 +203,15 @@ impl ThemePreset {
                     comment: 0x8b8a85,
                     number: 0xe9a07a,
                 },
+                chart: ChartInk {
+                    track: 0x2f2f2f,
+                    shades: [0x505050, 0x717171, 0x919191, 0xb1b1b1],
+                    claude_area: 0xd977571f,
+                    area: 0xf2f2f21f,
+                },
+                scroll_thumb: 0xffffff38,
+                banner_wash: 0xff94a224,
+                pill_alpha: 0x24,
             },
             Self::Light => ThemeColors {
                 background: 0xeef0f9,
@@ -220,6 +254,15 @@ impl ThemePreset {
                     comment: 0x6e6d67,
                     number: 0xa0461c,
                 },
+                chart: ChartInk {
+                    track: 0xd5d6de,
+                    shades: [0xafb1bb, 0x91949f, 0x747682, 0x565965],
+                    claude_area: 0xb85c3f1f,
+                    area: 0x1b1e2c1f,
+                },
+                scroll_thumb: 0x1b1e2c3d,
+                banner_wash: 0x97203a24,
+                pill_alpha: 0x24,
             },
         }
     }

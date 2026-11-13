@@ -528,10 +528,11 @@ impl XdDesktop {
                                     .glyph(15.0)
                                     .build()
                                     .debug_selector(move || attach_id.into())
-                                    .key_stop(
+                                    .key_stop_named(
                                         &keys,
                                         KeyLayer::Page,
                                         attach_id,
+                                        "Attach files",
                                         colors,
                                         cx,
                                         move |this, window, cx| {

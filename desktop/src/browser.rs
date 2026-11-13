@@ -312,6 +312,8 @@ pub struct BrowserPane {
     auxiliary: Option<SideTab>,
     auxiliary_tabs: Vec<SideTab>,
     tools_enabled: bool,
+    /// The window's Tab stops, which the pane's tabs and buttons join.
+    keys: crate::KeyTargets,
 }
 
 impl EventEmitter<BrowserEvent> for BrowserPane {}
@@ -356,6 +358,7 @@ impl BrowserPane {
             auxiliary: None,
             auxiliary_tabs: Vec::new(),
             tools_enabled: false,
+            keys: crate::KeyTargets::default(),
         };
         for url in session.tabs {
             pane.insert_tab(url, window, cx);
@@ -454,6 +457,18 @@ impl BrowserPane {
     pub fn set_covered(&mut self, covered: bool) {
         self.covered = covered;
         self.update_visibility();
+    }
+
+    /// Joins the pane's tabs and buttons, and its pages' toolbars, to the
+    /// window's Tab stops.
+    pub fn set_key_targets(&mut self, keys: &crate::KeyTargets, cx: &mut Context<Self>) {
+        if Rc::ptr_eq(&self.keys.0, &keys.0) {
+            return;
+        }
+        self.keys = keys.clone();
+        for tab in &self.tabs {
+            tab.entity.update(cx, |tab, _| tab.keys = keys.clone());
+        }
     }
 
     pub fn set_colors(&mut self, colors: ThemeColors, cx: &mut Context<Self>) {
@@ -622,7 +637,11 @@ impl BrowserPane {
     fn insert_tab(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let entity = cx.new(|cx| BrowserTab::new(url, self.colors, window, cx));
+        let entity = cx.new(|cx| {
+            let mut tab = BrowserTab::new(url, self.colors, window, cx);
+            tab.keys = self.keys.clone();
+            tab
+        });
         let display = entity.read(cx).display.clone();
         self.session.tabs.push(entity.read(cx).current_url());
         cx.subscribe_in(&entity, window, move |pane, _, event, window, cx| {
@@ -768,28 +787,61 @@ impl Render for BrowserPane {
             }
         }
         let colors = self.colors;
+        let keys = self.keys.clone();
+        let pane_handle = cx.entity().downgrade();
+        let stop = |control: gpui::Stateful<gpui::Div>,
+                    id: String,
+                    label: Option<&'static str>,
+                    radius: f32,
+                    run: PaneKeyRun| {
+            let pane = pane_handle.clone();
+            crate::key_stop_in_view(
+                control,
+                &keys,
+                crate::KeyLayer::Page,
+                id,
+                label.map(gpui::SharedString::from),
+                radius,
+                colors,
+                move |window, cx| {
+                    let _ = pane.update(cx, |pane, cx| run(pane, window, cx));
+                },
+            )
+        };
         let auxiliary_tabs = self
             .auxiliary_tabs
             .iter()
             .copied()
             .enumerate()
             .map(|(index, tab)| {
-                tab_pill(
+                let pill = tab_pill(
                     ("side-tool-tab", index),
                     self.auxiliary == Some(tab),
                     colors,
                 )
                 .on_click(cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)))
                 .child(crate::icon(tab.icon(), 13., colors.muted))
-                .child(tab.label())
-                .child(
-                    tab_close(("close-side-tool", index), "Close", colors).on_click(cx.listener(
-                        move |pane, _, _, cx| {
-                            cx.stop_propagation();
-                            pane.close_auxiliary(tab, cx);
-                        },
-                    )),
+                .child(tab.label());
+                let close = tab_close(("close-side-tool", index), "Close", colors).on_click(
+                    cx.listener(move |pane, _, _, cx| {
+                        cx.stop_propagation();
+                        pane.close_auxiliary(tab, cx);
+                    }),
+                );
+                stop(
+                    pill,
+                    format!("side-tool-tab-{index}"),
+                    None,
+                    TAB_RING_RADIUS,
+                    Box::new(move |pane, _, cx| pane.select_auxiliary(Some(tab), cx)),
                 )
+                .child(stop(
+                    close,
+                    format!("close-side-tool-{index}"),
+                    Some("Close"),
+                    crate::FOCUS_RING_RADIUS,
+                    Box::new(move |pane, _, cx| pane.close_auxiliary(tab, cx)),
+                ))
             })
             .collect::<Vec<_>>();
         let tools = self.tools_enabled.then(|| {
@@ -799,11 +851,22 @@ impl Render for BrowserPane {
                 // An open tool already has its tab; only offer the others.
                 .filter(|(_, tab)| !self.auxiliary_tabs.contains(tab))
                 .map(|(index, tab)| {
-                    crate::icon_button(("side-add-tool", index), tab.label(), tab.icon(), colors)
+                    stop(
+                        crate::icon_button(
+                            ("side-add-tool", index),
+                            tab.label(),
+                            tab.icon(),
+                            colors,
+                        )
                         .build()
                         .on_click(
                             cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)),
-                        )
+                        ),
+                        format!("side-add-tool-{index}"),
+                        Some(tab.label()),
+                        crate::FOCUS_RING_RADIUS,
+                        Box::new(move |pane, _, cx| pane.select_auxiliary(Some(tab), cx)),
+                    )
                 })
                 .collect::<Vec<_>>()
         });
@@ -848,31 +911,42 @@ impl Render for BrowserPane {
                                 };
                                 let active =
                                     self.auxiliary.is_none() && index == self.session.active_tab;
-                                tab_pill(("browser-tab", slot.id), active, colors)
+                                let pill = tab_pill(("browser-tab", slot.id), active, colors)
                                     .w(px(BROWSER_TAB_WIDTH))
                                     .on_click(cx.listener(move |pane, _, window, cx| {
                                         pane.select_tab(index, window, cx)
                                     }))
                                     .child(crate::icon(crate::BROWSER_ICON, 13., colors.muted))
-                                    .child(div().flex_1().min_w_0().text_ellipsis().child(label))
-                                    .child(
-                                        tab_close(
-                                            ("browser-close-tab", slot.id),
-                                            "Close tab",
-                                            colors,
-                                        )
-                                        .on_click(
-                                            cx.listener(move |pane, _, window, cx| {
-                                                cx.stop_propagation();
-                                                pane.close_tab(index, window, cx);
-                                            }),
-                                        ),
-                                    )
+                                    .child(div().flex_1().min_w_0().text_ellipsis().child(label));
+                                let close =
+                                    tab_close(("browser-close-tab", slot.id), "Close tab", colors)
+                                        .on_click(cx.listener(move |pane, _, window, cx| {
+                                            cx.stop_propagation();
+                                            pane.close_tab(index, window, cx);
+                                        }));
+                                stop(
+                                    pill,
+                                    format!("browser-tab-{}", slot.id),
+                                    None,
+                                    TAB_RING_RADIUS,
+                                    Box::new(move |pane, window, cx| {
+                                        pane.select_tab(index, window, cx)
+                                    }),
+                                )
+                                .child(stop(
+                                    close,
+                                    format!("browser-close-tab-{}", slot.id),
+                                    Some("Close tab"),
+                                    crate::FOCUS_RING_RADIUS,
+                                    Box::new(move |pane, window, cx| {
+                                        pane.close_tab(index, window, cx)
+                                    }),
+                                ))
                             }))
                             .children(auxiliary_tabs),
                     )
                     .when_some(tools, |bar, tools| bar.children(tools))
-                    .child(
+                    .child(stop(
                         crate::icon_button(
                             "browser-new-tab",
                             "New browser tab",
@@ -884,7 +958,11 @@ impl Render for BrowserPane {
                         .on_click(
                             cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
                         ),
-                    ),
+                        "browser-new-tab".into(),
+                        Some("New browser tab"),
+                        crate::FOCUS_RING_RADIUS,
+                        Box::new(on_pane_new_tab),
+                    )),
             )
             .when(self.auxiliary.is_none(), |pane| {
                 pane.child(
@@ -895,6 +973,16 @@ impl Render for BrowserPane {
                 )
             })
     }
+}
+
+/// What Enter or Space on one of the pane's controls does to the pane.
+type PaneKeyRun = Box<dyn Fn(&mut BrowserPane, &mut Window, &mut Context<BrowserPane>)>;
+
+/// The corners of the focus ring around one of the pane's tabs.
+const TAB_RING_RADIUS: f32 = RADIUS_TAB + crate::FOCUS_RING_GAP;
+
+fn on_pane_new_tab(pane: &mut BrowserPane, window: &mut Window, cx: &mut Context<BrowserPane>) {
+    pane.add_tab(None, window, cx);
 }
 
 /// The side pane's tab, in the shape of the chat tabs beside it.
@@ -960,6 +1048,8 @@ struct BrowserTab {
     last_history_gesture: Option<std::time::Instant>,
     /// Tabs this tab's pages asked for that the pane has opened.
     popups_handled: u64,
+    /// The window's Tab stops, which the toolbar joins.
+    keys: crate::KeyTargets,
 }
 
 impl EventEmitter<TabEvent> for BrowserTab {}
@@ -1024,6 +1114,7 @@ impl BrowserTab {
             #[cfg(target_os = "linux")]
             last_history_gesture: None,
             popups_handled: 0,
+            keys: crate::KeyTargets::default(),
         };
         cx.subscribe_in(&address, window, |pane, _, event, _, cx| match event {
             ComposerEvent::Changed(text) => {
@@ -1438,6 +1529,32 @@ impl Render for BrowserTab {
         let forward_enabled = self.can_forward;
         let colors = self.colors;
         let address_focused = self.address.read(cx).focus_handle(cx).is_focused(window);
+        let keys = self.keys.clone();
+        let tab_handle = cx.entity().downgrade();
+        // A toolbar button the window's Tab stops on while it can be used:
+        // Enter or Space does what a click does.
+        let stop = |button: gpui::Stateful<gpui::Div>,
+                    id: &'static str,
+                    label: &'static str,
+                    enabled: bool,
+                    run: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            if !enabled {
+                return button;
+            }
+            let tab = tab_handle.clone();
+            crate::key_stop_in_view(
+                button,
+                &keys,
+                crate::KeyLayer::Page,
+                id,
+                Some(label.into()),
+                crate::FOCUS_RING_RADIUS,
+                colors,
+                move |window, cx| {
+                    let _ = tab.update(cx, |tab, cx| run(tab, window, cx));
+                },
+            )
+        };
         let mut pane = div()
             .size_full()
             .min_w_0()
@@ -1457,15 +1574,19 @@ impl Render for BrowserTab {
                     .px(px(8.))
                     .border_b_1()
                     .border_color(rgb(colors.border))
-                    .child(
+                    .child(stop(
                         self.button("browser-back", "Back", crate::ARROW_LEFT_ICON, back_enabled)
                             .on_click(cx.listener(move |pane, _, _, cx| {
                                 if back_enabled {
                                     pane.history(true, cx);
                                 }
                             })),
-                    )
-                    .child(
+                        "browser-back",
+                        "Back",
+                        back_enabled,
+                        |tab, _, cx| tab.history(true, cx),
+                    ))
+                    .child(stop(
                         self.button(
                             "browser-forward",
                             "Forward",
@@ -1477,8 +1598,12 @@ impl Render for BrowserTab {
                                 pane.history(false, cx);
                             }
                         })),
-                    )
-                    .child(
+                        "browser-forward",
+                        "Forward",
+                        forward_enabled,
+                        |tab, _, cx| tab.history(false, cx),
+                    ))
+                    .child(stop(
                         self.button(
                             "browser-reload",
                             "Reload",
@@ -1494,7 +1619,17 @@ impl Render for BrowserTab {
                                 }
                             },
                         )),
-                    )
+                        "browser-reload",
+                        "Reload",
+                        has_page || self.engine_failed,
+                        |tab, window, cx| {
+                            if tab.engine_failed {
+                                tab.retry(window, cx);
+                            } else if tab.url.is_some() {
+                                tab.reload(cx);
+                            }
+                        },
+                    ))
                     .child(
                         div()
                             .id("browser-address")
@@ -1522,6 +1657,10 @@ impl Render for BrowserTab {
                                 }),
                             )
                             .child(div().flex_1().min_w_0().child(self.address.clone()))
+                            .child(keys.mark(
+                                crate::KeyLayer::Page,
+                                crate::KeyStop::Field(self.address.read(cx).focus_handle(cx)),
+                            ))
                             .when(self.loading, |field| {
                                 field.child(
                                     div()
@@ -1532,7 +1671,7 @@ impl Render for BrowserTab {
                                 )
                             }),
                     )
-                    .child(
+                    .child(stop(
                         self.button(
                             "browser-external",
                             "Open in your browser",
@@ -1544,7 +1683,15 @@ impl Render for BrowserTab {
                                 cx.open_url(url);
                             }
                         })),
-                    ),
+                        "browser-external",
+                        "Open in your browser",
+                        has_page,
+                        |tab, _, cx| {
+                            if let Some(url) = &tab.url {
+                                cx.open_url(url);
+                            }
+                        },
+                    )),
             );
         if let Some(error) = &self.error {
             pane = pane.child(

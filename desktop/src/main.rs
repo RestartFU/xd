@@ -1113,11 +1113,11 @@ fn answered_question_label(question: &str) -> String {
     format!("Answering “{}”", question.trim())
 }
 
-fn stamp(label: impl Into<SharedString>, color: u32) -> gpui::AnyElement {
-    pill(label, color)
+fn stamp(label: impl Into<SharedString>, color: u32, colors: ThemeColors) -> gpui::AnyElement {
+    pill(label, color, colors)
 }
 
-fn pill(label: impl Into<SharedString>, color: u32) -> gpui::AnyElement {
+fn pill(label: impl Into<SharedString>, color: u32, colors: ThemeColors) -> gpui::AnyElement {
     div()
         .flex_none()
         .px(px(7.0))
@@ -1125,7 +1125,7 @@ fn pill(label: impl Into<SharedString>, color: u32) -> gpui::AnyElement {
         .flex()
         .items_center()
         .rounded_full()
-        .bg(rgba((color << 8) | 0x24))
+        .bg(rgba((color << 8) | u32::from(colors.pill_alpha)))
         .text_size(px(TEXT_CAPTION))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(color))
@@ -1191,6 +1191,41 @@ fn ui_button(
             .text_color(rgb(colors.danger))
             .hover(|style| style.bg(rgb(colors.danger_surface))),
     }
+}
+
+/// A row of segments, one of them on: a choice of a few short words, such as
+/// Usage's period and measure.
+fn segmented_control() -> gpui::Div {
+    div().flex().flex_none().items_center().gap(px(2.0))
+}
+
+/// The corners of a segment's focus ring: the segment's own, moved out.
+const SEGMENT_RING_RADIUS: f32 = RADIUS_TAB + FOCUS_RING_GAP;
+
+/// One segment of a [`segmented_control`], at the compact height, on a
+/// selected fill while it is the one on.
+fn segment_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    active: bool,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(CONTROL_HEIGHT_COMPACT))
+        .px(px(9.0))
+        .flex()
+        .items_center()
+        .rounded(px(RADIUS_TAB))
+        .text_size(px(TEXT_LABEL))
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .text_color(rgb(if active { colors.text } else { colors.muted }))
+        .when(active, |button| button.bg(rgb(colors.selected_surface)))
+        .when(!active, |button| {
+            button.hover(|style| style.bg(rgb(colors.surface_high)))
+        })
+        .child(label.into())
 }
 
 /// A button that cannot be pressed now: the shape of [`ui_button`] in the
@@ -1425,6 +1460,24 @@ fn dialog_shell(width: f32, colors: ThemeColors) -> gpui::Div {
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
+/// The widths of a dialog that holds a page of its own: figures and a chart,
+/// or a table to fill in.
+const DIALOG_SHEET_WIDTH: f32 = 768.0;
+const DIALOG_TABLE_WIDTH: f32 = 880.0;
+
+/// A dialog that holds a page of its own, laid out by what it holds, in the
+/// same frame as [`dialog_shell`], as wide as the window lets it be up to
+/// `width`.
+fn dialog_sheet(width: f32, colors: ThemeColors) -> gpui::Div {
+    dialog_frame(colors)
+        .w_full()
+        .max_w(px(width))
+        .max_h_full()
+        .min_h_0()
+        .flex()
+        .flex_col()
+}
+
 fn dialog_title(title: impl Into<SharedString>, colors: ThemeColors) -> gpui::Div {
     div()
         .flex_none()
@@ -1633,6 +1686,8 @@ fn workspace_icon(avatar: Option<Arc<Image>>, size: f32, color: u32) -> gpui::An
 
 struct PaneTooltip {
     label: SharedString,
+    /// Quieter lines under the name, such as a figure's breakdown.
+    detail: Vec<SharedString>,
     colors: ThemeColors,
 }
 
@@ -1641,20 +1696,39 @@ fn pane_tooltip(
     label: impl Into<SharedString>,
     colors: ThemeColors,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
-    let label = label.into();
+    pane_tooltip_lines(vec![label.into()], colors)
+}
+
+/// [`pane_tooltip`] with quieter lines under its first: what a figure, a
+/// bar or a row of Usage stands for.
+fn pane_tooltip_lines(
+    lines: Vec<SharedString>,
+    colors: ThemeColors,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
     move |_, cx| {
+        let mut lines = lines.clone().into_iter();
+        let label = lines.next().unwrap_or_default();
+        let detail = lines.collect();
         cx.new(|_| PaneTooltip {
-            label: label.clone(),
+            label,
+            detail,
             colors,
         })
         .into()
     }
 }
 
+/// The widest a tooltip grows before its words wrap.
+const TOOLTIP_MAX_WIDTH: f32 = 400.0;
+
 fn tooltip_box(label: impl Into<SharedString>, colors: ThemeColors) -> gpui::Div {
     div()
+        .max_w(px(TOOLTIP_MAX_WIDTH))
         .px_2()
         .py_1()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
         .rounded(px(RADIUS_CONTROL))
         .border_1()
         .border_color(rgb(colors.border))
@@ -1666,7 +1740,12 @@ fn tooltip_box(label: impl Into<SharedString>, colors: ThemeColors) -> gpui::Div
 
 impl Render for PaneTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        tooltip_box(self.label.clone(), self.colors)
+        let muted = self.colors.muted;
+        tooltip_box(self.label.clone(), self.colors).children(
+            self.detail
+                .iter()
+                .map(|line| div().text_color(rgb(muted)).child(line.clone())),
+        )
     }
 }
 
@@ -2033,6 +2112,10 @@ fn page_scroll(handle: &ScrollHandle, scroll: PageScroll) -> bool {
     true
 }
 
+/// How a Files row's Tab stop is named: this, then the row's place in the
+/// list. Up and Down move the ring through the rows.
+const FILE_ROW_STOP: &str = "native-file:";
+
 /// The key context of the handle that has the keyboard while the Tab ring is
 /// on a control.
 const KEY_STOP_CONTEXT: &str = "KeyStop";
@@ -2309,6 +2392,20 @@ trait KeyRow: Sized {
         run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
     ) -> Self;
 
+    /// [`KeyRow::key_stop`] for a control that is an icon alone: while the
+    /// ring is on it, its name shows under it, as under the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn key_stop_named(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self;
+
     /// [`KeyRow::key_stop_ring`] for a control with the corners of a button.
     fn key_stop(
         self,
@@ -2356,6 +2453,76 @@ impl KeyRow for gpui::Stateful<gpui::Div> {
         .child(keys.mark(layer, KeyStop::Control(id, run)))
         .when(on, |control| control.child(focus_ring(colors, radius)))
     }
+
+    fn key_stop_named(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self {
+        let id = id.into();
+        let on = keys.stop_on(&id);
+        let label = label.into();
+        self.key_stop(keys, layer, id, colors, cx, run)
+            .when(on, |control| control.child(focus_tooltip(label, colors)))
+    }
+}
+
+/// Makes a control another view draws, such as the browser pane's, a Tab
+/// stop of the window. The control keeps its own click handler; Enter and
+/// Space run `run`. A control that is an icon alone passes its `label`,
+/// which shows under it while the ring is on it.
+#[allow(clippy::too_many_arguments)]
+fn key_stop_in_view(
+    control: gpui::Stateful<gpui::Div>,
+    keys: &KeyTargets,
+    layer: KeyLayer,
+    id: impl Into<SharedString>,
+    label: Option<SharedString>,
+    radius: f32,
+    colors: ThemeColors,
+    run: impl Fn(&mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let id = id.into();
+    let on = keys.stop_on(&id);
+    let run: KeyRun = Rc::new(move |_, window, cx| run(window, cx));
+    control
+        .child(keys.mark(layer, KeyStop::Control(id, run)))
+        .when(on, |control| control.child(focus_ring(colors, radius)))
+        .when_some(label.filter(|_| on), |control, label| {
+            control.child(focus_tooltip(label, colors))
+        })
+}
+
+/// How far under its control a name shown for the Tab ring sits: clear of
+/// the ring.
+const FOCUS_TOOLTIP_GAP: f32 = FOCUS_RING_GAP + 4.0;
+
+/// The name of an icon-only control the Tab ring is on, shown under it in
+/// the box the pointer's tooltip draws, over everything and inside the
+/// window. A child of the control, which must be `relative`.
+fn focus_tooltip(label: SharedString, colors: ThemeColors) -> impl IntoElement {
+    div()
+        .debug_selector(|| "focus-tooltip".into())
+        .absolute()
+        .top_full()
+        .left_0()
+        .child(
+            gpui::deferred(
+                gpui::anchored()
+                    .snap_to_window_with_margin(px(MENU_MARGIN))
+                    .child(
+                        div()
+                            .pt(px(FOCUS_TOOLTIP_GAP))
+                            .child(tooltip_box(label, colors)),
+                    ),
+            )
+            .with_priority(2),
+        )
 }
 
 /// How far the focus ring stands off the control it is around.
@@ -4194,6 +4361,9 @@ struct XdDesktop {
     key_stop: Option<SharedString>,
     /// What had the keyboard before the ring took it, to give it back.
     key_stop_return: Option<gpui::WeakFocusHandle>,
+    /// The ring moved to a row being scrolled into view, which the frame
+    /// before did not draw.
+    key_stop_scrolling: bool,
     /// The Settings page's scroll, to bring a control Tab reaches into view,
     /// and the section it last showed: each section starts at its top.
     settings_scroll: ScrollHandle,
@@ -5097,6 +5267,7 @@ impl XdDesktop {
             stop_focus: cx.focus_handle(),
             key_stop: None,
             key_stop_return: None,
+            key_stop_scrolling: false,
             settings_scroll: ScrollHandle::new(),
             settings_scroll_key: None,
             composer_room: Rc::default(),
@@ -10843,7 +11014,9 @@ impl XdDesktop {
             _ => None,
         };
         let tools_enabled = self.native_side_tools_enabled();
+        let keys = self.key_targets.clone();
         pane.update(cx, |pane, cx| {
+            pane.set_key_targets(&keys, cx);
             pane.configure_side_tabs(side_tab, tools_enabled, cx);
             pane.set_colors(colors, cx);
             pane.set_covered(covered);
@@ -15942,6 +16115,7 @@ impl XdDesktop {
                             .tooltip(move |_, cx| {
                                 cx.new(|_| PaneTooltip {
                                     label: "Open pull request".into(),
+                                    detail: Vec::new(),
                                     colors,
                                 })
                                 .into()
@@ -15973,7 +16147,7 @@ impl XdDesktop {
             )
             .child(div().flex_1())
             .when(signal != SessionSignal::Idle && fit.stamp, |toolbar| {
-                toolbar.child(stamp(signal.label(), signal.color(colors)))
+                toolbar.child(stamp(signal.label(), signal.color(colors), colors))
             })
             .child(
                 div()
@@ -16074,6 +16248,7 @@ impl XdDesktop {
                     .tooltip(move |_, cx| {
                         cx.new(|_| PaneTooltip {
                             label: tooltip.into(),
+                            detail: Vec::new(),
                             colors,
                         })
                         .into()
@@ -16108,6 +16283,7 @@ impl XdDesktop {
                             chip.tooltip(move |_, cx| {
                                 cx.new(|_| PaneTooltip {
                                     label: "Show all pull requests".into(),
+                                    detail: Vec::new(),
                                     colors,
                                 })
                                 .into()
@@ -19219,7 +19395,7 @@ impl XdDesktop {
                             .text_color(rgb(colors.muted)),
                     )
                     .child(if failed {
-                        stamp(card.status, colors.danger)
+                        stamp(card.status, colors.danger, colors)
                     } else {
                         div()
                             .flex_none()
@@ -20065,7 +20241,7 @@ impl XdDesktop {
                     .text_color(rgb(colors.muted)),
             )
             .when(view.background, |header| {
-                header.child(stamp("Background", colors.faint))
+                header.child(stamp("Background", colors.faint, colors))
             })
             .when_some(pending.filter(|_| running), |header, label| {
                 header.child(
@@ -20168,7 +20344,7 @@ impl XdDesktop {
                     )
                     .child(view.status.label())
                     .into_any_element(),
-                SubagentState::Failed => stamp(view.status.label(), colors.danger),
+                SubagentState::Failed => stamp(view.status.label(), colors.danger, colors),
                 _ => div()
                     .flex_none()
                     .text_size(px(TEXT_LABEL))
@@ -20930,7 +21106,7 @@ impl XdDesktop {
                 )
                 .child(pending.map_or(view.status.label().to_owned(), |label| format!("{label}…")))
                 .into_any_element(),
-            SubagentState::Failed => stamp(view.status.label(), colors.danger),
+            SubagentState::Failed => stamp(view.status.label(), colors.danger, colors),
             _ => div()
                 .flex_none()
                 .text_size(px(TEXT_LABEL))
@@ -22141,6 +22317,7 @@ impl XdDesktop {
                                 .tooltip(move |_, cx| {
                                     cx.new(|_| PaneTooltip {
                                         label: "Send this to the agent now".into(),
+                                        detail: Vec::new(),
                                         colors,
                                     })
                                     .into()
@@ -22838,6 +23015,7 @@ impl XdDesktop {
                 .text_color(rgb(colors.muted))
                 .child(text)
         };
+        let keys = self.key_targets.clone();
         let rows = uniform_list(
             "native-file-list",
             entries.len(),
@@ -22878,10 +23056,19 @@ impl XdDesktop {
                                     .flex_none()
                                     .text_color(rgb(colors.faint)),
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_browse_entry(path.clone(), directory, cx);
-                            }))
                             .child(truncating_label(entry.name.clone()).min_w_0())
+                            // Tab stops on the rows in view; Up and Down move
+                            // through all of them.
+                            .key_stop(
+                                &keys,
+                                KeyLayer::Page,
+                                format!("{FILE_ROW_STOP}{index}"),
+                                colors,
+                                cx,
+                                move |this, _, cx| {
+                                    this.open_browse_entry(path.clone(), directory, cx);
+                                },
+                            )
                     })
                     .collect::<Vec<_>>()
             }),
@@ -22944,7 +23131,14 @@ impl XdDesktop {
                         .child(
                             ui_button("native-save-file", ButtonKind::Secondary, colors)
                                 .h(px(CONTROL_HEIGHT_COMPACT))
-                                .on_click(cx.listener(|this, _, _, cx| this.save_browse_file(cx)))
+                                .key_stop(
+                                    &self.key_targets,
+                                    KeyLayer::Page,
+                                    "native-save-file",
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.save_browse_file(cx),
+                                )
                                 .child(if saving { "Saving…" } else { "Save" }),
                         ),
                 )
@@ -22988,27 +23182,15 @@ impl XdDesktop {
                                 colors,
                             )
                             .build()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let (Some(chat), Some(panel)) =
-                                    (this.model.selected_chat.clone(), &mut this.diff_panel)
-                                {
-                                    panel.browse_path = Path::new(&panel.browse_path)
-                                        .parent()
-                                        .map(|p| p.to_string_lossy().into_owned())
-                                        .unwrap_or_default();
-                                    panel.loading = true;
-                                    panel.file_preview = None;
-                                    let path = panel.browse_path.clone();
-                                    if let Some(host) = this.active_host() {
-                                        let _ = host.file_browse_list(
-                                            &chat,
-                                            &path,
-                                            this.diff_generation,
-                                        );
-                                    }
-                                }
-                                cx.notify();
-                            })),
+                            .key_stop_named(
+                                &self.key_targets,
+                                KeyLayer::Page,
+                                "native-files-up",
+                                "Parent directory",
+                                colors,
+                                cx,
+                                |this, _, cx| this.open_parent_directory(cx),
+                            ),
                         )
                     })
                     .child(
@@ -23041,6 +23223,24 @@ impl XdDesktop {
                     .when(detail_open, |split| split.child(detail)),
             )
             .into_any_element()
+    }
+
+    /// Opens the folder the Files pane's list is in.
+    fn open_parent_directory(&mut self, cx: &mut Context<Self>) {
+        if let (Some(chat), Some(panel)) = (self.model.selected_chat.clone(), &mut self.diff_panel)
+        {
+            panel.browse_path = Path::new(&panel.browse_path)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            panel.loading = true;
+            panel.file_preview = None;
+            let path = panel.browse_path.clone();
+            if let Some(host) = self.active_host() {
+                let _ = host.file_browse_list(&chat, &path, self.diff_generation);
+            }
+        }
+        cx.notify();
     }
 
     /// Opens a folder in the Files pane's list, or a file beside it.
@@ -23105,7 +23305,14 @@ impl XdDesktop {
             .is_focused(window);
         let commit_button = match commit {
             CommitState::Ready => ui_button("native-commit", ButtonKind::Primary, colors)
-                .on_click(cx.listener(|this, _, _, cx| this.commit_changes(cx)))
+                .key_stop(
+                    &self.key_targets,
+                    KeyLayer::Page,
+                    "native-commit",
+                    colors,
+                    cx,
+                    |this, _, cx| this.commit_changes(cx),
+                )
                 .child("Commit all"),
             CommitState::Busy(action) => disabled_button("native-commit", colors).child(action),
             CommitState::Blocked(reason) => disabled_button("native-commit", colors)
@@ -23145,9 +23352,15 @@ impl XdDesktop {
                     .child(
                         icon_button("native-refresh-diff", "Refresh", ROTATE_CW_ICON, colors)
                             .build()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_native_pane(NativePane::Diff, cx)
-                            })),
+                            .key_stop_named(
+                                &self.key_targets,
+                                KeyLayer::Page,
+                                "native-refresh-diff",
+                                "Refresh",
+                                colors,
+                                cx,
+                                |this, _, cx| this.show_native_pane(NativePane::Diff, cx),
+                            ),
                     ),
             )
             .when(loading, |pane| {
@@ -23228,7 +23441,11 @@ impl XdDesktop {
                                 colors.border
                             }))
                             .bg(rgb(colors.surface))
-                            .child(div().w_full().child(self.git_commit_input.clone())),
+                            .child(div().w_full().child(self.git_commit_input.clone()))
+                            .child(self.key_targets.mark(
+                                KeyLayer::Page,
+                                KeyStop::Field(self.git_commit_input.read(cx).focus_handle(cx)),
+                            )),
                     )
                     .child(commit_button),
             )
@@ -24618,7 +24835,7 @@ impl XdDesktop {
                     icon_button("error-banner-close", "Dismiss", CLOSE_ICON, colors)
                         .glyph(13.0)
                         .ink(colors.danger)
-                        .wash(rgba((colors.danger << 8) | 0x24))
+                        .wash(rgba(colors.banner_wash))
                         .build()
                         .debug_selector(|| "error-banner-close".into())
                         .on_click(cx.listener(|this, _, _, cx| this.dismiss_error(cx))),
@@ -25583,6 +25800,9 @@ impl XdDesktop {
     /// Says whether there was a list to move in. In Settings, with no menu
     /// open, they move through its sections.
     fn key_move(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
+        if self.key_ring_step(down, cx) {
+            return true;
+        }
         let Some((_, owner, len)) = self.key_rows() else {
             return self.step_settings_section(down, cx);
         };
@@ -25598,6 +25818,44 @@ impl XdDesktop {
             self.key_scroll.scroll_to_item(child);
         }
         cx.notify();
+        true
+    }
+
+    /// Up and Down while the Tab ring is on a row of the Files list: moves
+    /// the ring to the row above or below, scrolling it into view, and
+    /// stops at the ends. Says whether the ring was on such a row.
+    fn key_ring_step(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
+        let Some(at) = self
+            .key_stop
+            .as_ref()
+            .and_then(|id| id.strip_prefix(FILE_ROW_STOP))
+            .and_then(|index| index.parse::<usize>().ok())
+        else {
+            return false;
+        };
+        let rows = self
+            .diff_panel
+            .as_ref()
+            .map_or(0, |panel| panel.browse_entries.len());
+        let next = if down {
+            (at + 1).min(rows.saturating_sub(1))
+        } else {
+            at.saturating_sub(1)
+        };
+        if next != at {
+            self.files_scroll.scroll_to_item(
+                next,
+                if down {
+                    gpui::ScrollStrategy::Bottom
+                } else {
+                    gpui::ScrollStrategy::Top
+                },
+            );
+            self.key_stop = Some(format!("{FILE_ROW_STOP}{next}").into());
+            // The row may come into view only with the next frame.
+            self.key_stop_scrolling = true;
+            cx.notify();
+        }
         true
     }
 
@@ -25776,7 +26034,9 @@ impl XdDesktop {
             .stops
             .iter()
             .any(|(stop, _)| matches!(stop, KeyStop::Control(stop, _) if stop == id));
-        if !drawn {
+        if drawn {
+            self.key_stop_scrolling = false;
+        } else if !std::mem::take(&mut self.key_stop_scrolling) {
             self.leave_key_stop(window);
         }
     }

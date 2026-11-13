@@ -1915,9 +1915,9 @@ impl XdDesktop {
             })
             .child(div().flex_1())
             .child(if starting {
-                stamp("Starting", colors.working)
+                stamp("Starting", colors.working, colors)
             } else {
-                stamp("Draft", colors.muted)
+                stamp("Draft", colors.muted, colors)
             })
             .child(
                 div().ml_2().flex_none().child(

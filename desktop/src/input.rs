@@ -5,7 +5,7 @@ use gpui::{
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
-    fill, hsla, point, prelude::*, relative, rgb, rgba, size,
+    fill, point, prelude::*, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1042,13 +1042,17 @@ impl Element for TextElement {
                 input.placeholder.clone(),
                 input
                     .colors
-                    .map(|colors| rgb(colors.muted).into())
-                    .unwrap_or_else(|| hsla(0., 0., 0.65, 1.)),
+                    .map_or(rgb(ThemePreset::Dark.colors().muted).into(), |colors| {
+                        rgb(colors.muted).into()
+                    }),
             )
         } else {
             (content, style.color)
         };
-        let caret_color = input.colors.map_or(0x6b8cff, |colors| colors.accent_ink);
+        let caret_color = input
+            .colors
+            .unwrap_or(ThemePreset::Dark.colors())
+            .accent_ink;
         let selection_color = input
             .colors
             .map_or(ThemePreset::Dark.colors().selection, |colors| {
@@ -1255,7 +1259,7 @@ impl Render for ComposerInput {
             } else {
                 TEXT_BODY
             }))
-            .text_color(rgb(self.colors.map_or(0xe8eaf0, |colors| colors.text)))
+            .text_color(rgb(self.colors.unwrap_or(ThemePreset::Dark.colors()).text))
             .child(
                 div()
                     .when(!self.compact, |line| line.h(px(30.)).py_1())

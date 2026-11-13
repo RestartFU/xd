@@ -295,6 +295,7 @@ impl XdDesktop {
                                 against its quota. An estimate: chats working on one \
                                 account share each rise."
                             .into(),
+                        detail: Vec::new(),
                         colors,
                     })
                     .into()
