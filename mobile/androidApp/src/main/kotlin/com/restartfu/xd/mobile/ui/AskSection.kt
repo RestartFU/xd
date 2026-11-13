@@ -55,7 +55,9 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -160,7 +162,12 @@ internal fun AskHeader(title: String, counter: String? = null) {
         )
         Text(
             title,
-            modifier = Modifier.weight(1f).semantics { heading() },
+            // Told to a screen reader as it arrives: an ask docks under the
+            // transcript, where nothing else would say the agent now waits.
+            modifier = Modifier.weight(1f).semantics {
+                heading()
+                liveRegion = LiveRegionMode.Polite
+            },
             style = MaterialTheme.typography.titleMedium.copy(
                 fontWeight = FontWeight.SemiBold,
                 letterSpacing = (-0.08).sp,

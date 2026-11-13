@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Button
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -225,7 +226,8 @@ private fun QuotaPercentField(
         modifier = modifier
             .minimumInteractiveComponentSize()
             .width(76.dp)
-            .height(40.dp)
+            // At least 40dp: enlarged text needs more.
+            .heightIn(min = 40.dp)
             .semantics { contentDescription = "$label, percent" },
         enabled = enabled,
         singleLine = true,

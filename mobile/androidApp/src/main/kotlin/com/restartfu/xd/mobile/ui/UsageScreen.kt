@@ -35,6 +35,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -278,6 +280,21 @@ private fun Stat(label: String, value: String) {
     }
 }
 
+/** What the usage chart shows, for a screen reader: its span and its highest bar. */
+internal fun usageChartDescription(
+    metric: String,
+    labels: List<String>,
+    values: List<Double>,
+    format: (Double) -> String,
+): String {
+    val what = if (metric == "Cost") "Cost over time" else "Tokens over time"
+    if (values.isEmpty() || labels.isEmpty()) return "$what: no usage yet"
+    val span = if (labels.size == 1) labels.first() else "${labels.first()} to ${labels.last()}"
+    val peak = values.indices.maxBy { values[it] }
+    if (values[peak] <= 0.0) return "$what, $span: no usage"
+    return "$what, $span. Highest: ${format(values[peak])}, ${labels.getOrElse(peak) { labels.last() }}"
+}
+
 /** The selected metric per day, or per hour over the past day. */
 @Composable
 private fun UsageChart(summary: UsageSummaryReply, metric: String) {
@@ -289,7 +306,16 @@ private fun UsageChart(summary: UsageSummaryReply, metric: String) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(if (metric == "Cost") "Cost over time (USD)" else "Tokens over time", style = MaterialTheme.typography.labelMedium)
         Text(if (metric == "Cost") usd(peak) else compact(peak.toLong()), style = MaterialTheme.typography.labelSmall)
-        Canvas(Modifier.fillMaxWidth().height(96.dp)) {
+        // The bars in words: the span they cover and where the most was used.
+        val described = remember(summary, metric) {
+            usageChartDescription(
+                metric = metric,
+                labels = summary.periods.map { it.label },
+                values = values,
+                format = { if (metric == "Cost") usd(it) else compact(it.toLong()) },
+            )
+        }
+        Canvas(Modifier.fillMaxWidth().height(96.dp).semantics { contentDescription = described }) {
             if (values.isEmpty()) return@Canvas
             val slot = size.width / values.size
             val width = (slot * 0.7f).coerceAtLeast(1f)

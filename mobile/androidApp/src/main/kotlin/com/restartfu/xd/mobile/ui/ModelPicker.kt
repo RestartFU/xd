@@ -87,7 +87,7 @@ internal fun ModelPicker(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Text(selectionError.orEmpty(), color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = { effortModelId?.let(model::selectModel) }) { Text("Retry") }
+                    TextButton(onClick = { effortModelId?.let(model::selectModel) }) { Text("Try again") }
                 }
 
                 effortBackendId != null && !modelReady -> Box(
@@ -127,7 +127,7 @@ internal fun ModelPicker(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = model::loadCatalog) { Text("Retry") }
+                    TextButton(onClick = model::loadCatalog) { Text("Try again") }
                 }
 
                 currentAssistant == null -> Text(

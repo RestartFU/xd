@@ -134,26 +134,28 @@ internal fun MessageImage(
         }
 
         is Loaded.Ready -> {
+            // Named by its file: the picture itself cannot be put into words here.
+            val described = "Image ${path.substringAfterLast('/')}"
             Image(
                 bitmap = current.bitmap,
-                contentDescription = "Image",
+                contentDescription = described,
                 modifier = modifier
                     .fillMaxWidth()
                     // Bounded, so a tall screenshot cannot push the rest of
                     // the turn off the screen.
                     .heightIn(max = 260.dp)
                     .clip(MaterialTheme.shapes.small)
-                    .clickable { zoomed = true },
+                    .clickable(onClickLabel = "View larger") { zoomed = true },
                 contentScale = ContentScale.Fit,
             )
             if (zoomed) {
                 Dialog(onDismissRequest = { zoomed = false }) {
                     Image(
                         bitmap = current.bitmap,
-                        contentDescription = "Image",
+                        contentDescription = described,
                         modifier = Modifier
                             .fillMaxSize()
-                            .clickable { zoomed = false },
+                            .clickable(onClickLabel = "Close") { zoomed = false },
                         contentScale = ContentScale.Fit,
                     )
                 }

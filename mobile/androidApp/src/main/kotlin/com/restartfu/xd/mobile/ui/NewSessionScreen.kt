@@ -529,7 +529,7 @@ private fun SessionForm(
                                     color = MaterialTheme.colorScheme.error,
                                     style = MaterialTheme.typography.bodySmall,
                                 )
-                                retryCatalog?.let { TextButton(onClick = it) { Text("Retry") } }
+                                retryCatalog?.let { TextButton(onClick = it) { Text("Try again") } }
                             }
                         }
                     }

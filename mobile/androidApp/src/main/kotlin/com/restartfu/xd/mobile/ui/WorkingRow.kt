@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -217,7 +218,13 @@ internal fun elapsedSeconds(startedAtMillis: Long?): Long {
 
 @Composable
 internal fun Dots(color: Color, contentDescription: String? = null) {
-    val lit by produceState(0) {
+    // With animations off the three dots hold still, all lit.
+    val still = reducedMotion()
+    val lit by produceState(if (still) 3 else 0, still) {
+        if (still) {
+            value = 3
+            return@produceState
+        }
         while (true) {
             delay(DOT_FRAME_MILLIS)
             value = (value + 1) % 4
@@ -230,7 +237,8 @@ internal fun Dots(color: Color, contentDescription: String? = null) {
                 withStyle(SpanStyle(color = shade)) { append(".") }
             }
         },
-        modifier = Modifier.semantics {
+        // Three full stops are not words: a screen reader hears the description, or nothing.
+        modifier = Modifier.clearAndSetSemantics {
             contentDescription?.let { this.contentDescription = it }
         },
         style = MaterialTheme.typography.bodySmall,
