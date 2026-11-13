@@ -165,6 +165,9 @@ internal enum class Pane(val label: String) {
 internal class WorkspacePaneModel : ViewModel() {
     var pane by mutableStateOf(Pane.CHAT)
     lateinit var chat: com.restartfu.xd.store.ChatSession
+
+    /** Whether a screen has given it the view saved with it; only a model made new takes one. */
+    var restored = false
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -238,7 +241,12 @@ internal fun ChatScreen(
     // the process does not: saved with the screen too, a model made new takes
     // the view that was open, rather than falling back to the chat.
     var savedPane by rememberSaveable(workspaceId) { mutableStateOf(workspacePane.pane) }
-    remember(workspacePane) { workspacePane.pane = savedPane }
+    // Only into a model made new: the session's chats share one, and a chat
+    // tab shown again must not put back the view it had before.
+    remember(workspacePane) {
+        if (!workspacePane.restored) workspacePane.pane = savedPane
+        workspacePane.restored = true
+    }
     var pane by workspacePane::pane
     SideEffect { savedPane = pane }
     // Wherever a workspace view replaces the chat (a phone, or a tablet too
