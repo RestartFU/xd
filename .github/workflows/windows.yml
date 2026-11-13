@@ -1,4 +1,5 @@
-# Native Windows desktop with the matching Linux host used inside WSL.
+# Native Windows desktop, packaged as an MSI with the matching Linux host used
+# inside WSL.
 # Callable by release, nightly, and PR gates; dispatch verifies this platform
 # independently of the other release builds.
 name: windows
@@ -156,14 +157,33 @@ jobs:
           cargo test --locked --release --target x86_64-pc-windows-msvc --manifest-path terminal-core/Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw 'Windows terminal tests failed.' }
 
-      - name: Build and smoke-test the native Windows package
+      # Installed for real, as a user would, and left installed for the next step.
+      - name: Build, install and check the native Windows installer
         id: native_package
         run: |
           ./scripts/build-windows.ps1 -Profile '${{ inputs.profile }}' -HostPayload .build-cache/windows-host/xd-host-linux
           "GPUI_FXC_PATH=$env:GPUI_FXC_PATH" >> $env:GITHUB_ENV
           $name = if ('${{ inputs.profile }}' -eq 'nightly') { 'xd-nightly' } else { 'xd' }
-          ./scripts/smoke-windows.ps1 -Archive "dist/windows/$name-windows-x86_64.zip"
+          ./scripts/smoke-windows.ps1 -Installer "dist/windows/$name-windows-x86_64.msi" -Keep
           ./installer/windows/install-webview2.ps1
+          "XD_INSTALLER=dist/windows/$name-windows-x86_64.msi" >> $env:GITHUB_ENV
+          "XD_INSTALLED=$env:LOCALAPPDATA\Programs\$name\xd.exe" >> $env:GITHUB_ENV
+
+      # The only check of what a person sees: the window is dragged, resized,
+      # maximized and closed with the pointer, and the browser pane is opened.
+      - name: Drive the installed app's window
+        run: ./scripts/test-windows-ui.ps1 -Executable $env:XD_INSTALLED -Output dist/windows-ui
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        with:
+          name: windows-ui
+          path: dist/windows-ui
+          if-no-files-found: warn
+
+      - name: Remove the installed app
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        run: ./scripts/smoke-windows.ps1 -Installer $env:XD_INSTALLER -Remove
 
       - name: Test the native Windows desktop
         env:
@@ -186,8 +206,8 @@ jobs:
         with:
           name: windows
           path: |
-            dist/windows/*-windows-x86_64.zip
-            dist/windows/*-windows-x86_64.zip.sha256
+            dist/windows/*-windows-x86_64.msi
+            dist/windows/*-windows-x86_64.msi.sha256
           if-no-files-found: error
 
       # Keep the dependency compile even if a test fails. A failed first run

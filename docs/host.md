@@ -50,7 +50,8 @@ Restart is blocked while chats are running, a chat's background agents or shells
 are still at work, or terminal tabs are open; close the terminal tabs first.
 Stored conversations can resume afterward.
 
-Source builds and Windows installations require a manual app update. Set
+Source builds and Windows installations require a manual app update; on Windows,
+run the newer installer, which replaces the installed version. Set
 `XD_DISABLE_AUTO_UPDATE=1` to disable background checks.
 
 ## Resuming cut-off turns

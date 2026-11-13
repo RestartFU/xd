@@ -8,6 +8,16 @@ pub(super) const CHEVRON_UP_ICON: &str = "icons/chevron-up.svg";
 pub(super) const COPY_ICON: &str = "icons/copy.svg";
 pub(super) const SWITCH_ICON: &str = "icons/arrow-left-right.svg";
 
+/// The page a host says to sign in on, if it is one a browser can be sent to.
+///
+/// The address comes from the host, which may be another machine. The system
+/// opens whatever it is handed, and on Windows that includes a program or a
+/// file on a network share, so only a web address gets as far as a button.
+fn sign_in_page(url: Option<&str>) -> Option<&str> {
+    url.and_then(markdown::safe_link_url)
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+}
+
 /// Marks a transcript row that says a chat moved to another account.
 const ACCOUNT_SWITCH_PREFIX: &str = "account_switch\n";
 /// The assistants that can hold several accounts, in the order shown.
@@ -933,7 +943,7 @@ impl XdDesktop {
             format!("Sign in to {}", account.label)
         };
         let cancel_provider = provider.to_owned();
-        let url = account.login_url.clone();
+        let url = sign_in_page(account.login_url.as_deref()).map(str::to_owned);
         let waiting = account.login_url.is_none() && account.device_code.is_none();
         div()
             .id(("account-sign-in-steps", provider_index))
@@ -1087,6 +1097,30 @@ impl XdDesktop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_web_address_is_offered_as_a_sign_in_page() {
+        let page = "https://auth.openai.com/codex/device";
+        assert_eq!(sign_in_page(Some(page)), Some(page));
+        assert_eq!(
+            sign_in_page(Some("http://localhost:1455/auth")),
+            Some("http://localhost:1455/auth")
+        );
+        // What Windows would run or fetch rather than browse to.
+        for unsafe_address in [
+            r"C:\Windows\System32\calc.exe",
+            r"\\attacker\share\payload.exe",
+            "file:///C:/Windows/System32/calc.exe",
+            "ms-msdt:/id PCWDiagnostic",
+            "mailto:someone@example.com",
+            "javascript:alert(1)",
+            "https://example.com/a b",
+            "",
+        ] {
+            assert_eq!(sign_in_page(Some(unsafe_address)), None, "{unsafe_address}");
+        }
+        assert_eq!(sign_in_page(None), None);
+    }
 
     fn provider(value: Value) -> AuthProvider {
         serde_json::from_value(value).unwrap()

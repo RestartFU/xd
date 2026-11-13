@@ -6,7 +6,7 @@ use std::{env, path::PathBuf};
 pub(crate) const HOST_SCRIPT: &str = r#"set -eu
 umask 077
 payload=$(wslpath -u "$1") || { printf '%s\n' 'xd: Cannot locate the bundled host inside WSL.' >&2; exit 1; }
-[ -f "$payload" ] || { printf '%s\n' 'xd: The bundled Linux host is missing. Extract the complete Windows ZIP.' >&2; exit 1; }
+[ -f "$payload" ] || { printf '%s\n' 'xd: The bundled Linux host is missing. Install xd again.' >&2; exit 1; }
 [ "$(uname -m)" = x86_64 ] || { printf '%s\n' 'xd: This Windows build requires an x86_64 WSL distribution.' >&2; exit 1; }
 for dependency in git tmux; do
     command -v "$dependency" >/dev/null 2>&1 || { printf 'xd: Install %s in your WSL distribution (Ubuntu: sudo apt install git tmux), then reopen xd.\n' "$dependency" >&2; exit 1; }
@@ -71,6 +71,8 @@ pub(crate) fn command(script: &str, parameters: &[String]) -> std::process::Comm
         parameters,
         distribution().as_deref(),
     ));
+    // Have wsl.exe write its own messages as UTF-8 rather than UTF-16.
+    command.env("WSL_UTF8", "1");
     // The desktop has its own native window. Stdio services should not create
     // a second console; terminal views use ConPTY separately.
     command.creation_flags(0x0800_0000);
@@ -91,7 +93,7 @@ pub(crate) fn payload() -> Result<PathBuf, String> {
         })
     });
     path.filter(|path| path.is_file()).ok_or_else(|| {
-        "The bundled WSL host is missing. Extract the complete Windows ZIP, including libexec/xd-host-linux."
+        "The Linux host that xd runs in WSL is missing from its installation. Install xd again."
             .into()
     })
 }

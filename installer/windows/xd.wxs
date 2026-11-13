@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Windows installer, built by scripts/build-windows.ps1 with WiX 3.
+
+  It installs for the signed-in user only, under %LOCALAPPDATA%\Programs, so
+  it never asks for an administrator and xd can replace itself with a newer
+  version later. Every component is therefore keyed on a value under HKCU, as
+  Windows Installer requires of files in a user's profile.
+
+  Stable and nightly are separate products with separate folders, shortcuts
+  and upgrade codes, the way they keep separate settings and chats, so both
+  can be installed at once. The build script passes the variables.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="$(var.ProductName)"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="RestartFU"
+           UpgradeCode="$(var.UpgradeCode)">
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perUser"
+             Description="$(var.ProductName) $(var.Version)"
+             Comments="Run Codex, Claude Code and Copilot sessions from one desktop app." />
+
+    <!-- One file to download: the payload travels inside the installer. -->
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!--
+      Installing any build replaces the one already there. A nightly keeps the
+      version of the release it follows, so the same version must upgrade too.
+    -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed. Remove it first to install this one." />
+
+    <Icon Id="xd.ico" SourceFile="$(var.Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="xd.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/RestartFU/xd" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/RestartFU/xd#readme" />
+    <!-- There is nothing to choose, so nothing to change later. -->
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="UserProgramsFolder" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="$(var.InstallFolder)">
+            <Directory Id="LibexecFolder" Name="libexec" />
+            <Directory Id="LicensesFolder" Name="licenses" />
+          </Directory>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="Application" Guid="*">
+        <RegistryValue Root="HKCU" Key="$(var.RegistryKey)" Name="InstallFolder"
+                       Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="$(var.RegistryKey)" Name="Version"
+                       Type="string" Value="$(var.Version)" />
+        <File Id="XdExecutable" Name="xd.exe" Source="$(var.Payload)\xd.exe" />
+        <!--
+          The shortcut carries the identity xd gives its own window, so the
+          taskbar treats a pinned shortcut and the running app as one.
+        -->
+        <Shortcut Id="StartMenuShortcut"
+                  Directory="ProgramMenuFolder"
+                  Name="$(var.ProductName)"
+                  Description="Run Codex, Claude Code and Copilot sessions"
+                  Target="[#XdExecutable]"
+                  WorkingDirectory="INSTALLFOLDER">
+          <ShortcutProperty Key="System.AppUserModel.ID" Value="$(var.AppUserModelId)" />
+        </Shortcut>
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveUserProgramsFolder" Directory="UserProgramsFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- The Linux host xd copies into WSL and runs there. -->
+    <DirectoryRef Id="LibexecFolder">
+      <Component Id="WslHost" Guid="*">
+        <RegistryValue Root="HKCU" Key="$(var.RegistryKey)\Components" Name="WslHost"
+                       Type="integer" Value="1" KeyPath="yes" />
+        <File Id="XdHostLinux" Name="xd-host-linux" Source="$(var.Payload)\libexec\xd-host-linux" />
+        <RemoveFolder Id="RemoveLibexecFolder" Directory="LibexecFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="LicensesFolder">
+      <Component Id="Licenses" Guid="*">
+        <RegistryValue Root="HKCU" Key="$(var.RegistryKey)\Components" Name="Licenses"
+                       Type="integer" Value="1" KeyPath="yes" />
+        <File Id="LicenseAlacritty" Name="alacritty-terminal-LICENSE-APACHE"
+              Source="$(var.Payload)\licenses\alacritty-terminal-LICENSE-APACHE" />
+        <File Id="LicenseJetBrainsMono" Name="JetBrainsMono-OFL.txt"
+              Source="$(var.Payload)\licenses\JetBrainsMono-OFL.txt" />
+        <File Id="LicenseT3Code" Name="t3code-LICENSE"
+              Source="$(var.Payload)\licenses\t3code-LICENSE" />
+        <RemoveFolder Id="RemoveLicensesFolder" Directory="LicensesFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Complete" Title="$(var.ProductName)" Level="1">
+      <ComponentRef Id="Application" />
+      <ComponentRef Id="WslHost" />
+      <ComponentRef Id="Licenses" />
+    </Feature>
+
+    <!--
+      Open xd once it is installed or updated, as someone who double-clicked
+      the installer expects, since there is no last page with a button for it.
+      A silent install (msiexec /qn) is someone else's script and opens
+      nothing; LAUNCHAPP=1 or LAUNCHAPP=0 overrides either way.
+    -->
+    <CustomAction Id="LaunchApplication" FileKey="XdExecutable" ExeCommand=""
+                  Return="asyncNoWait" Impersonate="yes" />
+    <InstallExecuteSequence>
+      <Custom Action="LaunchApplication" After="InstallFinalize">
+        <![CDATA[NOT REMOVE AND ((UILevel > 2 AND NOT LAUNCHAPP = "0") OR LAUNCHAPP = "1")]]>
+      </Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

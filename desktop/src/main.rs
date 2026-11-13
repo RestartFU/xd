@@ -80,6 +80,8 @@ mod new_chat;
 mod new_chat_store;
 #[cfg(target_os = "linux")]
 mod notifications;
+#[cfg(any(target_os = "windows", test))]
+mod recovery;
 mod selection;
 mod settings;
 mod source_build;
@@ -87,6 +89,7 @@ mod terminal;
 mod undo;
 mod update_popup;
 mod usage_view;
+mod window_chrome;
 #[cfg(any(target_os = "windows", test))]
 mod windows;
 mod workspace_settings;
@@ -182,6 +185,7 @@ const DOWNLOAD_ICON: &str = "icons/download.svg";
 const SEARCH_ICON: &str = "icons/search.svg";
 const MINIMIZE_ICON: &str = "icons/minimize.svg";
 const MAXIMIZE_ICON: &str = "icons/maximize.svg";
+const RESTORE_ICON: &str = "icons/restore.svg";
 use accounts_view::{AuthAccount, CHEVRON_UP_ICON, COPY_ICON, SWITCH_ICON};
 /// What a chat is called when nobody chose a name for it.
 const DEFAULT_CHAT_TITLE: &str = "New Chat";
@@ -2793,12 +2797,16 @@ struct XdDesktop {
     image_viewer: Option<String>,
     /// Owners already asked about, so one avatar is fetched once per host.
     owner_icons_requested: HashSet<String>,
+    /// The Segoe font that draws the Windows caption buttons, when installed.
+    caption_font: Option<&'static str>,
     live_render_generation: u64,
     live_render_scheduled: Option<u64>,
     window_settings_generation: u64,
     /// The banner text a dismissal timer is counting down, so a newer error
     /// restarts the clock instead of inheriting the old one's.
     expiring_error: Option<String>,
+    /// Said once after a launch that follows a crash, until dismissed.
+    startup_notice: Option<String>,
     error_generation: u64,
 }
 
@@ -3593,11 +3601,18 @@ impl XdDesktop {
             message_images_closing: 0,
             image_viewer: None,
             owner_icons_requested: HashSet::new(),
+            caption_font: if cfg!(target_os = "windows") {
+                let installed = cx.text_system().all_font_names();
+                window_chrome::caption_font(installed.iter().map(String::as_str))
+            } else {
+                None
+            },
             workflow_ticking: HashSet::new(),
             live_render_generation: 0,
             live_render_scheduled: None,
             window_settings_generation: 0,
             expiring_error: None,
+            startup_notice: None,
             error_generation: 0,
         };
         if corrected_active_connection {
@@ -3712,9 +3727,35 @@ impl XdDesktop {
         desktop
     }
 
+    /// Start carefully after a run that crashed or was killed, and say so.
+    ///
+    /// Whatever ended that run, this one must not walk straight back into it:
+    /// a browser pane left open is created again as soon as the window draws.
+    /// Call before the first frame.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    fn recover_from_failed_run(&mut self, notice: String) {
+        let mut closed = false;
+        for state in self.settings.browser_sessions.values_mut() {
+            closed |= std::mem::replace(&mut state.open, false);
+        }
+        if closed {
+            let _ = self.settings.save();
+        }
+        self.startup_notice = Some(notice);
+    }
+
     fn window_bounds_changed(&mut self, window: &Window, cx: &mut Context<Self>) {
         let maximized = window.is_maximized();
         let bounds = window.bounds();
+        // Minimizing is not a change to remember: Windows moves the window far
+        // off screen and stops calling it maximized, and saving that reopened
+        // a maximized window as an ordinary one the size of the screen.
+        if window_chrome::parked_while_minimized(
+            f32::from(bounds.origin.x),
+            f32::from(bounds.origin.y),
+        ) {
+            return;
+        }
         let mut changed = self.settings.window_maximized != maximized;
         self.settings.window_maximized = maximized;
         if !maximized {
@@ -4112,9 +4153,12 @@ impl XdDesktop {
                         offer_browser(&host);
                         this.host = Some(host);
                         this._started_host = Some(started_host);
-                        this.reconnect_attempt = 0;
+                        // Started is not answering: see `local_host_answered`.
+                        let retrying = this.reconnect_attempt != 0;
                         let local_model = this.endpoint_model_mut(ChatEndpoint::Local);
-                        local_model.connection_error = None;
+                        if !retrying {
+                            local_model.connection_error = None;
+                        }
                         // Until its tree says otherwise, this host may be older.
                         local_model.folder_reorder_supported = false;
                         local_model.folder_groups_supported = false;
@@ -4559,9 +4603,28 @@ impl XdDesktop {
         let _ = host.resume_interrupted(self.settings.auto_resume_chats);
     }
 
+    /// The local host has said something, so it is really there.
+    ///
+    /// Starting its process proves nothing: with no WSL distribution, or with
+    /// git missing inside it, the process starts and ends at once. Treating
+    /// the start as success reset the backoff every time, so xd started a new
+    /// process four times a second for as long as it stayed open, and the
+    /// message saying what was wrong flickered away before it could be read.
+    fn local_host_answered(&mut self) {
+        if self.reconnect_attempt == 0 {
+            return;
+        }
+        self.reconnect_attempt = 0;
+        self.endpoint_model_mut(ChatEndpoint::Local)
+            .connection_error = None;
+    }
+
     fn handle_host_update(&mut self, update: HostUpdate, generation: u64, cx: &mut Context<Self>) {
         if generation != self.connection_generation {
             return;
+        }
+        if matches!(update, HostUpdate::Reply { .. } | HostUpdate::Event { .. }) {
+            self.local_host_answered();
         }
         if self.usage_host_update(ChatEndpoint::Local, &update, cx)
             || self.browser_host_update(ChatEndpoint::Local, &update, cx)
@@ -4577,10 +4640,11 @@ impl XdDesktop {
             match update {
                 HostUpdate::Connected { .. } => {
                     self.inactive_model.connected = true;
-                    self.inactive_model.connection_error = None;
+                    if self.reconnect_attempt == 0 {
+                        self.inactive_model.connection_error = None;
+                    }
                     self.connecting = false;
                     self.connection_in_flight = false;
-                    self.reconnect_attempt = 0;
                     if let Some(host) = &self.host {
                         let _ = host.tree();
                         let _ = host.agent_catalog();
@@ -4683,8 +4747,9 @@ impl XdDesktop {
                 self.model.connected = true;
                 self.connecting = false;
                 self.connection_in_flight = false;
-                self.reconnect_attempt = 0;
-                self.model.connection_error = None;
+                if self.reconnect_attempt == 0 {
+                    self.model.connection_error = None;
+                }
                 self.request_tree();
                 self.request_agent_catalog();
                 // Account changes sent while away were missed.
@@ -13857,80 +13922,164 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    fn render_minimal_window_controls(&self, colors: ThemeColors) -> gpui::AnyElement {
+    /// Minimize, maximize or restore, and close, for the desktops that leave
+    /// them to the app.
+    fn render_minimal_window_controls(
+        &self,
+        colors: ThemeColors,
+        window: &Window,
+    ) -> gpui::AnyElement {
+        let maximized = window.is_maximized();
+        if cfg!(target_os = "windows") {
+            return self.render_windows_caption_buttons(colors, maximized, window);
+        }
+        let control = |id: &'static str, width: f32, danger: bool| {
+            div()
+                .id(id)
+                .w(px(width))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .occlude()
+                .hover(move |style| {
+                    if danger {
+                        style.bg(rgb(colors.danger_surface))
+                    } else {
+                        style.bg(rgb(colors.surface_high))
+                    }
+                })
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        };
         div()
             .h_full()
             .flex()
             .items_center()
-            .when(!cfg!(target_os = "macos"), |titlebar| {
-                titlebar.child(
-                    div()
-                        .id("minimal-window-minimize")
-                        .w(px(38.0))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .cursor_pointer()
-                        .hover(|style| {
-                            style
-                                .bg(rgb(colors.surface_high))
-                                .text_color(rgb(colors.text))
-                        })
-                        .window_control_area(WindowControlArea::Min)
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(|_, window, _| window.minimize_window())
-                        .child(icon(MINIMIZE_ICON, 14.0, colors.muted)),
+            .child(
+                control("minimal-window-minimize", 38.0, false)
+                    .window_control_area(WindowControlArea::Min)
+                    .on_click(|_, window, _| window.minimize_window())
+                    .child(icon(MINIMIZE_ICON, 14.0, colors.muted)),
+            )
+            .child(
+                control("minimal-window-maximize", 38.0, false)
+                    .window_control_area(WindowControlArea::Max)
+                    .on_click(|_, window, _| window.zoom_window())
+                    .child(icon(
+                        if maximized {
+                            RESTORE_ICON
+                        } else {
+                            MAXIMIZE_ICON
+                        },
+                        12.0,
+                        colors.muted,
+                    )),
+            )
+            .child(
+                control("minimal-window-close", 42.0, true)
+                    .window_control_area(WindowControlArea::Close)
+                    .on_click(|_, window, _| window.remove_window())
+                    .child(icon(CLOSE_ICON, 14.0, colors.muted)),
+            )
+            .into_any_element()
+    }
+
+    /// The Windows caption buttons, sized and coloured as the system's own.
+    ///
+    /// They have no click handlers on purpose. Each claims its part of the
+    /// frame with `window_control_area`, and Windows then runs the button
+    /// itself: maximize also restores, and hovering it opens Snap Layouts. A
+    /// handler here would swallow the press before Windows saw it.
+    fn render_windows_caption_buttons(
+        &self,
+        colors: ThemeColors,
+        maximized: bool,
+        window: &Window,
+    ) -> gpui::AnyElement {
+        // Windows dims the buttons of a window that is not in front.
+        let resting = if window.is_window_active() {
+            colors.text
+        } else {
+            colors.faint
+        };
+        let font = self.caption_font;
+        let button = move |id: &'static str,
+                           area: WindowControlArea,
+                           glyph: &'static str,
+                           drawn: &'static str,
+                           close: bool| {
+            div()
+                .id(id)
+                .w(px(window_chrome::CAPTION_BUTTON_WIDTH))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .text_color(rgb(resting))
+                .hover(move |style| {
+                    if close {
+                        style
+                            .bg(rgb(window_chrome::CAPTION_CLOSE_HOVER))
+                            .text_color(rgb(0xffffff))
+                    } else {
+                        style
+                            .bg(rgb(colors.surface_high))
+                            .text_color(rgb(colors.text))
+                    }
+                })
+                .active(move |style| {
+                    if close {
+                        style
+                            .bg(rgb(window_chrome::CAPTION_CLOSE_PRESSED))
+                            .text_color(rgb(0xffffff))
+                    } else {
+                        style.bg(rgb(colors.selected_surface))
+                    }
+                })
+                .window_control_area(area)
+                .map(|button| match font {
+                    Some(font) => button.font_family(font).text_size(px(10.0)).child(glyph),
+                    // No Segoe icon font: draw the glyph, in the text colour so
+                    // it turns white over the red of a hovered close button.
+                    None => button.child(svg().path(drawn).size(px(14.0)).flex_none()),
+                })
+        };
+        div()
+            .h_full()
+            .flex()
+            .child(button(
+                "minimal-window-minimize",
+                WindowControlArea::Min,
+                window_chrome::CAPTION_MINIMIZE,
+                MINIMIZE_ICON,
+                false,
+            ))
+            .child(if maximized {
+                button(
+                    "minimal-window-maximize",
+                    WindowControlArea::Max,
+                    window_chrome::CAPTION_RESTORE,
+                    RESTORE_ICON,
+                    false,
+                )
+            } else {
+                button(
+                    "minimal-window-maximize",
+                    WindowControlArea::Max,
+                    window_chrome::CAPTION_MAXIMIZE,
+                    MAXIMIZE_ICON,
+                    false,
                 )
             })
-            .when(!cfg!(target_os = "macos"), |titlebar| {
-                titlebar.child(
-                    div()
-                        .id("minimal-window-maximize")
-                        .w(px(38.0))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_xs()
-                        .text_color(rgb(colors.muted))
-                        .cursor_pointer()
-                        .hover(|style| {
-                            style
-                                .bg(rgb(colors.surface_high))
-                                .text_color(rgb(colors.text))
-                        })
-                        .window_control_area(WindowControlArea::Max)
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(|_, window, _| window.zoom_window())
-                        .child(icon(MAXIMIZE_ICON, 12.0, colors.muted)),
-                )
-            })
-            .when(!cfg!(target_os = "macos"), |titlebar| {
-                titlebar.child(
-                    div()
-                        .id("minimal-window-close")
-                        .w(px(42.0))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .cursor_pointer()
-                        .hover(|style| {
-                            style
-                                .bg(rgb(colors.danger_surface))
-                                .text_color(rgb(colors.danger))
-                        })
-                        .window_control_area(WindowControlArea::Close)
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(|_, window, _| window.remove_window())
-                        .child(icon(CLOSE_ICON, 14.0, colors.muted)),
-                )
-            })
+            .child(button(
+                "minimal-window-close",
+                WindowControlArea::Close,
+                window_chrome::CAPTION_CLOSE,
+                CLOSE_ICON,
+                true,
+            ))
             .into_any_element()
     }
 
@@ -13938,6 +14087,7 @@ impl XdDesktop {
         &mut self,
         colors: ThemeColors,
         titlebar: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let connected = self.model.connected;
@@ -13980,7 +14130,15 @@ impl XdDesktop {
             .bg(glass::pane(colors))
             .border_b_1()
             .border_color(glass::edge(colors))
+            // The whole bar moves the window, gaps and padding included. Windows
+            // is told so and then drags, maximizes on a double click and opens
+            // the window menu on a right click by itself; the other desktops
+            // are driven from the press. Whatever is clickable in the bar
+            // occludes it, so a press there is not a drag.
             .when(titlebar, |bar| {
+                bar.window_control_area(WindowControlArea::Drag)
+            })
+            .when(titlebar && !cfg!(target_os = "windows"), |bar| {
                 bar.on_mouse_down(MouseButton::Left, |event, window, _| {
                     if event.click_count >= 2 {
                         if cfg!(target_os = "macos") {
@@ -14002,9 +14160,6 @@ impl XdDesktop {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_sm()
                     .text_color(rgb(colors.text))
-                    .when(titlebar, |brand| {
-                        brand.window_control_area(WindowControlArea::Drag)
-                    })
                     .child(xd_mark(colors.text))
                     .child("xd"),
             )
@@ -14016,9 +14171,6 @@ impl XdDesktop {
                     .truncate()
                     .text_size(px(12.5))
                     .text_color(rgb(colors.muted))
-                    .when(titlebar, |context| {
-                        context.window_control_area(WindowControlArea::Drag)
-                    })
                     .child(context),
             )
             .when(
@@ -14032,6 +14184,7 @@ impl XdDesktop {
                             self.browser_is_open(),
                             colors,
                         )
+                        .occlude()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
                     )
@@ -14051,6 +14204,7 @@ impl XdDesktop {
                     .text_xs()
                     .text_color(rgb(colors.muted))
                     .cursor_pointer()
+                    .occlude()
                     .hover(|style| {
                         style
                             .bg(rgb(colors.surface_high))
@@ -14070,9 +14224,10 @@ impl XdDesktop {
                         (true, false) => "Remote · reconnecting",
                     }),
             )
-            .when(titlebar && !cfg!(target_os = "macos"), |bar| {
-                bar.child(self.render_minimal_window_controls(colors))
-            })
+            .when(
+                window_chrome::draws_window_controls(std::env::consts::OS, titlebar),
+                |bar| bar.child(self.render_minimal_window_controls(colors, window)),
+            )
             .into_any_element()
     }
 
@@ -21281,7 +21436,7 @@ impl XdDesktop {
                 } => self.render_minimal_cli(colors, project_id, chat_id, agent, window, cx),
             }
         };
-        let titlebar = self.render_minimal_titlebar(colors, custom_titlebar, cx);
+        let titlebar = self.render_minimal_titlebar(colors, custom_titlebar, window, cx);
         // The popover itself draws in the session header, above this.
         let pull_request_backdrop = self.pull_request_panel.is_some().then(|| {
             div()
@@ -22699,6 +22854,47 @@ impl XdDesktop {
                 .child(error)
                 .into_any_element()
         });
+        // What is wrong now outranks what went wrong last time.
+        let startup_notice = self
+            .startup_notice
+            .clone()
+            .filter(|_| error_banner.is_none())
+            .map(|notice| {
+                div()
+                    .id("startup-notice")
+                    .absolute()
+                    .bottom(px(20.0))
+                    .left(px(50.0))
+                    .right(px(50.0))
+                    .mx_auto()
+                    .max_w(px(760.0))
+                    .pl_4()
+                    .pr_2()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(glass::edge(colors))
+                    .bg(rgb(colors.surface_high))
+                    .shadow_lg()
+                    .text_size(px(13.0))
+                    .text_color(rgb(colors.text))
+                    .occlude()
+                    .child(div().flex_1().min_w_0().child(notice))
+                    .child(
+                        ui_button("startup-notice-dismiss", ButtonKind::Ghost, colors)
+                            .h(px(28.0))
+                            .flex_none()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.startup_notice = None;
+                                cx.notify();
+                            }))
+                            .child("Dismiss"),
+                    )
+                    .into_any_element()
+            });
 
         div()
             .id("desktop-root")
@@ -22991,61 +23187,66 @@ impl XdDesktop {
             .when_some(image_preview_overlay, |root, overlay| root.child(overlay))
             .when_some(image_viewer_overlay, |root, overlay| root.child(overlay))
             .when_some(error_banner, |root, banner| root.child(banner))
+            .when_some(startup_notice, |root, notice| root.child(notice))
             .when(!minimal_popup_open, |root| {
-                root.child(
-                    div()
-                        .absolute()
-                        .top(px(0.0))
-                        .left(px(6.0))
-                        .right(px(6.0))
-                        .h(px(6.0))
-                        .cursor(CursorStyle::ResizeUpDown)
-                        .on_mouse_down(MouseButton::Left, |_, window, _| {
-                            window.start_window_resize(ResizeEdge::Top)
-                        }),
-                )
-            })
-            .when(!minimal_popup_open, |root| {
-                root.child(
-                    div()
-                        .absolute()
-                        .bottom(px(0.0))
-                        .left(px(6.0))
-                        .right(px(6.0))
-                        .h(px(6.0))
-                        .cursor(CursorStyle::ResizeUpDown)
-                        .on_mouse_down(MouseButton::Left, |_, window, _| {
-                            window.start_window_resize(ResizeEdge::Bottom)
-                        }),
-                )
-            })
-            .when(!minimal_popup_open, |root| {
-                root.child(
-                    div()
-                        .absolute()
-                        .top(px(6.0))
-                        .bottom(px(6.0))
-                        .left(px(0.0))
-                        .w(px(6.0))
-                        .cursor(CursorStyle::ResizeLeftRight)
-                        .on_mouse_down(MouseButton::Left, |_, window, _| {
-                            window.start_window_resize(ResizeEdge::Left)
-                        }),
-                )
-            })
-            .when(!minimal_popup_open, |root| {
-                root.child(
-                    div()
-                        .absolute()
-                        .top(px(6.0))
-                        .right(px(0.0))
-                        .bottom(px(6.0))
-                        .w(px(6.0))
-                        .cursor(CursorStyle::ResizeLeftRight)
-                        .on_mouse_down(MouseButton::Left, |_, window, _| {
-                            window.start_window_resize(ResizeEdge::Right)
-                        }),
-                )
+                let edges = window_chrome::resize_edges(
+                    std::env::consts::OS,
+                    window.is_maximized(),
+                    window.is_fullscreen(),
+                );
+                match edges {
+                    window_chrome::ResizeEdges::All { thickness } => {
+                        let edge = |cursor: CursorStyle, edge: ResizeEdge| {
+                            div()
+                                .absolute()
+                                .cursor(cursor)
+                                .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                                    window.start_window_resize(edge)
+                                })
+                        };
+                        root.child(
+                            edge(CursorStyle::ResizeUpDown, ResizeEdge::Top)
+                                .top(px(0.0))
+                                .left(px(thickness))
+                                .right(px(thickness))
+                                .h(px(thickness)),
+                        )
+                        .child(
+                            edge(CursorStyle::ResizeUpDown, ResizeEdge::Bottom)
+                                .bottom(px(0.0))
+                                .left(px(thickness))
+                                .right(px(thickness))
+                                .h(px(thickness)),
+                        )
+                        .child(
+                            edge(CursorStyle::ResizeLeftRight, ResizeEdge::Left)
+                                .top(px(thickness))
+                                .bottom(px(thickness))
+                                .left(px(0.0))
+                                .w(px(thickness)),
+                        )
+                        .child(
+                            edge(CursorStyle::ResizeLeftRight, ResizeEdge::Right)
+                                .top(px(thickness))
+                                .bottom(px(thickness))
+                                .right(px(0.0))
+                                .w(px(thickness)),
+                        )
+                    }
+                    // Nothing to press: the strip only keeps the title bar and
+                    // its buttons from claiming the top edge, which Windows
+                    // then resizes from.
+                    window_chrome::ResizeEdges::Top { thickness } => root.child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .h(px(thickness))
+                            .occlude(),
+                    ),
+                    window_chrome::ResizeEdges::None => root,
+                }
             })
             .into_any_element()
     }
@@ -23059,7 +23260,8 @@ impl Render for XdDesktop {
         self.terminal_drawn = false;
         self.expire_action_error(cx);
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
-        let custom_titlebar = client_decorations || cfg!(target_os = "macos");
+        let custom_titlebar =
+            window_chrome::draws_titlebar(std::env::consts::OS, client_decorations);
         window.set_client_inset(if client_decorations { px(6.0) } else { px(0.0) });
         self.render_minimal(custom_titlebar, window, cx)
     }
@@ -23535,6 +23737,9 @@ impl AssetSource for EmbeddedIcons {
             )),
             MAXIMIZE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/maximize.svg").as_slice(),
+            )),
+            RESTORE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/restore.svg").as_slice(),
             )),
             CHEVRON_UP_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/chevron-up.svg").as_slice(),
@@ -25511,6 +25716,98 @@ Binary files /dev/null and b/image.png differ\n";
             );
             let again = next_messages_request(&mut requests);
             assert!(again.get("before").is_none() && again.get("after").is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn a_launch_after_a_failed_run_leaves_browser_panes_closed_and_says_so(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            let open = || settings::BrowserState {
+                open: true,
+                session: browser::BrowserSession {
+                    tabs: vec![Some("http://localhost:3000/".into())],
+                    active_tab: 0,
+                },
+            };
+            desktop
+                .settings
+                .browser_sessions
+                .insert("local/browser".into(), open());
+            desktop
+                .settings
+                .browser_sessions
+                .insert("local/chat/review".into(), open());
+
+            desktop.recover_from_failed_run("xd did not close properly last time.".into());
+
+            // Closed, so nothing recreates the views, but not forgotten.
+            for state in desktop.settings.browser_sessions.values() {
+                assert!(!state.open);
+                assert_eq!(state.session, open().session);
+            }
+            assert!(!desktop.browser_is_open());
+            assert_eq!(
+                desktop.startup_notice.as_deref(),
+                Some("xd did not close properly last time.")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_host_that_starts_and_dies_keeps_backing_off_until_one_answers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            let started = || HostUpdate::Connected {
+                path: PathBuf::from("wsl:xd"),
+            };
+            let died = || HostUpdate::Disconnected {
+                message: "xd host closed the connection: xd: Install git in your WSL distribution"
+                    .into(),
+            };
+
+            // The process starts, says nothing, and ends: the wait grows.
+            for attempt in 1..=3 {
+                // Each retry is a new connection.
+                let generation = desktop.connection_generation;
+                desktop.handle_host_update(started(), generation, cx);
+                desktop.handle_host_update(died(), generation, cx);
+                assert_eq!(desktop.reconnect_attempt, attempt);
+            }
+            assert_eq!(
+                reconnect_delay(desktop.reconnect_attempt),
+                Duration::from_secs(1)
+            );
+
+            // Starting again does not hide why the last one ended.
+            let generation = desktop.connection_generation;
+            desktop.handle_host_update(started(), generation, cx);
+            assert_eq!(desktop.reconnect_attempt, 3);
+            assert!(
+                desktop
+                    .model
+                    .connection_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("Install git"))
+            );
+
+            // A host that answers is a connection: the message goes, and the
+            // next failure starts from a short wait again.
+            desktop.handle_host_update(
+                HostUpdate::Event {
+                    name: "agent-auth-changed".into(),
+                    body: serde_json::Map::new(),
+                    attachments: None,
+                },
+                generation,
+                cx,
+            );
+            assert_eq!(desktop.reconnect_attempt, 0);
+            assert_eq!(desktop.model.connection_error, None);
         });
     }
 
@@ -28025,7 +28322,11 @@ Binary files /dev/null and b/image.png differ\n";
             .split_once("impl Render for XdDesktop")
             .expect("desktop render implementation")
             .1;
-        assert!(render.contains("client_decorations || cfg!(target_os = \"macos\")"));
+        assert!(
+            render.contains(
+                "window_chrome::draws_titlebar(std::env::consts::OS, client_decorations)"
+            )
+        );
         assert!(render.contains("self.render_minimal(custom_titlebar, window, cx)"));
 
         let startup = source
@@ -33296,13 +33597,33 @@ fn main() {
     #[cfg(target_os = "linux")]
     browser::run_smoke_test_if_requested();
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    #[cfg(target_os = "windows")]
+    if windows::run_crash_dialog(&arguments) {
+        return;
+    }
     if arguments
         .iter()
         .any(|argument| argument == "--version" || argument == "-v")
     {
+        #[cfg(target_os = "windows")]
+        windows::attach_parent_console();
         println!("xd {}", desktop_version());
         return;
     }
+    // Everything from here is the one running xd: a second launch has shown
+    // the first one's window and left.
+    #[cfg(target_os = "windows")]
+    let Some(_instance) = windows::SingleInstance::acquire() else {
+        return;
+    };
+    #[cfg(target_os = "windows")]
+    let recovery_notice = {
+        windows::install_crash_handler(desktop_version());
+        windows::set_app_identity();
+        windows::begin_run()
+    };
+    #[cfg(not(target_os = "windows"))]
+    let recovery_notice: Option<String> = None;
     Application::new()
         .with_assets(EmbeddedIcons)
         .run(|cx: &mut App| {
@@ -33496,14 +33817,12 @@ fn main() {
             ]);
             cx.bind_keys(undo_key_bindings());
             let settings = AppSettings::load();
-            let bounds = Bounds::centered(
-                None,
-                size(
-                    px(f32::from(settings.window_width.max(760))),
-                    px(f32::from(settings.window_height.max(560))),
-                ),
-                cx,
+            let window_size = size(
+                px(f32::from(settings.window_width.max(760))),
+                px(f32::from(settings.window_height.max(560))),
             );
+            let bounds = initial_window_bounds(window_size, cx)
+                .unwrap_or_else(|| Bounds::centered(None, window_size, cx));
             let window_bounds = if settings.window_maximized {
                 WindowBounds::Maximized(bounds)
             } else {
@@ -33527,7 +33846,23 @@ fn main() {
                         app_id: Some(xd_desktop::channel::app_id()),
                         ..Default::default()
                     },
-                    |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
+                    |window, cx| {
+                        #[cfg(target_os = "windows")]
+                        if let Ok(handle) =
+                            raw_window_handle::HasWindowHandle::window_handle(window)
+                            && let raw_window_handle::RawWindowHandle::Win32(handle) =
+                                handle.as_raw()
+                        {
+                            windows::close_with_the_session(handle.hwnd.get());
+                        }
+                        cx.new(|cx| {
+                            let mut desktop = XdDesktop::new(window, cx);
+                            if let Some(notice) = recovery_notice {
+                                desktop.recover_from_failed_run(notice);
+                            }
+                            desktop
+                        })
+                    },
                 )
                 .expect("open xd GPUI window");
             cx.on_action(move |_: &ToggleUsage, cx| {
@@ -33539,6 +33874,43 @@ fn main() {
             });
             cx.activate(true);
         });
+    // Reached on Windows once the last window has closed, which is the run
+    // ending as it should.
+    #[cfg(target_os = "windows")]
+    recovery::finish();
+}
+
+/// The remembered window, shrunk and moved to fit the part of the primary
+/// screen the taskbar leaves free. Elsewhere the window manager places it.
+#[cfg(target_os = "windows")]
+fn initial_window_bounds(window: gpui::Size<Pixels>, cx: &App) -> Option<Bounds<Pixels>> {
+    let screen = cx.primary_display()?.bounds();
+    let (monitor, work) = windows::primary_monitor()?;
+    let area = window_chrome::work_area(
+        window_chrome::Rect {
+            x: f32::from(screen.origin.x),
+            y: f32::from(screen.origin.y),
+            width: f32::from(screen.size.width),
+            height: f32::from(screen.size.height),
+        },
+        monitor,
+        work,
+    )?;
+    let fitted = window_chrome::fit_window(
+        f32::from(window.width),
+        f32::from(window.height),
+        (760.0, 560.0),
+        area,
+    );
+    Some(Bounds::new(
+        point(px(fitted.x), px(fitted.y)),
+        size(px(fitted.width), px(fitted.height)),
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn initial_window_bounds(_: gpui::Size<Pixels>, _: &App) -> Option<Bounds<Pixels>> {
+    None
 }
 
 fn desktop_version() -> String {
