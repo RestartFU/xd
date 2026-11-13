@@ -11,6 +11,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import com.restartfu.xd.mobile.R
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -85,7 +97,11 @@ internal fun FilesPaneContent(model: FilesViewModel) {
             FileTab.Tree -> when {
                 rows.isEmpty() && state.loading -> Centered { CircularProgressIndicator() }
                 rows.isEmpty() -> Centered {
-                    Text("Nothing here", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "This folder is empty.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 else -> LazyColumn(Modifier.fillMaxSize()) {
                     items(rows, key = { it.path }) { row ->
@@ -140,9 +156,9 @@ private fun FileTabs(
         Row(
             modifier = Modifier
                 .weight(1f)
+                .selectableGroup()
                 .horizontalScroll(rememberScrollState()),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             TabLabel(
                 text = "Files",
@@ -152,10 +168,12 @@ private fun FileTabs(
             open.files.forEach { file ->
                 TabLabel(
                     // A dot rather than a word: the tab is already as narrow as
-                    // it can be and still name the file.
+                    // it can be and still name the file. A screen reader hears the word.
                     text = if (file.dirty) "${file.name} •" else file.name,
                     selected = open.active == FileTab.File(file.path),
                     onClick = { onShow(FileTab.File(file.path)) },
+                    spoken = if (file.dirty) "${file.name}, unsaved changes" else file.name,
+                    closeLabel = "Close ${file.name}",
                     onClose = { onClose(file.path) },
                 )
             }
@@ -164,60 +182,78 @@ private fun FileTabs(
     }
 }
 
+/** One tab of the strip, 48dp tall, with a close button of its own beside it when it can close. */
 @Composable
 private fun TabLabel(
     text: String,
     selected: Boolean,
     onClick: () -> Unit,
+    spoken: String = text,
+    closeLabel: String? = null,
     onClose: (() -> Unit)? = null,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text,
+        Box(
             modifier = Modifier
-                .clickable(onClick = onClick)
-                .padding(vertical = 8.dp, horizontal = 4.dp),
-            maxLines = 1,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-            color = if (selected) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-        )
-        onClose?.let { close ->
+                .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                .selectable(selected = selected, role = Role.Tab, onClick = onClick)
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
             Text(
-                "✕",
-                modifier = Modifier
-                    .clickable(onClick = close)
-                    .padding(vertical = 8.dp, horizontal = 2.dp),
+                text,
+                modifier = Modifier.semantics { contentDescription = spoken },
+                maxLines = 1,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
             )
+        }
+        onClose?.let { close ->
+            IconButton(onClick = close, modifier = Modifier.size(48.dp)) {
+                Icon(
+                    painterResource(R.drawable.ic_close),
+                    contentDescription = closeLabel,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
         }
     }
 }
 
+/** One file or folder of the tree: a 48dp row that says, for a folder, whether it is open. */
 @Composable
 private fun TreeEntry(row: TreeRow, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(
+                role = Role.Button,
+                onClickLabel = when {
+                    !row.directory -> "Open file"
+                    row.expanded -> "Close folder"
+                    else -> "Open folder"
+                },
+                onClick = onClick,
+            )
+            .semantics {
+                if (row.directory) stateDescription = if (row.expanded) "Expanded" else "Collapsed"
+            }
+            .heightIn(min = 48.dp)
             .padding(start = 8.dp + INDENT * row.depth, end = 12.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // A caret only where there is something to fold, and a blank of the
+        // A chevron only where there is something to fold, and a blank of the
         // same width elsewhere so names line up down a level.
         Box(Modifier.width(16.dp), contentAlignment = Alignment.Center) {
             when {
                 row.loading -> CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.dp)
-                row.directory -> Text(
-                    if (row.expanded) "▾" else "▸",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline,
-                )
+                row.directory -> DisclosureChevron(row.expanded, size = 12.dp)
             }
         }
         Spacer(Modifier.width(4.dp))
