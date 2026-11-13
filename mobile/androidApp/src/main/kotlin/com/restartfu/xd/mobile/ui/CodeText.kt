@@ -155,19 +155,73 @@ internal fun CodeText(
 }
 
 /**
- * Colours editable source without changing its characters or offsets. Keeping
- * an identity mapping is important: selection handles, cursor movement and
- * IME edits continue to address the original file text.
+ * Files being edited, coloured in the background. Typing makes a new text on
+ * every keystroke, so only the newest few are kept, apart from the finished
+ * code blocks in [CodeColours].
  */
-internal class SyntaxVisualTransformation(
-    private val language: SyntaxLanguage,
-    private val ink: CodeInk,
-) : VisualTransformation {
-    override fun filter(text: AnnotatedString): TransformedText = TransformedText(
-        highlight(text.text, language, ink),
-        OffsetMapping.Identity,
-    )
+internal val EditorColours = PreparedCache<CodeKey, AnnotatedString>(
+    capacity = 4,
+    maxWeight = CACHED_CHARACTERS,
+    weigh = { it.code.length },
+) {
+    highlight(it.code, it.language, it.ink)
 }
+
+/**
+ * Colours editable source from a colouring worked out away from the main
+ * thread ([EditorColours]), without changing its characters or offsets.
+ * Keeping an identity mapping is important: selection handles, cursor
+ * movement and IME edits continue to address the original file text.
+ *
+ * Nothing is coloured here. A text the colouring was made for takes it whole;
+ * one typed since takes it everywhere but the stretch that changed (see
+ * [colourFor]) until the new colouring arrives. A caret move filters the same
+ * text again and gets the same result back.
+ */
+internal class EditorColouring(private val coloured: AnnotatedString?) : VisualTransformation {
+    private var last: Pair<String, AnnotatedString>? = null
+
+    override fun filter(text: AnnotatedString): TransformedText {
+        val plain = text.text
+        val shown = last?.takeIf { it.first === plain }?.second
+            ?: colourFor(plain, coloured).also { last = plain to it }
+        return TransformedText(shown, OffsetMapping.Identity)
+    }
+
+    override fun equals(other: Any?): Boolean = other is EditorColouring && other.coloured === coloured
+
+    override fun hashCode(): Int = System.identityHashCode(coloured)
+}
+
+/**
+ * [text] in the colours of [coloured], an earlier colouring: all of them when
+ * it is the same text; otherwise the colours before and after the one stretch
+ * that differs, moved by what was typed or deleted there, and that stretch
+ * plain. No colouring yet is the text plain.
+ */
+internal fun colourFor(text: String, coloured: AnnotatedString?): AnnotatedString {
+    if (coloured == null) return AnnotatedString(text)
+    val old = coloured.text
+    if (old == text) return coloured
+    val most = minOf(old.length, text.length)
+    var prefix = 0
+    while (prefix < most && old[prefix] == text[prefix]) prefix++
+    var suffix = 0
+    while (suffix < most - prefix && old[old.length - 1 - suffix] == text[text.length - 1 - suffix]) suffix++
+    val changedEnd = old.length - suffix
+    val shift = text.length - old.length
+    val spans = ArrayList<AnnotatedString.Range<SpanStyle>>(coloured.spanStyles.size)
+    for (span in coloured.spanStyles) {
+        if (span.start < prefix) spans += AnnotatedString.Range(span.item, span.start, minOf(span.end, prefix))
+        if (span.end > changedEnd) {
+            spans += AnnotatedString.Range(span.item, maxOf(span.start, changedEnd) + shift, span.end + shift)
+        }
+    }
+    return AnnotatedString(text, spans)
+}
+
+/** How many times source was coloured on the main thread, for tests: it never should be. */
+internal val HighlightsOnMain = java.util.concurrent.atomic.AtomicInteger()
 
 /**
  * A unified patch: added and removed lines carry the desktop's tinted row
@@ -270,6 +324,7 @@ private fun highlight(
     language: SyntaxLanguage,
     ink: CodeInk,
 ): AnnotatedString = buildAnnotatedString {
+    if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) HighlightsOnMain.incrementAndGet()
     val state = SyntaxState()
     code.lines().forEachIndexed { index, line ->
         if (index > 0) append('\n')

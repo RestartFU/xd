@@ -32,12 +32,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -56,13 +58,18 @@ import com.restartfu.xd.files.FileTab
 import com.restartfu.xd.files.TreeRow
 import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.syntax.Syntax
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /** How far one level of nesting shifts a row. */
 private val INDENT = 12.dp
 private const val LARGE_FILE_CHARACTERS = 128 * 1024
 private const val LARGE_FILE_LINES = 4_000
+
+/** How long typing pauses before the file is coloured again: each keystroke would be wasted work. */
+private const val EDITOR_COLOUR_PAUSE_MILLIS = 150L
 
 /**
  * The working directory as a folding tree, and the files opened out of it.
@@ -75,12 +82,17 @@ private const val LARGE_FILE_LINES = 4_000
 internal fun FilesPaneContent(model: FilesViewModel) {
     val state by model.state.collectAsStateWithLifecycle()
     val rows = state.tree.rows()
+    // The file whose tab was asked to close with edits in it, kept through a rotation.
+    var closing by rememberSaveable { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxSize()) {
         FileTabs(
             open = state.open,
             onShow = model::show,
-            onClose = model::close,
+            // Edits that were never saved are asked about, not dropped.
+            onClose = { path ->
+                if (state.open.files.find { it.path == path }?.dirty == true) closing = path else model.close(path)
+            },
             trailing = {
                 TextButton(onClick = model::refresh, enabled = !state.loading) { Text("Refresh") }
             },
@@ -146,6 +158,49 @@ internal fun FilesPaneContent(model: FilesViewModel) {
             }
         }
     }
+    val asked = closing?.let { path -> state.open.files.find { it.path == path } }
+    if (asked != null) {
+        DiscardChangesDialog(
+            name = asked.name,
+            onDiscard = {
+                closing = null
+                model.close(asked.path)
+            },
+            onSave = {
+                closing = null
+                model.saveAndClose(asked.path)
+            },
+            onDismiss = { closing = null },
+        )
+    } else if (closing != null) {
+        // Closed some other way meanwhile: nothing is left to ask about.
+        LaunchedEffect(Unit) { closing = null }
+    }
+}
+
+/**
+ * Asked before a tab with unsaved edits closes: Discard drops them, Save
+ * writes them and then closes (a failed save keeps the tab, with its reason).
+ */
+@Composable
+private fun DiscardChangesDialog(
+    name: String,
+    onDiscard: () -> Unit,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Discard changes to $name?") },
+        text = { Text("Your edits to this file are not saved.") },
+        confirmButton = { TextButton(onClick = onSave) { Text("Save") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                TextButton(onClick = onDiscard) { Text("Discard", color = MaterialTheme.colorScheme.error) }
+            }
+        },
+    )
 }
 
 /**
@@ -300,9 +355,27 @@ private fun FileEditor(
     val ink = codeInk()
     val large = remember(text) { isLargeFile(text) }
     var editingLargeFile by rememberSaveable(path) { mutableStateOf(false) }
-    val syntaxColours = remember(language, ink) {
-        SyntaxVisualTransformation(language, ink)
+    // Coloured away from the main thread, once typing pauses; until then the
+    // last colouring is kept round what changed (see [EditorColouring]).
+    val key = remember(text, language, ink) { CodeKey(text, language, ink) }
+    var coloured by remember(path, language, ink) { mutableStateOf(EditorColours.peek(key)) }
+    if (!large) {
+        LaunchedEffect(key) {
+            EditorColours.peek(key)?.let {
+                coloured = it
+                return@LaunchedEffect
+            }
+            if (coloured != null) delay(EDITOR_COLOUR_PAUSE_MILLIS)
+            coloured = try {
+                EditorColours.request(key).await()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                coloured
+            }
+        }
     }
+    val syntaxColours = remember(coloured) { EditorColouring(coloured) }
 
     // Clear of the keyboard, so the caret and Save stay in sight while typing.
     // The app draws edge to edge, so nothing else makes room for it.
@@ -350,11 +423,14 @@ private fun FileEditor(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp),
+                    .padding(horizontal = 8.dp)
+                    // The field has no label: this names it for a screen reader.
+                    .semantics { contentDescription = "Contents of ${path.substringAfterLast('/')}" },
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = XdMonoFamily),
-                // Re-transforming an 800 KiB document on every selection or
-                // keystroke defeats the explicit large-file edit escape hatch.
+                // A large file is edited plain: even moving its colours along
+                // as it is typed would cost each keystroke.
                 visualTransformation = if (large) VisualTransformation.None else syntaxColours,
+                colors = xdFieldColors(),
             )
         }
         Row(
@@ -413,4 +489,3 @@ private fun LargeFileView(
 
 private fun isLargeFile(text: String): Boolean =
     text.length >= LARGE_FILE_CHARACTERS || text.count { it == '\n' } >= LARGE_FILE_LINES
-                colors = xdFieldColors(),

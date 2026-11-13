@@ -264,6 +264,7 @@ class FilesViewModel(
         _state.value = _state.value.let { it.copy(open = it.open.showing(tab)) }
     }
 
+    /** Closes a tab as it is: the caller asks first when it holds unsaved edits. */
     fun close(path: String) {
         _state.value = _state.value.let { it.copy(open = it.open.closed(path)) }
     }
@@ -279,7 +280,23 @@ class FilesViewModel(
      * so anything typed while it was in flight stays unsaved rather than being
      * marked written.
      */
-    fun save(path: String) {
+    fun save(path: String) = write(path, thenClose = false)
+
+    /**
+     * Saves a file and then closes its tab. A save that fails leaves it open
+     * and in front, with the reason on it, so nothing typed is lost.
+     */
+    fun saveAndClose(path: String) {
+        val file = _state.value.open.files.find { it.path == path } ?: return
+        if (!file.dirty) {
+            close(path)
+            return
+        }
+        show(FileTab.File(path))
+        write(path, thenClose = true)
+    }
+
+    private fun write(path: String, thenClose: Boolean) {
         val file = _state.value.open.files.find { it.path == path } ?: return
         if (file.saving || !file.dirty) return
         val sending = file.text
@@ -289,6 +306,9 @@ class FilesViewModel(
             try {
                 session().writeFile(path, against, sending)
                 _state.value = _state.value.let { it.copy(open = it.open.saved(path, sending)) }
+                // Only once all of it is written: anything typed meanwhile keeps the tab.
+                val written = _state.value.open.files.find { it.path == path }
+                if (thenClose && written != null && !written.dirty) close(path)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
