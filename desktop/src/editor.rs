@@ -203,6 +203,13 @@ impl FileEditor {
         &self.content
     }
 
+    /// Whether the caret is inside a fenced code block of the text: past
+    /// a line that opens a fence of three backticks and before the line
+    /// that closes it.
+    pub fn caret_in_code_fence(&self) -> bool {
+        in_code_fence(&self.content, self.cursor_offset())
+    }
+
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
         self.content = text.into();
@@ -1214,6 +1221,19 @@ fn display_run_len(range: &Range<usize>, placeholder_len: Option<usize>) -> usiz
 
 /// Where a word-wise delete behind `offset` lands: the whitespace under the
 /// cursor, then the run of word characters — or of punctuation — behind it.
+/// Whether `offset` in `text` falls inside a fenced code block: after an
+/// odd number of lines that start, past any indent, with three backticks.
+/// A fence line counts from just past its backticks, so the opening line's
+/// language name is inside and the closing line's end is not.
+pub(crate) fn in_code_fence(text: &str, offset: usize) -> bool {
+    let before = text.get(..offset).unwrap_or(text);
+    let fences = before
+        .split('\n')
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count();
+    fences % 2 == 1
+}
+
 pub(crate) fn previous_word_boundary(content: &str, offset: usize) -> usize {
     let text = &content[..offset];
     let trimmed = text.trim_end_matches(char::is_whitespace);
@@ -1695,5 +1715,25 @@ mod tests {
         assert_eq!(editor_text(&editor, cx), "abX");
         cx.simulate_keystrokes("ctrl-z");
         assert_eq!(editor_text(&editor, cx), "ab");
+    }
+
+    #[test]
+    fn the_caret_is_in_a_code_fence_between_its_backtick_lines() {
+        let text = "Run this:\n```sh\nmake test\n```\nThen tell me.";
+        let at = |needle: &str| text.find(needle).unwrap();
+        assert!(!in_code_fence(text, 0));
+        assert!(
+            !in_code_fence(text, at("```sh")),
+            "before the opening fence"
+        );
+        assert!(in_code_fence(text, at("sh\n")), "on the opening line");
+        assert!(in_code_fence(text, at("test")));
+        assert!(!in_code_fence(text, at("\nThen")), "past the closing fence");
+        assert!(!in_code_fence(text, text.len()));
+        // An indented fence, and one left open, count too.
+        assert!(in_code_fence("- step\n  ```\n  code", 18));
+        assert!(in_code_fence("```\nstill open", 14));
+        // Inline backticks are no fence.
+        assert!(!in_code_fence("Use `make` here", 10));
     }
 }

@@ -2029,6 +2029,7 @@ gpui::actions!(
     xd,
     [
         NewChatTab,
+        CloseChatTab,
         NextChatTab,
         PreviousChatTab,
         NextSession,
@@ -2067,6 +2068,10 @@ fn app_key_bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("ctrl-t", NewChatTab, context),
         KeyBinding::new("cmd-t", NewChatTab, context),
+        // A shell deletes a word with Ctrl+W, so the terminal binds it
+        // deeper and keeps it.
+        KeyBinding::new("ctrl-w", CloseChatTab, context),
+        KeyBinding::new("cmd-w", CloseChatTab, context),
         KeyBinding::new("ctrl-tab", NextChatTab, context),
         KeyBinding::new("ctrl-shift-tab", PreviousChatTab, context),
         KeyBinding::new("alt-down", NextSession, context),
@@ -2156,6 +2161,17 @@ fn page_scroll(handle: &ScrollHandle, scroll: PageScroll) -> bool {
 /// How a Files row's Tab stop is named: this, then the row's place in the
 /// list. Up and Down move the ring through the rows.
 const FILE_ROW_STOP: &str = "native-file:";
+
+/// What a project's pause button, and the same row of its menu, says.
+fn project_pause_label(action: PauseAllAction) -> &'static str {
+    match action {
+        PauseAllAction::Pause => "Pause this project's chats",
+        PauseAllAction::Resume => "Resume this project's chats",
+    }
+}
+
+/// How a message's Copy Tab stop is named: this, then the message's row.
+const COPY_MESSAGE_STOP: &str = "native-copy-message:";
 
 /// The key context of the handle that has the keyboard while the Tab ring is
 /// on a control.
@@ -2459,6 +2475,19 @@ trait KeyRow: Sized {
         run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
     ) -> Self;
 
+    /// [`key_reach`]: a Tab stop for a control that keeps its own click.
+    #[allow(clippy::too_many_arguments)]
+    fn key_reach(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        label: Option<SharedString>,
+        radius: f32,
+        colors: ThemeColors,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self;
+
     /// [`KeyRow::key_stop_ring`] for a control with the corners of a button.
     fn key_stop(
         self,
@@ -2524,6 +2553,19 @@ impl KeyRow for gpui::Stateful<gpui::Div> {
             .when(on, |control| control.child(focus_tooltip(label, colors)))
     }
 
+    fn key_reach(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        label: Option<SharedString>,
+        radius: f32,
+        colors: ThemeColors,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self {
+        key_reach(self, keys, layer, id, label, radius, colors, run)
+    }
+
     fn key_stop_inset(
         self,
         keys: &KeyTargets,
@@ -2569,9 +2611,36 @@ fn key_stop_in_view(
     colors: ThemeColors,
     run: impl Fn(&mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
+    key_reach(
+        control,
+        keys,
+        layer,
+        id,
+        label,
+        radius,
+        colors,
+        move |_, window, cx| run(window, cx),
+    )
+}
+
+/// Makes a control that keeps its own click handler, such as a link that
+/// reads the click's modifiers, a Tab stop: Enter and Space run `run`. A
+/// control that is an icon alone passes its `label`, which shows under it
+/// while the ring is on it.
+#[allow(clippy::too_many_arguments)]
+fn key_reach(
+    control: gpui::Stateful<gpui::Div>,
+    keys: &KeyTargets,
+    layer: KeyLayer,
+    id: impl Into<SharedString>,
+    label: Option<SharedString>,
+    radius: f32,
+    colors: ThemeColors,
+    run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+) -> gpui::Stateful<gpui::Div> {
     let id = id.into();
     let on = keys.stop_on(&id);
-    let run: KeyRun = Rc::new(move |_, window, cx| run(window, cx));
+    let run: KeyRun = Rc::new(run);
     control
         .child(keys.mark(layer, KeyStop::Control(id, run)))
         .when(on, |control| control.child(focus_ring(colors, radius)))
@@ -2588,29 +2657,70 @@ const FOCUS_TOOLTIP_GAP: f32 = FOCUS_RING_GAP + 4.0;
 /// the box the pointer's tooltip draws, over everything and inside the
 /// window. A child of the control, which must be `relative`.
 fn focus_tooltip(label: SharedString, colors: ThemeColors) -> impl IntoElement {
+    let tooltip = gpui::anchored()
+        .snap_to_window_with_margin(px(MENU_MARGIN))
+        .child(
+            div()
+                .pt(px(FOCUS_TOOLTIP_GAP))
+                .child(tooltip_box(label, colors)),
+        );
     div()
         .debug_selector(|| "focus-tooltip".into())
         .absolute()
         .top_full()
         .left_0()
-        .child(
-            gpui::deferred(
-                gpui::anchored()
-                    .snap_to_window_with_margin(px(MENU_MARGIN))
-                    .child(
-                        div()
-                            .pt(px(FOCUS_TOOLTIP_GAP))
-                            .child(tooltip_box(label, colors)),
-                    ),
-            )
-            .with_priority(2),
-        )
+        .map(|place| {
+            // A popover is itself drawn over everything, after the rest:
+            // the name is drawn in it, in its turn.
+            if IN_POPOVER.with(Cell::get) {
+                place.child(tooltip)
+            } else {
+                place.child(gpui::deferred(tooltip).with_priority(2))
+            }
+        })
+}
+
+thread_local! {
+    /// What is being built goes in a popover, which is drawn deferred.
+    static IN_POPOVER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Builds what goes in a popover, such as the pull request panel.
+fn in_popover<R>(build: impl FnOnce() -> R) -> R {
+    IN_POPOVER.with(|inside| inside.set(true));
+    let built = build();
+    IN_POPOVER.with(|inside| inside.set(false));
+    built
+}
+
+/// The whole text of a label cut short in the control the keyboard is on,
+/// under that control in the box the pointer's tooltip draws, as the name of
+/// an icon-only control shows under it.
+fn keyed_title(
+    bounds: Bounds<Pixels>,
+    text: SharedString,
+    colors: ThemeColors,
+) -> impl IntoElement {
+    gpui::deferred(
+        gpui::anchored()
+            .position(point(bounds.left(), bounds.bottom()))
+            .snap_to_window_with_margin(px(MENU_MARGIN))
+            .child(
+                div()
+                    .debug_selector(|| "keyed-title".into())
+                    .pt(px(FOCUS_TOOLTIP_GAP))
+                    .child(tooltip_box(text, colors)),
+            ),
+    )
+    .with_priority(2)
 }
 
 /// How far the focus ring stands off the control it is around.
 const FOCUS_RING_GAP: f32 = 3.0;
 /// The ring's corners around a button: the button's own, moved out by the gap.
 const FOCUS_RING_RADIUS: f32 = RADIUS_CONTROL + FOCUS_RING_GAP;
+/// The ring's corners around a pill: fully round, as the pill is.
+const PILL_RING_RADIUS: f32 = 999.0;
 
 /// The ring that shows Tab is on a control. It is drawn around the control,
 /// in room the control does not take, so nothing moves when it shows.
@@ -4231,6 +4341,14 @@ struct ProjectAddMenu {
     position: Point<Pixels>,
 }
 
+/// The menu Shift+F10 opens on a message whose Copy the Tab ring is on:
+/// what the message offers, where it was.
+#[derive(Clone)]
+struct MessageMenu {
+    copy: KeyRun,
+    position: Point<Pixels>,
+}
+
 #[derive(Clone)]
 struct SidebarContextMenu {
     target: SidebarTarget,
@@ -4639,6 +4757,18 @@ struct XdDesktop {
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
     sidebar_context_menu: Option<SidebarContextMenu>,
+    message_menu: Option<MessageMenu>,
+    /// The layer over the window that draws what moves with the pulse and
+    /// the blink, when the window has one.
+    pulse_layer: Option<Entity<PulseLayer>>,
+    /// The whole text of the label the keyboard's control cuts short, and
+    /// where that control is, shown under it.
+    key_title: Option<(Bounds<Pixels>, SharedString)>,
+    /// The setting changed last on the Settings page, and when: a save that
+    /// fails soon after is that setting's.
+    settings_saving: Option<(&'static str, Instant)>,
+    /// A setting whose save failed, and why, shown under it in Settings.
+    settings_failure: Option<(&'static str, SharedString)>,
     settle_undo: Option<SettleUndo>,
     /// The draft or queued message last thrown away, while Undo is offered
     /// for it in the settle notice's place.
@@ -5552,6 +5682,11 @@ impl XdDesktop {
             queue_edit: None,
             sidebar_edit: None,
             sidebar_context_menu: None,
+            message_menu: None,
+            pulse_layer: None,
+            key_title: None,
+            settings_saving: None,
+            settings_failure: None,
             settle_undo: None,
             discard_undo: None,
             root_focus,
@@ -9628,6 +9763,7 @@ impl XdDesktop {
             || self.project_add_menu.is_some()
             || self.sidebar_edit.is_some()
             || self.sidebar_context_menu.is_some()
+            || self.message_menu.is_some()
             || self.pending_sidebar_delete.is_some()
             || self.creating_chat_folder.is_some()
             || self.pull_request_panel.is_some()
@@ -10144,6 +10280,7 @@ impl XdDesktop {
             }
         }
         let can_close = chats.len() > 1;
+        let keys = self.key_targets.clone();
         let front_agent = self.open_agent_key().map(str::to_owned);
         let tabs = chats
             .into_iter()
@@ -10244,12 +10381,19 @@ impl XdDesktop {
                             .size(HIT_MIN)
                             .glyph(11.0)
                             .build()
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
+                            .key_stop_named(
+                                &keys,
+                                KeyLayer::Page,
+                                format!("close-session-chat-tab-{index}"),
+                                "Close chat tab",
+                                colors,
+                                cx,
+                                move |this, window, cx| {
+                                    // Not a press on the tab under it as well.
                                     cx.stop_propagation();
                                     this.close_session_chat_tab(close_id.clone(), window, cx);
                                 },
-                            )),
+                            ),
                         )
                     })
             })
@@ -10333,10 +10477,18 @@ impl XdDesktop {
                         .size(HIT_MIN)
                         .glyph(11.0)
                         .build()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.close_agent_tab(&close, cx);
-                        })),
+                        .key_stop_named(
+                            &keys,
+                            KeyLayer::Page,
+                            format!("close-session-agent-tab-{index}"),
+                            "Close agent tab",
+                            colors,
+                            cx,
+                            move |this, _, cx| {
+                                cx.stop_propagation();
+                                this.close_agent_tab(&close, cx);
+                            },
+                        ),
                     )
                     .into_any_element()
             })
@@ -10383,9 +10535,14 @@ impl XdDesktop {
                         .h(px(CONTROL_HEIGHT_COMPACT))
                         .px_2()
                         .text_size(text_px(TEXT_CAPTION))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.reopen_session_chat_tab(window, cx)
-                        }))
+                        .key_stop(
+                            &keys,
+                            KeyLayer::Page,
+                            "reopen-session-chat",
+                            colors,
+                            cx,
+                            |this, window, cx| this.reopen_session_chat_tab(window, cx),
+                        )
                         .child(format!("Reopen ({})", hidden.len())),
                 )
             })
@@ -10398,8 +10555,14 @@ impl XdDesktop {
                 )
                 .drawn(plus_icon)
                 .build()
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.begin_session_chat_create(window, cx)),
+                .key_stop_named(
+                    &keys,
+                    KeyLayer::Page,
+                    "add-session-chat",
+                    format!("New chat ({MOD_KEY}+T)"),
+                    colors,
+                    cx,
+                    |this, window, cx| this.begin_session_chat_create(window, cx),
                 ),
             )
             .into_any_element()
@@ -15851,6 +16014,7 @@ impl XdDesktop {
             output.into_any_element()
         };
         let active = selected_id.is_some();
+        let keys = self.key_targets.clone();
         let tabs = panel
             .sessions
             .iter()
@@ -15877,9 +16041,14 @@ impl XdDesktop {
                     .text_color(rgb(if selected { colors.text } else { colors.muted }))
                     .cursor_pointer()
                     .hover(|style| style.text_color(rgb(colors.text)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_terminal(terminal_id.clone(), cx);
-                    }))
+                    .key_stop_inset(
+                        &keys,
+                        KeyLayer::Page,
+                        format!("minimal-terminal-tab-{index}"),
+                        colors,
+                        cx,
+                        move |this, _, cx| this.select_terminal(terminal_id.clone(), cx),
+                    )
                     .child(session.title.clone())
                     .child(
                         icon_button(
@@ -15891,12 +16060,18 @@ impl XdDesktop {
                         .size(HIT_MIN)
                         .glyph(11.0)
                         .build()
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
+                        .key_stop_named(
+                            &keys,
+                            KeyLayer::Page,
+                            format!("minimal-close-terminal-{index}"),
+                            "Close terminal",
+                            colors,
+                            cx,
+                            move |this, window, cx| {
                                 cx.stop_propagation();
                                 this.close_terminal_tab(close_id.clone(), window, cx);
                             },
-                        )),
+                        ),
                     )
             })
             .collect::<Vec<_>>();
@@ -16010,9 +16185,15 @@ impl XdDesktop {
                             .drawn(plus_icon)
                             .build()
                             .mr_2()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_minimal_terminal_tab(None, window, cx)
-                            })),
+                            .key_stop_named(
+                                &keys,
+                                KeyLayer::Page,
+                                "minimal-new-terminal",
+                                "New terminal",
+                                colors,
+                                cx,
+                                |this, window, cx| this.open_minimal_terminal_tab(None, window, cx),
+                            ),
                     ),
             )
             .when(panel_loading && panel_is_empty, |pane| {
@@ -16480,7 +16661,16 @@ impl XdDesktop {
                                     .flex_none()
                                     .text_color(rgb(colors.muted)),
                             )
-                            .child(label),
+                            .child(label)
+                            .key_reach(
+                                &self.key_targets,
+                                KeyLayer::Page,
+                                "minimal-session-pull-request",
+                                None,
+                                PILL_RING_RADIUS,
+                                colors,
+                                move |this, window, cx| this.open_browser_url(&url, window, cx),
+                            ),
                     )
                 },
             )
@@ -16586,23 +16776,18 @@ impl XdDesktop {
         };
         let shown = room.min(HEADER_PULL_REQUEST_CHIPS);
         let hidden = links.len().saturating_sub(shown);
+        let keys = self.key_targets.clone();
         let chips = links
             .iter()
             .take(shown)
             .enumerate()
             .map(|(index, link)| {
                 let url = link.url.clone();
+                let key_url = link.url.clone();
                 let tooltip = pull_request_chip_tooltip(link.state);
                 chip(("minimal-session-pull-request", index).into())
                     .debug_selector(move || format!("minimal-session-pull-request-{index}"))
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| PaneTooltip {
-                            label: tooltip.into(),
-                            detail: Vec::new(),
-                            colors,
-                        })
-                        .into()
-                    })
+                    .tooltip(pane_tooltip(tooltip, colors))
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.open_link(&url, event, window, cx);
                     }))
@@ -16612,10 +16797,20 @@ impl XdDesktop {
                         pull_request_state_color(link.state, colors),
                     ))
                     .child(pull_request_label(&link.url))
+                    .key_reach(
+                        &keys,
+                        KeyLayer::Page,
+                        format!("minimal-session-pull-request-{index}"),
+                        None,
+                        PILL_RING_RADIUS,
+                        colors,
+                        move |this, window, cx| this.open_browser_url(&key_url, window, cx),
+                    )
             })
             .collect::<Vec<_>>();
         let panel_open = self.pull_request_panel.is_some();
-        let panel = panel_open.then(|| self.render_pull_request_panel(&links, colors, cx));
+        let panel =
+            panel_open.then(|| in_popover(|| self.render_pull_request_panel(&links, colors, cx)));
         div()
             .relative()
             .flex_none()
@@ -16630,19 +16825,18 @@ impl XdDesktop {
                         .when(panel_open, |chip| chip.bg(rgb(colors.selected_surface)))
                         // A tooltip would linger over the open popover.
                         .when(!panel_open, |chip| {
-                            chip.tooltip(move |_, cx| {
-                                cx.new(|_| PaneTooltip {
-                                    label: "Show all pull requests".into(),
-                                    detail: Vec::new(),
-                                    colors,
-                                })
-                                .into()
-                            })
+                            chip.tooltip(pane_tooltip("Show all pull requests", colors))
                         })
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_pull_request_panel(window, cx);
-                        }))
-                        .child(format!("+{hidden}")),
+                        .child(format!("+{hidden}"))
+                        .key_stop_ring(
+                            &keys,
+                            KeyLayer::Page,
+                            "minimal-session-pull-requests-more",
+                            PILL_RING_RADIUS,
+                            colors,
+                            cx,
+                            |this, window, cx| this.open_pull_request_panel(window, cx),
+                        ),
                 )
             })
             .child(
@@ -16668,9 +16862,15 @@ impl XdDesktop {
                 .debug_selector(|| "minimal-session-link-pull-request".into())
                 .w(hit_px(HIT_MIN))
                 .h(hit_px(HIT_MIN))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_pull_request_panel(window, cx);
-                })),
+                .key_stop_named(
+                    &keys,
+                    KeyLayer::Page,
+                    "minimal-session-link-pull-request",
+                    "Link pull request",
+                    colors,
+                    cx,
+                    |this, window, cx| this.open_pull_request_panel(window, cx),
+                ),
             )
             .when_some(panel, |group, panel| {
                 // Drawn last, over the transcript, just under the header.
@@ -16701,14 +16901,17 @@ impl XdDesktop {
                 )
             })
             .unwrap_or_default();
+        let keys = self.key_targets.clone();
         let rows = links
             .iter()
             .enumerate()
             .map(|(index, link)| {
                 let open_url = link.url.clone();
+                let key_url = link.url.clone();
                 let remove_url = link.url.clone();
                 div()
                     .id(("pull-request-panel-row", index))
+                    .relative()
                     .debug_selector(move || format!("pull-request-panel-row-{index}"))
                     .h(px(ROW_HEIGHT))
                     .pl_2()
@@ -16723,6 +16926,19 @@ impl XdDesktop {
                         this.close_pull_request_panel(window, cx);
                         this.open_link(&open_url, event, window, cx);
                     }))
+                    // The row opens its link; Tab stops on it before its Remove.
+                    .key_reach(
+                        &keys,
+                        KeyLayer::Dialog,
+                        format!("pull-request-panel-row-{index}"),
+                        None,
+                        FOCUS_RING_RADIUS,
+                        colors,
+                        move |this, window, cx| {
+                            this.close_pull_request_panel(window, cx);
+                            this.open_browser_url(&key_url, window, cx);
+                        },
+                    )
                     .child(icon(
                         GIT_PULL_REQUEST_ICON,
                         14.0,
@@ -16765,10 +16981,18 @@ impl XdDesktop {
                         .wash(rgb(colors.selected_surface))
                         .build()
                         .debug_selector(move || format!("pull-request-panel-remove-{index}"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.unlink_pull_request(&remove_url, cx);
-                        })),
+                        .key_stop_named(
+                            &keys,
+                            KeyLayer::Dialog,
+                            format!("pull-request-panel-remove-{index}"),
+                            "Remove",
+                            colors,
+                            cx,
+                            move |this, _, cx| {
+                                cx.stop_propagation();
+                                this.unlink_pull_request(&remove_url, cx);
+                            },
+                        ),
                     )
             })
             .collect::<Vec<_>>();
@@ -16838,7 +17062,12 @@ impl XdDesktop {
                                 self.field_frame(&self.pull_request_input, cx)
                             })
                             .bg(rgb(colors.background))
-                            .child(self.pull_request_input.clone()),
+                            .relative()
+                            .child(self.pull_request_input.clone())
+                            .child(keys.mark(
+                                KeyLayer::Dialog,
+                                KeyStop::Field(self.pull_request_input.read(cx).focus_handle(cx)),
+                            )),
                     )
                     .child(
                         ui_button(
@@ -16853,7 +17082,14 @@ impl XdDesktop {
                         .when(!can_link, |button| {
                             button.cursor_default().text_color(rgb(colors.faint))
                         })
-                        .on_click(cx.listener(|this, _, _, cx| this.link_pasted_pull_requests(cx)))
+                        .key_stop(
+                            &keys,
+                            KeyLayer::Dialog,
+                            "pull-request-panel-link",
+                            colors,
+                            cx,
+                            |this, _, cx| this.link_pasted_pull_requests(cx),
+                        )
                         .child(if linking { "Linking…" } else { "Link" }),
                     ),
             )
@@ -17732,13 +17968,16 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (label, path) = match action {
-            PauseAllAction::Pause => ("Pause this project's chats", PAUSE_ICON),
-            PauseAllAction::Resume => ("Resume this project's chats", PLAY_ICON),
+        let label = project_pause_label(action);
+        let path = match action {
+            PauseAllAction::Pause => PAUSE_ICON,
+            PauseAllAction::Resume => PLAY_ICON,
         };
         let ready = !self.pause_all_pending;
         let resume = action == PauseAllAction::Resume;
         let folder_id = folder_id.to_owned();
+        let stop = format!("minimal-project-pause-{project_index}");
+        let ringed = self.key_targets.stop_on(&stop);
         icon_button(
             ("minimal-project-pause", project_index),
             label,
@@ -17754,17 +17993,26 @@ impl XdDesktop {
         .wash(rgb(colors.border))
         .enabled(ready)
         .build()
-        // The open session's project keeps its actions in sight.
-        .when(!resume && !current, |button| {
+        // The open session's project keeps its actions in sight, and so
+        // does the button the Tab ring is on.
+        .when(!resume && !current && !ringed, |button| {
             button
                 .invisible()
                 .group_hover("catalog-project", |style| style.visible())
         })
         .when(ready, |button| {
-            button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                cx.stop_propagation();
-                this.pause_folder(&folder_id, resume, cx)
-            }))
+            button.key_stop_named(
+                &self.key_targets,
+                KeyLayer::Page,
+                stop,
+                label,
+                colors,
+                cx,
+                move |this, _, cx| {
+                    cx.stop_propagation();
+                    this.pause_folder(&folder_id, resume, cx)
+                },
+            )
         })
         .into_any_element()
     }
@@ -20916,6 +21164,7 @@ impl XdDesktop {
         column: f32,
         answering: Option<&str>,
         pinned_copy: bool,
+        copy_keys: Option<&KeyTargets>,
     ) -> gpui::AnyElement {
         let role = message.role.as_str();
         if role == "duration" {
@@ -21098,11 +21347,15 @@ impl XdDesktop {
             .child(body);
         let copy = (!error && !message.content.trim().is_empty()).then(|| {
             let text = message.content.clone();
+            let stop = SharedString::from(format!("{COPY_MESSAGE_STOP}{index}"));
+            let ringed = copy_keys.is_some_and(|keys| keys.stop_on(&stop));
             div()
                 .id(("native-copy-message", index))
+                .relative()
                 // The newest message keeps its Copy in sight: without a
-                // pointer there is no hover to bring it out.
-                .when(!pinned_copy, |copy| {
+                // pointer there is no hover to bring it out. Any other shows
+                // it while the Tab ring is on it.
+                .when(!pinned_copy && !ringed, |copy| {
                     copy.invisible()
                         .group_hover("native-message", |style| style.visible())
                 })
@@ -21120,10 +21373,26 @@ impl XdDesktop {
                         .bg(rgb(colors.surface_high))
                         .text_color(rgb(colors.text))
                 })
-                .on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                .on_click({
+                    let text = text.clone();
+                    move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                    }
                 })
                 .child("Copy")
+                .when_some(copy_keys, |copy, keys| {
+                    copy.key_reach(
+                        keys,
+                        KeyLayer::Page,
+                        stop,
+                        None,
+                        FOCUS_RING_RADIUS,
+                        colors,
+                        move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                        },
+                    )
+                })
         });
         // What the message answers, attached above it like a reply's quote.
         let answered = answering.filter(|_| user).map(|question| {
@@ -22506,6 +22775,8 @@ impl XdDesktop {
                         && !message.content.trim().is_empty()
                 })
             });
+            // Each message's Copy is a Tab stop as well.
+            let copy_keys = self.key_targets.clone();
             list(self.transcript.clone(), move |index, _window, cx| {
                 // The list's count follows the snapshot; should they ever
                 // disagree for a frame, draw nothing rather than crash.
@@ -22630,6 +22901,7 @@ impl XdDesktop {
                         column,
                         messages.answered_question(index),
                         last_copy == Some(index),
+                        Some(&copy_keys),
                     )))
                     .into_any_element()
             })
@@ -22642,6 +22914,7 @@ impl XdDesktop {
         };
         // Only a running turn can be steered away from.
         let can_steer = self.model.working;
+        let queue_keys = self.key_targets.clone();
         let queued = self
             .model
             .queue
@@ -22695,16 +22968,14 @@ impl XdDesktop {
                                 .h(px(CONTROL_HEIGHT_COMPACT))
                                 .px(px(8.0))
                                 .text_size(text_px(TEXT_LABEL))
-                                .tooltip(move |_, cx| {
-                                    cx.new(|_| PaneTooltip {
-                                        label: "Send this to the agent now".into(),
-                                        detail: Vec::new(),
-                                        colors,
-                                    })
-                                    .into()
-                                })
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.steer_queued(index, cx)),
+                                .tooltip(pane_tooltip("Send this to the agent now", colors))
+                                .key_stop(
+                                    &queue_keys,
+                                    KeyLayer::Page,
+                                    format!("native-steer-queued-{index}"),
+                                    colors,
+                                    cx,
+                                    move |this, _, cx| this.steer_queued(index, cx),
                                 )
                                 .child("Steer"),
                         )
@@ -22719,7 +22990,15 @@ impl XdDesktop {
                         .glyph(13.0)
                         .wash(rgb(colors.background))
                         .build()
-                        .on_click(cx.listener(move |this, _, _, cx| this.drop_queued(index, cx))),
+                        .key_stop_named(
+                            &queue_keys,
+                            KeyLayer::Page,
+                            format!("native-drop-queued-{index}"),
+                            "Remove from queue",
+                            colors,
+                            cx,
+                            move |this, _, cx| this.drop_queued(index, cx),
+                        ),
                     )
                     .into_any_element()
             })
@@ -24166,6 +24445,44 @@ impl XdDesktop {
                 )
         });
         let keys = self.key_targets.clone();
+        let message_menu_overlay = self.message_menu.clone().map(|menu| {
+            let copy = menu.copy.clone();
+            div()
+                .occlude()
+                .absolute()
+                .inset_0()
+                .track_focus(&minimal_popup_focus)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_message_menu(window, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, window, cx| this.close_message_menu(window, cx)),
+                )
+                .child(menu_at(
+                    menu.position,
+                    menu_shell(colors)
+                        .debug_selector(|| "message-menu".into())
+                        .w(px(188.0))
+                        .child(
+                            key_row(
+                                &keys,
+                                KeyLayer::Menu,
+                                "message-menu",
+                                menu_row("message-menu-copy", colors),
+                                colors.surface_high,
+                                cx,
+                                move |this, window, cx| {
+                                    copy(this, window, cx);
+                                    this.close_message_menu(window, cx);
+                                },
+                            )
+                            .child("Copy"),
+                        ),
+                ))
+                .into_any_element()
+        });
         let session_context_overlay = self.sidebar_context_menu.clone().map(|menu| {
             let rename_target = menu.target.clone();
             let rename_title = menu.title.clone();
@@ -24188,6 +24505,22 @@ impl XdDesktop {
                     .map(|state| (session_id.clone(), state)),
                 _ => None,
             };
+            // What the row's pause button does, for the keyboard as well.
+            let pause = match &menu.target {
+                SidebarTarget::Folder(folder_id) => self
+                    .model
+                    .pause_action_for(folder_id)
+                    .map(|action| (folder_id.clone(), action)),
+                _ => None,
+            };
+            // Room for its longer words on one line.
+            let menu_width = if menu.moving {
+                240.0
+            } else if pause.is_some() {
+                212.0
+            } else {
+                188.0
+            };
             // One row of the menu: what it says, and what choosing it does.
             let row = |id: &'static str, label: &'static str, danger: bool, run: BoxedKeyRun| {
                 let fill = if danger {
@@ -24199,10 +24532,12 @@ impl XdDesktop {
                     &keys,
                     KeyLayer::Menu,
                     "sidebar-menu",
-                    menu_row(id, colors).when(danger, |row| {
-                        row.text_color(rgb(colors.danger))
-                            .hover(|style| style.bg(rgb(colors.danger_surface)))
-                    }),
+                    menu_row(id, colors)
+                        .debug_selector(move || id.into())
+                        .when(danger, |row| {
+                            row.text_color(rgb(colors.danger))
+                                .hover(|style| style.bg(rgb(colors.danger_surface)))
+                        }),
                     fill,
                     cx,
                     run,
@@ -24334,6 +24669,18 @@ impl XdDesktop {
                         }),
                     ));
                 }
+                if let Some((folder_id, action)) = pause {
+                    let resume = action == PauseAllAction::Resume;
+                    rows.push(row(
+                        "catalog-project-pause",
+                        project_pause_label(action),
+                        false,
+                        Box::new(move |this, window, cx| {
+                            this.close_sidebar_context_menu(window, cx);
+                            this.pause_folder(&folder_id, resume, cx);
+                        }),
+                    ));
+                }
                 if let Some((session_id, (settled, auto_disabled))) = settlement {
                     let settle_session = session_id.clone();
                     rows.push(row(
@@ -24405,7 +24752,7 @@ impl XdDesktop {
                     menu.position,
                     menu_shell(colors)
                         .debug_selector(|| "sidebar-context-menu".into())
-                        .w(px(if menu.moving { 240.0 } else { 188.0 }))
+                        .w(px(menu_width))
                         .when(menu.moving, |menu| {
                             menu.max_h(px(menu_under_max_height(0.0, 420.0)))
                         })
@@ -25290,6 +25637,16 @@ impl XdDesktop {
             // Nothing can be asked of a host that is not there, so the banner
             // offers the way back to one.
             let offline = !self.model.connected;
+            // Drawn over everything, its buttons join the Tab stops of
+            // whatever is on top: the page, Settings or Usage, or a dialog.
+            let banner_keys = self.key_targets.clone();
+            let banner_layer = if self.dialog_open() {
+                KeyLayer::Dialog
+            } else if self.shortcuts_blocked() {
+                KeyLayer::Overlay
+            } else {
+                KeyLayer::Page
+            };
             div()
                 .id("error-banner")
                 .debug_selector(|| "error-banner".into())
@@ -25334,8 +25691,13 @@ impl XdDesktop {
                             .debug_selector(|| "error-banner-reconnect".into())
                             .h(px(CONTROL_HEIGHT_COMPACT))
                             .px_2()
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.reconnect_now(window, cx)),
+                            .key_stop(
+                                &banner_keys,
+                                banner_layer,
+                                "error-banner-reconnect",
+                                colors,
+                                cx,
+                                |this, window, cx| this.reconnect_now(window, cx),
                             )
                             .child("Reconnect"),
                     )
@@ -25347,7 +25709,15 @@ impl XdDesktop {
                         .wash(rgba(colors.banner_wash))
                         .build()
                         .debug_selector(|| "error-banner-close".into())
-                        .on_click(cx.listener(|this, _, _, cx| this.dismiss_error(cx))),
+                        .key_stop_named(
+                            &banner_keys,
+                            banner_layer,
+                            "error-banner-close",
+                            "Dismiss",
+                            colors,
+                            cx,
+                            |this, _, cx| this.dismiss_error(cx),
+                        ),
                 )
                 .into_any_element()
         });
@@ -25463,6 +25833,9 @@ impl XdDesktop {
             .on_action(cx.listener(|this, _: &NewChatTab, window, cx| {
                 this.new_chat_tab(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &CloseChatTab, window, cx| {
+                this.close_front_tab(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &NextChatTab, window, cx| {
                 this.step_chat_tab(true, window, cx);
             }))
@@ -25562,8 +25935,8 @@ impl XdDesktop {
                     cx.notify();
                 }
             }))
-            // Tab in an empty message box has nothing to indent, so it goes
-            // on to the options under the box.
+            // Tab in a message box goes on to the options under it, except
+            // in a fenced code block, where it indents.
             .capture_action(cx.listener(|this, _: &EditorTab, window, cx| {
                 if this.tab_leaves_message_box(window, cx) {
                     cx.stop_propagation();
@@ -25670,6 +26043,8 @@ impl XdDesktop {
                     this.close_remote(cx);
                 } else if this.sidebar_context_menu.is_some() {
                     this.close_sidebar_context_menu(window, cx);
+                } else if this.message_menu.is_some() {
+                    this.close_message_menu(window, cx);
                 } else if this.project_add_menu.is_some() {
                     this.close_project_add_menu(window, cx);
                 } else if this.pending_sidebar_delete.is_some() {
@@ -25806,6 +26181,10 @@ impl XdDesktop {
             )
             .when_some(pull_request_backdrop, |root, overlay| root.child(overlay))
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
+            .when_some(message_menu_overlay, |root, overlay| root.child(overlay))
+            .when_some(self.key_title.clone(), |root, (bounds, text)| {
+                root.child(keyed_title(bounds, text, colors))
+            })
             .when_some(project_add_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
             .when_some(update_overlay, |root, overlay| root.child(overlay))
@@ -25905,6 +26284,7 @@ impl XdDesktop {
             || self.project_add_menu.is_some()
             || self.sidebar_edit.is_some()
             || self.sidebar_context_menu.is_some()
+            || self.message_menu.is_some()
             || self.pending_sidebar_delete.is_some()
             || self.pull_request_panel.is_some()
     }
@@ -26097,6 +26477,26 @@ impl XdDesktop {
             && let Some(agent) = AgentCli::from_backend(&chat.backend)
         {
             self.open_minimal_session(chat.folder.clone(), chat.id.clone(), agent, window, cx);
+        }
+    }
+
+    /// Closes the tab in front, as its close button does: the agent tab,
+    /// or else the chat tab, unless it is the last chat left open.
+    fn close_front_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shortcuts_blocked() || self.creating_chat_folder.is_some() {
+            return;
+        }
+        let Some(active) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if let Some(key) = self.open_agent_key().map(str::to_owned) {
+            self.close_agent_tab(&key, cx);
+            self.focus_composer(window, cx);
+            return;
+        }
+        let (chats, _) = self.session_tab_chats(&active);
+        if chats.len() > 1 {
+            self.close_session_chat_tab(active, window, cx);
         }
     }
 
@@ -26570,18 +26970,20 @@ impl XdDesktop {
         self.settings_scroll.set_offset(offset);
     }
 
-    /// Tab in a message box that holds nothing moves to the options under
-    /// it. With text in the box Tab indents, as it always has.
+    /// Tab in a message box moves to the options under it, as Shift+Tab
+    /// moves back. Inside a fenced code block, where a message is code,
+    /// Tab indents instead.
     fn tab_leaves_message_box(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.shortcuts_blocked() || self.menu_open() {
             return false;
         }
-        let (input, empty) = if self.creating_chat_folder.is_some() {
-            (&self.new_chat_input, self.new_chat_prompt.is_empty())
+        let input = if self.creating_chat_folder.is_some() {
+            &self.new_chat_input
         } else {
-            (&self.composer_input, self.composer.is_empty())
+            &self.composer_input
         };
-        empty && input.read(cx).focus_handle(cx).is_focused(window) && {
+        let editor = input.read(cx);
+        editor.focus_handle(cx).is_focused(window) && !editor.caret_in_code_fence() && {
             self.key_field(false, window, cx)
         }
     }
@@ -26590,6 +26992,9 @@ impl XdDesktop {
     /// row, or of the current project's on the landing page, under that row.
     fn open_context_menu_from_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.shortcuts_blocked() || self.menu_open() {
+            return;
+        }
+        if self.open_message_menu_from_keys(window, cx) {
             return;
         }
         let Some((target, title, bounds)) = self
@@ -26602,6 +27007,49 @@ impl XdDesktop {
         };
         let position = point(bounds.left() + px(24.0), bounds.bottom());
         self.open_sidebar_context_menu(target, title, position, window, cx);
+    }
+
+    /// Shift+F10 with the Tab ring on a message's Copy: that message's menu,
+    /// under its Copy. Says whether the ring was on one.
+    fn open_message_menu_from_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.stop_focus.is_focused(window) {
+            return false;
+        }
+        let Some(id) = self
+            .key_stop
+            .clone()
+            .filter(|id| id.starts_with(COPY_MESSAGE_STOP))
+        else {
+            return false;
+        };
+        let found =
+            self.key_targets
+                .0
+                .borrow()
+                .stops
+                .iter()
+                .find_map(|(stop, bounds)| match stop {
+                    KeyStop::Control(stop, run) if *stop == id => Some((run.clone(), *bounds)),
+                    _ => None,
+                });
+        let Some((copy, bounds)) = found else {
+            return false;
+        };
+        // The keyboard goes back to the message box when the menu closes.
+        self.leave_key_stop(window);
+        self.message_menu = Some(MessageMenu {
+            copy,
+            position: point(bounds.left(), bounds.bottom()),
+        });
+        self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
+        cx.notify();
+        true
+    }
+
+    fn close_message_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.message_menu = None;
+        self.restore_minimal_popup_focus(window);
+        cx.notify();
     }
 
     /// The side pane's tool the page keys can scroll, while it shows.
@@ -31632,7 +32080,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                         .flex()
                         .justify_center()
                         .child(div().w(px(COLUMN)).child(XdDesktop::render_native_message(
-                            colors, message, None, None, index, false, &images, COLUMN, None, false,
+                            colors, message, None, None, index, false, &images, COLUMN, None,
+                            false, None,
                         )))
                         .into_any_element()
                 })
@@ -31731,6 +32180,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                         720.0,
                         None,
                         false,
+                        None,
                     )
                 })
                 .size_full()
@@ -32417,6 +32867,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         let mut keys = vec![
             "ctrl-t",
             "cmd-t",
+            "ctrl-w",
+            "cmd-w",
             "ctrl-tab",
             "ctrl-shift-tab",
             "alt-down",
@@ -32506,6 +32958,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         // The terminal keeps every Ctrl and letter it sends to the shell.
         for (key, action) in [
             ("ctrl-t", "ControlT"),
+            // A shell deletes the word before the cursor.
+            ("ctrl-w", "ControlW"),
             ("ctrl-b", "ControlB"),
             ("ctrl-l", "ClearScreen"),
             ("ctrl-k", "ControlK"),
@@ -32921,7 +33375,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
     }
 
     #[gpui::test]
-    fn tab_from_an_empty_message_box_reaches_the_options_under_it(cx: &mut gpui::TestAppContext) {
+    fn tab_from_the_message_box_reaches_the_options_under_it(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = keyboard_window(cx);
         cx.simulate_keystrokes("alt-down");
         desktop.update(cx, |desktop, _| {
@@ -32960,23 +33414,48 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         });
         assert!(in_box(cx));
 
-        // Shift+Tab goes back from the box to its last option, and Escape
-        // from an option returns to the box without leaving the chat.
+        // Shift+Tab goes back from the box to the control before it, the new
+        // chat button over the chat, and Tab comes back; Escape from a control
+        // returns to the box without leaving the chat.
         cx.simulate_keystrokes("shift-tab");
-        assert_eq!(ring(&desktop, cx).as_deref(), Some("native-option-plan"));
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("add-session-chat"));
         cx.simulate_keystrokes("tab");
-        assert!(in_box(cx), "round to the message box");
+        assert!(in_box(cx), "back to the message box");
+        // The box's options, and round past the window's other controls.
+        let passed = tab_to(&desktop, cx, "native-option-plan");
+        assert_eq!(passed.first().map(String::as_str), Some("native-attach"));
+        cx.simulate_keystrokes("shift-tab");
+        assert_ne!(ring(&desktop, cx).as_deref(), Some("native-option-plan"));
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        assert!(in_box(cx));
         cx.simulate_keystrokes("shift-tab escape");
         redraw(cx);
         assert!(in_box(cx));
         assert_eq!(ring(&desktop, cx), None);
         assert_eq!(shown_chat(&desktop, cx).as_deref(), Some("implementation"));
 
-        // With words in the box, Tab indents them as it always has.
+        // With words in the box, Tab still goes on to the options, and
+        // leaves the words as they are; Shift+Tab comes back.
         cx.simulate_input("x");
         cx.simulate_keystrokes("tab");
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("native-attach"));
+        assert!(!in_box(cx));
+        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.composer, "x"));
+        cx.simulate_keystrokes("shift-tab");
         assert!(in_box(cx));
-        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.composer, "x    "));
+        // Inside a fenced code block, Tab indents the code.
+        cx.simulate_input("\n```\nfn main() {\n");
+        cx.simulate_keystrokes("tab");
+        assert!(in_box(cx));
+        assert_eq!(ring(&desktop, cx), None);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.composer, "x\n```\nfn main() {\n    ")
+        });
+        // Past the block's closing fence, Tab leaves again.
+        cx.simulate_input("}\n```\n");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("native-attach"));
     }
 
     #[gpui::test]
@@ -36486,6 +36965,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                     720.0,
                     None,
                     false,
+                    None,
                 ))
             }
         }

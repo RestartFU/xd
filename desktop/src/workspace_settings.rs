@@ -194,6 +194,7 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                     "Ctrl Tab / Ctrl Shift Tab".into(),
                 ),
                 ("New chat tab", format!("{m} T")),
+                ("Close the chat or agent tab in front", format!("{m} W")),
                 ("Go to the message box", format!("{m} L / Shift Escape")),
                 ("Stop the running turn", format!("{m} .")),
                 ("Show or hide the side pane", format!("{m} B")),
@@ -238,6 +239,10 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                     "Open the menu of the open session, or of the current project on the landing page",
                     "Shift F10 / Menu".into(),
                 ),
+                (
+                    "Through the tabs' close buttons, the header's pull requests, each message's Copy, the queue and the terminal's tabs",
+                    "Tab / Shift Tab".into(),
+                ),
             ],
         ),
         (
@@ -266,11 +271,15 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ("New line", "Shift Enter".into()),
                 (
                     "From the message box to the options under it, and through them",
-                    "Tab in an empty box, or Shift Tab".into(),
+                    "Tab / Shift Tab".into(),
                 ),
                 ("Open the option Tab is on", "Enter or Space".into()),
                 ("Back to the message box from its options", "Escape".into()),
-                ("Indent, in a box with text", "Tab".into()),
+                ("Indent, inside a ``` code block", "Tab".into()),
+                (
+                    "Copy a message, from the menu of the message whose Copy Tab is on",
+                    "Shift F10 / Menu".into(),
+                ),
                 ("Copy / cut / paste", format!("{m} C / {m} X / {m} V")),
                 ("Select all", format!("{m} A")),
                 ("Undo / redo", format!("{m} Z / {m} Shift Z or Ctrl Y")),
@@ -288,7 +297,7 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ("Search command history", "Ctrl R".into()),
                 ("Scroll back and forward", "Page Up / Page Down".into()),
                 (
-                    "Every other Ctrl and letter goes to the shell, so Ctrl K, L, B and T do not reach xd from here",
+                    "Every other Ctrl and letter goes to the shell, so Ctrl K, L, B, T and W do not reach xd from here",
                     "Ctrl A to Z".into(),
                 ),
                 (
