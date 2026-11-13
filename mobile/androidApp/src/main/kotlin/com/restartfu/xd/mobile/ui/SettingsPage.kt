@@ -110,6 +110,8 @@ internal fun SettingsPage(
     /** Erases this device's pairing with the host, once the reader has confirmed it. */
     onForget: () -> Unit,
     modifier: Modifier = Modifier,
+    /** The page's own coming and going, which a back gesture from its home drives. */
+    closing: PageTransition<Boolean>? = null,
 ) {
     val theme by settings.theme.collectAsStateWithLifecycle()
     val allPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
@@ -223,15 +225,19 @@ internal fun SettingsPage(
         if (tree.settlement) model.refreshAutoSettle()
     }
 
-    BackHandler {
-        when {
-            section != null -> section = null
-            query.isNotEmpty() -> query = ""
-            else -> onClose()
-        }
-    }
-
     val open = section
+    // Back leaves a section, then clears a search, then closes Settings. A
+    // back gesture shows the page it returns to as it is dragged: the
+    // Settings home from a section, the page beneath from the home.
+    val sections = rememberPageTransition(open, "settings-section")
+    if (closing != null) {
+        PredictiveBack(closing, enabled = open == null && query.isEmpty(), back = false, onBack = onClose)
+    } else {
+        BackHandler(enabled = open == null && query.isEmpty(), onBack = onClose)
+    }
+    BackHandler(enabled = open == null && query.isNotEmpty()) { query = "" }
+    PredictiveBack(sections, enabled = open != null, back = null) { section = null }
+
     // A Surface, so taps on the page never reach the workspace beneath it.
     Surface(
         modifier
@@ -255,11 +261,9 @@ internal fun SettingsPage(
         )
         // Into a section and back out along one axis, as stepping into any page.
         val still = reducedMotion()
-        AnimatedContent(
-            targetState = open,
+        sections.transition.AnimatedContent(
             modifier = Modifier.fillMaxSize(),
             transitionSpec = { pageMotion(still, sharedAxisX(forward = targetState != null)) },
-            label = "settings-section",
         ) { shown ->
         // The page scrolls across its whole width; its rows stop at the
         // reading measure and sit in the middle of a wide window.

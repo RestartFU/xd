@@ -348,7 +348,6 @@ private fun MinimalMobileWorkspace(
             scope.launch { snackbar.showSnackbar("Update the connected host to add chats inside a session.") }
         }
     }
-    BackHandler(enabled = mobileDestination != MobileDestination.PROJECTS, onBack = showProjects)
     // Which layout the window gets, from its width and its height: see [WindowLayout].
     val layout = rememberWindowLayout()
     val imeVisible = WindowInsets.isImeVisible
@@ -388,6 +387,15 @@ private fun MinimalMobileWorkspace(
         mobileDestination == MobileDestination.SESSIONS && activeSession != null -> WorkspacePage.SESSION
         else -> WorkspacePage.PROJECTS
     }
+    // Back from a session, or from a page the bar switches to, returns to
+    // Projects; held as a gesture, Projects comes in as it is dragged.
+    val pages = rememberPageTransition(page, "page")
+    PredictiveBack(
+        pages,
+        enabled = mobileDestination != MobileDestination.PROJECTS,
+        back = WorkspacePage.PROJECTS,
+        onBack = showProjects,
+    )
     // A brief word to the reader goes on the app's one snackbar, not a system toast.
     val notify: (String) -> Unit = remember(scope, snackbar) { { text -> scope.launch { snackbar.showSnackbar(text) } } }
     CompositionLocalProvider(LocalNotice provides notify) {
@@ -406,8 +414,7 @@ private fun MinimalMobileWorkspace(
         }
         Column(Modifier.weight(1f)) {
             Box(Modifier.weight(1f)) {
-                AnimatedContent(
-                    targetState = page,
+                pages.transition.AnimatedContent(
                     modifier = Modifier.fillMaxSize(),
                     // Into a session and back out along one axis; between the
                     // places the bar switches, a fade through.
@@ -421,7 +428,6 @@ private fun MinimalMobileWorkspace(
                             },
                         )
                     },
-                    label = "page",
                 ) { shown ->
                 when (shown) {
                     WorkspacePage.TERMINAL -> MinimalGlobalTerminal(
@@ -586,13 +592,15 @@ private fun MinimalMobileWorkspace(
     )
     // Over everything, rail and bars included: Settings is its own page,
     // stepped into from whichever page its button was on.
-    AnimatedVisibility(
-        visible = settingsOpen,
+    val settingsShown = rememberPageTransition(settingsOpen, "settings")
+    settingsShown.transition.AnimatedVisibility(
+        visible = { it },
         enter = if (still) EnterTransition.None else sharedAxisEnter(forward = true),
         exit = if (still) ExitTransition.None else sharedAxisExit(forward = false),
     ) {
         SettingsPage(
             model = model,
+            closing = settingsShown,
             settings = settings,
             onClose = { settingsOpen = false },
             onForget = {
