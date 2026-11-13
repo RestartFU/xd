@@ -420,7 +420,11 @@ fn replace_stale_daemon(
     let stops_with_app = info["stops_with_app"] == true;
     let stop = stop_command(options);
     let status = request(&mut stale, json!({"op": "host-update"})).unwrap_or_default();
-    if !restarts_into_this_host(info, &status) {
+    // The Windows app's daemon in WSL belongs to no installation, so it
+    // cannot re-execute. It is stopped instead, once it is idle.
+    let stops_to_be_replaced =
+        app_runtime_host(options).is_some_and(|host| daemon_runs_from(info, &host));
+    if !stops_to_be_replaced && !restarts_into_this_host(info, &status) {
         return Err(format!(
             "A different xd daemon version is running. Stop it with `{stop}` and reconnect."
         ));
@@ -433,9 +437,21 @@ fn replace_stale_daemon(
         json!({"op": "host-update", "action": "restart"}),
     )
     .map_err(|e| e.to_string())?;
-    if reply["ok"] != true {
+    // A daemon checks for live work before it finds it has nothing to restart
+    // into, so that refusal says it is idle. Any other refusal says it is not.
+    let idle_without_restart =
+        stops_to_be_replaced && reply["error"].as_str() == Some(xd_host::CANNOT_RESTART);
+    if reply["ok"] != true && !idle_without_restart {
         return Err(format!(
             "xd was updated, but the previous daemon is still running because chats, their background agents and shells, or terminals are active. It restarts by itself when they finish. To restart it now and interrupt them, run `{stop}`."
+        ));
+    }
+    if idle_without_restart
+        && request(&mut stale, json!({"op": "daemon-stop"}))
+            .map_or(true, |reply| reply["ok"] != true)
+    {
+        return Err(format!(
+            "The previous xd daemon did not stop for the update. Stop it with `{stop}` and reconnect."
         ));
     }
     drop(stale);
@@ -462,16 +478,35 @@ fn restarts_into_this_host(info: &Value, status: &Value) -> bool {
     let Some(host) = xd_host::installed_host_executable() else {
         return false;
     };
-    let same_host = match info["executable"].as_str() {
+    status["supported"] == true && daemon_runs_from(info, &host)
+}
+
+/// Whether the daemon was started from `host`, the binary running here.
+fn daemon_runs_from(info: &Value, host: &Path) -> bool {
+    match info["executable"].as_str() {
         Some(daemon) => Some(daemon) == host.to_str(),
-        // Older daemons don't report it. Their command line still names the
-        // path they were started from, even after an update replaces that file.
+        // Older daemons don't report it, and neither does one outside an
+        // installation. Their command line still names the path they were
+        // started from, even after an update replaces that file.
         None => info["pid"]
             .as_u64()
             .and_then(process_command)
             .is_some_and(|command| command.starts_with(&format!("{} daemon ", host.display()))),
-    };
-    status["supported"] == true && same_host
+    }
+}
+
+/// This binary, when it is the copy the Windows app keeps inside WSL.
+///
+/// The app replaces `runtime/v1/xd-host` in its data directory with its own
+/// matching host each time it starts, then runs the bridge from there. A
+/// daemon the previous version started from that path is still running the
+/// old file, and the app could never connect again while it lived: the daemon
+/// refused to restart, the bridge refused to talk to it, and every retry kept
+/// it from noticing that the app had gone.
+fn app_runtime_host(options: &HostOptions) -> Option<PathBuf> {
+    let executable = fs::canonicalize(std::env::current_exe().ok()?).ok()?;
+    let data = fs::canonicalize(options.database.parent()?).ok()?;
+    (executable == data.join("runtime/v1/xd-host")).then_some(executable)
 }
 #[cfg(target_os = "linux")]
 fn process_command(pid: u64) -> Option<String> {

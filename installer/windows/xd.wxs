@@ -54,7 +54,7 @@
     </Directory>
 
     <DirectoryRef Id="INSTALLFOLDER">
-      <Component Id="Application" Guid="*">
+      <Component Id="Application" Guid="$(var.ApplicationComponent)">
         <RegistryValue Root="HKCU" Key="$(var.RegistryKey)" Name="InstallFolder"
                        Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
         <RegistryValue Root="HKCU" Key="$(var.RegistryKey)" Name="Version"
@@ -79,7 +79,7 @@
 
     <!-- The Linux host xd copies into WSL and runs there. -->
     <DirectoryRef Id="LibexecFolder">
-      <Component Id="WslHost" Guid="*">
+      <Component Id="WslHost" Guid="$(var.WslHostComponent)">
         <RegistryValue Root="HKCU" Key="$(var.RegistryKey)\Components" Name="WslHost"
                        Type="integer" Value="1" KeyPath="yes" />
         <File Id="XdHostLinux" Name="xd-host-linux" Source="$(var.Payload)\libexec\xd-host-linux" />
@@ -88,7 +88,7 @@
     </DirectoryRef>
 
     <DirectoryRef Id="LicensesFolder">
-      <Component Id="Licenses" Guid="*">
+      <Component Id="Licenses" Guid="$(var.LicensesComponent)">
         <RegistryValue Root="HKCU" Key="$(var.RegistryKey)\Components" Name="Licenses"
                        Type="integer" Value="1" KeyPath="yes" />
         <File Id="LicenseAlacritty" Name="alacritty-terminal-LICENSE-APACHE"

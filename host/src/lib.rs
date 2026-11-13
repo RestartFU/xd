@@ -81,7 +81,7 @@ use repository_monitor::RepositoryMonitor;
 use runtime::{LiveTurn, TurnRuntime};
 use secrets::SecretsStore;
 use self_update::SelfUpdate;
-pub use self_update::installed_host_executable;
+pub use self_update::{CANNOT_RESTART, installed_host_executable};
 use settlement::AutoSettler;
 pub use storage::ChatToResume;
 use storage::{Continuation, SendDisposition};

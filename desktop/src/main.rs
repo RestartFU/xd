@@ -3062,7 +3062,7 @@ impl XdDesktop {
             ComposerInput::new(
                 cx,
                 if cfg!(target_os = "windows") {
-                    "Linux repository path, e.g. /home/you/project…"
+                    "Repository path in WSL or on a drive (optional)…"
                 } else {
                     "Existing repository path (optional)…"
                 },
@@ -7745,6 +7745,19 @@ impl XdDesktop {
         }
     }
 
+    /// A path typed for the host, in the form the host can open.
+    ///
+    /// The Windows app's own host runs inside WSL, where a folder is known
+    /// by its Linux path however Explorer names it. A paired host is another
+    /// machine, and is sent what was typed.
+    fn host_path(&self, typed: &str) -> String {
+        #[cfg(target_os = "windows")]
+        if self.active_endpoint == ChatEndpoint::Local {
+            return xd_desktop::wsl::linux_path(typed);
+        }
+        typed.to_owned()
+    }
+
     fn workspace_repo_changed(&mut self, text: String, cx: &mut Context<Self>) {
         if self.creating_workspace && !self.workspace_create_submitting {
             self.workspace_create_repo = text;
@@ -7849,7 +7862,7 @@ impl XdDesktop {
         }
         let repo = optional_trimmed(&self.workspace_create_repo)
             .filter(|_| project)
-            .map(str::to_owned);
+            .map(|typed| self.host_path(typed));
         let repo_url = optional_trimmed(&self.workspace_create_clone)
             .filter(|_| project)
             .map(str::to_owned);
@@ -23835,16 +23848,27 @@ fn workflow_row_indices(model: &AppModel, marker: &str) -> Vec<usize> {
         .collect()
 }
 
-#[cfg(target_os = "macos")]
-fn notify_turn_finished(title: &str, ending: &str) {
-    let body = format!(
+/// "{title} {ending}", as the single line a notification has room for.
+#[cfg(not(target_os = "linux"))]
+fn turn_finished_text(title: &str, ending: &str) -> String {
+    format!(
         "{} {ending}",
         title
             .chars()
             .filter(|character| !character.is_control())
             .take(120)
             .collect::<String>()
-    );
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn notify_turn_finished(title: &str, ending: &str) {
+    windows::notify(turn_finished_text(title, ending));
+}
+
+#[cfg(target_os = "macos")]
+fn notify_turn_finished(title: &str, ending: &str) {
+    let body = turn_finished_text(title, ending);
     if let Ok(mut child) = Command::new("/usr/bin/osascript")
         .args([
             "-e",
@@ -23867,7 +23891,7 @@ fn notify_turn_finished(title: &str, ending: &str) {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn notify_turn_finished(_: &str, _: &str) {}
 
 fn optional_trimmed(value: &str) -> Option<&str> {
@@ -33660,6 +33684,11 @@ fn main() {
                 KeyBinding::new("ctrl-c", Copy, Some("ComposerInput")),
                 KeyBinding::new("ctrl-x", Cut, Some("ComposerInput")),
                 KeyBinding::new("ctrl-v", Paste, Some("ComposerInput")),
+                // The older Windows and Linux clipboard keys, still on every
+                // keyboard and in many hands.
+                KeyBinding::new("shift-insert", Paste, Some("ComposerInput")),
+                KeyBinding::new("ctrl-insert", Copy, Some("ComposerInput")),
+                KeyBinding::new("shift-delete", Cut, Some("ComposerInput")),
                 KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
                 KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
                 KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
@@ -33700,6 +33729,9 @@ fn main() {
                 KeyBinding::new("ctrl-c", EditorCopy, Some("FileEditor")),
                 KeyBinding::new("ctrl-x", EditorCut, Some("FileEditor")),
                 KeyBinding::new("ctrl-v", EditorPaste, Some("FileEditor")),
+                KeyBinding::new("shift-insert", EditorPaste, Some("FileEditor")),
+                KeyBinding::new("ctrl-insert", EditorCopy, Some("FileEditor")),
+                KeyBinding::new("shift-delete", EditorCut, Some("FileEditor")),
                 KeyBinding::new("cmd-a", EditorSelectAll, Some("FileEditor")),
                 KeyBinding::new("cmd-c", EditorCopy, Some("FileEditor")),
                 KeyBinding::new("cmd-x", EditorCut, Some("FileEditor")),
@@ -33754,6 +33786,9 @@ fn main() {
                 KeyBinding::new("ctrl-c", EditorCopy, Some("MessageEditor")),
                 KeyBinding::new("ctrl-x", EditorCut, Some("MessageEditor")),
                 KeyBinding::new("ctrl-v", EditorPaste, Some("MessageEditor")),
+                KeyBinding::new("shift-insert", EditorPaste, Some("MessageEditor")),
+                KeyBinding::new("ctrl-insert", EditorCopy, Some("MessageEditor")),
+                KeyBinding::new("shift-delete", EditorCut, Some("MessageEditor")),
                 KeyBinding::new("cmd-a", EditorSelectAll, Some("MessageEditor")),
                 KeyBinding::new("cmd-c", EditorCopy, Some("MessageEditor")),
                 KeyBinding::new("cmd-x", EditorCut, Some("MessageEditor")),
@@ -33813,6 +33848,8 @@ fn main() {
                 KeyBinding::new("ctrl-z", TerminalSuspend, Some("TerminalInput")),
                 KeyBinding::new("ctrl-shift-c", Copy, Some("TerminalInput")),
                 KeyBinding::new("ctrl-shift-v", Paste, Some("TerminalInput")),
+                KeyBinding::new("shift-insert", Paste, Some("TerminalInput")),
+                KeyBinding::new("ctrl-insert", Copy, Some("TerminalInput")),
                 KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
             ]);
             cx.bind_keys(undo_key_bindings());

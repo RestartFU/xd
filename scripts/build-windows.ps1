@@ -5,7 +5,9 @@
 param(
     [ValidateSet('nightly', 'release')][string] $Profile = 'release',
     [Parameter(Mandatory = $true)][string] $HostPayload,
-    [string] $OutputDirectory = 'dist/windows'
+    [string] $OutputDirectory = 'dist/windows',
+    # Package this already built xd.exe instead of building one.
+    [string] $Executable
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,13 +22,18 @@ $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
 # Stable and nightly are separate products: each has its own folder, Start
 # menu entry and settings, and its own upgrade code so that installing one
 # never replaces the other. The upgrade codes must never change, or an update
-# would install beside the old version instead of over it.
+# would install beside the old version instead of over it. Nor may the
+# component identifiers: Windows Installer tracks what an update replaces by
+# them, and the two products install to different folders, so they differ too.
 $product = if ($Profile -eq 'nightly') {
     @{
         Name = 'xd-nightly'
         ProductName = 'xd Nightly'
         UpgradeCode = 'EEFC7CAA-3EAF-41D3-998B-083422A38BE3'
         AppUserModelId = 'com.restartfu.Xd.Nightly'
+        ApplicationComponent = 'B1A8DBB5-4D52-4FC1-A090-2C20E5AED343'
+        WslHostComponent = '05CDA4CB-FE97-4F32-8130-F2DBFF0D513D'
+        LicensesComponent = '51AEF5EB-7D87-4827-A358-6EBA378B000C'
     }
 } else {
     @{
@@ -34,6 +41,9 @@ $product = if ($Profile -eq 'nightly') {
         ProductName = 'xd'
         UpgradeCode = '0C3865A7-0B00-4FA9-B5A8-B11F0C62B9D6'
         AppUserModelId = 'com.restartfu.Xd'
+        ApplicationComponent = '68D7D064-7444-46DE-B49F-F440605E229C'
+        WslHostComponent = 'FB766FA8-4F95-4C01-BF4F-FAE764C84B9C'
+        LicensesComponent = 'F1AAF530-FEBC-4421-B520-0BDAA387B39B'
     }
 }
 $name = $product.Name
@@ -73,42 +83,45 @@ function Get-WixDirectory {
 }
 $wix = Get-WixDirectory
 
-if (-not $env:GPUI_FXC_PATH) {
-    $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-    $fxc = Get-ChildItem -Path "$sdkRoot/*/x64/fxc.exe" -File |
-        Sort-Object FullName -Descending | Select-Object -First 1
-    if ($null -eq $fxc) { throw 'The Windows SDK HLSL compiler (fxc.exe) is required.' }
-    $env:GPUI_FXC_PATH = $fxc.FullName
-}
-if (-not $env:CARGO_BUILD_JOBS) {
-    $env:CARGO_BUILD_JOBS = [string][Math]::Max(1, [Math]::Min(4,
-        [Math]::Floor([Environment]::ProcessorCount * 0.75)))
-}
-$env:XD_BUILD_PROFILE = $Profile
-$env:XD_COMMIT = (& git -C $repositoryRoot rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0) { throw 'Cannot determine the build commit.' }
-
-# MSVC's static CRT keeps the installed app independent of redistributable DLLs.
-$savedRustFlags = $env:RUSTFLAGS
-try {
-    if ($savedRustFlags -notmatch 'target-feature=\+crt-static') {
-        $env:RUSTFLAGS = "$savedRustFlags -C target-feature=+crt-static".Trim()
+function Build-Desktop {
+    if (-not $env:GPUI_FXC_PATH) {
+        $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+        $fxc = Get-ChildItem -Path "$sdkRoot/*/x64/fxc.exe" -File |
+            Sort-Object FullName -Descending | Select-Object -First 1
+        if ($null -eq $fxc) { throw 'The Windows SDK HLSL compiler (fxc.exe) is required.' }
+        $env:GPUI_FXC_PATH = $fxc.FullName
     }
-    & cargo build --locked --release --target x86_64-pc-windows-msvc `
-        --manifest-path (Join-Path $repositoryRoot 'desktop/Cargo.toml')
-    if ($LASTEXITCODE -ne 0) { throw 'Native Windows desktop build failed.' }
-} finally {
-    $env:RUSTFLAGS = $savedRustFlags
+    if (-not $env:CARGO_BUILD_JOBS) {
+        $env:CARGO_BUILD_JOBS = [string][Math]::Max(1, [Math]::Min(4,
+            [Math]::Floor([Environment]::ProcessorCount * 0.75)))
+    }
+    $env:XD_BUILD_PROFILE = $Profile
+    $env:XD_COMMIT = (& git -C $repositoryRoot rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot determine the build commit.' }
+
+    # MSVC's static CRT keeps the installed app independent of redistributable DLLs.
+    $savedRustFlags = $env:RUSTFLAGS
+    try {
+        if ($savedRustFlags -notmatch 'target-feature=\+crt-static') {
+            $env:RUSTFLAGS = "$savedRustFlags -C target-feature=+crt-static".Trim()
+        }
+        # To the console, so that only the path below is this function's result.
+        & cargo build --locked --release --target x86_64-pc-windows-msvc `
+            --manifest-path (Join-Path $repositoryRoot 'desktop/Cargo.toml') | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'Native Windows desktop build failed.' }
+    } finally {
+        $env:RUSTFLAGS = $savedRustFlags
+    }
+    return Join-Path $repositoryRoot 'desktop/target/x86_64-pc-windows-msvc/release/xd-desktop.exe'
 }
+$built = if ($Executable) { (Resolve-Path -LiteralPath $Executable).Path } else { Build-Desktop }
 
 # Exactly what the installer puts on disk.
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
 if (Test-Path -LiteralPath $payload) { Remove-Item -LiteralPath $payload -Recurse -Force }
 New-Item -ItemType Directory -Path $payload, (Join-Path $payload 'libexec'), `
     (Join-Path $payload 'licenses') | Out-Null
-Copy-Item -LiteralPath (Join-Path $repositoryRoot `
-    'desktop/target/x86_64-pc-windows-msvc/release/xd-desktop.exe') `
-    -Destination (Join-Path $payload 'xd.exe')
+Copy-Item -LiteralPath $built -Destination (Join-Path $payload 'xd.exe')
 Copy-Item -LiteralPath $hostPath -Destination (Join-Path $payload 'libexec/xd-host-linux')
 Copy-Item -LiteralPath (Join-Path $repositoryRoot `
     'data/licenses/alacritty-terminal-LICENSE-APACHE') `
@@ -140,6 +153,9 @@ $object = Join-Path $work 'xd.wixobj'
     "-dInstallFolder=$name" `
     "-dRegistryKey=Software\RestartFU\$name" `
     "-dAppUserModelId=$($product.AppUserModelId)" `
+    "-dApplicationComponent=$($product.ApplicationComponent)" `
+    "-dWslHostComponent=$($product.WslHostComponent)" `
+    "-dLicensesComponent=$($product.LicensesComponent)" `
     "-dPayload=$payload" `
     "-dIcon=$(Join-Path $repositoryRoot 'installer/windows/xd.ico')" `
     -out $object (Join-Path $repositoryRoot 'installer/windows/xd.wxs')

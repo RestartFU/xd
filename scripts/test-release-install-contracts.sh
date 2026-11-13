@@ -183,6 +183,38 @@ assert_contains .github/workflows/nightly.yml 'gh release edit "$candidate"'
 assert_contains .github/workflows/nightly.yml 'rollback_nightly'
 assert_contains .github/workflows/nightly.yml 'git/refs/tags/nightly'
 
+# Windows ships as an installer, never as an archive to unpack.
+assert_contains .github/workflows/release.yml 'xd-windows-x86_64.msi.sha256'
+assert_contains .github/workflows/nightly.yml 'xd-nightly-windows-x86_64.msi.sha256'
+assert_not_contains .github/workflows/nightly.yml 'windows-x86_64.zip'
+assert_contains .github/workflows/windows.yml 'dist/windows/*-windows-x86_64.msi'
+assert_not_contains .github/workflows/windows.yml 'windows-x86_64.zip'
+assert_not_contains README.md 'xd-windows-x86_64.zip'
+# An installer with a different upgrade code installs beside the version it
+# should replace, so these two are fixed for good.
+assert_contains scripts/build-windows.ps1 "UpgradeCode = '0C3865A7-0B00-4FA9-B5A8-B11F0C62B9D6'"
+assert_contains scripts/build-windows.ps1 "UpgradeCode = 'EEFC7CAA-3EAF-41D3-998B-083422A38BE3'"
+for component in \
+    68D7D064-7444-46DE-B49F-F440605E229C FB766FA8-4F95-4C01-BF4F-FAE764C84B9C \
+    F1AAF530-FEBC-4421-B520-0BDAA387B39B B1A8DBB5-4D52-4FC1-A090-2C20E5AED343 \
+    05CDA4CB-FE97-4F32-8130-F2DBFF0D513D 51AEF5EB-7D87-4827-A358-6EBA378B000C; do
+  assert_contains scripts/build-windows.ps1 "Component = '$component'"
+done
+# Nightly builds keep their release's version, and must still replace it.
+assert_contains installer/windows/xd.wxs 'AllowSameVersionUpgrades="yes"'
+# No administrator prompt, and a folder the app may replace itself in.
+assert_contains installer/windows/xd.wxs 'InstallScope="perUser"'
+assert_not_contains installer/windows/xd.wxs 'ProgramFiles'
+# The shortcut and the running window share one taskbar identity per channel.
+assert_contains installer/windows/xd.wxs 'System.AppUserModel.ID'
+for identity in com.restartfu.Xd com.restartfu.Xd.Nightly; do
+  assert_contains scripts/build-windows.ps1 "AppUserModelId = '$identity'"
+  assert_contains desktop/src/channel.rs "\"$identity\""
+done
+# The installer is installed, driven and removed before it is published.
+assert_contains .github/workflows/windows.yml 'scripts/smoke-windows.ps1'
+assert_contains .github/workflows/windows.yml 'scripts/test-windows-ui.ps1'
+
 assert_contains .github/workflows/release.yml $'permissions:\n  contents: read'
 assert_contains .github/workflows/nightly.yml $'permissions:\n  contents: read'
 assert_contains .github/workflows/release.yml 'persist-credentials: false'

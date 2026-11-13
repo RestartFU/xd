@@ -31,6 +31,49 @@ payload=$(wslpath -u "$1")
 exec "$payload" --version
 "#;
 
+/// A path as Linux inside WSL names it, from however Windows shows it.
+///
+/// Projects live in WSL, and what someone has to hand is usually how Explorer
+/// names the folder: `\\wsl.localhost\Ubuntu\home\me\project` for one
+/// inside the distribution, `C:\Users\me\project` for one on a Windows
+/// drive, either in the quotes "Copy as path" adds. The host knows neither
+/// form, and said only that the directory did not exist. A Linux path, and
+/// anything else, is passed on as typed.
+pub fn linux_path(typed: &str) -> String {
+    let trimmed = typed.trim();
+    let path = trimmed
+        .strip_prefix('"')
+        .and_then(|path| path.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    let slashed = path.replace('\\', "/");
+
+    // \\wsl.localhost\<distribution>\... and its older name, \\wsl$\...
+    for share in ["//wsl.localhost/", "//wsl$/"] {
+        // `get`, because the cut may fall inside a character of some other path.
+        if let Some(head) = slashed.get(..share.len())
+            && head.eq_ignore_ascii_case(share)
+        {
+            let inside = slashed[share.len()..]
+                .split_once('/')
+                .map_or("", |(_distribution, inside)| inside);
+            return format!("/{}", inside.trim_end_matches('/'));
+        }
+    }
+
+    // X:\... is mounted at /mnt/x.
+    let mut characters = slashed.chars();
+    if let (Some(drive), Some(':')) = (characters.next(), characters.next())
+        && drive.is_ascii_alphabetic()
+    {
+        let rest = characters.as_str();
+        if rest.is_empty() || rest.starts_with('/') {
+            let rest = rest.trim_end_matches('/');
+            return format!("/mnt/{}{rest}", drive.to_ascii_lowercase());
+        }
+    }
+    typed.to_owned()
+}
+
 pub(crate) fn executable() -> PathBuf {
     PathBuf::from("wsl.exe")
 }
@@ -118,6 +161,55 @@ pub(crate) fn version_command(path: &std::path::Path) -> std::process::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_names_for_a_folder_become_the_path_linux_knows_it_by() {
+        for (typed, linux) in [
+            // Inside the distribution, as Explorer's address bar shows it.
+            (
+                r"\\wsl.localhost\Ubuntu\home\me\project",
+                "/home/me/project",
+            ),
+            (r"\\wsl$\Ubuntu-24.04\home\me\project\", "/home/me/project"),
+            (r"\\WSL.LOCALHOST\Ubuntu\srv", "/srv"),
+            ("//wsl.localhost/Ubuntu/home/me", "/home/me"),
+            (r"\\wsl.localhost\Ubuntu", "/"),
+            (r"\\wsl.localhost\Ubuntu\", "/"),
+            // On a Windows drive, which WSL mounts under /mnt.
+            (r"C:\Users\me\project", "/mnt/c/Users/me/project"),
+            ("d:/work/site/", "/mnt/d/work/site"),
+            (r"C:\", "/mnt/c"),
+            ("C:", "/mnt/c"),
+            // What "Copy as path" puts on the clipboard.
+            (
+                r#""C:\Users\A Person\my project""#,
+                "/mnt/c/Users/A Person/my project",
+            ),
+            (r"  C:\Users\me  ", "/mnt/c/Users/me"),
+        ] {
+            assert_eq!(linux_path(typed), linux, "{typed}");
+        }
+    }
+
+    #[test]
+    fn paths_linux_already_knows_are_left_as_typed() {
+        for typed in [
+            "/home/me/project",
+            "~/project",
+            "project",
+            "",
+            // Not a drive: a relative name that happens to hold a colon.
+            "c:project",
+            "notes:2024/plan",
+            // Any script is a name; none of it is cut mid-character.
+            "проекты/мой-проект",
+            "/home/me/プロジェクト/サイト",
+            // Another machine's share is not this distribution.
+            r"\\server\share\project",
+        ] {
+            assert_eq!(linux_path(typed), typed, "{typed}");
+        }
+    }
 
     #[test]
     fn wsl_arguments_keep_paths_and_shell_metacharacters_in_separate_parameters() {

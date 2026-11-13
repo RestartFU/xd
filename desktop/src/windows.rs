@@ -95,6 +95,27 @@ fn crash_dialog_text(report: &Path) -> String {
     )
 }
 
+/// The toast Windows shows for `text`: one line, under the app's own name
+/// and icon, which Windows takes from the Start menu shortcut.
+fn toast_xml(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            // XML has no way to write most control characters at all.
+            character if character.is_control() => escaped.push(' '),
+            character => escaped.push(character),
+        }
+    }
+    format!(
+        r#"<toast><visual><binding template="ToastGeneric"><text>{escaped}</text></binding></visual></toast>"#
+    )
+}
+
 #[cfg(target_os = "windows")]
 pub use native::*;
 
@@ -141,7 +162,7 @@ mod native {
         core::{BOOL, HSTRING, PCWSTR, PWSTR},
     };
 
-    use super::{crash_dialog_text, instance_name, state_directory};
+    use super::{crash_dialog_text, instance_name, state_directory, toast_xml};
     use crate::recovery;
 
     /// The flag a crashing xd starts a second xd with, to say so.
@@ -199,6 +220,31 @@ mod native {
                 REGISTER_APPLICATION_RESTART_FLAGS(NO_CRASH | NO_HANG),
             )
         };
+    }
+
+    /// Show a Windows notification. Clicking it opens xd, which brings the
+    /// running window forward.
+    pub fn notify(text: String) {
+        use windows::{
+            Data::Xml::Dom::XmlDocument,
+            UI::Notifications::{ToastNotification, ToastNotificationManager},
+        };
+
+        // Off the UI thread: the first notification starts a system service.
+        let _ = std::thread::Builder::new()
+            .name("xd-notification".into())
+            .spawn(move || {
+                let show = || -> windows::core::Result<()> {
+                    let document = XmlDocument::new()?;
+                    document.LoadXml(&wide(&toast_xml(&text)))?;
+                    let toast = ToastNotification::CreateToastNotification(&document)?;
+                    // The identity the window and its shortcut share.
+                    let identity = wide(&xd_desktop::channel::app_id());
+                    ToastNotificationManager::CreateToastNotifierWithId(&identity)?.Show(&toast)
+                };
+                // A notification that cannot be shown is not worth an error.
+                let _ = show();
+            });
     }
 
     /// Held for as long as this is the running xd.
@@ -444,6 +490,19 @@ mod tests {
             instance_name(r"team\xd dev"),
             r"Local\xd-desktop-team_xd_dev"
         );
+    }
+
+    #[test]
+    fn a_notification_shows_a_chat_title_as_text_whatever_it_contains() {
+        assert_eq!(
+            toast_xml("Fix the login finished"),
+            r#"<toast><visual><binding template="ToastGeneric"><text>Fix the login finished</text></binding></visual></toast>"#
+        );
+        // A title is whatever the user or a model wrote.
+        let xml = toast_xml("</text><actions> \"a\" & 'b'\n\u{1} finished");
+        assert!(xml.contains(
+            "<text>&lt;/text&gt;&lt;actions&gt; &quot;a&quot; &amp; &apos;b&apos;   finished</text>"
+        ));
     }
 
     #[test]

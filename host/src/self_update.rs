@@ -218,7 +218,7 @@ impl SelfUpdate {
             .inner
             .install
             .clone()
-            .ok_or_else(|| "This host's installation cannot restart itself.".to_owned())?;
+            .ok_or_else(|| CANNOT_RESTART.to_owned())?;
 
         let arguments = env::args_os().skip(1).collect::<Vec<_>>();
         self.publish();
@@ -532,6 +532,12 @@ fn installer_command(installer: &Path, channel: UpdateChannel, _mode: InstallerM
     }
     command
 }
+
+/// What a daemon outside an installation answers when asked to restart.
+///
+/// A bridge replacing the Windows app's daemon in WSL recognises daemons of
+/// earlier versions by this exact text, so it must not change.
+pub const CANNOT_RESTART: &str = "This host's installation cannot restart itself.";
 
 /// The installed host binary this process belongs to, if it is a bundle.
 pub fn installed_host_executable() -> Option<PathBuf> {
