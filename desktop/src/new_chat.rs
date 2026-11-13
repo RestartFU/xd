@@ -456,6 +456,17 @@ impl XdDesktop {
                 }
                 if self.chat_create_sources_loading {
                     rows.push(menu_note("Loading branches…", colors).into_any_element());
+                } else if let Some(error) = &self.chat_create_sources_error {
+                    // Why the branches and pull requests are missing.
+                    rows.push(
+                        menu_note(
+                            format!("Branches and pull requests did not load. {error}"),
+                            colors,
+                        )
+                        .debug_selector(|| "draft-sources-error".into())
+                        .text_color(rgb(colors.danger))
+                        .into_any_element(),
+                    );
                 }
             }
             _ => {}

@@ -236,6 +236,8 @@ const SESSION_NEST_INDENT: f32 = 10.0;
 /// removed message: long enough to notice what went and come back for it
 /// with the keyboard, and the next of those replaces it sooner.
 const UNDO_LIFETIME: Duration = Duration::from_secs(30);
+/// How long the sidebar's footer says a clone finished.
+const CLONE_NOTICE_LIFETIME: Duration = Duration::from_secs(8);
 /// Rows of the Settled shelf shown at first, and how many Show more adds.
 const SETTLED_INITIAL_ROWS: usize = 10;
 const SETTLED_MORE_ROWS: usize = 25;
@@ -2749,6 +2751,14 @@ struct AuthProvider {
 struct CliVersion {
     provider: String,
     state: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    latest: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -4271,7 +4281,6 @@ struct XdDesktop {
     #[cfg(target_os = "linux")]
     turn_notifier: notifications::Notifier<TurnNotificationTarget>,
     settings: AppSettings,
-    settings_open: bool,
     /// Why the last change to an account failed.
     account_error: Option<String>,
     /// The added account whose removal waits for a second press.
@@ -4428,9 +4437,6 @@ struct XdDesktop {
     quota_stops_announced: HashSet<String>,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
-    sidebar_move: Option<SidebarTarget>,
-    sidebar_move_submitting: bool,
-    sidebar_move_destination: Option<Option<String>>,
     collapsed_folders: HashSet<String>,
     /// Sessions the user unfolded to show the sessions their agents started,
     /// by session key. Every other such session lists folded.
@@ -5195,7 +5201,6 @@ impl XdDesktop {
             #[cfg(target_os = "linux")]
             turn_notifier,
             settings,
-            settings_open: false,
             account_error: None,
             account_remove_confirm: None,
             secrets_panel: None,
@@ -5306,9 +5311,6 @@ impl XdDesktop {
             quota_stops_announced: HashSet::new(),
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
-            sidebar_move: None,
-            sidebar_move_submitting: false,
-            sidebar_move_destination: None,
             collapsed_folders,
             expanded_sessions,
             catalog_find_input,
@@ -5826,7 +5828,6 @@ impl XdDesktop {
         self.sidebar_edit = None;
         self.sidebar_context_menu = None;
         self.pending_sidebar_delete = None;
-        self.sidebar_move = None;
         self.creating_workspace = false;
         self.project_add_menu = None;
         self.creating_chat_folder = None;
@@ -6218,7 +6219,7 @@ impl XdDesktop {
                     }
                 } else {
                     if name == "folder-clone" {
-                        self.handle_folder_clone_event(ChatEndpoint::Remote, &body);
+                        self.handle_folder_clone_event(ChatEndpoint::Remote, &body, cx);
                     } else {
                         if Self::is_terminal_screen_event(&name) {
                             self.handle_terminal_screen_event(
@@ -6452,7 +6453,7 @@ impl XdDesktop {
                         self.handle_event(&name, body, attachments, cx);
                     } else {
                         if name == "folder-clone" {
-                            self.handle_folder_clone_event(ChatEndpoint::Local, &body);
+                            self.handle_folder_clone_event(ChatEndpoint::Local, &body, cx);
                         } else {
                             if Self::is_terminal_screen_event(&name) {
                                 self.handle_terminal_screen_event(
@@ -7160,14 +7161,7 @@ impl XdDesktop {
                     }
                     self.request_tree();
                 }
-                RequestKind::MoveFolder { folder_id, .. } => {
-                    if self.sidebar_move.as_ref() == Some(&SidebarTarget::Folder(folder_id.clone()))
-                    {
-                        self.sidebar_move_submitting = false;
-                        self.sidebar_move_destination = None;
-                    }
-                    self.request_tree();
-                }
+                RequestKind::MoveFolder { .. } => self.request_tree(),
                 RequestKind::RenameSession { session_id, .. } => {
                     if let Some(edit) = &mut self.sidebar_edit
                         && edit.target == SidebarTarget::Session(session_id.clone())
@@ -7176,10 +7170,7 @@ impl XdDesktop {
                     }
                     self.request_tree();
                 }
-                RequestKind::MoveSession { .. } => {
-                    self.sidebar_move_submitting = false;
-                    self.request_tree();
-                }
+                RequestKind::MoveSession { .. } => self.request_tree(),
                 RequestKind::DeleteSession { .. } => {
                     self.sidebar_delete_submitting = false;
                     self.request_tree();
@@ -7192,13 +7183,7 @@ impl XdDesktop {
                     }
                     self.request_tree();
                 }
-                RequestKind::MoveChat { chat_id, .. } => {
-                    if self.sidebar_move.as_ref() == Some(&SidebarTarget::Chat(chat_id.clone())) {
-                        self.sidebar_move_submitting = false;
-                        self.sidebar_move_destination = None;
-                    }
-                    self.request_tree();
-                }
+                RequestKind::MoveChat { .. } => self.request_tree(),
                 RequestKind::TrashFolder { folder_id } => {
                     if self.pending_sidebar_delete.as_ref()
                         == Some(&SidebarTarget::Folder(folder_id.clone()))
@@ -7274,27 +7259,6 @@ impl XdDesktop {
                 {
                     self.pending_sidebar_delete = None;
                     self.sidebar_delete_submitting = false;
-                }
-                if self
-                    .sidebar_move
-                    .as_ref()
-                    .zip(self.sidebar_move_destination.as_ref())
-                    .is_some_and(|(target, destination)| {
-                        sidebar_move_applied(&self.model, target, destination.as_deref())
-                    })
-                {
-                    self.sidebar_move = None;
-                    self.sidebar_move_submitting = false;
-                    self.sidebar_move_destination = None;
-                }
-                if self
-                    .sidebar_move
-                    .as_ref()
-                    .is_some_and(|target| !self.sidebar_target_exists(target))
-                {
-                    self.sidebar_move = None;
-                    self.sidebar_move_submitting = false;
-                    self.sidebar_move_destination = None;
                 }
                 self.collapsed_folders.retain(|folder_id| {
                     self.model
@@ -8521,7 +8485,7 @@ impl XdDesktop {
             match self.workspace_clone_outcomes.remove(&key) {
                 Some(None) => {
                     if endpoint == self.active_endpoint {
-                        self.workspace_clone_status = Some("Repository cloned".into());
+                        self.note_clone_finished(cx);
                     }
                 }
                 Some(Some(error)) => {
@@ -8540,7 +8504,29 @@ impl XdDesktop {
         true
     }
 
-    fn handle_folder_clone_event(&mut self, endpoint: ChatEndpoint, body: &Value) {
+    /// Says in the sidebar's footer that a clone finished, for a while.
+    fn note_clone_finished(&mut self, cx: &mut Context<Self>) {
+        const CLONED: &str = "Repository cloned";
+        self.workspace_clone_status = Some(CLONED.into());
+        let shown = cx.background_executor().timer(CLONE_NOTICE_LIFETIME);
+        cx.spawn(async move |this, cx| {
+            shown.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.workspace_clone_status.as_deref() == Some(CLONED) {
+                    this.workspace_clone_status = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn handle_folder_clone_event(
+        &mut self,
+        endpoint: ChatEndpoint,
+        body: &Value,
+        cx: &mut Context<Self>,
+    ) {
         let folder_id = body.get("folder").and_then(Value::as_str);
         let key = folder_id.map(|folder_id| (endpoint, folder_id.to_owned()));
         let event_url = body.get("url").and_then(Value::as_str);
@@ -8556,7 +8542,7 @@ impl XdDesktop {
             }
             Some("ready") => {
                 if endpoint == self.active_endpoint {
-                    self.workspace_clone_status = Some("Repository cloned".into());
+                    self.note_clone_finished(cx);
                 }
                 if preserve_outcome && let Some(key) = &key {
                     self.workspace_clone_outcomes.insert(key.clone(), None);
@@ -9044,7 +9030,7 @@ impl XdDesktop {
                 }
             }
             "shortcuts-changed" => self.request_shortcuts(),
-            "folder-clone" => self.handle_folder_clone_event(self.active_endpoint, &body),
+            "folder-clone" => self.handle_folder_clone_event(self.active_endpoint, &body, cx),
             "agent-auth-changed" => self.apply_auth_provider(&body),
             "agent-cli-changed" => self.apply_cli_version(&body),
             "host-update" => self.apply_self_update(&body),
@@ -9103,6 +9089,24 @@ impl XdDesktop {
             self.account_remove_confirm = None;
         }
         self.sync_active_auth_state();
+    }
+
+    /// Asks the host which versions of the assistants' command-line tools it
+    /// runs, for Settings › Updates.
+    fn request_cli_versions(&mut self) {
+        let Some(host) = self.active_host().cloned() else {
+            return;
+        };
+        match host.agent_clis() {
+            Ok(()) => {
+                self.cli_versions_loading = true;
+                self.cli_versions_error = None;
+            }
+            Err(error) => {
+                self.cli_versions_loading = false;
+                self.cli_versions_error = Some(error);
+            }
+        }
     }
 
     fn apply_cli_versions(&mut self, value: &Value) {
@@ -10356,7 +10360,6 @@ impl XdDesktop {
     }
 
     fn open_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_open = false;
         self.remote_panel = Some(RemotePanel {
             error: self.remote_error.clone(),
             ..Default::default()
@@ -12392,9 +12395,6 @@ impl XdDesktop {
         self.sidebar_context_menu = None;
         self.pending_sidebar_delete = None;
         self.sidebar_delete_submitting = false;
-        self.sidebar_move = None;
-        self.sidebar_move_submitting = false;
-        self.sidebar_move_destination = None;
         self.sidebar_edit = Some(SidebarEdit {
             target,
             original: current.clone(),
@@ -12416,9 +12416,6 @@ impl XdDesktop {
     ) {
         self.sidebar_context_menu = None;
         self.sidebar_edit = None;
-        self.sidebar_move = None;
-        self.sidebar_move_submitting = false;
-        self.sidebar_move_destination = None;
         self.pending_sidebar_delete = Some(target);
         self.sidebar_delete_submitting = false;
         self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
@@ -15421,6 +15418,7 @@ impl XdDesktop {
             self.request_auto_settle_settings();
             self.request_auto_delete_settings();
             self.request_chat_quota_settings();
+            self.request_cli_versions();
             self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         } else {
             self.clear_settings_search(cx);
@@ -18631,6 +18629,19 @@ impl XdDesktop {
                             // here, so the ring around Undo shows whole.
                             .text_size(px(TEXT_CAPTION))
                             .text_color(rgb(colors.faint))
+                            // A clone started from New project, while
+                            // nothing waits to be undone.
+                            .when_some(
+                                self.workspace_clone_status
+                                    .clone()
+                                    .filter(|_| settle_notice.is_none()),
+                                |notice, status| {
+                                    notice.child(
+                                        truncating_label(status)
+                                            .debug_selector(|| "catalog-clone-status".into()),
+                                    )
+                                },
+                            )
                             .when_some(settle_notice, |notice, summary| {
                                 // Undo keeps its room; the words give way.
                                 notice.child(truncating_label(summary)).child(
@@ -27167,33 +27178,6 @@ fn sidebar_edit_applied(model: &AppModel, edit: &SidebarEdit) -> bool {
     authoritative == Some(edit.text.trim())
 }
 
-fn sidebar_move_applied(
-    model: &AppModel,
-    target: &SidebarTarget,
-    destination: Option<&str>,
-) -> bool {
-    match target {
-        SidebarTarget::Folder(folder_id) => model
-            .folders
-            .iter()
-            .find(|folder| &folder.id == folder_id)
-            .is_some_and(|folder| folder.parent.as_deref() == destination),
-        SidebarTarget::Session(session_id) => destination.is_some_and(|destination| {
-            model
-                .sessions
-                .iter()
-                .any(|session| &session.id == session_id && session.folder == destination)
-        }),
-        SidebarTarget::Chat(chat_id) => destination.is_some_and(|destination| {
-            model
-                .chats
-                .iter()
-                .find(|chat| &chat.id == chat_id)
-                .is_some_and(|chat| chat.folder == destination)
-        }),
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ChatReorder {
     chat_id: String,
@@ -33284,6 +33268,58 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         desktop.read_with(cx, |desktop, _| {
             assert!(desktop.move_destinations("workspace").is_none());
         });
+    }
+
+    #[gpui::test]
+    fn what_was_only_stored_is_now_said(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        // A clone started from New project says how it goes in the footer,
+        // and that it finished, for a while.
+        desktop.update(cx, |desktop, cx| {
+            desktop.workspace_clone_status = Some("Cloning repository…".into());
+            cx.notify();
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("catalog-clone-status").is_some());
+        desktop.update(cx, |desktop, cx| desktop.note_clone_finished(cx));
+        cx.executor().advance_clock(CLONE_NOTICE_LIFETIME);
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.workspace_clone_status, None);
+        });
+
+        // The branch picker says why it lists no branches.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.begin_chat_create("atlas".into(), window, cx);
+            desktop.chat_create_sources_loading = false;
+            desktop.chat_create_sources_error = Some("git is not installed.".into());
+            desktop.new_chat_menu = Some("branch");
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("draft-sources-error").is_some());
+
+        // Settings › Updates says which assistant versions the host runs,
+        // or why it cannot.
+        let rows = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| {
+                desktop
+                    .assistant_version_rows(desktop.settings.theme.colors())
+                    .into_iter()
+                    .map(|row| row.description.to_string())
+                    .collect::<Vec<_>>()
+            })
+        };
+        desktop.update(cx, |desktop, _| {
+            desktop.cli_versions_error = Some("Assistant versions disconnected.".into());
+        });
+        assert!(rows(&desktop, cx)[0].contains("Assistant versions disconnected."));
+        desktop.update(cx, |desktop, _| {
+            desktop.apply_cli_versions(&serde_json::json!({"providers":[
+                {"provider":"claude","display_name":"Claude Code","state":"idle",
+                 "version":"2.1.0","latest":"2.2.0"}
+            ]}));
+        });
+        assert_eq!(rows(&desktop, cx), ["2.1.0. 2.2.0 is available."]);
     }
 
     #[gpui::test]

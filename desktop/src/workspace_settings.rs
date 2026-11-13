@@ -1242,6 +1242,69 @@ impl XdDesktop {
         )
     }
 
+    /// The version of each assistant's command-line tool the host runs, or
+    /// why there is none to show.
+    pub(super) fn assistant_version_rows(&self, colors: ThemeColors) -> Vec<SettingRow> {
+        let row = |id: String, title: String, description: String| SettingRow {
+            title: title.clone().into(),
+            description: description.clone().into(),
+            element: settings_row(SharedString::from(id), title, description, colors)
+                .into_any_element(),
+        };
+        if self.cli_versions.is_empty() {
+            let description = match (&self.cli_versions_error, self.cli_versions_loading) {
+                (Some(error), _) => format!("Could not read the versions. {error}"),
+                (None, true) => "Checking the assistants' versions…".to_owned(),
+                (None, false) => "The host has not said which versions it runs.".to_owned(),
+            };
+            return vec![row(
+                "workspace-settings-cli-versions".into(),
+                "Assistant versions".into(),
+                description,
+            )];
+        }
+        let mut rows = self
+            .cli_versions
+            .iter()
+            .map(|cli| {
+                let name = if cli.display_name.is_empty() {
+                    cli.provider.clone()
+                } else {
+                    cli.display_name.clone()
+                };
+                let version = cli.version.as_deref().unwrap_or("not installed");
+                let description = match cli.state.as_str() {
+                    "checking" => format!("{version}. Checking for an update…"),
+                    "updating" => format!("{version}. Updating…"),
+                    "updated" => format!("Updated to {version}."),
+                    "failed" => format!(
+                        "{version}. The update failed: {}",
+                        cli.detail.as_deref().unwrap_or("no reason given")
+                    ),
+                    _ => match &cli.latest {
+                        Some(latest) if cli.version.as_deref() != Some(latest) => {
+                            format!("{version}. {latest} is available.")
+                        }
+                        _ => format!("{version}. Up to date."),
+                    },
+                };
+                row(
+                    format!("workspace-settings-cli-{}", cli.provider),
+                    name,
+                    description,
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(error) = &self.cli_versions_error {
+            rows.push(row(
+                "workspace-settings-cli-versions".into(),
+                "Assistant versions".into(),
+                format!("Could not refresh the versions. {error}"),
+            ));
+        }
+        rows
+    }
+
     /// The update status of xd itself, with what can be done about it.
     fn update_row(&self, colors: ThemeColors, cx: &mut Context<Self>) -> SettingRow {
         let keys = self.key_targets.clone();
@@ -1662,6 +1725,7 @@ impl XdDesktop {
                 .collect(),
             _ => vec![
                 group("xd", vec![self.update_row(colors, cx)]),
+                group("Assistants", self.assistant_version_rows(colors)),
                 group("Development", vec![self.source_build_row(colors, cx)]),
             ],
         }
