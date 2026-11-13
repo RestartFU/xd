@@ -90,9 +90,10 @@ fn state_directory() -> PathBuf {
         .join(xd_desktop::channel::data_name())
 }
 
-/// The name Windows knows this build's one running instance by. Stable and
-/// nightly keep separate data, so each may run beside the other.
-fn instance_name(data_name: &str) -> String {
+/// What tells this build's one running instance from every other program:
+/// the name of the mark on its window. Stable and nightly keep separate data,
+/// so each may run beside the other.
+fn instance_key(data_name: &str) -> String {
     let name = data_name
         .chars()
         .map(|character| {
@@ -103,10 +104,19 @@ fn instance_name(data_name: &str) -> String {
             }
         })
         .collect::<String>();
-    // `Local\` keeps the name to this sign-in session; a kernel object's name
-    // may hold no other backslash.
-    format!(r"Local\xd-desktop-{name}")
+    format!("xd-desktop-{name}")
 }
+
+/// The name Windows knows the running instance by.
+fn instance_name(data_name: &str) -> String {
+    // `Local\` keeps the name to this sign-in session; a kernel object's name
+    // may hold no other backslash, and the key has none.
+    format!(r"Local\{}", instance_key(data_name))
+}
+
+/// What a second launch says when the first never showed a window to bring
+/// forward. Starting beside it would share its settings and browser profile.
+const ALREADY_RUNNING: &str = "xd is already running, but its window has not appeared.\n\nWait a moment and open xd again. If that does not help, end xd in Task Manager first.";
 
 /// What the crash dialog says. It runs in a process of its own, so it knows
 /// only the path it was started with.
@@ -165,10 +175,7 @@ mod native {
                 Com::CoTaskMemFree,
                 Console::{ATTACH_PARENT_PROCESS, AttachConsole},
                 Recovery::{REGISTER_APPLICATION_RESTART_FLAGS, RegisterApplicationRestart},
-                Threading::{
-                    CreateMutexW, GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32,
-                    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-                },
+                Threading::{CreateMutexW, GetCurrentProcessId},
             },
             UI::{
                 HiDpi::GetSystemMetricsForDpi,
@@ -177,18 +184,18 @@ mod native {
                     SetCurrentProcessExplicitAppUserModelID, SetWindowSubclass,
                 },
                 WindowsAndMessaging::{
-                    ENDSESSION_CLOSEAPP, EnumWindows, GetWindowThreadProcessId, IDYES, IsIconic,
-                    IsWindowVisible, MB_ICONERROR, MB_SETFOREGROUND, MB_YESNO, MessageBoxW,
-                    PostMessageW, PostQuitMessage, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SW_RESTORE,
-                    SetForegroundWindow, ShowWindow, WM_CLOSE, WM_ENDSESSION, WM_NCDESTROY,
-                    WM_QUERYENDSESSION,
+                    ENDSESSION_CLOSEAPP, EnumWindows, GetPropW, GetWindowThreadProcessId, IDYES,
+                    IsIconic, IsWindowVisible, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
+                    MB_SETFOREGROUND, MB_YESNO, MessageBoxW, PostMessageW, PostQuitMessage,
+                    SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SW_RESTORE, SetForegroundWindow, SetPropW,
+                    ShowWindow, WM_CLOSE, WM_ENDSESSION, WM_NCDESTROY, WM_QUERYENDSESSION,
                 },
             },
         },
-        core::{BOOL, HSTRING, PCWSTR, PWSTR},
+        core::{BOOL, HSTRING, PCWSTR},
     };
 
-    use super::{crash_dialog_text, instance_name, state_directory, toast_xml};
+    use super::{crash_dialog_text, instance_key, instance_name, state_directory, toast_xml};
     use crate::recovery;
 
     /// The flag a crashing xd starts a second xd with, to say so.
@@ -302,19 +309,21 @@ mod native {
     }
 
     impl SingleInstance {
-        /// Claim to be the running xd. `None` when another already is: its
-        /// window has been brought forward, and this process should exit.
+        /// Claim to be the running xd. `None` when another already is, and
+        /// this process should exit: the other's window has been brought
+        /// forward, or it has none yet and the user has been told.
         ///
         /// Two would share one settings file and one browser profile, and a
         /// second click on the Start menu is asking for the window, not for
         /// another copy.
         pub fn acquire() -> Option<Self> {
-            let name = wide(&instance_name(
-                &xd_desktop::channel::data_name().to_string_lossy(),
-            ));
+            let data_name = xd_desktop::channel::data_name();
+            let data_name = data_name.to_string_lossy();
+            let name = wide(&instance_name(&data_name));
+            let key = wide(&instance_key(&data_name));
             // Another xd without a window is starting, or on its way out
             // after being closed. Give it a few seconds to do either.
-            for _ in 0..30 {
+            for _ in 0..50 {
                 let handle = unsafe { CreateMutexW(None, false, &name) };
                 // Read at once: it is only meaningful straight after the call.
                 let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
@@ -325,51 +334,36 @@ mod native {
                 if !exists {
                     return Some(Self(handle));
                 }
-                if show_running_instance() {
-                    let _ = unsafe { CloseHandle(handle) };
-                    return None;
-                }
                 // Let go before looking again: holding the name open would
                 // make the next try find it even after the other xd has gone.
                 let _ = unsafe { CloseHandle(handle) };
+                if show_running_instance(&key) {
+                    return None;
+                }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            // It never showed a window and never left: stuck. Opening a
-            // second xd is better than opening nothing.
-            unsafe { CreateMutexW(None, false, &name) }
-                .ok()
-                .map(Self)
-                .or(Some(Self(HANDLE::default())))
+            // Still there and still without a window. It is not this
+            // process's to judge that it is safe to run beside it.
+            unsafe {
+                MessageBoxW(
+                    None,
+                    &wide(super::ALREADY_RUNNING),
+                    &wide("xd"),
+                    MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+                );
+            }
+            None
         }
-    }
-
-    fn executable_of(process: u32) -> Option<PathBuf> {
-        use std::os::windows::ffi::OsStringExt;
-
-        let handle =
-            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process) }.ok()?;
-        let mut buffer = [0u16; 1024];
-        let mut length = buffer.len() as u32;
-        let named = unsafe {
-            QueryFullProcessImageNameW(
-                handle,
-                PROCESS_NAME_WIN32,
-                PWSTR(buffer.as_mut_ptr()),
-                &mut length,
-            )
-        };
-        let _ = unsafe { CloseHandle(handle) };
-        named.ok()?;
-        Some(PathBuf::from(OsString::from_wide(
-            &buffer[..length as usize],
-        )))
     }
 
     /// Bring the window of the xd that is already running to the front.
     /// Returns whether it has one to bring.
-    fn show_running_instance() -> bool {
-        struct Search {
-            executable: PathBuf,
+    ///
+    /// The window is known by the mark [`adopt_window`] puts on it, whichever
+    /// copy of xd.exe that instance was started from.
+    fn show_running_instance(key: &HSTRING) -> bool {
+        struct Search<'a> {
+            key: &'a HSTRING,
             own_process: u32,
             found: Option<HWND>,
         }
@@ -382,11 +376,7 @@ mod native {
             if process != 0
                 && process != search.own_process
                 && unsafe { IsWindowVisible(window) }.as_bool()
-                && executable_of(process).is_some_and(|path| {
-                    // Windows file names ignore case.
-                    path.as_os_str()
-                        .eq_ignore_ascii_case(search.executable.as_os_str())
-                })
+                && !unsafe { GetPropW(window, search.key) }.is_invalid()
             {
                 search.found = Some(window);
                 return false.into();
@@ -394,11 +384,8 @@ mod native {
             true.into()
         }
 
-        let Ok(executable) = std::env::current_exe() else {
-            return false;
-        };
         let mut search = Search {
-            executable,
+            key,
             own_process: unsafe { GetCurrentProcessId() },
             found: None,
         };
@@ -508,14 +495,21 @@ mod native {
         })
     }
 
-    /// Leave when Windows says the session is ending or an installer needs
-    /// the files, and leave no sign of a crash behind when it does.
+    /// Make xd's window known as this instance's, and have it leave when
+    /// Windows says the session is ending or an installer needs the files,
+    /// with no sign of a crash left behind.
     ///
     /// GPUI answers neither message, so an update used to find xd unwilling to
     /// close and ask for a reboot instead.
-    pub fn close_with_the_session(window: isize) {
+    pub fn adopt_window(window: isize) {
         /// Tells this subclass from any other on the window.
         const SUBCLASS: usize = 1;
+
+        // The mark a second launch looks for. Windows drops it with the window.
+        let key = wide(&instance_key(
+            &xd_desktop::channel::data_name().to_string_lossy(),
+        ));
+        let _ = unsafe { SetPropW(HWND(window as _), &key, Some(HANDLE(1 as _))) };
 
         unsafe extern "system" fn procedure(
             window: HWND,
@@ -566,6 +560,9 @@ mod tests {
             instance_name(r"team\xd dev"),
             r"Local\xd-desktop-team_xd_dev"
         );
+        // The mark on the window is the same name without the session part.
+        assert_eq!(instance_key("xd-nightly"), "xd-desktop-xd-nightly");
+        assert!(ALREADY_RUNNING.contains("already running"));
     }
 
     #[test]

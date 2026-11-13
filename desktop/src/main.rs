@@ -33904,7 +33904,7 @@ fn main() {
                             && let raw_window_handle::RawWindowHandle::Win32(handle) =
                                 handle.as_raw()
                         {
-                            windows::close_with_the_session(handle.hwnd.get());
+                            windows::adopt_window(handle.hwnd.get());
                         }
                         cx.new(|cx| {
                             #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
