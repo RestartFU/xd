@@ -218,7 +218,7 @@ internal class TreeStore(
                 stateMutex.withLock {
                     _state.value = _state.value.copy(
                         loading = false,
-                        error = error.message ?: "Could not load the workspace tree",
+                        error = error.message ?: "Could not load projects",
                     )
                 }
             }

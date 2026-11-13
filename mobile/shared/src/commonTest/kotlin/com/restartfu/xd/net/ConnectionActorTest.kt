@@ -429,6 +429,42 @@ class ConnectionActorTest {
         assertTrue(factory.latest.closed)
     }
 
+    @Test
+    fun aProtocolFailureCanBeTriedAgain() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = connectedActor(factory)
+        factory.latest.receive("not-json")
+        runCurrent()
+        assertTrue(assertIs<Link.Fatal>(actor.link.value).retryable)
+
+        actor.retry()
+        runCurrent()
+        assertEquals(2, factory.sockets.size)
+        assertEquals(Link.Connecting, actor.link.value)
+        factory.latest.connected()
+        runCurrent()
+        // The host answers the new connection's own first request.
+        val request = Regex("\"_xd_request\":(\\d+)").find(factory.latest.writeText())!!.groupValues[1]
+        factory.latest.receive("""{"ok":true,"nodes":[],"_xd_request":$request}""")
+        runCurrent()
+        assertIs<Link.Up>(actor.link.value)
+    }
+
+    @Test
+    fun aChangedHostKeyCannotBeTriedAgain() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(credentials()), backgroundScope)
+        runCurrent()
+        factory.latest.fail(SocketFailureKind.HOST_KEY_MISMATCH, "host key changed")
+        runCurrent()
+        assertTrue(!assertIs<Link.Fatal>(actor.link.value).retryable)
+
+        actor.retry()
+        runCurrent()
+        assertIs<Link.Fatal>(actor.link.value)
+        assertEquals(1, factory.sockets.size)
+    }
+
     private suspend fun kotlinx.coroutines.test.TestScope.connectedActor(
         factory: FakeSocketFactory,
     ): ConnectionActor {

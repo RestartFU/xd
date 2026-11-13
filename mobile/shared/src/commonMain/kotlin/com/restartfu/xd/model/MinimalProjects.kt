@@ -132,7 +132,7 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
         val agentsAtWork = chats.count { it.parentId in ids && (it.working || it.backgroundTasks > 0) }
         MinimalSession(
             id = id,
-            title = (workspace?.title ?: first.title).takeIf(String::isNotBlank) ?: "New Session",
+            title = (workspace?.title ?: first.title).takeIf(String::isNotBlank) ?: "New chat",
             agent = DirectAgent.fromBackend(first.backend),
             branch = (workspace?.branch ?: first.branch)?.takeIf(String::isNotBlank)
                 ?: "Project directory",

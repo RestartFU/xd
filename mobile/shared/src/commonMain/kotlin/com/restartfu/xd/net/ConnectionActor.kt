@@ -41,7 +41,14 @@ public sealed interface Link {
     public data class Fatal(
         val reason: FatalReason,
         val message: String,
-    ) : Link
+    ) : Link {
+        /**
+         * Whether connecting again with the same pairing can get past it. A
+         * reply the client could not read may not come again; a changed host
+         * key or a refused device needs a new pairing.
+         */
+        val retryable: Boolean get() = reason == FatalReason.PROTOCOL
+    }
 }
 
 public enum class FatalReason {
@@ -141,6 +148,11 @@ internal class ConnectionActor(
         sendToMailbox(Message.Background)
     }
 
+    /** Connects again after a failure that [Link.Fatal.retryable] says another attempt can get past. */
+    fun retry() {
+        sendToMailbox(Message.RetryFatal)
+    }
+
     suspend fun connect(connection: SshConnection): ConnectResult {
         validateConnection(connection)
         val result = CompletableDeferred<ConnectResult>()
@@ -216,6 +228,7 @@ internal class ConnectionActor(
                 is Message.CallTimedOut -> handleCallTimedOut(message)
                 is Message.ProtocolFailure -> handleProtocolFailure(message)
                 is Message.Retry -> handleRetry()
+                Message.RetryFatal -> handleRetryFatal()
             }
         }
     }
@@ -511,6 +524,17 @@ internal class ConnectionActor(
         }
     }
 
+    private fun handleRetryFatal() {
+        val fatal = _link.value as? Link.Fatal ?: return
+        if (!fatal.retryable || credentials == null) return
+        retryJob?.cancel()
+        retryJob = null
+        backoff.reset()
+        wanted = true
+        _link.value = Link.Idle
+        if (socket == null) connectSocket()
+    }
+
     private fun connectSocket() {
         check(socket == null)
         val connection = connectionAttempt?.connection ?: credentials?.connection ?: return
@@ -627,6 +651,7 @@ internal class ConnectionActor(
         data object Poke : Message
         data object Background : Message
         data object Retry : Message
+        data object RetryFatal : Message
 
         data class Connect(
             val connection: SshConnection,

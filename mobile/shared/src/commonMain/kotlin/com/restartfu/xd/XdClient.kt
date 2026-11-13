@@ -500,6 +500,11 @@ public class XdClient(
         actor.goBackground()
     }
 
+    /** Connects again after a failure another attempt can get past; see [Link.Fatal.retryable]. */
+    public fun retryConnection() {
+        actor.retry()
+    }
+
     public suspend fun connect(connection: SshConnection): ConnectResult =
         actor.connect(connection)
 
