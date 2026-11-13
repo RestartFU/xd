@@ -72,6 +72,10 @@ jobs:
       - name: Install as a standard user
         run: |
           $ErrorActionPreference = 'Stop'
+          # Windows Server only lets administrators install; desktop Windows,
+          # which this stands in for, lets anyone install for themselves.
+          New-Item -Path 'HKLM:\Software\Policies\Microsoft\Windows\Installer' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\Software\Policies\Microsoft\Windows\Installer' -Name DisableMSI -Value 0 -Type DWord
           $password = 'Xd-' + [guid]::NewGuid().ToString('N') + '!a1'
           $secure = ConvertTo-SecureString $password -AsPlainText -Force
           New-LocalUser -Name xdstandard -Password $secure -AccountNeverExpires | Out-Null
@@ -92,7 +96,7 @@ jobs:
           "remove=`$(`$remove.ExitCode) left=`$(Test-Path (Join-Path `$env:LOCALAPPDATA 'Programs\xd'))" | Add-Content '$shared\result.txt'
           "@
           Set-Content -Path "$shared\run.ps1" -Value $script
-          $run = Start-Process pwsh -Credential $credential -WorkingDirectory $shared -Wait -PassThru -ArgumentList '-NoProfile', '-File', "$shared\run.ps1"
+          $run = Start-Process 'C:\Program Files\PowerShell\7\pwsh.exe' -Credential $credential -LoadUserProfile -UseNewEnvironment -WorkingDirectory $shared -Wait -PassThru -ArgumentList '-NoProfile', '-File', "$shared\run.ps1"
           Write-Host "standard user run exit: $($run.ExitCode)"
           Get-Content "$shared\result.txt" | Write-Host
           Select-String -Path "$shared\install.log" -Pattern 'Property\(S\): (ALLUSERS|Privileged|AdminUser|INSTALLFOLDER)|Return value 3|Error ' | Select-Object -First 20 | ForEach-Object Line | Write-Host
