@@ -68,6 +68,16 @@ class TerminalCellColoursTest {
         assertTrue(contrastRatio(ink, checkNotNull(ground)) >= MIN_CELL_CONTRAST)
     }
 
+    @Test fun readableInkFollowsTheRealContrastOnMidTones() {
+        // Grey text on a green the old brightness cut-off called dark, where white read under 3:1, and on a mid blue.
+        for (ground in listOf(Color(0xFF00B000), Color(0xFF5A6EC8))) {
+            val ink = checkNotNull(terminalCellInk(Color(0xFF505050), ground, light, light = true))
+            assertTrue("$ink on $ground", contrastRatio(ink, ground) >= 4f)
+            val bare = checkNotNull(terminalCellInk(null, ground, dark, light = false))
+            assertTrue("$bare on $ground", contrastRatio(bare, ground) >= 4f)
+        }
+    }
+
     @Test fun contrastRatioMatchesTheWcagExtremes() {
         assertEquals(21f, contrastRatio(Color.Black, Color.White), 0.01f)
         assertEquals(1f, contrastRatio(Color(0xFF777777), Color(0xFF777777)), 0.001f)

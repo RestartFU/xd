@@ -261,8 +261,8 @@ public fun contrastRatio(first: Color, second: Color): Float {
  * on it. In the Light set that also goes for text under [MIN_CELL_CONTRAST]
  * against its background: that set has no light colour, so a program that
  * sets both (black on white, white on blue) would otherwise draw dark on dark.
- * Text that reads on a dark background is white; on a light one it is the
- * set's black.
+ * The replacement is whichever of white and the set's black reads better on
+ * that background; one of the two always clears 4:1.
  */
 public fun terminalCellInk(
     foreground: Color?,
@@ -273,9 +273,8 @@ public fun terminalCellInk(
     background ?: return foreground
     val unreadable = foreground == null || (light && contrastRatio(foreground, background) < MIN_CELL_CONTRAST)
     if (!unreadable) return foreground
-    val argb = background.toArgb()
-    val weighted = ((argb shr 16) and 0xff) * 299 + ((argb shr 8) and 0xff) * 587 + (argb and 0xff) * 114
-    return if (weighted < 128_000) Color.White else palette[0]
+    val dark = palette[0]
+    return if (contrastRatio(Color.White, background) >= contrastRatio(dark, background)) Color.White else dark
 }
 
 /**
