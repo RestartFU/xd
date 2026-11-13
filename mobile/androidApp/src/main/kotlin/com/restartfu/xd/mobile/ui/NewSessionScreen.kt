@@ -246,7 +246,7 @@ private fun TopBar(title: String, navigation: Navigation) {
         Modifier
             .fillMaxWidth()
             .safeTopPadding()
-            .height(64.dp)
+            .heightIn(min = 64.dp)
             .padding(start = 4.dp, end = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -683,7 +683,8 @@ private fun AgentTiles(selected: DirectAgent, onSelect: (DirectAgent) -> Unit) {
             Box(
                 Modifier
                     .weight(1f)
-                    .height(84.dp)
+                    // At least this tall, and taller for enlarged text rather than clipping it.
+                    .heightIn(min = 84.dp)
                     .clip(shape)
                     .background(if (chosen) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow)
                     .border(
@@ -694,7 +695,7 @@ private fun AgentTiles(selected: DirectAgent, onSelect: (DirectAgent) -> Unit) {
                     .selectable(selected = chosen, role = Role.RadioButton, onClick = { onSelect(candidate) }),
             ) {
                 Column(
-                    Modifier.align(Alignment.Center),
+                    Modifier.align(Alignment.Center).padding(horizontal = 8.dp, vertical = 14.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -1049,7 +1050,10 @@ private fun ValueRow(
     onSelect: (String) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
-    val tone = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+    // Disabled, it takes the theme's faint ink rather than a see-through one:
+    // still readable, and plainly not the row's usual colour.
+    val faint = LocalXdSignals.current.faint
+    val tone = if (enabled) MaterialTheme.colorScheme.onSurface else faint
     Row(
         Modifier
             .fillMaxWidth()
@@ -1065,7 +1069,7 @@ private fun ValueRow(
         }
         Box {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(value, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(value, style = MaterialTheme.typography.bodyMedium, color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else faint)
                 Icon(
                     painterResource(R.drawable.ic_chevron_down),
                     contentDescription = null,
@@ -1115,7 +1119,8 @@ private fun ActionBar(label: String, blocker: String?, busy: Boolean, onClick: (
                 onClick = onClick,
                 enabled = blocker == null,
                 shape = MaterialTheme.shapes.medium,
-                modifier = Modifier.fillMaxWidth().height(52.dp),
+                // At least 52dp, and taller for enlarged text rather than clipping it.
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
             ) { Text(label, style = MaterialTheme.typography.labelLarge) }
         }
     }

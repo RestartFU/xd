@@ -94,6 +94,12 @@ internal fun ConnectScreen(model: MainViewModel) {
             modifier = Modifier.fillMaxWidth().testTag(PAIRING_CODE_TAG),
             label = { Text("Pairing code") },
             enabled = !connecting,
+            // Said on the field it is about, and told as it appears: the form
+            // gives no other sign that pairing failed.
+            isError = error != null,
+            supportingText = error?.let { message ->
+                { Text(message, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
+            },
             // A code is typed or pasted exactly; the action key pairs.
             keyboardOptions = KeyboardOptions(
                 capitalization = KeyboardCapitalization.None,
@@ -104,14 +110,6 @@ internal fun ConnectScreen(model: MainViewModel) {
             keyboardActions = KeyboardActions(onDone = { pair() }),
         )
         Spacer(Modifier.height(12.dp))
-        error?.let {
-            Text(
-                it,
-                // Told as it appears: the form gives no other sign that pairing failed.
-                modifier = Modifier.padding(bottom = 12.dp).semantics { liveRegion = LiveRegionMode.Polite },
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
         Button(onClick = pair, enabled = ready, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
             if (connecting) {
                 // Says what it is doing, at the size the button keeps throughout.
