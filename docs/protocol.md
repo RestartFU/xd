@@ -410,7 +410,7 @@ boundary, not an event cursor.
 | `file-browse` | `chat`, `action`, optional relative `path`, `content`, and `original` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB; `action:"write"` saves bounded UTF-8 text and rejects a stale optional `original` |
 | `agent-secrets` | optional `folder` | `names: string[]` for that project's own set, or the host-wide set without `folder`; values never cross the wire |
 | `agent-clis` | none | detected assistant versions |
-| `agent-auth` | none | `providers:[…]` as in [Assistant accounts](#assistant-accounts), and `multiple_accounts: boolean`, false on a host that keeps only the user's own sign-in; checks every account again |
+| `agent-auth` | optional `check: boolean` | `providers:[…]` as in [Assistant accounts](#assistant-accounts), and `multiple_accounts: boolean`, false on a host that keeps only the user's own sign-in; checks every account again unless `check` is `false` |
 | `host-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-cli-updates` | optional `action` of `status`, `check`, `install`; `install` requires `provider` | `providers:[{provider,display_name,state,available,updatable, optional version, latest, detail}]`; `state` is `idle`, `updating`, `updated`, or `failed`; each change is also sent as an `agent-cli-update` event holding one provider |
 | `resume-interrupted` | `resume: boolean` | `resumed: string[]`. Answers for every chat cut off since the last answer, or left waiting on background agents or commands that a restart stopped, which wait in storage until then. Local and authenticated remote clients may answer, and the first answer settles them: `true` sends a visible continuation message to each (one that says the background work stopped, for a waiting chat), unless the chat has moved on, and `false` discards them |
@@ -968,7 +968,8 @@ another process.
 ```
 
 Options: `model`, `effort`, `access`, `plan`, `fast`, `backend`,
-`new-worktree`, `workspace`. Boolean options take `"true"`/`"false"`.
+`new-worktree`, `workspace`, `account`. Boolean options take `"true"`/`"false"`.
+`account` is described under [Choosing a chat's account](#choosing-a-chats-account).
 `fast` is Codex-only. An unknown option is an error.
 
 `new-worktree` and `workspace` change the shared session workspace atomically
@@ -1074,7 +1075,8 @@ authenticated devices, which need them to tell accounts apart.
 A provider runs one sign-in or sign-out at a time. Each answers `ok: true` and
 reports progress through `agent-auth-changed`.
 
-Each turn runs on one account, chosen when it starts. A chat stays on the
+Each turn runs on one account, chosen when it starts. Unless the user set the
+chat to one (see [Choosing a chat's account](#choosing-a-chats-account)), a chat stays on the
 account its session belongs to while that account is signed in, is still the
 login it was added as (an added account's login must have been read since it
 last signed in or the host started), and has usage left; otherwise the turn runs on the first
@@ -1101,9 +1103,41 @@ decides the home. An account whose login the host cannot read is not added. A Cl
 cannot open on another account, so the new account starts a session given the
 chat's messages as text, and the row says so.
 
+#### Choosing a chat's account
+
+A host where a chat can be set to run on one account adds a top-level
+`"chat_accounts":true` to `tree`. `set-option` with `option` `account` and the
+`id` of one of the chat's assistant's accounts sets it; an empty `value` lets
+the host choose again. An account still signing in for the first time, or one
+not in the list, is refused. `new-chat` takes the same id as `account`; there
+such an id is ignored and never kept. A chat an agent starts on its own assistant is
+set to its parent's account, if the parent is set to one. The `chat` reply has
+`account` while the chat is set to one that is still in the list.
+
+Every turn of such a chat runs on that account, whatever the order and
+automatic switching say, and even when it is out of usage, so the assistant
+says so itself. A turn that ran out stays there. When switching is on and
+another account could have taken it, the host adds an `account_switch` row
+saying the chat stays on its account. When the account cannot take a turn at
+all, because it is signed out, signing in or out, signed in to a different
+login, or the same login as an earlier account, the turn is refused with an
+error that says so. An added account whose login has not been read since it
+signed in or the host started is read first. A Codex account whose login cannot
+be read just then takes the turn all the same, in a new session filed under an
+unknown login, as it would for any chat. Choosing another account moves
+the chat's session at its next turn as switching does, with the same row. A
+removed account chooses nothing, and the chat runs where any other would; so
+does the assistant's only account, once the others are gone.
+
+A client lists the accounts with `agent-auth` and `check: false`, which answers
+without checking every account again, and keeps the list current from
+`agent-auth-changed`. It offers the choice only while the assistant has two or
+more accounts that are not `pending`.
+
 The row's text is `account_switch\n` followed by one sentence, such as
 `Switched to b@example.com: a@example.com reached its 5-hour limit (back in 2 h 5 min). Continuing there.`
-or, when every account is out, `Every Codex account is out of usage. The first is back in 3 h.`
+or, when every account is out, `Every Codex account is out of usage. The first is back in 3 h.`,
+or for a chat set to its account, `a@example.com reached its 5-hour limit (back in 2 h 5 min). This chat is set to run on it, so it stays there; choose another account for it to continue now.`
 
 ### `usage-consume-reset-credit`
 

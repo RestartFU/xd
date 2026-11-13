@@ -74,6 +74,64 @@ class NewSessionDialogScreenshotTest {
         capture(screen, dialog, "new-chat-dark")
     }
 
+    /** An assistant with several accounts offers them, and a chat is made on the one chosen. */
+    @Test fun aNewChatCanBeSetToAnAccount() {
+        val accounts = listOf(
+            com.restartfu.xd.protocol.AgentAccountReply(id = "default", default = true, label = "dana@example.com", state = "signed-in", inUse = true),
+            com.restartfu.xd.protocol.AgentAccountReply(id = "b7c8d9e0f1a2", label = "dana.work@example.com", state = "signed-in"),
+        )
+        var created: NewSessionRequest? = null
+        fun open(draftKey: String): Pair<ComponentActivity, View> {
+            val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+            activity.setContent {
+                CompositionLocalProvider(LocalXdSignals provides xdSignals(MinimalThemePreset.DARK)) {
+                    MaterialTheme(colorScheme = minimalColors(MinimalThemePreset.DARK), typography = XdTypography) {
+                        Surface(Modifier.fillMaxSize()) {
+                            NewSessionDialog(
+                                projectName = "Reconnect backoff",
+                                draftKey = draftKey,
+                                backends = listOf(com.restartfu.xd.protocol.BackendReply("claude", "Claude", efforts = listOf("low", "medium", "high"))),
+                                // Only Codex has two; Claude's lone account is no choice.
+                                accounts = mapOf("codex" to accounts, "claude" to emptyList()),
+                                chatTab = true,
+                                onDismiss = {},
+                                onCreate = { created = it },
+                            )
+                        }
+                    }
+                }
+            }
+            repeat(3) { idle() }
+            return activity to dialogViews().last { it !== activity.window.decorView }
+        }
+
+        // The host chooses until an account is picked.
+        val (first, form) = open("account-choice/automatic")
+        check(shows(form, "Account") && shows(form, "Automatic") && shows(form, "The first account with room left")) { "The host chooses at first" }
+        capture(first.window.decorView, form, "new-chat-account-dark")
+        click(form, "Start chat")
+        check(checkNotNull(created) { "Start chat sent nothing" }.account == null) { created.toString() }
+        first.finish()
+
+        // A form left with an account picked comes back with it, and sends it.
+        created = null
+        first.getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE).edit()
+            .putString("account-choice/picked", """{"agent":"codex","account":"b7c8d9e0f1a2"}""").commit()
+        val (second, picked) = open("account-choice/picked")
+        check(shows(picked, "dana.work@example.com") && !shows(picked, "The first account with room left")) { "The form shows the account picked" }
+        capture(second.window.decorView, picked, "new-chat-account-chosen-dark")
+        click(picked, "Start chat")
+        check(checkNotNull(created) { "Start chat sent nothing" }.account == "b7c8d9e0f1a2") { created.toString() }
+
+        // Accounts belong to one assistant: another has none to choose.
+        created = null
+        click(picked, "Claude")
+        check(!shows(picked, "Account")) { "Claude's lone account is no choice" }
+        click(picked, "Start chat")
+        check(checkNotNull(created).account == null) { created.toString() }
+        second.finish()
+    }
+
     @Test fun creationDraftSurvivesClosingAndReopening() {
         fun open(): ComponentActivity {
             val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()

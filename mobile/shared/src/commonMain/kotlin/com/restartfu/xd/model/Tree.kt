@@ -110,6 +110,8 @@ public data class TreeSnapshot(
     val linkedPullRequests: Boolean = false,
     /** The connected host can limit chats to a share of their account's usage. */
     val chatQuotas: Boolean = false,
+    /** The connected host can set a chat to run on one of its assistant's accounts. */
+    val chatAccounts: Boolean = false,
 ) {
     /**
      * New folders can be made. A host that already lists one keeps them even

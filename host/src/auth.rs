@@ -297,6 +297,17 @@ impl AuthManager {
 
     /// The account the chat's next turn runs on; see [`Accounts::choose`].
     pub(crate) fn choose(&self, provider: &str, chat_account: Option<&str>) -> Choice {
+        self.choose_with(provider, chat_account, None)
+    }
+
+    /// The account the next turn of a chat the user may have set to run on
+    /// `chosen` runs on; see [`Accounts::choose_with`].
+    pub(crate) fn choose_with(
+        &self,
+        provider: &str,
+        chat_account: Option<&str>,
+        chosen: Option<&str>,
+    ) -> Choice {
         // Sign-in states are read before the accounts are, so choosing never
         // holds the accounts lock while waiting on the states lock.
         let signed_in: HashMap<String, bool> = self
@@ -310,20 +321,48 @@ impl AuthManager {
                 (account, signed_in)
             })
             .collect();
-        let mut choice = self.inner.accounts.choose(
+        let mut choice = self.inner.accounts.choose_with(
             provider,
             chat_account,
+            chosen,
             |account| signed_in.get(account).copied().unwrap_or(false),
             now_ms(),
         );
         // Even a lone sign-in takes no turn while it is being signed in or out.
-        if matches!(
-            self.snapshot(provider, &choice.account).state.as_str(),
-            "signing-in" | "signing-out"
-        ) {
+        let state = self.snapshot(provider, &choice.account).state;
+        if matches!(state.as_str(), "signing-in" | "signing-out") {
             choice.unavailable = true;
+            if choice.refused.is_some() {
+                choice.refused = Some(
+                    if state == "signing-in" {
+                        "is signing in"
+                    } else {
+                        "is signing out"
+                    }
+                    .into(),
+                );
+            }
         }
         choice
+    }
+
+    /// Reads who an added account is signed in as before a chat set to it
+    /// takes a turn, when that has not been read since the account signed in
+    /// or the host started: such an account takes no turns, and the chat
+    /// would be refused for the moments a restarted host needs to read it.
+    pub(crate) fn confirm_chosen(&self, provider: &str, account: &str) {
+        let accounts = &self.inner.accounts;
+        // Unit tests never start a real CLI for this.
+        if cfg!(test)
+            || account == DEFAULT_ACCOUNT
+            || !accounts.exists(provider, account)
+            || accounts.pending(provider).as_deref() == Some(account)
+            || accounts.login_read_at(provider, account).is_some()
+            || !self.signed_in(provider, account)
+        {
+            return;
+        }
+        crate::usage::check_account(accounts, provider, account);
     }
 
     /// The account for a short run xd makes on its own, such as naming a chat:

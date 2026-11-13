@@ -103,6 +103,8 @@ public data class TreeReply(
     @SerialName("linked_pull_requests") val linkedPullRequests: Boolean = false,
     /** True when the host can limit chats to a share of their account's usage. */
     @SerialName("chat_quotas") val chatQuotas: Boolean = false,
+    /** True when a chat can be set to run on one of its assistant's accounts. */
+    @SerialName("chat_accounts") val chatAccounts: Boolean = false,
 )
 
 /** A chat checkout's Git state, as `git-status` and `git-commit` answer. */
@@ -580,6 +582,8 @@ public data class ChatReply(
     val model: String? = null,
     val effort: String? = null,
     val access: String? = null,
+    /** The account the chat is set to run on; absent while the host chooses. */
+    val account: String? = null,
     @SerialName("context_used")
     val contextUsed: Long? = null,
     @SerialName("context_window")

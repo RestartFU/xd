@@ -128,6 +128,8 @@ public class XdClient(
     private val agentCliStates = ProviderStates<AgentCliProviderReply> { it.provider }
     /** Asked for on this host, so a reconnect reads them again even if no answer landed. */
     private val agentAuthWanted = MutableStateFlow(false)
+    /** The accounts alone were asked for, to offer them for a chat. */
+    private val agentAccountsWanted = MutableStateFlow(false)
     private val agentClisWanted = MutableStateFlow(false)
     private val agentAuthFreshness = Freshness()
     private val agentClisFreshness = Freshness()
@@ -422,6 +424,8 @@ public class XdClient(
                     // date, and the next read that lands clears the mark.
                     if (agentAuthWanted.value) {
                         scope.launch { runCatching { loadAgentAuth() } }
+                    } else if (agentAccountsWanted.value) {
+                        scope.launch { runCatching { loadAgentAccounts() } }
                     }
                     if (agentClisWanted.value) {
                         scope.launch { runCatching { agentCliUpdates("status") } }
@@ -535,6 +539,7 @@ public class XdClient(
         agentAuthStates.clear()
         agentCliStates.clear()
         agentAuthWanted.value = false
+        agentAccountsWanted.value = false
         agentClisWanted.value = false
         agentAuthFreshness.reset()
         agentClisFreshness.reset()
@@ -682,11 +687,25 @@ public class XdClient(
     /** Asks each assistant for its sign-in state, into [agentAuth]. */
     public suspend fun loadAgentAuth() {
         agentAuthWanted.value = true
+        readAgentAuth(check = true)
+    }
+
+    /**
+     * Lists the assistants' accounts into [agentAuth] without the host
+     * checking each again, to offer them for a chat. Only for a host whose
+     * tree has `chatAccounts`: an older one would check them all.
+     */
+    public suspend fun loadAgentAccounts() {
+        agentAccountsWanted.value = true
+        readAgentAuth(check = false)
+    }
+
+    private suspend fun readAgentAuth(check: Boolean) {
         val generation = _sessionGeneration.value
         val call = agentAuthFreshness.start()
         val mark = agentAuthStates.mark()
         val reply = try {
-            actor.decodeReply(actor.call(Ops.agentAuth())) { it.decodeReply<AgentAuthReply>() }
+            actor.decodeReply(actor.call(Ops.agentAuth(check))) { it.decodeReply<AgentAuthReply>() }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -987,8 +1006,12 @@ public class XdClient(
         effort: String? = null,
         access: String? = null,
         plan: Boolean? = null,
+        /** The account the chat runs on, or null to let the host choose. */
+        account: String? = null,
     ): String {
-        val value = actor.call(Ops.newChat(folderId, title, backend, sessionId, worktree, startFromRemote, effort, access, plan))
+        val value = actor.call(
+            Ops.newChat(folderId, title, backend, sessionId, worktree, startFromRemote, effort, access, plan, account),
+        )
         val id = actor.decodeReply(value) {
             val reply = it.decodeReply<DoneReply>()
             reply.id?.takeIf(String::isNotBlank)

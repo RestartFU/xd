@@ -8,11 +8,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -21,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.ChatViewModel
@@ -47,8 +51,15 @@ internal fun ChatOptionsDialog(
 ) {
     val catalog by model.catalog.collectAsStateWithLifecycle()
     val busy by model.selectingModel.collectAsStateWithLifecycle()
+    val auth by model.agentAuth.collectAsStateWithLifecycle()
+    val tree by model.client.tree.collectAsStateWithLifecycle()
+    val now = rememberMinuteClock()
 
     LaunchedEffect(Unit) { model.loadCatalog() }
+    LaunchedEffect(tree.chatAccounts) { model.loadAccounts() }
+    val accounts = if (tree.chatAccounts) chatAccountChoices(auth?.get(state.backend)) else emptyList()
+    // An account removed since it was chosen chooses nothing.
+    val chosen = state.account?.takeIf { id -> accounts.any { it.id == id } }
 
     val efforts = catalog.firstOrNull { it.id == state.backend }
         ?.efforts
@@ -131,6 +142,24 @@ internal fun ChatOptionsDialog(
                     )
                 }
 
+                if (accounts.isNotEmpty()) {
+                    Section("Account")
+                    AccountChoice(
+                        label = AUTOMATIC_ACCOUNT,
+                        selected = chosen == null,
+                        enabled = !busy,
+                        onClick = { model.setAccount(null) },
+                    )
+                    accounts.forEach { account ->
+                        AccountChoice(
+                            label = chatAccountLabel(account, now),
+                            selected = chosen == account.id,
+                            enabled = !busy,
+                            onClick = { model.setAccount(account.id) },
+                        )
+                    }
+                }
+
                 if (state.canCreateWorktree) {
                     Section("Worktree")
                     Row(
@@ -187,6 +216,26 @@ private fun OptionSwitch(
             onCheckedChange = onCheckedChange,
             enabled = enabled,
         )
+    }
+}
+
+@Composable
+internal fun AccountChoice(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        RadioButton(selected = selected, onClick = null, enabled = enabled)
+        Text(label, style = MaterialTheme.typography.bodyMedium)
     }
 }
 

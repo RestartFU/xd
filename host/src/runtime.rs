@@ -244,6 +244,9 @@ enum RecordWrite {
 enum AfterLimit {
     /// It stays on its account: there is no other, or switching is off.
     Stays,
+    /// It stays, since the user set it to run on that account, though
+    /// another could take it; the sentence says so.
+    Chosen(String),
     /// It stays, since every account is spent. The first is back at `back`.
     AllSpent { provider: &'static str, back: i64 },
     /// It continues on another account; the sentence says which and why.
@@ -848,7 +851,14 @@ impl TurnRuntime {
         {
             self.inner.auth.confirm_login(&turn.backend, own);
         }
-        let mut choice = self.inner.auth.choose(&turn.backend, chat_account);
+        let chosen = turn.chosen_account.as_deref();
+        if let Some(chosen) = chosen {
+            self.inner.auth.confirm_chosen(&turn.backend, chosen);
+        }
+        let mut choice = self
+            .inner
+            .auth
+            .choose_with(&turn.backend, chat_account, chosen);
         // A Codex session about to be resumed must be resumed as the login
         // that wrote it, so that login is read again first when it may be
         // stale. If it cannot be read, the session is not resumed.
@@ -867,7 +877,10 @@ impl TurnRuntime {
                     .confirm_login(&turn.backend, &choice.account);
                 login_unknown = !confirmed;
                 unconfirmed = !confirmed && turn.session_id.is_some();
-                let again = self.inner.auth.choose(&turn.backend, chat_account);
+                let again = self
+                    .inner
+                    .auth
+                    .choose_with(&turn.backend, chat_account, chosen);
                 let settled = again.account == choice.account;
                 choice = again;
                 if settled {
@@ -883,6 +896,16 @@ impl TurnRuntime {
         // under the sessions lock, so none can begin during the copy.
         if turn.backend == "claude" && choice.account != crate::accounts::DEFAULT_ACCOUNT {
             self.share_claude_settings(&turn.backend, &choice.account);
+        }
+        if let Some(reason) = &choice.refused {
+            return Err(format!(
+                "This chat is set to run on {}, which {reason}. Choose another account for it, \
+                 or let xd choose.",
+                self.inner
+                    .auth
+                    .accounts()
+                    .label(&turn.backend, &choice.account)
+            ));
         }
         if choice.unavailable {
             return Err(format!(
@@ -1046,7 +1069,34 @@ impl TurnRuntime {
         if !auth.accounts().auto_switch(provider) {
             return AfterLimit::Stays;
         }
-        let choice = auth.choose(provider, Some(account));
+        // The account the user set the chat to, read now rather than when
+        // the turn began: they may have chosen meanwhile.
+        let chosen = self.inner.store.chosen_account(chat_id).ok().flatten();
+        // A chat set to this account stays on it. Where it would have gone
+        // decides whether that needs saying.
+        let stays = chosen.as_deref() == Some(account);
+        let choice = auth.choose_with(
+            provider,
+            Some(account),
+            chosen.as_deref().filter(|_| !stays),
+        );
+        // Set meanwhile to an account that cannot take it: the next turn
+        // says why, rather than this one going on there.
+        if choice.refused.is_some() {
+            return AfterLimit::Stays;
+        }
+        if stays && choice.account != account {
+            let label = auth.accounts().label(provider, account);
+            let limit = limit.as_deref().unwrap_or("usage limit");
+            let back = resets_at_ms
+                .filter(|at| *at > crate::accounts::now_ms())
+                .map(|at| format!(" (back in {})", until(at)))
+                .unwrap_or_default();
+            return AfterLimit::Chosen(format!(
+                "{label} reached its {limit}{back}. This chat is set to run on it, so it \
+                 stays there; choose another account for it to continue now."
+            ));
+        }
         if choice.account == account {
             return match choice.all_spent_until {
                 Some(back) => AfterLimit::AllSpent {
@@ -1069,6 +1119,7 @@ impl TurnRuntime {
     fn continue_after_limit(&self, chat_id: &str, outcome: AfterLimit, last_message: i64) {
         match outcome {
             AfterLimit::Stays => {}
+            AfterLimit::Chosen(sentence) => self.post_account_notice(chat_id, &sentence),
             AfterLimit::AllSpent { provider, back } => self.post_account_notice(
                 chat_id,
                 &format!(
@@ -5197,6 +5248,144 @@ done
             .filter(|(_, content)| content.starts_with(ACCOUNT_SWITCH_PREFIX))
             .count();
         assert_eq!(notices, 1);
+        runtime.discard_chat(&chat);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A chat the user set to run on an account stays on it when it runs out,
+    /// says so, and moves only when the user chooses another.
+    #[cfg(unix)]
+    #[test]
+    fn a_chat_set_to_a_spent_account_waits_there_until_another_is_chosen() {
+        use std::{env, fs, os::unix::fs::PermissionsExt};
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = env::temp_dir().join(format!("xd-runtime-chosen-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("Workspaces")).unwrap();
+        let resets = crate::accounts::now_ms() / 1000 + 3600;
+        let agent = root.join("claude");
+        fs::write(
+            &agent,
+            format!(
+                r#"#!/bin/sh
+echo "${{CLAUDE_CONFIG_DIR:-default}} $*" >> '{log}'
+while read line; do
+  echo '{{"type":"system","subtype":"init","session_id":"s1"}}'
+  if [ -z "$CLAUDE_CONFIG_DIR" ]; then
+    echo '{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","resetsAt":{resets},"rateLimitType":"five_hour"}}}}'
+    echo '{{"type":"result","is_error":true,"api_error_status":429,"result":"You have hit your limit."}}'
+  else
+    echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Carried on."}}]}}}}'
+    echo '{{"type":"result","subtype":"success","result":"Carried on."}}'
+  fi
+done
+"#,
+                log = root.join("runs").display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let folder = store.new_folder(&json!({"name": "project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store
+            .new_chat(&json!({"folder": folder, "backend": "claude", "account": "default"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let accounts = crate::accounts::Accounts::with_homes(&root.join("data"), &[]);
+        let second = accounts.begin_adding("claude").unwrap();
+        accounts
+            .finish_adding(
+                "claude",
+                &second,
+                &crate::accounts::Identity {
+                    email: Some("b@example.com".into()),
+                    plan: None,
+                    account_key: Some("b".into()),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let events = Arc::new(EventBus::default());
+        let runtime = TurnRuntime::with_auth(
+            store.clone(),
+            events.clone(),
+            Arc::new(SecretsStore::new(None)),
+            AuthManager::new(events, accounts.clone()),
+        );
+        let continued = Arc::new(Mutex::new(Vec::new()));
+        let asked = continued.clone();
+        runtime.set_account_switch_handler(Box::new(move |chat, _| {
+            asked.lock().unwrap().push(chat);
+        }));
+        let send = |text: &str| match store
+            .prepare_send(&json!({"chat": chat, "text": text}))
+            .unwrap()
+        {
+            crate::storage::SendDisposition::Start { turn, .. } => runtime.start(turn).unwrap(),
+            crate::storage::SendDisposition::Queued { .. } => panic!("{text} was queued"),
+        };
+        let idle =
+            || runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false;
+        let notices = || {
+            contents(&store, &chat)
+                .into_iter()
+                .filter_map(|(_, content)| {
+                    content
+                        .strip_prefix(ACCOUNT_SWITCH_PREFIX)
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        send("Build it");
+        wait_for("the chat to say it waits", || {
+            idle() && !notices().is_empty()
+        });
+        let notice = notices().remove(0);
+        assert!(
+            notice.starts_with("Claude Code sign-in reached its 5-hour limit (back in "),
+            "{notice}"
+        );
+        assert!(
+            notice.ends_with(
+                "This chat is set to run on it, so it stays there; choose another account \
+                 for it to continue now."
+            ),
+            "{notice}"
+        );
+        assert!(continued.lock().unwrap().is_empty(), "it does not move on");
+
+        store
+            .set_option(&json!({"chat": chat, "option": "account", "value": second}))
+            .unwrap();
+        send("Go on");
+        wait_for("the turn on the chosen account to end", || {
+            idle()
+                && contents(&store, &chat)
+                    .iter()
+                    .any(|(_, content)| content == "Carried on.")
+        });
+        let runs = fs::read_to_string(root.join("runs")).unwrap();
+        let home = accounts.home("claude", &second).unwrap();
+        let second_run = runs
+            .lines()
+            .find(|run| run.starts_with(&home.display().to_string()))
+            .unwrap_or_else(|| panic!("no run as the chosen account in {runs}"));
+        assert!(second_run.contains("--resume s1"), "{second_run}");
+        assert_eq!(
+            notices().last().map(String::as_str),
+            Some("This chat now runs on b@example.com.")
+        );
         runtime.discard_chat(&chat);
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
         unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };
