@@ -1,5 +1,10 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
+import androidx.compose.material3.TextButton
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
@@ -45,13 +50,59 @@ internal fun codeInk(): CodeInk {
     return remember(text, syntax) { CodeInk(text, syntax) }
 }
 
-/** One block of code and the ink it is coloured in: the key of a coloured block. */
-internal data class CodeKey(val code: String, val language: SyntaxLanguage, val ink: CodeInk)
+/**
+ * One block of code and the ink it is coloured in: the key of a coloured block.
+ * Its hash is worked out once, from the text's hash and length, and two keys
+ * compare their texts only once those match, so a lookup does not read a long
+ * block through again; a collision still compares the text, so it is never
+ * taken for another block.
+ */
+internal class CodeKey(val code: String, val language: SyntaxLanguage, val ink: CodeInk) {
+    private val hash = 31 * (31 * (31 * code.hashCode() + code.length) + language.hashCode()) + ink.hashCode()
+
+    override fun hashCode(): Int = hash
+
+    override fun equals(other: Any?): Boolean = other is CodeKey && other.hash == hash &&
+        other.code.length == code.length && other.language == language && other.ink == ink && other.code == code
+}
 
 /** Finished code blocks, coloured once each, in the background, for every row that shows them. */
-internal val CodeColours = PreparedCache<CodeKey, AnnotatedString>(capacity = 600) {
+internal val CodeColours = PreparedCache<CodeKey, AnnotatedString>(
+    capacity = 600,
+    maxWeight = CACHED_CHARACTERS,
+    weigh = { it.code.length },
+) {
     highlight(it.code, it.language, it.ink)
 }
+
+/** How many characters of text each prepared cache keeps at most. */
+internal const val CACHED_CHARACTERS: Long = 2_000_000
+
+/** A patch and the ink it is coloured in: the key of a read and coloured patch, compared as [CodeKey] is. */
+internal class DiffKey(val patch: String, val ink: CodeInk) {
+    private val hash = 31 * (31 * patch.hashCode() + patch.length) + ink.hashCode()
+
+    override fun hashCode(): Int = hash
+
+    override fun equals(other: Any?): Boolean = other is DiffKey && other.hash == hash &&
+        other.patch.length == patch.length && other.ink == ink && other.patch == patch
+}
+
+/** A patch read into its lines, each coloured for its file's language. */
+internal class PreparedPatch(val lines: List<DiffLine>, val coloured: List<AnnotatedString>)
+
+/** Patches shown in approvals and tool rows, read and coloured once each, in the background. */
+internal val DiffColours = PreparedCache<DiffKey, PreparedPatch>(
+    capacity = 64,
+    maxWeight = CACHED_CHARACTERS,
+    weigh = { it.patch.length },
+) { key ->
+    val lines = CodeBlocks.diffLines(key.patch)
+    PreparedPatch(lines, highlightDiff(lines, key.ink))
+}
+
+/** How many lines of a patch are drawn inline before "Show all" is asked for. */
+internal const val DIFF_INLINE_LINES = 200
 
 /**
  * The newest colourings of blocks still being written, so the finished reply
@@ -121,23 +172,41 @@ internal class SyntaxVisualTransformation(
 /**
  * A unified patch: added and removed lines carry the desktop's tinted row
  * backgrounds, and their contents are coloured for the file's own language.
+ *
+ * The patch is read and coloured away from the main thread (see
+ * [DiffColours]); until then its first lines show plain. Only the first
+ * [DIFF_INLINE_LINES] are drawn at first, with an action that draws the rest,
+ * so a patch of thousands of lines does not lay out thousands of rows.
  */
 @Composable
 internal fun DiffText(
     patch: String,
     modifier: Modifier = Modifier,
-) = DiffText(remember(patch) { CodeBlocks.diffLines(patch) }, modifier)
-
-@Composable
-internal fun DiffText(
-    lines: List<DiffLine>,
-    modifier: Modifier = Modifier,
 ) {
     val ink = codeInk()
-    val rendered = remember(lines, ink) { highlightDiff(lines, ink) }
-    Column(modifier.horizontalScroll(rememberScrollState())) {
-        lines.forEachIndexed { index, line ->
-            DiffLineText(line.kind, rendered[index], Modifier.fillMaxWidth())
+    val key = remember(patch, ink) { DiffKey(patch, ink) }
+    val prepared = rememberPrepared(DiffColours, key)
+    var showAll by rememberSaveable(patch.length, patch.hashCode()) { mutableStateOf(false) }
+    Column(modifier) {
+        val scroll = rememberScrollState()
+        if (prepared == null) {
+            val plain = remember(patch) { patch.lineSequence().take(DIFF_INLINE_LINES).toList() }
+            Column(Modifier.horizontalScroll(scroll)) {
+                plain.forEach { line ->
+                    DiffLineText(DiffKind.CONTEXT, AnnotatedString(line), Modifier.fillMaxWidth())
+                }
+            }
+        } else {
+            val count = prepared.lines.size
+            val shown = if (showAll) count else minOf(count, DIFF_INLINE_LINES)
+            Column(Modifier.horizontalScroll(scroll)) {
+                for (index in 0 until shown) {
+                    DiffLineText(prepared.lines[index].kind, prepared.coloured[index], Modifier.fillMaxWidth())
+                }
+            }
+            if (shown < count) {
+                TextButton(onClick = { showAll = true }) { Text("Show all $count lines") }
+            }
         }
     }
 }
@@ -187,7 +256,7 @@ internal fun DiffLineText(
             .background(background)
             .padding(horizontal = 4.dp),
         color = when (kind) {
-            DiffKind.META, DiffKind.HUNK -> MaterialTheme.colorScheme.outline
+            DiffKind.META, DiffKind.HUNK -> LocalXdSignals.current.faint
             else -> Color.Unspecified
         },
         fontFamily = XdMonoFamily,

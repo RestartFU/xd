@@ -26,11 +26,28 @@ import kotlinx.coroutines.withContext
  * finished one, which is then kept for every time its row comes back.
  */
 
-/** A finished reply: the message's id and its text, which a record may rewrite. */
-internal data class ReplyKey(val id: String, val text: String)
+/**
+ * A finished reply: the message's id and its text, which a record may
+ * rewrite. Compared by the id, the text's length and hash first, and the text
+ * itself only when those match, as [CodeKey] is.
+ */
+internal class ReplyKey(val id: String, val text: String) {
+    private val hash = 31 * (31 * id.hashCode() + text.length) + text.hashCode()
 
-/** Finished replies read into their parts, the newest few hundred kept. */
-internal val ReplyBodies = PreparedCache<ReplyKey, List<BodyPart>>(capacity = 300) {
+    override fun hashCode(): Int = hash
+
+    override fun equals(other: Any?): Boolean = other is ReplyKey && other.hash == hash &&
+        other.text.length == text.length && other.id == id && other.text == text
+
+    override fun toString(): String = "ReplyKey($id, ${text.length} characters)"
+}
+
+/** Finished replies read into their parts: the newest few hundred, and no more than [CACHED_CHARACTERS] of text. */
+internal val ReplyBodies = PreparedCache<ReplyKey, List<BodyPart>>(
+    capacity = 300,
+    maxWeight = CACHED_CHARACTERS,
+    weigh = { it.text.length },
+) {
     assistantBody(it.text, live = false)
 }
 

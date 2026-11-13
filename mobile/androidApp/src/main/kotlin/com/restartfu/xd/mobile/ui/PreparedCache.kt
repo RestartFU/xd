@@ -25,22 +25,42 @@ import kotlinx.coroutines.async
 private val PreparingScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
 /**
- * The newest [capacity] values of [compute], by key. A value missing is
- * worked out once in the background however many ask for it meanwhile, and
- * kept; the one used longest ago makes room when it is full.
+ * The newest values of [compute], by key: at most [capacity] of them, and at
+ * most [maxWeight] in all by [weigh] (the characters a key's text holds), so
+ * a few very long replies cannot hold as much as hundreds of short ones. A
+ * value missing is worked out once in the background however many ask for
+ * it meanwhile, and kept; the ones used longest ago make room when it is full.
  */
 internal class PreparedCache<K : Any, V : Any>(
     private val capacity: Int,
+    private val maxWeight: Long = Long.MAX_VALUE,
+    private val weigh: (K) -> Int = { 1 },
     private val compute: (K) -> V,
 ) {
     private val lock = Any()
-    private val done = object : LinkedHashMap<K, V>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean = size > capacity
-    }
+    private val done = LinkedHashMap<K, V>(16, 0.75f, true)
+    private var weight = 0L
     private val pending = HashMap<K, Deferred<V>>()
 
     /** How many times a value has been worked out, for tests. */
     val computed = AtomicInteger()
+
+    /** How many values are kept, and their weight in all, for tests. */
+    val size: Int get() = synchronized(lock) { done.size }
+    val totalWeight: Long get() = synchronized(lock) { weight }
+
+    /** Keeps [value], then lets go of the least recently used until both limits hold. Call holding [lock]. */
+    private fun keep(key: K, value: V) {
+        done.put(key, value)?.let { weight -= weigh(key) }
+        weight += weigh(key)
+        val oldest = done.entries.iterator()
+        // The newest stays even when it alone is over the weight: it is what was asked for.
+        while ((done.size > capacity || weight > maxWeight) && done.size > 1 && oldest.hasNext()) {
+            val eldest = oldest.next()
+            weight -= weigh(eldest.key)
+            oldest.remove()
+        }
+    }
 
     /** The value for [key] if it is ready, without working anything out. */
     fun peek(key: K): V? = synchronized(lock) { done[key] }
@@ -52,7 +72,7 @@ internal class PreparedCache<K : Any, V : Any>(
         val job = PreparingScope.async(start = CoroutineStart.LAZY) {
             computed.incrementAndGet()
             try {
-                compute(key).also { value -> synchronized(lock) { done[key] = value } }
+                compute(key).also { value -> synchronized(lock) { keep(key, value) } }
             } finally {
                 synchronized(lock) { pending.remove(key) }
             }
@@ -64,10 +84,13 @@ internal class PreparedCache<K : Any, V : Any>(
 
     /** Keeps [value] for [key], worked out elsewhere, unless one is kept already. */
     fun offer(key: K, value: V) = synchronized(lock) {
-        if (done[key] == null) done[key] = value
+        if (done[key] == null) keep(key, value)
     }
 
-    fun clear() = synchronized(lock) { done.clear() }
+    fun clear() = synchronized(lock) {
+        done.clear()
+        weight = 0
+    }
 }
 
 /**
