@@ -1031,7 +1031,10 @@ fn commit_notice(diff: &DiffPanel) -> Option<String> {
 const PATCH_ROW_HEIGHT: f32 = 19.0;
 
 fn patch_row(row: &PatchRow, colors: ThemeColors) -> gpui::Div {
+    // As wide as the pane, or the part of the patch scrolled into view, so a
+    // row's fill reaches the pane's edge.
     let base = div()
+        .w_full()
         .h(px(PATCH_ROW_HEIGHT))
         .px_3()
         .flex()
@@ -10578,9 +10581,12 @@ impl XdDesktop {
                         .unwrap_or_default();
                     host.file_browse_list(&chat_id, path, generation)
                 } else {
+                    // The whole patch is what the Changes pane draws; a
+                    // file listing alone would leave a committed or edited
+                    // diff on screen.
                     host.diff_read(
                         &chat_id,
-                        if branch { "base" } else { "working-status" },
+                        if branch { "base" } else { "working-all" },
                         None,
                         None,
                         generation,
@@ -21142,6 +21148,7 @@ impl XdDesktop {
                         let open = open_path.as_deref() == Some(path.as_str());
                         div()
                             .id(("native-file", index))
+                            .w_full()
                             .h(px(28.0))
                             .px_2()
                             .flex()
@@ -21396,7 +21403,7 @@ impl XdDesktop {
             CommitState::Busy(action) => disabled_button("native-commit", colors).child(action),
             CommitState::Blocked(reason) => disabled_button("native-commit", colors)
                 .tooltip(move |_, cx| {
-                    cx.new(|_| PaneTooltip {
+                    cx.new(|_| ClearTooltip {
                         label: reason,
                         colors,
                     })
