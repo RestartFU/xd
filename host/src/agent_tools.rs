@@ -277,12 +277,18 @@ fn tools() -> Value {
             "name": MESSAGE,
             "title": "Message an agent",
             "description": "Send one of this chat's agents a message, as the user would. It is \
-                queued behind the agent's turn when it is working.",
+                queued behind the agent's turn when it is working, unless you steer: then the \
+                agent takes it now, in the turn it is taking, or that turn stops and the \
+                message starts the next one.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "agent": agent,
                     "text": {"type": "string", "description": "The message."},
+                    "steer": {"type": "boolean", "description": "Redirect a working agent now \
+                        instead of queueing the message behind its turn, as the user steering a \
+                        queued message would. Use it to stop, pause or correct an agent \
+                        mid-turn. Defaults to false."},
                 },
                 "required": ["agent", "text"],
                 "additionalProperties": false,
@@ -300,7 +306,8 @@ fn tools() -> Value {
             "description": "Stop one of this chat's agents and throw it away, once you need \
                 nothing more from it. Any turn it is taking stops and its chat is deleted, so it \
                 no longer shows to the user and cannot be messaged again. Files it wrote in its \
-                worktree stay on disk. To change its course instead, use message_agent.",
+                worktree stay on disk. To change its course instead, use message_agent with \
+                steer.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"agent": agent},
@@ -632,20 +639,23 @@ fn message_agent(arguments: &Value, ask: impl FnOnce(Value) -> Result<Value, Str
     let (Some(agent), Some(message)) = (text(arguments, "agent"), text(arguments, "text")) else {
         return tool_result("Pass agent, the agent's id, and text, the message.", true);
     };
-    ask_daemon(
-        ask,
-        json!({"op": "message-agent", "agent": agent, "text": message}),
-        |answer| {
-            tool_result(
-                if answer["queued"] == true {
-                    "Queued behind the agent's current turn."
-                } else {
-                    "Sent. The agent is working on it."
-                },
-                false,
-            )
-        },
-    )
+    let mut request = json!({"op": "message-agent", "agent": agent, "text": message});
+    if arguments.get("steer").and_then(Value::as_bool) == Some(true) {
+        request["steer"] = json!(true);
+    }
+    ask_daemon(ask, request, |answer| {
+        // `steered` is only there when the message met a turn at work: true
+        // when that turn took it, false when it was stopped for it.
+        tool_result(
+            match answer.get("steered").and_then(Value::as_bool) {
+                Some(true) => "Steered. The agent takes it in the turn it is taking.",
+                Some(false) => "Stopped the agent's turn. The message starts its next one.",
+                None if answer["queued"] == true => "Queued behind the agent's current turn.",
+                None => "Sent. The agent is working on it.",
+            },
+            false,
+        )
+    })
 }
 
 fn stop(arguments: &Value, ask: impl FnOnce(Value) -> Result<Value, String>) -> Value {
@@ -950,6 +960,50 @@ mod tests {
         );
         let (asked, _) = call(MESSAGE, json!({"agent": "child"}), json!({}));
         assert!(asked.is_none());
+
+        // Steering asks the daemon to redirect the turn, and says which way it went.
+        let (asked, steered) = call(
+            MESSAGE,
+            json!({"agent": "child", "text": "Stop here", "steer": true}),
+            json!({"ok": true, "queued": true, "steered": true}),
+        );
+        assert_eq!(
+            asked.unwrap(),
+            json!({"op": "message-agent", "agent": "child", "text": "Stop here", "steer": true})
+        );
+        assert_eq!(
+            steered["content"][0]["text"],
+            "Steered. The agent takes it in the turn it is taking."
+        );
+        let (_, interrupted) = call(
+            MESSAGE,
+            json!({"agent": "child", "text": "Stop here", "steer": true}),
+            json!({"ok": true, "queued": true, "steered": false}),
+        );
+        assert_eq!(
+            interrupted["content"][0]["text"],
+            "Stopped the agent's turn. The message starts its next one."
+        );
+        // An agent at rest just starts on it, steered or not.
+        let (_, sent) = call(
+            MESSAGE,
+            json!({"agent": "child", "text": "Stop here", "steer": true}),
+            json!({"ok": true, "queued": false}),
+        );
+        assert_eq!(
+            sent["content"][0]["text"],
+            "Sent. The agent is working on it."
+        );
+        // Only a true steer is passed on.
+        let (asked, _) = call(
+            MESSAGE,
+            json!({"agent": "child", "text": "Later", "steer": false}),
+            json!({"ok": true, "queued": true}),
+        );
+        assert_eq!(
+            asked.unwrap(),
+            json!({"op": "message-agent", "agent": "child", "text": "Later"})
+        );
 
         let (asked, stopped) = call(
             STOP,

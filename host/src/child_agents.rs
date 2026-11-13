@@ -169,7 +169,9 @@ impl Engine {
     }
 
     /// `message-agent`: sends one of `chat`'s agents a message, queued behind
-    /// its turn when it is at work.
+    /// its turn when it is at work. With `steer` it redirects that turn instead,
+    /// as the user steering a queued message does: the turn takes the message
+    /// when its agent can, otherwise it stops and the message goes first.
     pub(crate) fn message_agent(&self, request: &Value) -> Value {
         let child = match self.own_agent(request) {
             Ok(child) => child,
@@ -188,9 +190,9 @@ impl Engine {
         if let Err(error) = self.room_for_another(request, &child) {
             return error_reply(error);
         }
-        let reply = self.send_message(
-            &json!({"op": "send", "chat": child.id, "text": text, "from_parent": true}),
-        );
+        let steer = request.get("steer").and_then(Value::as_bool) == Some(true);
+        let reply = self.send_message(&json!({"op": "send", "chat": child.id, "text": text,
+            "from_parent": true, "steer": steer}));
         if reply["ok"] == true {
             self.events
                 .publish(json!({"event": "changed", "chat": child.id}));
