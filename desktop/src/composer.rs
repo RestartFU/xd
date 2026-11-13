@@ -293,6 +293,7 @@ pub(super) fn context_chip(
     };
     chip.max_w(px(280.0))
         .min_w_0()
+        .flex_shrink()
         .child(assistant_icon(icon_path, 13.0, colors.muted, colors))
         .child(truncating_label(label).min_w_0())
         .when(interactive, |chip| {
@@ -303,13 +304,19 @@ pub(super) fn context_chip(
 /// The row under the composer, starting with the project's name.
 pub(super) fn context_row(project: String, colors: ThemeColors) -> gpui::Div {
     div()
+        // One line, as wide as what it holds and no wider than its place:
+        // the chips give way by cutting their labels short. It used to wrap,
+        // and at Interface sizes where its chips' widths are fractions of a
+        // pixel the row came out a hair narrower than their sum, so the last
+        // chip went to a second line under the window's edge.
+        .min_w_0()
+        .max_w_full()
         .flex()
-        .flex_wrap()
         .items_center()
         .gap_2()
         .text_size(px(TEXT_LABEL))
         .text_color(rgb(colors.muted))
-        .child(div().px_2().child(project))
+        .child(div().flex_none().px_2().child(project))
 }
 
 /// The round send button at the end of the composer's controls. It is an
