@@ -5578,7 +5578,7 @@ impl XdDesktop {
             }
         })
         .detach();
-        let workspace_create_input = cx.new(|cx| ComposerInput::new(cx, "Project name…"));
+        let workspace_create_input = cx.new(|cx| ComposerInput::new(cx, "e.g. atlas…"));
         cx.subscribe(&workspace_create_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_create_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
@@ -5589,9 +5589,9 @@ impl XdDesktop {
             ComposerInput::new(
                 cx,
                 if cfg!(target_os = "windows") {
-                    "Linux repository path, e.g. /home/you/project…"
+                    "/home/you/project or /mnt/c/…"
                 } else {
-                    "Existing repository path (optional)…"
+                    "/home/you/project…"
                 },
             )
         });
@@ -5602,15 +5602,14 @@ impl XdDesktop {
         })
         .detach();
         let workspace_clone_input =
-            cx.new(|cx| ComposerInput::new(cx, "Git clone URL (optional)…"));
+            cx.new(|cx| ComposerInput::new(cx, "https://github.com/owner/repo…"));
         cx.subscribe(&workspace_clone_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_clone_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
-        let workspace_org_input =
-            cx.new(|cx| ComposerInput::new(cx, "GitHub organization (optional), e.g. acme…"));
+        let workspace_org_input = cx.new(|cx| ComposerInput::new(cx, "e.g. acme…"));
         cx.subscribe(&workspace_org_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_org_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
@@ -5764,8 +5763,7 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
-        let remote_address_input =
-            cx.new(|cx| ComposerInput::new(cx, "Host address (LAN or Tailscale)…"));
+        let remote_address_input = cx.new(|cx| ComposerInput::new(cx, "LAN or Tailscale address…"));
         cx.subscribe(&remote_address_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => {
                 if let Some(panel) = &mut this.remote_panel {
@@ -5779,7 +5777,7 @@ impl XdDesktop {
         })
         .detach();
         let remote_pairing_input =
-            cx.new(|cx| ComposerInput::new(cx, "Paste pairing code from host…"));
+            cx.new(|cx| ComposerInput::new(cx, "Paste the code from the host…"));
         cx.subscribe(&remote_pairing_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => {
                 if let Some(panel) = &mut this.remote_panel {
@@ -10162,8 +10160,8 @@ impl XdDesktop {
         self.workspace_create_input.update(cx, |input, cx| {
             input.set_placeholder(
                 match kind {
-                    WorkspaceCreateKind::Project => "Project name…",
-                    WorkspaceCreateKind::Folder => "Folder name…",
+                    WorkspaceCreateKind::Project => "e.g. atlas…",
+                    WorkspaceCreateKind::Folder => "e.g. Clients…",
                 },
                 cx,
             );
