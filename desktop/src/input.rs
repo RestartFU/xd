@@ -103,8 +103,11 @@ fn caret_scroll(current: Pixels, caret: Pixels, text: Pixels, visible: Pixels) -
 }
 
 pub(crate) fn terminal_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    // Text copied on Windows ends its lines with a carriage return and a line
+    // feed. A terminal takes each as an Enter, so every line ran twice.
+    let text = text.replace("\r\n", "\n");
     if !bracketed {
-        return text.as_bytes().to_vec();
+        return text.into_bytes();
     }
     let mut bytes = Vec::with_capacity(text.len() + 12);
     bytes.extend_from_slice(b"\x1b[200~");
@@ -1242,6 +1245,15 @@ mod tests {
     #[test]
     fn terminal_paste_uses_bracketed_paste_only_when_requested() {
         assert_eq!(terminal_paste_bytes("hello\nworld", false), b"hello\nworld");
+        // Windows line endings paste as the same single line break.
+        assert_eq!(
+            terminal_paste_bytes("hello\r\nworld\r\n", false),
+            b"hello\nworld\n"
+        );
+        assert_eq!(
+            terminal_paste_bytes("a\r\nb", true),
+            b"\x1b[200~a\nb\x1b[201~"
+        );
         assert_eq!(
             terminal_paste_bytes("hello\nworld", true),
             b"\x1b[200~hello\nworld\x1b[201~"

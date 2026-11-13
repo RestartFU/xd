@@ -95,22 +95,43 @@ curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install.sh |
 curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install-macos.sh | sh -s -- --release
 ```
 
-**Windows** (x86_64): download `xd-windows-x86_64.zip` from the
-[latest release](https://github.com/RestartFU/xd/releases/latest), extract the
-whole archive, and run `xd.exe`.
+**Windows** (x86_64): download `xd-windows-x86_64.msi` from the
+[latest release](https://github.com/RestartFU/xd/releases/latest) and run it. xd
+opens when the installer finishes, and is in the Start menu from then on.
 
-The Linux and macOS installers need no root access. Nightly desktop builds are on
+None of the installers needs root or administrator access. Nightly desktop builds are on
 the [nightly release](https://github.com/RestartFU/xd/releases/tag/nightly), along
 with the Android APK when signing credentials are configured.
 
 <details>
 <summary><b>Windows notes</b></summary>
 
-The desktop and browser run natively; local projects and persistent sessions run in
-your default WSL distribution. Install git, tmux, CA certificates, and your
-assistant CLIs inside WSL first. The included README has setup instructions and a
-WebView2 Runtime installer helper. Set `XD_WSL_DISTRIBUTION` to select another
-distro.
+The window and browser run natively; local projects, agents and persistent sessions
+run in your default WSL distribution, where xd runs its own matching Linux host.
+
+1. Install WSL and a Linux distribution: `wsl --install` in PowerShell, then finish
+   the distribution's first-time setup. See
+   [Microsoft's guide](https://learn.microsoft.com/windows/wsl/install).
+2. Inside the distribution, install git, tmux, an SSH client and CA certificates.
+   On Ubuntu or Debian: `sudo apt update && sudo apt install git tmux openssh-client ca-certificates`.
+3. Install Codex, Claude Code or GitHub Copilot CLI inside the same distribution,
+   on its `PATH`.
+
+Projects and files use Linux paths, such as `/home/you/project`. Browser `localhost`
+addresses are Windows's own; WSL 2 forwards servers running inside it. Set
+`XD_WSL_DISTRIBUTION` to use a distribution other than the default.
+
+The installer needs no administrator rights: it installs for your account under
+`%LOCALAPPDATA%\Programs\xd`. Run a newer installer to update, and remove xd from
+Windows Settings like any other app; your chats and settings are kept apart from
+the program and survive both. The nightly build installs as a separate app, xd
+Nightly, with its own settings.
+
+The browser pane uses Microsoft's WebView2 Runtime, which Windows 11 includes. If it
+is missing, the pane says so and links to Microsoft's installer.
+
+If xd closes unexpectedly it says so, and saves a report to
+`%LOCALAPPDATA%\xd\crash.log`.
 
 </details>
 
@@ -148,9 +169,12 @@ confirm.
 ./scripts/test.sh
 ```
 
-Windows builds use `scripts/build-windows.ps1` with a matching static Linux host
-from `scripts/build-windows-host.sh`. The `windows` GitHub Actions workflow builds
-and checks both parts, including a real Windows-to-WSL connection.
+Windows builds use `scripts/build-windows.ps1`, which packages the app as an MSI with
+WiX 3 around a matching static Linux host from `scripts/build-windows-host.sh`. The
+`windows` GitHub Actions workflow builds both parts, installs the MSI, drives the
+installed window with real pointer input (`scripts/test-windows-ui.ps1`), and checks
+a real Windows-to-WSL connection. `scripts/build-windows-icon.sh` regenerates the
+Windows icon from the app's vector artwork.
 
 ## Acknowledgements
 

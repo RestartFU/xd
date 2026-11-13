@@ -395,8 +395,8 @@ jobs:
             xd-linux-x86_64.tar.gz.sha256
             xd-macos-*.zip
             xd-macos-*.zip.sha256
-            xd-windows-x86_64.zip
-            xd-windows-x86_64.zip.sha256
+            xd-windows-x86_64.msi
+            xd-windows-x86_64.msi.sha256
             xd-android.apk
             xd-android.apk.sha256
             scripts/install.sh
@@ -422,9 +422,10 @@ jobs:
 
           Windows x86_64:
 
-          Extract \`xd-windows-x86_64.zip\` and run \`xd.exe\`.
-          Local sessions require WSL with git and tmux installed. The included
-          README covers setup; the browser uses Microsoft's WebView2 Runtime.
+          Download and run \`xd-windows-x86_64.msi\`. It installs for your
+          account without administrator rights and adds xd to the Start menu.
+          Local sessions require WSL with git and tmux installed; the README
+          covers setup. The browser uses Microsoft's WebView2 Runtime.
 
           Android:
 
@@ -441,7 +442,7 @@ jobs:
           # the same thing.
           if gh release view "$tag" >/dev/null 2>&1; then
             for legacy in \
-              xd-windows-x86_64.msi xd-windows-x86_64.msi.sha256 \
+              xd-windows-x86_64.zip xd-windows-x86_64.zip.sha256 \
               xd1.cab xd1.cab.sha256 \
               xd-windows-x86_64-setup.exe xd-windows-x86_64-setup.exe.sha256 \
               xd-windows-x86_64-msi.payload xd-windows-x86_64-cab.payload; do

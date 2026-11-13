@@ -142,6 +142,10 @@ enum NativeEvent {
         by_agent: bool,
     },
     Error(String),
+    /// Windows could not create the view it was asked for earlier. Unlike a
+    /// page's error, trying again means creating it, not reloading.
+    #[cfg(any(target_os = "windows", test))]
+    EngineFailed(String),
     #[cfg(target_os = "linux")]
     HistoryGesture(bool),
     Navigation {
@@ -974,8 +978,8 @@ impl BrowserTab {
         let (native, error) = if cfg!(test) {
             (None, None)
         } else {
-            match NativeBrowser::create(window, events.clone()) {
-                Ok(native) => (Some(Rc::new(native)), None),
+            match NativeBrowser::create(window, events.clone(), cx) {
+                Ok(native) => (Some(native), None),
                 Err(error) => (None, Some(error)),
             }
         };
@@ -1219,6 +1223,15 @@ impl BrowserTab {
                 self.load_timed_out = false;
                 self.error = Some(error);
             }
+            #[cfg(any(target_os = "windows", test))]
+            NativeEvent::EngineFailed(error) => {
+                self.loading = false;
+                self.load_timed_out = false;
+                // The view that failed is of no use; another try makes its own.
+                self.display.native.borrow_mut().take();
+                self.engine_failed = true;
+                self.error = Some(error);
+            }
             #[cfg(target_os = "linux")]
             NativeEvent::FileDialog(dialog) => {
                 dialog.show(cx);
@@ -1353,9 +1366,8 @@ impl BrowserTab {
         if !self.engine_failed || self.display.shut_down.get() {
             return false;
         }
-        match NativeBrowser::create(window, self.display.events.clone()) {
+        match NativeBrowser::create(window, self.display.events.clone(), cx) {
             Ok(native) => {
-                let native = Rc::new(native);
                 *self.display.native.borrow_mut() = Some(native.clone());
                 self.engine_failed = false;
                 self.error = None;
@@ -1382,6 +1394,46 @@ impl BrowserTab {
                 engine_may_start_later()
             }
         }
+    }
+
+    /// What to offer when Windows could not create the browser at all: its
+    /// runtime to install if that is what is missing, and another try.
+    #[cfg(target_os = "windows")]
+    fn engine_recovery(&self, error: &str, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.engine_failed {
+            return None;
+        }
+        let colors = self.colors;
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .when(error == WEBVIEW2_MISSING, |row| {
+                    row.child(
+                        crate::ui_button(
+                            "browser-get-webview2",
+                            crate::ButtonKind::Primary,
+                            colors,
+                        )
+                        .h(px(28.))
+                        .on_click(|_, _, cx| cx.open_url(WEBVIEW2_INSTALLER))
+                        .child("Get WebView2"),
+                    )
+                })
+                .child(
+                    crate::ui_button("browser-retry", crate::ButtonKind::Secondary, colors)
+                        .h(px(28.))
+                        .on_click(cx.listener(|pane, _, window, cx| pane.retry(window, cx)))
+                        .child("Try again"),
+                )
+                .into_any_element(),
+        )
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn engine_recovery(&self, _: &str, _: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        None
     }
 
     /// Another xd holding the browser profile is often one still exiting,
@@ -1558,13 +1610,15 @@ impl Render for BrowserTab {
                             .text_color(rgb(colors.muted))
                             .child(error.clone()),
                     )
-                    .when(has_page, |state| {
-                        state.child(
+                    .map(|state| match self.engine_recovery(error, cx) {
+                        Some(recovery) => state.child(recovery),
+                        None if has_page => state.child(
                             crate::ui_button("browser-retry", crate::ButtonKind::Secondary, colors)
                                 .h(px(28.))
                                 .on_click(cx.listener(|pane, _, window, cx| pane.retry(window, cx)))
                                 .child("Reload"),
-                        )
+                        ),
+                        None => state,
                     }),
             );
         } else if has_page {
@@ -1830,8 +1884,15 @@ struct NativeBrowser {
     // still holding the native view after the owning entity is released.
     #[cfg(not(target_os = "linux"))]
     entry: RefCell<Option<NativeEntry>>,
+    /// Calls made while Windows is still creating the view, applied in order
+    /// once it exists. `None` once the view is there or has failed.
+    #[cfg(target_os = "windows")]
+    pending: RefCell<Option<Vec<PendingCall>>>,
     disposed: Cell<bool>,
 }
+
+#[cfg(target_os = "windows")]
+type PendingCall = Box<dyn FnOnce(&NativeView)>;
 
 impl NativeBrowser {
     fn is_disposed(&self) -> bool {
@@ -1856,14 +1917,24 @@ impl NativeBrowser {
                 });
             });
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         if let Some((view, _)) = self.entry.borrow().as_ref() {
             apply(view);
+        }
+        #[cfg(target_os = "windows")]
+        match self.entry.borrow().as_ref() {
+            Some((view, _)) => apply(view),
+            // Still being created: kept for when it exists.
+            None => {
+                if let Some(pending) = self.pending.borrow_mut().as_mut() {
+                    pending.push(Box::new(apply));
+                }
+            }
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn create(window: &Window, events: NativeEvents) -> Result<Self, String> {
+    fn create(window: &Window, events: NativeEvents, _: &mut App) -> Result<Rc<Self>, String> {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -1891,23 +1962,87 @@ impl NativeBrowser {
             return Err("The browser did not start. Restart xd to try again.".into());
         };
         result?;
-        Ok(Self {
+        Ok(Rc::new(Self {
             id,
             disposed: Cell::new(false),
-        })
+        }))
     }
 
-    #[cfg(not(target_os = "linux"))]
-    fn create(window: &Window, events: NativeEvents) -> Result<Self, String> {
+    #[cfg(target_os = "macos")]
+    fn create(window: &Window, events: NativeEvents, _: &mut App) -> Result<Rc<Self>, String> {
         let parent = NativeParent(
             HasWindowHandle::window_handle(window)
                 .map_err(|error| error.to_string())?
                 .as_raw(),
         );
-        Ok(Self {
+        Ok(Rc::new(Self {
             entry: RefCell::new(Some(create_native(parent, events)?)),
             disposed: Cell::new(false),
-        })
+        }))
+    }
+
+    /// Returns at once, with the view still to come.
+    ///
+    /// WebView2 hands over a view through the window's message queue, and wry
+    /// waits for it by running that queue. This is called while GPUI draws,
+    /// with the whole app borrowed, and the queue also carries GPUI's own
+    /// timers and tasks: the first to touch the app while it was borrowed
+    /// panicked, and a panic inside a window procedure ends the process. The
+    /// pane was already saved as open by then, so the next launch created the
+    /// view the same way and died the same way.
+    ///
+    /// So the view is created later, from GPUI's message loop, where nothing
+    /// is borrowed and the queue can run freely.
+    #[cfg(target_os = "windows")]
+    fn create(window: &Window, events: NativeEvents, cx: &mut App) -> Result<Rc<Self>, String> {
+        let parent = NativeParent(
+            HasWindowHandle::window_handle(window)
+                .map_err(|error| error.to_string())?
+                .as_raw(),
+        );
+        let native = Rc::new(Self {
+            entry: RefCell::new(None),
+            pending: RefCell::new(Some(Vec::new())),
+            disposed: Cell::new(false),
+        });
+        let created = Rc::downgrade(&native);
+        deferred::run(
+            move || {
+                // A tab closed before its turn came needs no view.
+                if created.upgrade().is_none_or(|native| native.is_disposed()) {
+                    return;
+                }
+                let entry = create_native(parent, events.clone());
+                let Some(native) = created.upgrade() else {
+                    return;
+                };
+                match entry {
+                    Ok(entry) => native.attach(entry),
+                    Err(error) => {
+                        native.pending.borrow_mut().take();
+                        events.send(NativeEvent::EngineFailed(error));
+                    }
+                }
+            },
+            cx,
+        );
+        Ok(native)
+    }
+
+    /// Take the created view and apply what was asked of it meanwhile.
+    #[cfg(target_os = "windows")]
+    fn attach(&self, entry: NativeEntry) {
+        let pending = self.pending.borrow_mut().take().unwrap_or_default();
+        // Closed while it was being created: dropping the entry closes it.
+        if self.is_disposed() {
+            return;
+        }
+        *self.entry.borrow_mut() = Some(entry);
+        for call in pending {
+            if let Some((view, _)) = self.entry.borrow().as_ref() {
+                call(view);
+            }
+        }
     }
 
     /// Destroy the view before returning: callers may be about to destroy the
@@ -1930,8 +2065,47 @@ impl NativeBrowser {
             });
             let _ = disposed.recv_timeout(NATIVE_REPLY_TIMEOUT);
         }
+        #[cfg(target_os = "windows")]
+        self.pending.borrow_mut().take();
         #[cfg(not(target_os = "linux"))]
         drop(self.entry.borrow_mut().take());
+    }
+}
+
+/// Work that has to run from GPUI's message loop on Windows, outside any
+/// update of the app, one piece at a time.
+#[cfg(target_os = "windows")]
+mod deferred {
+    use std::{
+        cell::{Cell, RefCell},
+        collections::VecDeque,
+    };
+
+    use gpui::App;
+
+    thread_local! {
+        static QUEUE: RefCell<VecDeque<Box<dyn FnOnce()>>> = const { RefCell::new(VecDeque::new()) };
+        static DRAINING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Run `job` after every job queued before it has finished.
+    ///
+    /// A job may run the message queue itself, and another job queued from
+    /// inside that must not start until the first is done: creating two
+    /// WebView2 views at once would borrow their shared context twice.
+    pub(super) fn run(job: impl FnOnce() + 'static, cx: &mut App) {
+        QUEUE.with(|queue| queue.borrow_mut().push_back(Box::new(job)));
+        if DRAINING.replace(true) {
+            return;
+        }
+        // A spawned task is first polled from the message loop, never here.
+        cx.spawn(async move |_| {
+            while let Some(job) = QUEUE.with(|queue| queue.borrow_mut().pop_front()) {
+                job();
+            }
+            DRAINING.set(false);
+        })
+        .detach();
     }
 }
 
@@ -2164,13 +2338,42 @@ fn create_native(parent: NativeParent, events: NativeEvents) -> Result<NativeEnt
             NewWindowResponse::Deny
         })
         .build_as_child(&parent)
-        .map_err(|error| format!("Could not create the browser: {error}"))?;
+        .map_err(creation_error)?;
     // Hide the fully constructed child before trusting our visibility cache.
     native
         .set_visible(false)
         .map_err(|error| format!("Could not hide the browser: {error}"))?;
     drop(context_ref);
     Ok((native, context))
+}
+
+#[cfg(target_os = "macos")]
+fn creation_error(error: wry::Error) -> String {
+    format!("Could not create the browser: {error}")
+}
+
+/// What a tab shows when Windows has no WebView2 Runtime to draw pages with.
+#[cfg(any(target_os = "windows", test))]
+const WEBVIEW2_MISSING: &str = "The browser needs Microsoft's WebView2 Runtime, which this PC does not have. Install it, then try again.";
+
+/// Microsoft's own installer for the WebView2 Runtime.
+#[cfg(target_os = "windows")]
+const WEBVIEW2_INSTALLER: &str = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+
+#[cfg(target_os = "windows")]
+fn creation_error(error: wry::Error) -> String {
+    // wry waits for the view by running the message queue, and reports a quit
+    // it finds there as a cancelled task. It took the quit off the queue to
+    // do so: put it back, or the window closes and the process stays.
+    if matches!(&error, wry::Error::WebView2Error(inner) if format!("{inner:?}") == "TaskCanceled")
+    {
+        crate::windows::repost_quit();
+    }
+    if wry::webview_version().is_err() {
+        WEBVIEW2_MISSING.into()
+    } else {
+        format!("Could not create the browser: {error}")
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2928,6 +3131,34 @@ mod tests {
     fn native_events_can_cross_to_the_browser_thread() {
         fn assert_send<T: Send>() {}
         assert_send::<NativeEvents>();
+    }
+
+    #[gpui::test]
+    fn a_view_windows_could_not_create_leaves_the_tab_able_to_try_again(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserTab::new(
+                Some("http://localhost:3000".into()),
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        pane.update(cx, |pane, cx| {
+            assert!(!pane.engine_failed);
+            // Creation is reported later on Windows, not when the tab is made.
+            pane.native_event(NativeEvent::EngineFailed(WEBVIEW2_MISSING.into()), cx);
+            assert!(pane.engine_failed, "another try must create the view");
+            assert_eq!(pane.error.as_deref(), Some(WEBVIEW2_MISSING));
+            assert!(pane.display.native().is_none());
+            assert!(!pane.loading);
+            // The page it was opened for is still the one to load.
+            assert_eq!(
+                pane.current_url().as_deref(),
+                Some("http://localhost:3000/")
+            );
+        });
     }
 
     #[gpui::test]

@@ -22,6 +22,35 @@ const MESSAGE_ICON: &str = "icons/message-square.svg";
 const BOT_ICON: &str = "icons/bot.svg";
 const KEYBOARD_ICON: &str = "icons/keyboard.svg";
 
+/// What Settings says about xd's version where the host cannot install an
+/// update itself: a source build, or the Windows app, whose host lives in WSL.
+///
+/// It used to say only that the update was manual, whatever "Check now" had
+/// found, so checking appeared to do nothing.
+fn manual_update_status(status: &SelfUpdateStatus, windows: bool) -> String {
+    match status.latest.as_deref() {
+        Some(latest) if status.available && windows => {
+            format!("Update available: {latest}. Download the installer and run it to update.")
+        }
+        Some(latest) if status.available => {
+            format!("Update available: {latest}. This installation requires a manual update.")
+        }
+        Some(_) => format!("xd {}. Up to date.", status.version),
+        None => {
+            "This installation requires a manual update. Check now to see if there is one.".into()
+        }
+    }
+}
+
+/// The installer of the newest build on this app's channel.
+fn windows_installer_url(nightly: bool) -> &'static str {
+    if nightly {
+        "https://github.com/RestartFU/xd/releases/download/nightly/xd-nightly-windows-x86_64.msi"
+    } else {
+        "https://github.com/RestartFU/xd/releases/latest/download/xd-windows-x86_64.msi"
+    }
+}
+
 /// How many theme cards sit in a row across `room`: all of them, or two to
 /// a row, or one, whichever keeps every card wide enough for its name. With two
 /// themes, both sit side by side unless the panel is very narrow.
@@ -880,7 +909,7 @@ impl XdDesktop {
                     Some(status) if status.state == "installing" => "Installing update…".into(),
                     Some(status) if status.state == "checking" => "Checking for updates…".into(),
                     Some(status) if !status.supported => {
-                        "This installation requires a manual update.".into()
+                        manual_update_status(status, cfg!(target_os = "windows"))
                     }
                     Some(status) if status.available => format!(
                         "Update available: {}",
@@ -910,6 +939,15 @@ impl XdDesktop {
                 .as_ref()
                 .is_some_and(|status| status.supported && status.available)
         });
+        // Windows updates by running the newer installer over the old one.
+        let download = cfg!(target_os = "windows")
+            && panel.is_some_and(|panel| {
+                panel.error.is_none()
+                    && panel
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| !status.supported && status.available)
+            });
         setting(
             "workspace-settings-update",
             "xd updates",
@@ -928,6 +966,17 @@ impl XdDesktop {
                                         this.request_app_update("check", cx)
                                     }))
                                     .child("Check now"),
+                            )
+                        })
+                        .when(!busy && download, |actions| {
+                            actions.child(
+                                ui_button("download-app-update", ButtonKind::Primary, colors)
+                                    .on_click(|_, _, cx| {
+                                        cx.open_url(windows_installer_url(
+                                            xd_desktop::channel::nightly(),
+                                        ))
+                                    })
+                                    .child("Download installer"),
                             )
                         })
                         .when(!busy && !installed && available, |actions| {
@@ -1708,6 +1757,43 @@ impl XdDesktop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checking_for_an_update_shows_what_was_found_even_where_installing_is_manual() {
+        let status = |latest: Option<&str>, available: bool| SelfUpdateStatus {
+            version: "0.2.17".into(),
+            latest: latest.map(str::to_owned),
+            available,
+            supported: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            manual_update_status(&status(None, false), true),
+            "This installation requires a manual update. Check now to see if there is one."
+        );
+        assert_eq!(
+            manual_update_status(&status(Some("0.2.17"), false), true),
+            "xd 0.2.17. Up to date."
+        );
+        assert_eq!(
+            manual_update_status(&status(Some("0.2.18"), true), true),
+            "Update available: 0.2.18. Download the installer and run it to update."
+        );
+        // A source build has no installer to offer.
+        assert_eq!(
+            manual_update_status(&status(Some("0.2.18"), true), false),
+            "Update available: 0.2.18. This installation requires a manual update."
+        );
+    }
+
+    #[test]
+    fn each_channel_downloads_its_own_installer() {
+        assert!(windows_installer_url(false).ends_with("/latest/download/xd-windows-x86_64.msi"));
+        assert!(
+            windows_installer_url(true)
+                .ends_with("/download/nightly/xd-nightly-windows-x86_64.msi")
+        );
+    }
 
     #[test]
     fn theme_cards_sit_side_by_side_unless_their_names_would_clip() {
