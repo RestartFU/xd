@@ -627,6 +627,7 @@ internal fun MinimalMobileApp(
             backends = model.hostCatalog.collectAsStateWithLifecycle().value,
             catalogError = model.hostCatalogError.collectAsStateWithLifecycle().value,
             retryCatalog = model::loadCreationCatalog,
+            accounts = rememberChatAccounts(model),
             chatTab = true,
             onDismiss = { createChatIn = null },
             onCreate = { request ->
@@ -635,6 +636,7 @@ internal fun MinimalMobileApp(
                     model.createDirectSession(
                         project.id, request.title, request.agent, session.id,
                         effort = request.effort, access = request.access, plan = request.plan,
+                        account = request.account,
                     )
                 }
             },
@@ -1031,6 +1033,7 @@ private fun MinimalProjectsHome(
             backends = model.hostCatalog.collectAsStateWithLifecycle().value,
             catalogError = model.hostCatalogError.collectAsStateWithLifecycle().value,
             retryCatalog = model::loadCreationCatalog,
+            accounts = rememberChatAccounts(model),
             places = { id -> NewSessionPlaces.load(model.client, id) },
             onDismiss = {
                 createSessionIn = null
@@ -1046,6 +1049,7 @@ private fun MinimalProjectsHome(
                     projectId, request.title, request.agent,
                     worktree = request.worktree, startFromRemote = request.startFromRemote,
                     effort = request.effort, access = request.access, plan = request.plan,
+                    account = request.account,
                 )
             },
         )

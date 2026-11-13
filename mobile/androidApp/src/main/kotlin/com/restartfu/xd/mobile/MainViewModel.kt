@@ -458,6 +458,12 @@ class MainViewModel @JvmOverloads constructor(
         loadCreationCatalog()
     }
 
+    /** Lists the accounts a new chat can be set to run on, on a host that can set one. */
+    fun loadChatAccounts() {
+        if (!client.tree.value.chatAccounts) return
+        viewModelScope.launch { runCatching { client.loadAgentAccounts() } }
+    }
+
     fun loadCreationCatalog() {
         val read = ++catalogReads
         _catalogError.value = null
@@ -667,6 +673,7 @@ class MainViewModel @JvmOverloads constructor(
         effort: String? = null,
         access: String? = null,
         plan: Boolean? = null,
+        account: String? = null,
     ) {
         _error.value = null
         val named = title.takeIf(String::isNotBlank) ?: if (sessionId == null) "New Session" else "New chat"
@@ -696,6 +703,7 @@ class MainViewModel @JvmOverloads constructor(
                     worktree = worktree,
                     effort = effort, access = access, plan = plan,
                     startFromRemote = startFromRemote,
+                    account = account,
                 )
                 if (drafts.getString(draftKey, null) == sentDraft) drafts.edit().remove(draftKey).apply()
                 if (openWhenMade.remove(starting.id)) {
@@ -1464,6 +1472,22 @@ class ChatViewModel(
     fun setAccess(access: String) {
         launchGuarded(_selectingModel) {
             session.setOption(ChatOption.ACCESS, access)
+        }
+    }
+
+    /** Each assistant's accounts, to offer one for this chat. */
+    val agentAuth = client.agentAuth
+
+    /** Lists the accounts, on a host that can set a chat to one. */
+    fun loadAccounts() {
+        if (!client.tree.value.chatAccounts) return
+        viewModelScope.launch { runCatching { client.loadAgentAccounts() } }
+    }
+
+    /** Sets the account the chat runs on; null lets the host choose again. */
+    fun setAccount(account: String?) {
+        launchGuarded(_selectingModel) {
+            session.setOption(ChatOption.ACCOUNT, account.orEmpty())
         }
     }
 

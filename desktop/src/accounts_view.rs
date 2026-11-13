@@ -209,6 +209,124 @@ fn account_status(account: &AuthAccount, now: i64, colors: ThemeColors) -> (Stri
     ("Ready".into(), colors.muted, false)
 }
 
+/// What the account picker calls letting the host choose.
+pub(super) const AUTOMATIC_ACCOUNT: &str = "Automatic: the first account with room left";
+
+/// The accounts a chat on `provider` can be set to run on, each with what the
+/// picker shows for it, after a first choice that lets the host choose. Empty
+/// unless the assistant has two or more accounts that finished signing in.
+pub(super) fn chat_account_choices(
+    provider: &AuthProvider,
+    now: i64,
+    colors: ThemeColors,
+) -> Vec<(String, String)> {
+    let accounts = provider
+        .accounts
+        .iter()
+        .filter(|account| !account.pending)
+        .collect::<Vec<_>>();
+    if accounts.len() < 2 {
+        return Vec::new();
+    }
+    std::iter::once((String::new(), AUTOMATIC_ACCOUNT.to_owned()))
+        .chain(accounts.into_iter().map(|account| {
+            let (status, _, _) = account_status(account, now, colors);
+            let label = if matches!(status.as_str(), "Ready" | "In use" | "Checking…") {
+                account.label.clone()
+            } else {
+                format!("{} · {status}", account.label)
+            };
+            (account.id.clone(), label)
+        }))
+        .collect()
+}
+
+impl XdDesktop {
+    /// What the open chat's account can be set to; see [`chat_account_choices`].
+    pub(super) fn open_chat_account_choices(&self, colors: ThemeColors) -> Vec<(String, String)> {
+        if !self.model.chat_accounts_supported {
+            return Vec::new();
+        }
+        self.auth_providers
+            .iter()
+            .find(|provider| provider.provider == self.model.backend)
+            .map(|provider| chat_account_choices(provider, now_ms(), colors))
+            .unwrap_or_default()
+    }
+
+    /// What the new chat's account can be set to; see [`chat_account_choices`].
+    pub(super) fn new_chat_account_choices(&self, colors: ThemeColors) -> Vec<(String, String)> {
+        if !self.model.chat_accounts_supported {
+            return Vec::new();
+        }
+        let backend = self.minimal_new_session_agent.protocol_name();
+        self.auth_providers
+            .iter()
+            .find(|provider| provider.provider == backend)
+            .map(|provider| chat_account_choices(provider, now_ms(), colors))
+            .unwrap_or_default()
+    }
+
+    /// The account the new chat will run on, as remembered for the project,
+    /// while it is still one its assistant can be set to. Until the accounts
+    /// have been listed it is sent as remembered: the host keeps it only if
+    /// the assistant offers it, where dropping it here would lose the choice.
+    pub(super) fn new_chat_account(&self) -> Option<String> {
+        if !self.model.chat_accounts_supported {
+            return None;
+        }
+        let backend = self.minimal_new_session_agent.protocol_name();
+        let chosen = self.new_chat_remembered.account.as_deref()?;
+        let Some(provider) = self
+            .auth_providers
+            .iter()
+            .find(|provider| provider.provider == backend)
+        else {
+            return Some(chosen.to_owned());
+        };
+        let listed = provider.accounts.iter().filter(|account| !account.pending);
+        (listed.clone().count() >= 2 && listed.clone().any(|account| account.id == chosen))
+            .then(|| chosen.to_owned())
+    }
+
+    /// The new chat's account chip: the account it will run on, or that the
+    /// host chooses.
+    pub(super) fn new_chat_account_label(&self) -> String {
+        let backend = self.minimal_new_session_agent.protocol_name();
+        self.new_chat_account()
+            .and_then(|id| {
+                self.auth_providers
+                    .iter()
+                    .find(|provider| provider.provider == backend)?
+                    .accounts
+                    .iter()
+                    .find(|account| account.id == id)
+                    .map(|account| account.label.clone())
+            })
+            .unwrap_or_else(|| "Auto account".to_owned())
+    }
+
+    /// The account the open chat is set to, by its label, while it is still
+    /// one of its assistant's; `None` while the host chooses.
+    pub(super) fn open_chat_account_name(&self) -> Option<String> {
+        let id = self.model.account.as_deref()?;
+        self.auth_providers
+            .iter()
+            .find(|provider| provider.provider == self.model.backend)?
+            .accounts
+            .iter()
+            .find(|account| account.id == id)
+            .map(|account| account.label.clone())
+    }
+
+    /// The account chip's text: the account the open chat is set to, or
+    /// that the host chooses.
+    pub(super) fn open_chat_account_label(&self) -> String {
+        self.open_chat_account_name()
+            .unwrap_or_else(|| "Auto account".to_owned())
+    }
+}
+
 /// The session and weekly allowance, as what is left.
 fn account_meters(account: &AuthAccount, colors: ThemeColors) -> Option<gpui::Div> {
     let left = |kind: &str| {
@@ -299,7 +417,8 @@ fn icon_button(
 
 /// What the accounts in Settings are for, shown above them and read by search.
 pub(super) const ACCOUNTS_EXPLANATION: &str = "Each assistant can hold several sign-ins. New chats \
-     start on the first one with room left; a chat stays on its account until that account runs out.";
+     start on the first one with room left; a chat stays on its account until that account runs out. \
+     To keep a chat on one account, choose it below the chat's message box.";
 
 impl XdDesktop {
     pub(super) fn request_agent_accounts(&mut self) {
@@ -981,6 +1100,50 @@ mod tests {
         assert!(accounts[0].default && accounts[0].in_use);
         assert_eq!(accounts[0].label, "Codex sign-in");
         assert!(!old.holds_several());
+    }
+
+    #[test]
+    fn a_chat_is_offered_accounts_only_when_there_are_several() {
+        let colors = ThemePreset::Dark.colors();
+        let now = 1_000_000;
+        let lone = provider(json!({"provider":"codex","state":"signed-in","accounts":[
+            {"id":"default","default":true,"label":"a@example.com","state":"signed-in","in_use":true},
+            {"id":"0123456789ab","label":"New account","state":"signing-in","pending":true},
+        ]}));
+        assert!(
+            chat_account_choices(&lone, now, colors).is_empty(),
+            "an account still signing in for the first time is no choice"
+        );
+        assert!(
+            chat_account_choices(
+                &provider(json!({"provider":"codex","state":"signed-in"})),
+                now,
+                colors
+            )
+            .is_empty(),
+            "nor is the one sign-in of a host from before accounts"
+        );
+        let several = provider(json!({"provider":"claude","state":"signed-in","accounts":[
+            {"id":"default","default":true,"label":"a@example.com","state":"signed-in","in_use":true},
+            {"id":"0123456789ab","label":"b@example.com","state":"signed-in",
+             "limited_until_ms": now + 2 * 3_600_000, "limited_reason":"5-hour limit"},
+            {"id":"ba9876543210","label":"c@example.com","state":"signed-out"},
+        ]}));
+        assert_eq!(
+            chat_account_choices(&several, now, colors),
+            vec![
+                (String::new(), AUTOMATIC_ACCOUNT.to_owned()),
+                ("default".to_owned(), "a@example.com".to_owned()),
+                (
+                    "0123456789ab".to_owned(),
+                    "b@example.com · Out of its 5-hour limit · back in 2 h".to_owned()
+                ),
+                (
+                    "ba9876543210".to_owned(),
+                    "c@example.com · Signed out".to_owned()
+                ),
+            ]
+        );
     }
 
     #[test]

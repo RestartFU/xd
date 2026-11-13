@@ -36,6 +36,19 @@ class OpsTest {
     }
 
     @Test
+    fun aChatCanBeSetToAnAccountOrLeftToTheHost() {
+        val set = Ops.setOption("c", ChatOption.ACCOUNT, "0123456789ab")
+        assertEquals("account", set["option"]!!.jsonPrimitive.content)
+        assertEquals("0123456789ab", set["value"]!!.jsonPrimitive.content)
+        assertEquals("", Ops.setOption("c", ChatOption.ACCOUNT, "")["value"]!!.jsonPrimitive.content)
+        assertEquals("default", Ops.newChat("f", account = "default")["account"]!!.jsonPrimitive.content)
+        assertFalse("account" in Ops.newChat("f"))
+        // Listing the accounts for a chat does not have the host check each again.
+        assertFalse(Ops.agentAuth(check = false)["check"]!!.jsonPrimitive.boolean)
+        assertFalse("check" in Ops.agentAuth())
+    }
+
+    @Test
     fun branchSessionsStartFromRemoteUnlessDisabled() {
         val branch = Ops.NewSessionWorktree.Branch("refs/heads/main", "abc")
         assertTrue(Ops.newChat("f", worktree = branch)["start_from_remote"]!!.jsonPrimitive.boolean)

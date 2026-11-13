@@ -279,6 +279,9 @@ pub(crate) struct Choice {
     /// login. Only said when there are several; a lone sign-in runs as before
     /// and the CLI says what is wrong.
     pub unavailable: bool,
+    /// The account the user chose for the chat cannot take the turn; says
+    /// why, as in "is signed out". `account` is then that account.
+    pub refused: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1094,9 +1097,25 @@ impl Accounts {
         signed_in: impl Fn(&str) -> bool,
         now: i64,
     ) -> Choice {
+        self.choose_with(provider, chat_account, None, signed_in, now)
+    }
+
+    /// Like [`Accounts::choose`], for a chat the user set to run on `chosen`.
+    /// Such a chat runs there whatever the order and switching say, even when
+    /// it is out of usage, so the CLI says so in its own words. When it cannot
+    /// run there at all, `refused` says why. An account no longer in the list
+    /// chooses nothing, and the chat goes where any other would.
+    pub(crate) fn choose_with(
+        &self,
+        provider: &str,
+        chat_account: Option<&str>,
+        chosen: Option<&str>,
+        signed_in: impl Fn(&str) -> bool,
+        now: i64,
+    ) -> Choice {
         let decided = self
             .with(provider, |state| {
-                choose(state, chat_account, &signed_in, now).map(|mut choice| {
+                choose(state, chat_account, chosen, &signed_in, now).map(|mut choice| {
                     if let Some(passed) = choice.passed_over.as_mut() {
                         passed.from = state
                             .account(&passed.from)
@@ -1113,6 +1132,7 @@ impl Accounts {
             passed_over: None,
             all_spent_until: None,
             unavailable: self.has_several(provider),
+            refused: None,
         });
         choice.environment = self.environment(provider, &choice.account);
         choice
@@ -1186,6 +1206,7 @@ pub(crate) struct Identity {
 fn choose(
     state: &Provider,
     chat_account: Option<&str>,
+    chosen: Option<&str>,
     signed_in: &impl Fn(&str) -> bool,
     now: i64,
 ) -> Option<Choice> {
@@ -1218,7 +1239,31 @@ fn choose(
         passed_over: None,
         all_spent_until: None,
         unavailable: false,
+        refused: None,
     };
+    // With one account there is nothing to choose between: it runs as it
+    // would for any chat, and the CLI says what is wrong with it.
+    if state.accounts.len() > 1
+        && let Some(chosen) =
+            chosen.and_then(|id| state.accounts.iter().find(|account| account.id == id))
+    {
+        let mut picked = choice(chosen);
+        if !usable(&chosen) {
+            picked.refused = Some(
+                if !signed_in(&chosen.id) {
+                    "is signed out"
+                } else if chosen.live.problem == Some("mismatch") {
+                    "is now signed in to a different account"
+                } else if runs_as_itself(chosen) {
+                    "is the same login as another account"
+                } else {
+                    "has not been checked since it signed in"
+                }
+                .into(),
+            );
+        }
+        return Some(picked);
+    }
     let first_usable = state.accounts.iter().find(usable);
     if !state.auto_switch || state.accounts.len() < 2 {
         return first_usable.map(choice);
@@ -1358,7 +1403,8 @@ fn load_provider(provider: &str, value: &Value, now: i64) -> Option<Provider> {
     })
 }
 
-fn valid_id(id: &str) -> bool {
+/// Whether `id` could name an account: `default`, or an id xd gave one it added.
+pub(crate) fn valid_id(id: &str) -> bool {
     id == DEFAULT_ACCOUNT
         || (id.len() == 12
             && id
@@ -2002,6 +2048,69 @@ mod tests {
         accounts.forget_login_reading("codex", DEFAULT_ACCOUNT);
         assert_eq!(accounts.session_tag("codex", DEFAULT_ACCOUNT), "default#?");
         assert!(accounts.describe("codex", 3)[0]["limited_until_ms"].is_null());
+    }
+
+    #[test]
+    fn a_chat_set_to_an_account_runs_there_whatever_the_order_says() {
+        let data = temp("chosen");
+        let accounts = Accounts::with_homes(&data, &[]);
+        let second = added(&accounts, "claude", "b@example.com");
+        let now = 10 * HOUR;
+        // Neither the order, nor the account the session is on, nor switching
+        // being off moves a chat off the account it was set to.
+        let choice = accounts.choose_with(
+            "claude",
+            Some(DEFAULT_ACCOUNT),
+            Some(&second),
+            |_| true,
+            now,
+        );
+        assert_eq!(choice.account, second);
+        assert_eq!(choice.refused, None);
+        assert_eq!(choice.passed_over, None);
+        accounts.set_auto_switch("claude", false).unwrap();
+        assert_eq!(
+            accounts
+                .choose_with("claude", None, Some(&second), |_| true, now)
+                .account,
+            second
+        );
+        accounts.set_auto_switch("claude", true).unwrap();
+        // Out of usage, it still runs there, so the CLI says so itself.
+        accounts.note_limited("claude", &second, Some(now + HOUR), None, now);
+        let choice = accounts.choose_with("claude", None, Some(&second), |_| true, now);
+        assert_eq!(choice.account, second);
+        assert_eq!(choice.refused, None);
+        assert_eq!(choice.all_spent_until, None);
+        // Signed out, the turn is refused rather than run elsewhere.
+        let choice = accounts.choose_with("claude", None, Some(&second), |id| id != second, now);
+        assert_eq!(choice.account, second);
+        assert_eq!(choice.refused.as_deref(), Some("is signed out"));
+        // A removed account chooses nothing: the chat goes where any would.
+        accounts.forget("claude", &second);
+        let choice = accounts.choose_with("claude", None, Some(&second), |_| true, now);
+        assert_eq!(choice.account, DEFAULT_ACCOUNT);
+        assert_eq!(choice.refused, None);
+        // Nor does the only account left: signed out, it runs as it would
+        // for any chat, and the CLI says so.
+        let choice = accounts.choose_with("claude", None, Some(DEFAULT_ACCOUNT), |_| false, now);
+        assert_eq!(choice.account, DEFAULT_ACCOUNT);
+        assert_eq!(choice.refused, None);
+        assert!(!choice.unavailable);
+    }
+
+    #[test]
+    fn a_chosen_account_now_signed_in_to_another_login_is_refused() {
+        let data = temp("chosen-login");
+        let accounts = Accounts::with_homes(&data, &[]);
+        let second = added(&accounts, "claude", "b@example.com");
+        accounts.record_probe("claude", &second, &identity("c@example.com"), vec![], 1);
+        let choice = accounts.choose_with("claude", None, Some(&second), |_| true, 2);
+        assert_eq!(choice.account, second);
+        assert_eq!(
+            choice.refused.as_deref(),
+            Some("is now signed in to a different account")
+        );
     }
 
     #[test]

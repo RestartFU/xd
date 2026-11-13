@@ -21,6 +21,9 @@ public enum class ChatOption(
     BACKEND("backend"),
     NEW_WORKTREE("new-worktree"),
     WORKSPACE("workspace"),
+
+    /** The account the chat runs on; an empty value lets the host choose. */
+    ACCOUNT("account"),
 }
 
 public object Ops {
@@ -412,8 +415,11 @@ public object Ops {
         effort: String? = null,
         access: String? = null,
         plan: Boolean? = null,
+        /** The account the chat runs on, or null to let the host choose. */
+        account: String? = null,
     ): JsonObject = buildJsonObject {
         put("op", "new-chat")
+        account?.let { put("account", it) }
         effort?.let { put("effort", it) }
         access?.let { put("access", it) }
         plan?.let { put("plan", it) }
@@ -474,7 +480,15 @@ public object Ops {
         put("folder", requireId(folderId, "Folder"))
     }
 
-    public fun agentAuth(): JsonObject = op("agent-auth")
+    /**
+     * The assistants' sign-ins and accounts. With [check] false the host
+     * answers without checking each account again, which is enough to offer
+     * them for a chat.
+     */
+    public fun agentAuth(check: Boolean = true): JsonObject = buildJsonObject {
+        put("op", "agent-auth")
+        if (!check) put("check", false)
+    }
 
     /**
      * Starts, feeds, or cancels an assistant's sign-in on the host, adds an

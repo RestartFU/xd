@@ -489,7 +489,11 @@ impl Engine {
                 }
             }
             Some("agent-auth") => {
-                self.auth.refresh_all();
+                // A client that only lists the accounts, to offer them for a
+                // chat, does not need each one checked again.
+                if request.get("check").and_then(Value::as_bool) != Some(false) {
+                    self.auth.refresh_all();
+                }
                 self.auth.snapshots()
             }
             Some("agent-clis") => self.cli_versions.snapshots(),
@@ -573,6 +577,7 @@ impl Engine {
             Some("new-chat-sources") => self.read(|store| store.new_chat_sources(&request)),
             Some("set-draft") => self.event_mutation(|store| store.set_draft(&request)),
             Some("set-shortcuts") => self.event_mutation(|store| store.set_shortcuts(&request)),
+            Some("set-option") if request["option"] == "account" => self.set_chat_account(&request),
             Some("set-option") => self.event_mutation(|store| store.set_option(&request)),
             Some("send") => self.send_message(&request),
             Some("resume-turn") => self.resume_turn(&request),
@@ -623,7 +628,11 @@ impl Engine {
                         .session_resources
                         .lock()
                         .unwrap_or_else(|error| error.into_inner());
-                    self.tree_mutation(|store| store.new_chat(&request))
+                    self.tree_mutation(|store| {
+                        store.new_chat_offering(&request, &|backend, account| {
+                            self.chooseable_account(backend, account)
+                        })
+                    })
                 };
                 // Named afterwards, so creating the chat never waits on a model.
                 if reply.get("ok").and_then(Value::as_bool) == Some(true)
@@ -1047,6 +1056,14 @@ impl Engine {
             .unwrap_or("codex")
             .to_owned();
         response["auth_state"] = Value::String(self.auth.state(&provider));
+        // An account removed since it was chosen chooses nothing any more.
+        if response["account"]
+            .as_str()
+            .is_some_and(|account| !self.chooseable_account(&provider, account))
+            && let Some(response) = response.as_object_mut()
+        {
+            response.remove("account");
+        }
         if let Some(runtime) = &self.runtime {
             response["background_tasks"] = runtime.background_tasks(chat_id).into();
             let interactions = runtime.interactions(chat_id);
@@ -1065,6 +1082,43 @@ impl Engine {
             }
         }
         response
+    }
+
+    /// Whether a chat on `provider` can be set to run on `account`: one in
+    /// the assistant's list, not one still signing in for the first time.
+    fn chooseable_account(&self, provider: &str, account: &str) -> bool {
+        let accounts = self.auth.accounts();
+        accounts.exists(provider, account) && accounts.pending(provider).as_deref() != Some(account)
+    }
+
+    /// Sets the account a chat runs on, or with an empty `value` lets xd
+    /// choose again. The next turn runs there. Work under way is left where
+    /// it is: a running turn, and the reports Claude's process makes on the
+    /// background agents and commands it started.
+    fn set_chat_account(&self, request: &Value) -> Value {
+        let chat_id =
+            match required_string(request, "chat", "set-option needs a chat and an option.") {
+                Ok(chat_id) => chat_id,
+                Err(error) => return error_reply(error),
+            };
+        let account = request
+            .get("value")
+            .and_then(Value::as_str)
+            .filter(|account| !account.is_empty());
+        if let Some(account) = account {
+            let backend = match self.store.as_ref().map(|store| store.chat_backend(chat_id)) {
+                Some(Ok(backend)) => backend,
+                Some(Err(error)) => return error_reply(error),
+                None => return error_reply("Rust host state storage is not configured."),
+            };
+            if !self.chooseable_account(&backend, account) {
+                return error_reply(format!(
+                    "No such {} account. It may have been removed.",
+                    crate::accounts::provider_name(&backend)
+                ));
+            }
+        }
+        self.event_mutation(|store| store.set_option(request))
     }
 
     fn auth_mutation(
@@ -4012,6 +4066,71 @@ mod tests {
             assert_eq!(bytes.last(), Some(&b'\n'));
             assert_eq!(serde_json::from_slice::<Value>(bytes).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn a_chat_is_set_only_to_an_account_its_assistant_has() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!("xd-engine-account-{}-{id}", std::process::id()));
+        let workspaces = root.join("Workspaces");
+        std::fs::create_dir_all(&workspaces).unwrap();
+        let store = StateStore::open(root.join("chats.db"), &workspaces).unwrap();
+        let engine = Engine::with_store(store);
+        assert_eq!(
+            engine.dispatch(json!({"op": "tree"}))["chat_accounts"],
+            true
+        );
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
+        let chat = engine.dispatch(json!({"op": "new-chat", "folder": folder}))["id"].clone();
+        let set = |value: &str| {
+            engine.dispatch(
+                json!({"op": "set-option", "chat": chat, "option": "account", "value": value}),
+            )
+        };
+
+        assert_eq!(set("default")["ok"], true);
+        assert_eq!(
+            engine.dispatch(json!({"op": "chat", "chat": chat}))["account"],
+            "default"
+        );
+        let refused = set("0123456789ab");
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert_eq!(
+            engine.dispatch(json!({"op": "chat", "chat": chat}))["account"],
+            "default"
+        );
+        assert_eq!(set("")["ok"], true);
+        assert!(
+            engine
+                .dispatch(json!({"op": "chat", "chat": chat}))
+                .get("account")
+                .is_none()
+        );
+        let missing = engine.dispatch(json!({"op": "set-option", "chat": "missing",
+            "option": "account", "value": "default"}));
+        assert_eq!(missing["ok"], false);
+
+        // A new chat keeps an account its assistant has, and no other: one
+        // not in the list would take effect if that id ever joined it.
+        let made = engine.dispatch(json!({"op": "new-chat", "folder": folder,
+            "account": "default"}))["id"]
+            .clone();
+        assert_eq!(
+            engine.dispatch(json!({"op": "chat", "chat": made}))["account"],
+            "default"
+        );
+        let gone = engine.dispatch(json!({"op": "new-chat", "folder": folder,
+            "account": "0123456789ab"}))["id"]
+            .clone();
+        assert!(
+            engine
+                .dispatch(json!({"op": "chat", "chat": gone}))
+                .get("account")
+                .is_none()
+        );
+        let stored = engine.store.as_ref().unwrap();
+        assert_eq!(stored.chosen_account(gone.as_str().unwrap()).unwrap(), None);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

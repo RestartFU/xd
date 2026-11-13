@@ -35,6 +35,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
@@ -63,7 +64,8 @@ import kotlinx.coroutines.delay
 /** What the dialog says above the accounts, as the desktop's Settings, Agents does. */
 internal const val ACCOUNTS_INTRO =
     "Each assistant can hold several sign-ins. New chats start on the first one with room left; " +
-        "a chat stays on its account until that account runs out."
+        "a chat stays on its account until that account runs out. " +
+        "To keep a chat on one account, choose it in the chat's settings."
 
 /** The assistants that can hold several accounts, in the order shown; any other follows. */
 private val ACCOUNT_PROVIDERS = listOf("codex", "claude")
@@ -114,6 +116,39 @@ internal fun accountStatus(account: AgentAccountReply, nowMs: Long): AccountStat
     if (account.state in setOf("checking", "unknown", "")) return AccountStatus("Checking…", AccountTone.FAINT)
     if (account.inUse) return AccountStatus("In use", AccountTone.WORKING, dot = true)
     return AccountStatus("Ready", AccountTone.MUTED)
+}
+
+/** What the account choice calls letting the host choose, as the desktop does. */
+internal const val AUTOMATIC_ACCOUNT = "Automatic: the first account with room left"
+
+/**
+ * The accounts a chat on [provider] can be set to run on: those that finished
+ * signing in, and only while there are two or more of them.
+ */
+internal fun chatAccountChoices(provider: AgentAuthProviderReply?): List<AgentAccountReply> {
+    val accounts = provider?.accounts.orEmpty().filter { !it.pending }
+    return if (accounts.size >= 2) accounts else emptyList()
+}
+
+/**
+ * By assistant, the accounts a new chat can be set to run on, on a host that
+ * can set one; null until the host has listed them.
+ */
+@Composable
+internal fun rememberChatAccounts(model: MainViewModel): Map<String, List<AgentAccountReply>>? {
+    val auth by model.agentAuth.collectAsStateWithLifecycle()
+    val tree by model.client.tree.collectAsStateWithLifecycle()
+    // Asked for once the host says it can set a chat's account, which it may
+    // only say after the form has opened.
+    LaunchedEffect(tree.chatAccounts) { model.loadChatAccounts() }
+    if (!tree.chatAccounts) return emptyMap()
+    return auth?.mapValues { (_, provider) -> chatAccountChoices(provider) }
+}
+
+/** How a choice of account reads: its label, and what keeps it from running if anything does. */
+internal fun chatAccountLabel(account: AgentAccountReply, nowMs: Long): String {
+    val status = accountStatus(account, nowMs).text
+    return if (status in setOf("Ready", "In use", "Checking…")) account.label else "${account.label} · $status"
 }
 
 /** The 5-hour and weekly allowance, as the percentage left, for a signed-in account. */

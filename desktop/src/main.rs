@@ -2522,6 +2522,9 @@ struct XdDesktop {
     remote_panel: Option<RemotePanel>,
     self_update_panel: Option<SelfUpdatePanel>,
     auth_providers: Vec<AuthProvider>,
+    /// The accounts were asked for since this host connected, to offer them
+    /// for a chat.
+    chat_accounts_listed: bool,
     cli_versions: Vec<CliVersion>,
     cli_versions_loading: bool,
     cli_versions_error: Option<String>,
@@ -3392,6 +3395,7 @@ impl XdDesktop {
             remote_panel: None,
             self_update_panel: Some(SelfUpdatePanel::default()),
             auth_providers: Vec::new(),
+            chat_accounts_listed: false,
             cli_versions: Vec::new(),
             cli_versions_loading: false,
             cli_versions_error: None,
@@ -4037,6 +4041,7 @@ impl XdDesktop {
         self.account_error = None;
         self.account_remove_confirm = None;
         self.auth_providers.clear();
+        self.chat_accounts_listed = false;
         self.cli_versions.clear();
         self.cli_versions_loading = false;
         self.cli_versions_error = None;
@@ -4064,6 +4069,7 @@ impl XdDesktop {
         self.quota_stops_seen = None;
         self.quota_stops_announced.clear();
         self.request_chat_quota_settings();
+        self.list_chat_accounts();
         true
     }
 
@@ -4245,6 +4251,8 @@ impl XdDesktop {
         // Broadcasts sent while away were missed.
         if self.active_endpoint == ChatEndpoint::Remote {
             self.request_chat_quota_settings();
+            // The tree asked for above lists the accounts again.
+            self.chat_accounts_listed = false;
         }
         if let Some(host) = &self.remote_host {
             let _ = host.agent_catalog();
@@ -4679,6 +4687,8 @@ impl XdDesktop {
                 self.model.connection_error = None;
                 self.request_tree();
                 self.request_agent_catalog();
+                // Account changes sent while away were missed.
+                self.chat_accounts_listed = false;
                 // Broadcasts sent while away were missed.
                 self.request_chat_quota_settings();
                 if let Some(host) = &self.host {
@@ -5424,6 +5434,7 @@ impl XdDesktop {
                     return;
                 }
                 self.notify_new_quota_stops(cx);
+                self.list_chat_accounts();
                 if self.model.chat_quotas_supported != chat_quotas_before {
                     self.chat_quota = None;
                     self.request_chat_quota_settings();
@@ -7473,6 +7484,22 @@ impl XdDesktop {
                 .into_iter()
                 .find(|account| account.in_use)
                 .map_or_else(|| provider.state.clone(), |account| account.state);
+        }
+    }
+
+    /// Asks once per connection for the accounts a chat can be set to run on,
+    /// without the host checking each again; `agent-auth-changed` keeps them
+    /// current after that.
+    fn list_chat_accounts(&mut self) {
+        if !self.model.chat_accounts_supported || self.chat_accounts_listed {
+            return;
+        }
+        let Some(result) = self.active_host().map(|host| host.agent_accounts()) else {
+            return;
+        };
+        match result {
+            Ok(()) => self.chat_accounts_listed = true,
+            Err(error) => self.model.connection_error = Some(error),
         }
     }
 
@@ -13417,6 +13444,7 @@ impl XdDesktop {
         }
         let title = chat_create_title(&self.chat_create_title).to_owned();
         let agent = self.minimal_new_session_agent.protocol_name();
+        let account = self.new_chat_account();
         let token = self.new_chat_tokens + 1;
         let result = self
             .active_host()
@@ -13436,6 +13464,7 @@ impl XdDesktop {
                         effort: self.new_chat_remembered.effort.as_deref(),
                         access: self.new_chat_remembered.access.as_deref(),
                         plan: Some(self.new_chat_remembered.plan.unwrap_or(false)),
+                        account: account.as_deref(),
                         worktree_backend: self.settings.git_writer.backend(),
                         worktree_model: self.settings.git_writer_model.as_deref(),
                     }),
@@ -20068,6 +20097,7 @@ impl XdDesktop {
             .find(|backend| backend.id == self.model.backend)
             .map(|backend| !backend.efforts.is_empty())
             .unwrap_or(matches!(agent, Some(AgentCli::Codex | AgentCli::Claude)));
+        let offers_accounts = !self.open_chat_account_choices(colors).is_empty();
         let options = [
             ("model", self.model.selected_model_label()),
             (
@@ -20087,9 +20117,11 @@ impl XdDesktop {
                 "plan",
                 if self.model.plan { "Plan" } else { "Build" }.to_owned(),
             ),
+            ("account", self.open_chat_account_label()),
         ]
         .into_iter()
         .filter(|(option, _)| *option != "effort" || supports_effort)
+        .filter(|(option, _)| *option != "account" || offers_accounts)
         .enumerate()
         .map(|(index, (option, label))| {
             let leading = (option == "model")
@@ -20104,7 +20136,11 @@ impl XdDesktop {
                 ("native-option", index),
                 leading,
                 label,
-                if option == "model" { 240.0 } else { 170.0 },
+                if matches!(option, "model" | "account") {
+                    240.0
+                } else {
+                    170.0
+                },
                 colors,
             )
             .debug_selector(move || format!("native-option-{option}"))
@@ -20508,6 +20544,7 @@ impl XdDesktop {
             "model" => host.set_model(&chat_id, &value),
             "effort" => host.set_effort(&chat_id, &value),
             "access" => host.set_access(&chat_id, &value),
+            "account" => host.set_account(&chat_id, &value),
             _ => host.set_plan(&chat_id, value == "true"),
         };
         if let Err(error) = result {
@@ -21708,6 +21745,7 @@ impl XdDesktop {
                 "model" => "Choose model",
                 "effort" => "Reasoning effort",
                 "access" => "Workspace access",
+                "account" => "Account",
                 _ => "Chat mode",
             };
             let current = match option {
@@ -21724,6 +21762,7 @@ impl XdDesktop {
                     &self.model.access
                 })
                 .to_owned(),
+                "account" => self.model.account.clone().unwrap_or_default(),
                 _ => self.model.plan.to_string(),
             };
             let choices = match option {
@@ -21761,6 +21800,7 @@ impl XdDesktop {
                         )
                     })
                     .collect(),
+                "account" => self.open_chat_account_choices(colors),
                 _ => vec![
                     ("false".into(), "Build".into()),
                     ("true".into(), "Plan".into()),
@@ -21772,6 +21812,9 @@ impl XdDesktop {
                 "model" => self.model.selected_model_label(),
                 "effort" => presentation::effort_name(&current).to_owned(),
                 "access" => presentation::access_name(&current).to_owned(),
+                "account" => self
+                    .open_chat_account_name()
+                    .unwrap_or_else(|| "Automatic".to_owned()),
                 _ => if self.model.plan { "Plan" } else { "Build" }.to_owned(),
             };
             let rows = choices
@@ -21781,6 +21824,7 @@ impl XdDesktop {
                     let selected = current == value;
                     div()
                         .id(("native-setting-choice", index))
+                        .debug_selector(move || format!("native-setting-choice-{index}"))
                         .w_full()
                         .min_h(px(36.0))
                         .px_3()
@@ -25511,6 +25555,81 @@ Binary files /dev/null and b/image.png differ\n";
                     .focus_handle(cx)
                     .is_focused(window)
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_chat_is_set_to_an_account_from_its_composer(cx: &mut gpui::TestAppContext) {
+        let (host, mut requests) = socket_host("chat-account-test");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.host = Some(host.clone());
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "claude".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Claude,
+            };
+            desktop.auth_providers = serde_json::from_value(serde_json::json!([
+                {"provider": "claude", "state": "signed-in", "accounts": [
+                    {"id": "default", "default": true, "label": "a@example.com",
+                     "state": "signed-in", "in_use": true},
+                    {"id": "0123456789ab", "label": "b@example.com", "state": "signed-in"},
+                ]},
+            ]))
+            .unwrap();
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.set_composer_text(String::new(), cx);
+            window.blur();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("native-option-account").is_none(),
+            "a host that cannot set a chat's account offers none"
+        );
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.model.chat_accounts_supported = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let option = cx.debug_bounds("native-option-account").unwrap();
+        cx.simulate_click(option.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        // After the choice that lets the host choose, in the host's order.
+        let second = cx.debug_bounds("native-setting-choice-2").unwrap();
+        cx.simulate_click(second.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let request = next_request_with_op(&mut requests, "set-option");
+        assert_eq!(request["chat"], "implementation");
+        assert_eq!(request["option"], "account");
+        assert_eq!(request["value"], "0123456789ab");
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert!(desktop.native_option_open.is_none());
+            assert_eq!(desktop.open_chat_account_label(), "Auto account");
+            desktop.model.account = Some("0123456789ab".into());
+            assert_eq!(desktop.open_chat_account_label(), "b@example.com");
+            // An account removed since reads as the host choosing.
+            desktop.model.account = Some("ba9876543210".into());
+            assert_eq!(desktop.open_chat_account_label(), "Auto account");
+
+            // A new chat is made on the account remembered for the project
+            // while its assistant still has it.
+            desktop.minimal_new_session_agent = AgentCli::Claude;
+            desktop.new_chat_remembered.account = Some("0123456789ab".into());
+            assert_eq!(desktop.new_chat_account().as_deref(), Some("0123456789ab"));
+            desktop.new_chat_remembered.account = Some("ba9876543210".into());
+            assert_eq!(desktop.new_chat_account(), None, "removed since");
+            // Before the accounts are listed the choice is kept for the host
+            // to check, rather than lost.
+            desktop.auth_providers.clear();
+            assert_eq!(desktop.new_chat_account().as_deref(), Some("ba9876543210"));
+            desktop.model.chat_accounts_supported = false;
+            assert_eq!(desktop.new_chat_account(), None, "an older host takes none");
         });
     }
 
