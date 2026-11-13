@@ -2013,7 +2013,7 @@ impl XdDesktop {
                 div().ml_2().flex_none().child(
                     icon_button(
                         "toggle-side-pane",
-                        "Toggle side pane",
+                        "Show or hide the side pane",
                         SIDE_LAYOUT_ICON,
                         colors,
                     )
@@ -2210,13 +2210,7 @@ impl XdDesktop {
                     .gap(px(6.0))
                     .text_size(text_px(TEXT_CAPTION))
                     .text_color(rgb(colors.working))
-                    .child(
-                        div()
-                            .size(px(7.0))
-                            .rounded_full()
-                            .bg(rgb(colors.working))
-                            .opacity(pulse_opacity()),
-                    )
+                    .child(pulse_dot(7.0, colors.working, true))
                     .child("Starting"),
             )
             .into_any_element()

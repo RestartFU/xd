@@ -297,6 +297,12 @@ fn mark_animated() {
 
 fn pulse_frame() -> usize {
     mark_animated();
+    pulse_step()
+}
+
+/// The pulse's step, for the layer that draws what moves with it: reading it
+/// there asks nothing of the window.
+fn pulse_step() -> usize {
     PULSE_FRAME.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -321,7 +327,249 @@ fn pulse_opacity() -> f32 {
     if reduce_motion() {
         return 1.0;
     }
-    [0.35, 0.65, 1.0, 0.65][pulse_frame() % 4]
+    pulse_opacity_at(pulse_frame())
+}
+
+fn pulse_opacity_at(step: usize) -> f32 {
+    [0.35, 0.65, 1.0, 0.65][step % 4]
+}
+
+/// What moves with the shared pulse or the terminal's blink: a working dot,
+/// three working dots, the terminal's cursor. Where the window has a
+/// [`PulseLayer`], the window's view lays out an empty place for each and
+/// notes it here as it paints, and the layer draws it there, over the
+/// window. A pulse step or a blink then redraws the layer alone, not the
+/// sidebar, the header and the composer around the marks.
+#[derive(Default)]
+struct Animated {
+    marks: Vec<AnimatedMark>,
+    /// Where something floats over the page, such as the error banner: no
+    /// mark is drawn through it.
+    occluders: Vec<Bounds<Pixels>>,
+    /// Whether the terminal's cursor is in the lit half of its blink.
+    cursor_on: bool,
+}
+
+struct AnimatedMark {
+    bounds: Bounds<Pixels>,
+    /// The clip of the scroll area the mark is in.
+    mask: gpui::ContentMask<Pixels>,
+    kind: AnimatedKind,
+}
+
+enum AnimatedKind {
+    /// A dot that pulses, in `color`.
+    Dot { color: u32 },
+    /// Three dots that fill in one by one, set as text.
+    Dots { color: u32, text: TextLook },
+    /// The terminal's cursor on the cell holding `glyph`: the cell in
+    /// `fill`, the glyph in `ink`.
+    Cursor {
+        glyph: SharedString,
+        fill: u32,
+        ink: u32,
+        text: TextLook,
+    },
+}
+
+/// The font a mark set as text is shaped in, as the place it is in sets it.
+#[derive(Clone)]
+struct TextLook {
+    font: gpui::Font,
+    size: Pixels,
+    line_height: Pixels,
+}
+
+impl TextLook {
+    fn here(window: &Window) -> Self {
+        let style = window.text_style();
+        Self {
+            font: style.font(),
+            size: style.font_size.to_pixels(window.rem_size()),
+            line_height: window.line_height(),
+        }
+    }
+
+    fn paint(
+        &self,
+        text: SharedString,
+        inks: &[gpui::Hsla],
+        origin: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let runs = inks
+            .iter()
+            .zip(text.char_indices().map(|(_, c)| c.len_utf8()))
+            .map(|(ink, len)| TextRun {
+                len,
+                font: self.font.clone(),
+                color: *ink,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            })
+            .collect::<Vec<_>>();
+        let line = window
+            .text_system()
+            .shape_line(text, self.size, &runs, None);
+        let _ = line.paint(origin, self.line_height, window, cx);
+    }
+}
+
+thread_local! {
+    static ANIMATED: RefCell<Animated> = RefCell::default();
+    /// Whether this frame's marks go to the [`PulseLayer`]: the window has
+    /// one, nothing covers the page, and motion is not reduced.
+    static LAYERED: Cell<bool> = const { Cell::new(false) };
+}
+
+fn layered() -> bool {
+    LAYERED.with(Cell::get)
+}
+
+/// Notes a mark where it is painted: an element that takes no room, laid
+/// over the place the mark has.
+fn animated_place(kind: impl Fn(&Window) -> AnimatedKind + 'static) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let mark = AnimatedMark {
+                bounds,
+                mask: window.content_mask(),
+                kind: kind(window),
+            };
+            ANIMATED.with(|animated| animated.borrow_mut().marks.push(mark));
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
+}
+
+/// Notes where something floats over the page, which marks under it leave
+/// alone.
+fn animated_occluder() -> impl IntoElement {
+    canvas(
+        |bounds, _, _| ANIMATED.with(|animated| animated.borrow_mut().occluders.push(bounds)),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
+}
+
+/// A round dot of `size` in `color` that pulses while `pulsing`: drawn by
+/// the [`PulseLayer`] where there is one, else in place.
+fn pulse_dot(size: f32, color: u32, pulsing: bool) -> gpui::Div {
+    let dot = div().size(px(size)).flex_none().rounded_full();
+    if !pulsing {
+        return dot.bg(rgb(color));
+    }
+    if layered() {
+        return dot.child(animated_place(move |_| AnimatedKind::Dot { color }));
+    }
+    dot.bg(rgb(color)).opacity(pulse_opacity())
+}
+
+/// Draws what moves with the pulse and the blink, over the window, at the
+/// places the window's view noted. It takes no input: every click goes to
+/// the view under it.
+struct PulseLayer;
+
+impl Render for PulseLayer {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        canvas(
+            |_, _, _| {},
+            |_, _, window, cx| {
+                let step = pulse_step();
+                ANIMATED.with(|animated| {
+                    let animated = animated.borrow();
+                    for mark in &animated.marks {
+                        if animated
+                            .occluders
+                            .iter()
+                            .any(|over| over.intersects(&mark.bounds))
+                        {
+                            continue;
+                        }
+                        window.with_content_mask(Some(mark.mask.clone()), |window| {
+                            paint_animated(mark, step, animated.cursor_on, window, cx);
+                        });
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
+}
+
+fn paint_animated(
+    mark: &AnimatedMark,
+    step: usize,
+    cursor_on: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let alpha = |color: u32, alpha: f32| -> gpui::Hsla {
+        rgba((color << 8) | (alpha * 255.0).round() as u32).into()
+    };
+    match &mark.kind {
+        AnimatedKind::Dot { color } => {
+            let radius = mark.bounds.size.width.min(mark.bounds.size.height) / 2.0;
+            window.paint_quad(
+                gpui::fill(mark.bounds, alpha(*color, pulse_opacity_at(step))).corner_radii(radius),
+            );
+        }
+        AnimatedKind::Dots { color, text } => {
+            let inks = working_dot_alphas(step).map(|lit| alpha(*color, f32::from(lit) / 255.0));
+            text.paint("...".into(), &inks, mark.bounds.origin, window, cx);
+        }
+        AnimatedKind::Cursor {
+            glyph,
+            fill,
+            ink,
+            text,
+        } => {
+            if !cursor_on {
+                return;
+            }
+            window.paint_quad(gpui::fill(mark.bounds, rgb(*fill)));
+            let inks = vec![rgb(*ink).into(); glyph.chars().count()];
+            text.paint(glyph.clone(), &inks, mark.bounds.origin, window, cx);
+        }
+    }
+}
+
+/// The window's root: the workspace, drawn once for each change to it, and
+/// over it the [`PulseLayer`], which alone redraws as the pulse steps and
+/// the terminal's cursor blinks.
+struct XdWindow {
+    desktop: Entity<XdDesktop>,
+    layer: Entity<PulseLayer>,
+}
+
+impl XdWindow {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let layer = cx.new(|_| PulseLayer);
+        let desktop = cx.new(|cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, _| desktop.pulse_layer = Some(layer.clone()));
+        Self { desktop, layer }
+    }
+}
+
+impl Render for XdWindow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .relative()
+            // Kept from frame to frame while nothing in it changed, so a
+            // frame for the layer alone reuses all of it.
+            .child(
+                gpui::AnyView::from(self.desktop.clone())
+                    .cached(gpui::StyleRefinement::default().size_full()),
+            )
+            .child(self.layer.clone())
+    }
 }
 
 /// Narrowest the browser pane can be dragged.
@@ -366,6 +614,19 @@ fn working_dot_alphas(frame: usize) -> [u8; 3] {
 /// Three dots that fill in one by one, in step with the shared pulse. The
 /// size is inherited so the dots sit on the label's baseline.
 fn working_dots(_instance: usize, color: u32) -> gpui::AnyElement {
+    if layered() {
+        // The place the dots take, and the font they are set in.
+        return div()
+            .relative()
+            .w(px(13.0))
+            .flex_none()
+            .child(div().invisible().child("..."))
+            .child(animated_place(move |window| AnimatedKind::Dots {
+                color,
+                text: TextLook::here(window),
+            }))
+            .into_any_element();
+    }
     // With motion reduced all three dots stay lit.
     let frame = if reduce_motion() { 3 } else { pulse_frame() };
     let highlights = working_dot_alphas(frame)
@@ -654,13 +915,7 @@ fn status_mark(signal: SessionSignal, size: f32, colors: ThemeColors) -> Option<
     let color = signal.color(colors);
     Some(match signal {
         SessionSignal::Idle => return None,
-        SessionSignal::Working => div()
-            .size(px(size))
-            .flex_none()
-            .rounded_full()
-            .bg(rgb(color))
-            .opacity(pulse_opacity())
-            .into_any_element(),
+        SessionSignal::Working => pulse_dot(size, color, true).into_any_element(),
         SessionSignal::Waiting => waiting_ring(colors).size(px(size + 2.0)).into_any_element(),
         SessionSignal::Background(_) => background_ring(size + 1.0, color).into_any_element(),
         // The drawn check and bars fill about half of their box.
@@ -5920,14 +6175,7 @@ impl XdDesktop {
                 Timer::after(PULSE_INTERVAL).await;
                 let alive = this
                     .update(cx, |this, cx| {
-                        if this.anything_working() || this.usage_busy() {
-                            PULSE_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            // Work that nothing on screen shows, such as a chat
-                            // in a collapsed folder, does not redraw the window.
-                            if ANIMATION_DRAWN.with(Cell::get) {
-                                cx.notify();
-                            }
-                        }
+                        this.pulse_tick(cx);
                         true
                     })
                     .unwrap_or(false);
@@ -5948,16 +6196,10 @@ impl XdDesktop {
                             cx.notify();
                         }
                         if let Some(error) = settings::take_save_error() {
-                            this.model.connection_error =
-                                Some(format!("Could not save app settings: {error}"));
+                            this.note_settings_save_error(error);
                             cx.notify();
                         }
-                        this.terminal_cursor_visible = !this.terminal_cursor_visible;
-                        // Only a terminal that is drawn and focused shows its
-                        // cursor; any other blink would redraw for nothing.
-                        if this.terminal_cursor_drawn {
-                            cx.notify();
-                        }
+                        this.blink_tick(cx);
                         true
                     })
                     .unwrap_or(false);
@@ -9229,7 +9471,7 @@ impl XdDesktop {
         if name == "turn-finished" && !self.event_is_active(&body) {
             let chat_id = body.get("chat").and_then(Value::as_str);
             let title = chat_id
-                .and_then(|chat_id| self.model.chats.iter().find(|chat| chat.id == chat_id))
+                .and_then(|chat_id| self.model.chat(chat_id))
                 .and_then(|chat| chat.title.as_deref())
                 .unwrap_or("Background chat")
                 .to_owned();
@@ -10248,7 +10490,7 @@ impl XdDesktop {
             .chats
             .iter()
             .filter(|id| **id != chat_id && !hidden.contains(id))
-            .filter_map(|id| self.model.chats.iter().find(|chat| &chat.id == id))
+            .filter_map(|id| self.model.chat(id))
             .cloned()
             .collect::<Vec<_>>();
         let Some(next) = remaining.first() else {
@@ -15346,6 +15588,54 @@ impl XdDesktop {
 
     /// Whether anything on screen shows motion: a turn, a session card, a
     /// terminal, or an agent still at work.
+    /// One step of the shared pulse, while anything works.
+    fn pulse_tick(&mut self, cx: &mut Context<Self>) {
+        if !(self.anything_working() || self.usage_busy()) {
+            return;
+        }
+        PULSE_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The marks the layer draws redraw with it alone.
+        self.redraw_pulse_layer(false, cx);
+        // Work that nothing on screen shows, such as a chat in a collapsed
+        // folder, does not redraw the window.
+        if ANIMATION_DRAWN.with(Cell::get) {
+            cx.notify();
+        }
+    }
+
+    /// One half of the terminal cursor's blink.
+    fn blink_tick(&mut self, cx: &mut Context<Self>) {
+        self.terminal_cursor_visible = !self.terminal_cursor_visible;
+        let visible = self.terminal_cursor_visible;
+        ANIMATED.with(|animated| animated.borrow_mut().cursor_on = visible);
+        // Only a terminal that is drawn and focused shows its cursor; any
+        // other blink would redraw for nothing, and with motion reduced it
+        // holds steady. The layer blinks it where it can, alone.
+        if !self.redraw_pulse_layer(true, cx) && self.terminal_cursor_drawn && !reduce_motion() {
+            cx.notify();
+        }
+    }
+
+    /// Redraws the layer over the window, and nothing else, when it draws
+    /// a mark that moves now: the cursor for a blink, else a working mark.
+    /// Says whether it did.
+    fn redraw_pulse_layer(&self, blink: bool, cx: &mut Context<Self>) -> bool {
+        let moves = ANIMATED.with(|animated| {
+            animated
+                .borrow()
+                .marks
+                .iter()
+                .any(|mark| matches!(mark.kind, AnimatedKind::Cursor { .. }) == blink)
+        });
+        match &self.pulse_layer {
+            Some(layer) if moves => {
+                layer.update(cx, |_, cx| cx.notify());
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn anything_working(&self) -> bool {
         self.model.working
             || self.chat_create_submitting
@@ -16002,7 +16292,22 @@ impl XdDesktop {
             .unwrap_or_default();
         let cursor_shown = output_cursor.is_some() && terminal_focus.is_focused(window);
         self.terminal_cursor_drawn |= cursor_shown;
-        let cursor_highlight = if self.terminal_cursor_visible && cursor_shown {
+        // The layer over the window blinks the cursor where there is one;
+        // with motion reduced it holds steady.
+        let cursor_layered = cursor_shown && layered();
+        let cursor_lit = reduce_motion() || self.terminal_cursor_visible;
+        let cursor_mark = output_cursor
+            .clone()
+            .filter(|_| cursor_layered)
+            .map(|cursor| {
+                let glyph = output_text
+                    .get(cursor.clone())
+                    .filter(|glyph| !glyph.is_empty() && *glyph != "\n")
+                    .unwrap_or(" ")
+                    .to_owned();
+                (cursor, SharedString::from(glyph))
+            });
+        let cursor_highlight = if cursor_lit && cursor_shown && !cursor_layered {
             output_cursor.map(|cursor| {
                 (
                     cursor,
@@ -16020,6 +16325,43 @@ impl XdDesktop {
         let output_range = 0..output_text.len();
         let output = StyledText::new(output_text.clone()).with_highlights(highlights);
         let output_layout = output.layout().clone();
+        let cursor_place = cursor_mark.map(|(cursor, glyph)| {
+            let layout = output_layout.clone();
+            let (fill, ink) = (colors.text, colors.background);
+            canvas(
+                move |_, window, _| {
+                    let Some(start) = layout.position_for_index(cursor.start) else {
+                        return;
+                    };
+                    let text = TextLook::here(window);
+                    let width = layout
+                        .position_for_index(cursor.end)
+                        .filter(|end| end.y == start.y && end.x > start.x)
+                        .map(|end| end.x - start.x)
+                        .unwrap_or_else(|| {
+                            let run = window.text_style().to_run(glyph.len());
+                            window
+                                .text_system()
+                                .shape_line(glyph.clone(), text.size, &[run], None)
+                                .width
+                        });
+                    let mark = AnimatedMark {
+                        bounds: Bounds::new(start, size(width, layout.line_height())),
+                        mask: window.content_mask(),
+                        kind: AnimatedKind::Cursor {
+                            glyph: glyph.clone(),
+                            fill,
+                            ink,
+                            text,
+                        },
+                    };
+                    ANIMATED.with(|animated| animated.borrow_mut().marks.push(mark));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        });
         let output = if let Some(terminal_id) = selected_id.as_deref() {
             let scope = format!("minimal-terminal-output:{terminal_id}");
             let document = scoped_element_id(&scope, 0);
@@ -16144,7 +16486,9 @@ impl XdDesktop {
                         window.focus(&focus);
                     }))
             })
-            .child(output);
+            .child(output)
+            // After the output, whose layout places the cursor.
+            .children(cursor_place);
         let measurement_canvas = canvas(
             {
                 let desktop = desktop.clone();
@@ -16501,9 +16845,7 @@ impl XdDesktop {
             MinimalRoute::Cli { chat_id, agent, .. } => (Some(chat_id.clone()), Some(*agent)),
             _ => (None, None),
         };
-        let chat = chat_id
-            .as_deref()
-            .and_then(|id| self.model.chats.iter().find(|chat| chat.id == id));
+        let chat = chat_id.as_deref().and_then(|id| self.model.chat(id));
         let title = chat
             .and_then(|chat| {
                 self.model
@@ -17173,12 +17515,12 @@ impl XdDesktop {
                 .any(|id| self.model.unread_chats.contains(id)),
             session.background_tasks,
         )
-        .or_paused(members.iter().filter(own).any(|id| {
-            self.model
-                .chats
+        .or_paused(
+            members
                 .iter()
-                .any(|chat| &chat.id == id && chat.paused)
-        }))
+                .filter(own)
+                .any(|id| self.model.chat(id).is_some_and(|chat| chat.paused)),
+        )
     }
 
     /// Whether the sidebar row of `chat_id` is the session of an agent a chat
@@ -20184,18 +20526,15 @@ impl XdDesktop {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(colors.surface_high)))
             .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleAgentsTray), cx))
-            .child(
-                div()
-                    .size(px(7.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(rgb(if all_waiting {
-                        colors.waiting
-                    } else {
-                        colors.working
-                    }))
-                    .when(!all_waiting, |dot| dot.opacity(pulse_opacity())),
-            )
+            .child(pulse_dot(
+                7.0,
+                if all_waiting {
+                    colors.waiting
+                } else {
+                    colors.working
+                },
+                !all_waiting,
+            ))
             .child(
                 div()
                     .flex_none()
@@ -20436,16 +20775,7 @@ impl XdDesktop {
                             window.dispatch_action(Box::new(ToggleActivity { id: row_key }), cx);
                         })
                 })
-                .child(
-                    div()
-                        .size(px(5.0))
-                        .flex_none()
-                        .rounded_full()
-                        .bg(rgb(mark))
-                        .when(card.kind == ActivityKind::Running, |dot| {
-                            dot.opacity(pulse_opacity())
-                        }),
-                )
+                .child(pulse_dot(5.0, mark, card.kind == ActivityKind::Running))
                 .child(
                     truncating_label(card.name.clone())
                         .min_w_0()
@@ -20584,8 +20914,15 @@ impl XdDesktop {
                     .rounded_full()
                     .border_2()
                     .border_color(rgb(colors.background))
-                    .bg(rgb(tone))
-                    .when(pulsing, |dot| dot.opacity(pulse_opacity())),
+                    .map(|dot| {
+                        if pulsing && layered() {
+                            // The layer pulses the fill inside the ring.
+                            dot.child(animated_place(move |_| AnimatedKind::Dot { color: tone }))
+                        } else {
+                            dot.bg(rgb(tone))
+                                .when(pulsing, |dot| dot.opacity(pulse_opacity()))
+                        }
+                    }),
             )
     }
 
@@ -21001,13 +21338,7 @@ impl XdDesktop {
                     .gap(px(6.0))
                     .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
-                    .child(
-                        div()
-                            .size(px(7.0))
-                            .rounded_full()
-                            .bg(rgb(colors.working))
-                            .opacity(pulse_opacity()),
-                    )
+                    .child(pulse_dot(7.0, colors.working, true))
                     .child(view.status.label())
                     .into_any_element(),
                 SubagentState::Failed => stamp(view.status.label(), colors.danger, colors),
@@ -21786,13 +22117,7 @@ impl XdDesktop {
                 .gap(px(6.0))
                 .text_size(text_px(TEXT_LABEL))
                 .text_color(rgb(colors.muted))
-                .child(
-                    div()
-                        .size(px(7.0))
-                        .rounded_full()
-                        .bg(rgb(colors.working))
-                        .opacity(pulse_opacity()),
-                )
+                .child(pulse_dot(7.0, colors.working, true))
                 .child(pending.map_or(view.status.label().to_owned(), |label| format!("{label}…")))
                 .into_any_element(),
             SubagentState::Failed => stamp(view.status.label(), colors.danger, colors),
@@ -21988,14 +22313,7 @@ impl XdDesktop {
                     .gap(px(8.0))
                     .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(rgb(colors.working))
-                            .opacity(pulse_opacity()),
-                    )
+                    .child(pulse_dot(6.0, colors.working, true))
                     .child(truncating_label(view.activity.clone()).min_w_0())
                     .into_any_element(),
             );
@@ -22721,7 +23039,7 @@ impl XdDesktop {
                 .chat_parents
                 .keys()
                 .filter_map(|id| {
-                    let chat = self.model.chats.iter().find(|chat| &chat.id == id)?;
+                    let chat = self.model.chat(id)?;
                     Some((
                         id.clone(),
                         AgentChatLive {
@@ -22740,7 +23058,7 @@ impl XdDesktop {
             .selected_chat
             .as_ref()
             .and_then(|chat| self.model.chat_parents.get(chat))
-            .and_then(|parent| self.model.chats.iter().find(|chat| &chat.id == parent))
+            .and_then(|parent| self.model.chat(parent))
             .map(|parent| {
                 Self::render_started_by(
                     colors,
@@ -23120,7 +23438,7 @@ impl XdDesktop {
             self.model
                 .selected_chat
                 .as_deref()
-                .and_then(|id| self.model.chats.iter().find(|chat| chat.id == id))
+                .and_then(|id| self.model.chat(id))
                 .map_or(0, |chat| chat.waiting_on()),
         );
         self.background_visible = waiting_on > 0;
@@ -23435,6 +23753,8 @@ impl XdDesktop {
                                             ButtonKind::Secondary,
                                             colors,
                                         )
+                                        .relative()
+                                        .child(animated_occluder())
                                         .h(px(CONTROL_HEIGHT_COMPACT))
                                         .rounded_full()
                                         .text_size(text_px(TEXT_LABEL))
@@ -23482,13 +23802,7 @@ impl XdDesktop {
                         .gap(px(8.0))
                         .text_size(text_px(TEXT_LABEL))
                         .text_color(rgb(colors.muted))
-                        .child(
-                            div()
-                                .size(px(7.0))
-                                .rounded_full()
-                                .bg(rgb(dot))
-                                .opacity(pulse_opacity()),
-                        )
+                        .child(pulse_dot(7.0, dot, true))
                         .child(status)
                         .child(working_dots(0, colors.muted)),
                 )
@@ -25714,6 +26028,7 @@ impl XdDesktop {
                 .debug_selector(|| "error-banner".into())
                 // Over a dialog too: a click on it is not a click outside one.
                 .occlude()
+                .child(animated_occluder())
                 .absolute()
                 .bottom(px(20.0))
                 .left(px(50.0))
@@ -26480,7 +26795,7 @@ impl XdDesktop {
         let chats = members
             .iter()
             .filter(|id| !hidden.contains(id) || id.as_str() == active)
-            .filter_map(|id| self.model.chats.iter().find(|chat| &chat.id == id))
+            .filter_map(|id| self.model.chat(id))
             .cloned()
             .collect();
         (chats, hidden)
@@ -27275,8 +27590,17 @@ impl XdDesktop {
     }
 }
 
+thread_local! {
+    /// How many times the window's view has been drawn, counted while the
+    /// tests run.
+    static DESKTOP_RENDERS: Cell<usize> = const { Cell::new(0) };
+}
+
 impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if cfg!(test) {
+            DESKTOP_RENDERS.with(|renders| renders.set(renders.get() + 1));
+        }
         self.background_visible = false;
         ANIMATION_DRAWN.with(|drawn| drawn.set(false));
         self.terminal_cursor_drawn = false;
@@ -27284,6 +27608,22 @@ impl Render for XdDesktop {
         // What the keyboard can reach is noted again as this frame is drawn.
         self.settle_key_cursor();
         self.settle_key_stop(window);
+        self.key_title = self.keyed_cut_label();
+        // What moves with the pulse goes to the layer over the window, while
+        // nothing covers the page it is on.
+        LAYERED.with(|layered| {
+            layered.set(
+                self.pulse_layer.is_some()
+                    && !self.shortcuts_blocked()
+                    && !self.menu_open()
+                    && !reduce_motion(),
+            )
+        });
+        ANIMATED.with(|animated| {
+            let mut animated = animated.borrow_mut();
+            animated.marks.clear();
+            animated.occluders.clear();
+        });
         self.key_menu_session = None;
         self.key_menu_project = None;
         self.frame_focus = window.focused(cx);
@@ -40386,14 +40726,16 @@ fn main() {
                         app_id: Some(xd_desktop::channel::app_id()),
                         ..Default::default()
                     },
-                    |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
+                    |window, cx| cx.new(|cx| XdWindow::new(window, cx)),
                 )
                 .expect("open xd GPUI window");
             cx.on_action(move |_: &ToggleUsage, cx| {
                 // The key is being dispatched inside this window's own update.
                 cx.defer(move |cx| {
-                    let _ = desktop_window
-                        .update(cx, |desktop, window, cx| desktop.toggle_usage(window, cx));
+                    let _ = desktop_window.update(cx, |root, window, cx| {
+                        root.desktop
+                            .update(cx, |desktop, cx| desktop.toggle_usage(window, cx))
+                    });
                 });
             });
             cx.activate(true);
