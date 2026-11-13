@@ -684,7 +684,7 @@ impl XdDesktop {
     ) -> SettingRow {
         let keys = self.key_targets.clone();
         let list = (self.settings_menu == Some(menu)).then(|| {
-            div().child(menu_under(
+            menu_under(
                 gpui::Corner::TopRight,
                 CONTROL_HEIGHT,
                 menu_shell(colors)
@@ -710,7 +710,7 @@ impl XdDesktop {
                                 .child(menu_check(chosen, colors))
                         },
                     )),
-            ))
+            )
         });
         SettingRow::custom(
             title,

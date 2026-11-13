@@ -1540,8 +1540,9 @@ fn menu_popover(corner: gpui::Corner, menu: impl IntoElement) -> gpui::Deferred 
 /// The gap between a control and the menu it opens.
 const MENU_GAP: f32 = 4.0;
 
-/// Hangs a menu from the control this is put in, which is a `relative` box
-/// `control_height` tall: under the control, by its left or its right edge,
+/// Hangs a menu from the control this is put in, as a direct child of a box
+/// `control_height` tall that holds the control and nothing else in flow:
+/// under the control, by its left or its right edge,
 /// and above it where the window has no room below. The control is never
 /// under its own menu, so the menu can be closed where it was opened.
 ///
@@ -32485,8 +32486,25 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         cx.simulate_click(button.center(), gpui::Modifiers::default());
         redraw(cx);
         let menu = cx.debug_bounds("settings-menu").unwrap();
-        // Under its button, which stays in sight.
-        assert!(menu.top() >= button.bottom());
+        // Just under its button.
+        assert!((menu.top() - button.bottom() - px(MENU_GAP)).abs() < px(1.0));
+        // In a window that ends too soon under the button it stands on the
+        // button instead, which stays in sight either way.
+        cx.simulate_resize(size(px(1180.0), px(f32::from(MIN_WINDOW_HEIGHT))));
+        redraw(cx);
+        let button = cx
+            .debug_bounds("workspace-settings-interface-size")
+            .unwrap();
+        let menu = cx.debug_bounds("settings-menu").unwrap();
+        assert!(button.bottom() + menu.size.height > px(f32::from(MIN_WINDOW_HEIGHT)));
+        assert!((button.top() - menu.bottom() - px(MENU_GAP)).abs() < px(1.0));
+        assert!(menu.top() >= px(0.0));
+        cx.simulate_resize(size(px(1180.0), px(780.0)));
+        redraw(cx);
+        let button = cx
+            .debug_bounds("workspace-settings-interface-size")
+            .unwrap();
+        let menu = cx.debug_bounds("settings-menu").unwrap();
         // The sizes in order, a row each: the last is 150 %.
         let last = point(menu.center().x, menu.bottom() - px(4.0 + 16.0));
         cx.simulate_click(last, gpui::Modifiers::default());
