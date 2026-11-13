@@ -53,6 +53,12 @@ pub(super) fn draft_label(title: &str, prompt: &str) -> String {
 }
 
 /// Whether a saved new-chat draft holds anything to send.
+/// How a pull request a new chat can start from is named, as Android names
+/// it: its number and title.
+fn pull_request_choice_label(pull: &NewSessionPullRequest) -> String {
+    format!("#{} {}", pull.number, pull.title)
+}
+
 pub(super) fn draft_has_content(draft: &Value) -> bool {
     draft["text"]
         .as_str()
@@ -82,7 +88,11 @@ impl XdDesktop {
         let shared = self.creating_chat_session.is_some();
         let new_worktree = matches!(
             self.chat_create_worktree,
-            Some(NewSessionWorktree::New | NewSessionWorktree::Branch { .. })
+            Some(
+                NewSessionWorktree::New
+                    | NewSessionWorktree::Branch { .. }
+                    | NewSessionWorktree::PullRequest { .. }
+            )
         );
         let branch_label = match &self.chat_create_worktree {
             Some(NewSessionWorktree::Branch { reference, .. }) => reference
@@ -90,6 +100,11 @@ impl XdDesktop {
                 .or_else(|| reference.strip_prefix("refs/remotes/"))
                 .unwrap_or(reference)
                 .to_owned(),
+            Some(NewSessionWorktree::PullRequest { number, .. }) => self
+                .chat_create_pull_requests
+                .iter()
+                .find(|pull| pull.number == *number)
+                .map_or_else(|| format!("#{number}"), pull_request_choice_label),
             Some(NewSessionWorktree::Existing(path)) => self
                 .chat_create_worktrees
                 .iter()
@@ -382,6 +397,55 @@ impl XdDesktop {
                             )
                             .into_any_element(),
                     );
+                    // A pull request's branch, checked out in a worktree of
+                    // its own, as Android's new session offers.
+                    let query = self.new_chat_query.as_str();
+                    let pulls = self
+                        .chat_create_pull_requests
+                        .iter()
+                        .filter(|pull| {
+                            pull.title.to_lowercase().contains(query)
+                                || format!("#{}", pull.number).contains(query)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !pulls.is_empty() {
+                        rows.push(menu_note("Pull requests", colors).into_any_element());
+                    }
+                    for pull in pulls {
+                        let selected = matches!(
+                            &self.chat_create_worktree,
+                            Some(NewSessionWorktree::PullRequest { number, .. }) if *number == pull.number
+                        );
+                        let label = pull_request_choice_label(&pull);
+                        let number = pull.number;
+                        rows.push(
+                            menu_row(("draft-pull-request", number as usize), colors)
+                                .debug_selector(move || format!("draft-pull-request-{number}"))
+                                .key_row(
+                                    &keys,
+                                    KeyLayer::Menu,
+                                    "draft-picker",
+                                    colors.surface_high,
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.chat_create_worktree =
+                                            Some(NewSessionWorktree::PullRequest {
+                                                number: pull.number,
+                                                oid: pull.oid.clone(),
+                                            });
+                                        this.new_chat_menu = None;
+                                        this.remember_new_chat_choices();
+                                        cx.notify();
+                                    },
+                                )
+                                .key_child(&keys, rows.len())
+                                .child(icon(GIT_PULL_REQUEST_ICON, 13.0, colors.muted))
+                                .child(truncating_label(label).flex_1())
+                                .child(menu_check(selected, colors))
+                                .into_any_element(),
+                        );
+                    }
                     rows.push(menu_note("Base branch", colors).into_any_element());
                     for (index, branch) in self.chat_create_branches.iter().enumerate() {
                         let branch = branch.clone();
@@ -455,17 +519,16 @@ impl XdDesktop {
                     }
                 }
                 if self.chat_create_sources_loading {
-                    rows.push(menu_note("Loading branches…", colors).into_any_element());
-                } else if let Some(error) = &self.chat_create_sources_error {
-                    // Why the branches and pull requests are missing.
                     rows.push(
-                        menu_note(
-                            format!("Branches and pull requests did not load. {error}"),
-                            colors,
-                        )
-                        .debug_selector(|| "draft-sources-error".into())
-                        .text_color(rgb(colors.danger))
-                        .into_any_element(),
+                        menu_note("Loading branches and pull requests…", colors).into_any_element(),
+                    );
+                } else if let Some(error) = &self.chat_create_sources_error {
+                    // Why the pull requests are missing: the branches came.
+                    rows.push(
+                        menu_note(format!("Pull requests did not load. {error}"), colors)
+                            .debug_selector(|| "draft-sources-error".into())
+                            .text_color(rgb(colors.danger))
+                            .into_any_element(),
                     );
                 }
             }
@@ -1082,6 +1145,12 @@ impl XdDesktop {
                         let focus = this.new_chat_search.read(cx).focus_handle(cx);
                         window.focus(&focus);
                     }
+                    let hint = match menu {
+                        "branch" => "Find a branch or pull request…",
+                        _ => "Search…",
+                    };
+                    this.new_chat_search
+                        .update(cx, |input, cx| input.set_placeholder(hint, cx));
                     this.new_chat_menu = if this.new_chat_menu == Some(menu) {
                         None
                     } else {
@@ -1323,9 +1392,14 @@ impl XdDesktop {
                     choices.new_worktree = false;
                     choices.checkout = Some(path.clone());
                 }
+                // A pull request is checked out in a worktree of its own;
+                // the next chat starts from the base branch again.
+                Some(NewSessionWorktree::PullRequest { .. }) => {
+                    choices.new_worktree = true;
+                }
                 // The worktrees have not arrived yet to pick a checkout or
                 // base from, but the mode was picked.
-                Some(NewSessionWorktree::PullRequest { .. }) | None => {
+                None => {
                     if let Some(new_worktree) = self.new_chat_worktree_picked {
                         choices.new_worktree = new_worktree;
                         if !new_worktree {

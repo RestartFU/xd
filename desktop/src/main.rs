@@ -8329,7 +8329,10 @@ impl XdDesktop {
                     let picked_base = self.new_chat_worktree_picked == Some(true)
                         && matches!(
                             self.chat_create_worktree,
-                            Some(NewSessionWorktree::Branch { .. })
+                            Some(
+                                NewSessionWorktree::Branch { .. }
+                                    | NewSessionWorktree::PullRequest { .. }
+                            )
                         );
                     // Before the base is resolved: without the remembered
                     // base, it falls back to the current checkout's branch.
@@ -15782,7 +15785,11 @@ impl XdDesktop {
         if self.chat_create_sources_loading
             && matches!(
                 self.chat_create_worktree,
-                Some(NewSessionWorktree::New | NewSessionWorktree::Branch { .. })
+                Some(
+                    NewSessionWorktree::New
+                        | NewSessionWorktree::Branch { .. }
+                        | NewSessionWorktree::PullRequest { .. }
+                )
             )
         {
             return;
