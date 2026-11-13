@@ -37,10 +37,20 @@ function Invoke-Installer([string[]] $Arguments, [string] $What) {
     Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
 }
 
-function Get-UninstallEntry {
-    Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
-        ForEach-Object { Get-ItemProperty -LiteralPath $_.PSPath } |
-        Where-Object { $_.DisplayName -eq $productName -and $_.Publisher -eq 'RestartFU' }
+# What Windows lists under installed apps, asked of Windows Installer itself:
+# where it keeps that in the registry differs by who installed.
+function Get-InstalledProduct {
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    foreach ($product in $installer.ProductsEx('', '', 7)) {
+        if ($product.InstallProperty('InstalledProductName') -eq $productName -and
+            $product.InstallProperty('Publisher') -eq 'RestartFU') {
+            [pscustomobject]@{
+                Version = $product.InstallProperty('VersionString')
+                # 0 is installed for one user, 1 for the whole machine.
+                Assignment = $product.InstallProperty('AssignmentType')
+            }
+        }
+    }
 }
 
 function Remove-Installation {
@@ -48,7 +58,7 @@ function Remove-Installation {
     if (Test-Path -LiteralPath $installFolder) { throw "Removing xd left $installFolder behind." }
     if (Test-Path -LiteralPath $shortcut) { throw 'Removing xd left its Start menu shortcut behind.' }
     if (Test-Path -LiteralPath $registryKey) { throw 'Removing xd left its registry key behind.' }
-    if (@(Get-UninstallEntry).Count -ne 0) { throw 'Removing xd left it listed as installed.' }
+    if (@(Get-InstalledProduct).Count -ne 0) { throw 'Removing xd left it listed as installed.' }
     Write-Host 'Windows installer: removal left nothing behind'
 }
 
@@ -138,10 +148,13 @@ if (-not (Test-Path -LiteralPath $shortcut -PathType Leaf)) {
 $target = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
 if ($target -ne $executable) { throw "The Start menu shortcut opens $target." }
 
-$entry = @(Get-UninstallEntry)
+$entry = @(Get-InstalledProduct)
 if ($entry.Count -ne 1) { throw "$productName is listed as installed $($entry.Count) times." }
-if ($entry[0].DisplayVersion -ne $packageVersion) {
-    throw "Windows lists version $($entry[0].DisplayVersion), but xd.exe is $packageVersion."
+if ($entry[0].Version -ne $packageVersion) {
+    throw "Windows lists version $($entry[0].Version), but xd.exe is $packageVersion."
+}
+if ($entry[0].Assignment -ne '0') {
+    throw "$productName installed for the whole machine, which needs an administrator."
 }
 if ((Get-ItemProperty -LiteralPath $registryKey).InstallFolder.TrimEnd('\') -ne $installFolder) {
     throw 'The installer did not record where it installed xd.'
@@ -152,7 +165,7 @@ Invoke-Installer @('/i', "`"$installerPath`"") 'Installing xd over itself'
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw 'Installing xd over itself removed it.'
 }
-if (@(Get-UninstallEntry).Count -ne 1) { throw 'Installing xd over itself listed it twice.' }
+if (@(Get-InstalledProduct).Count -ne 1) { throw 'Installing xd over itself listed it twice.' }
 
 Write-Host 'Windows installer: checksum, files, icon, version, shortcut, and reinstall passed'
 if (-not $Keep) { Remove-Installation }
