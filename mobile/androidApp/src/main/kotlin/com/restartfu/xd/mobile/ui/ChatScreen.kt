@@ -1,5 +1,8 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.runtime.SideEffect
+import androidx.compose.foundation.layout.consumeWindowInsets
 import android.app.Activity
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -231,14 +234,20 @@ internal fun ChatScreen(
         viewModelStoreOwner = workspaceOwner ?: checkNotNull(androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner.current),
     )
     workspacePane.chat = model.session
+    // The open view lives in the model, which a rotation keeps but the end of
+    // the process does not: saved with the screen too, a model made new takes
+    // the view that was open, rather than falling back to the chat.
+    var savedPane by rememberSaveable(workspaceId) { mutableStateOf(workspacePane.pane) }
+    remember(workspacePane) { workspacePane.pane = savedPane }
     var pane by workspacePane::pane
+    SideEffect { savedPane = pane }
     // Wherever a workspace view replaces the chat (a phone, or a tablet too
     // narrow for two panes, where the tab row switches them), Back returns to
     // the chat before it leaves the session. Beside the chat on a wide window,
     // Back closes the tool first, for the same reason.
-    androidx.activity.compose.BackHandler(enabled = pane != Pane.CHAT) {
-        pane = Pane.CHAT
-    }
+    // Held as a gesture, the chat comes back in as it is dragged.
+    val panes = rememberPageTransition(pane, "pane")
+    PredictiveBack(panes, enabled = pane != Pane.CHAT, back = Pane.CHAT) { pane = Pane.CHAT }
     // The conversation is on screen: always beside a tool, otherwise while no tool has taken its place.
     val chatShown = sideBySide || pane == Pane.CHAT
     // An agent tab sits over the chat it belongs to, so Back returns to the chat.
@@ -676,6 +685,7 @@ internal fun ChatScreen(
         ChatPanes(
             sideBySide = sideBySide,
             pane = pane,
+            panes = panes,
             padding = scaffoldPadding,
             composer = composerBar,
             tool = { shown ->
@@ -885,13 +895,20 @@ private val TranscriptEdge = 12.dp
 private fun ChatPanes(
     sideBySide: Boolean,
     pane: Pane,
+    /** How the view in the chat's place changes, which Back's gesture can drive. */
+    panes: PageTransition<Pane>,
     padding: PaddingValues,
     composer: @Composable () -> Unit,
     tool: @Composable (Pane) -> Unit,
     chat: @Composable (PaddingValues) -> Unit,
 ) {
     if (!sideBySide) {
-        if (pane != Pane.CHAT) Box(Modifier.padding(padding)) { tool(pane) } else chat(padding)
+        // The bars' room is taken here, so a tool that keeps clear of the
+        // keyboard counts only what the keyboard covers beyond them.
+        val still = reducedMotion()
+        panes.transition.AnimatedContent(transitionSpec = { pageMotion(still, fadeThrough()) }) { shown ->
+            if (shown != Pane.CHAT) Box(Modifier.padding(padding).consumeWindowInsets(padding)) { tool(shown) } else chat(padding)
+        }
         return
     }
     BoxWithConstraints(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
@@ -908,7 +925,8 @@ private fun ChatPanes(
                     Modifier
                         .weight(1f)
                         .testTag(TOOL_PANE_TAG)
-                        .padding(bottom = padding.calculateBottomPadding()),
+                        .padding(bottom = padding.calculateBottomPadding())
+                        .consumeWindowInsets(PaddingValues(bottom = padding.calculateBottomPadding())),
                 ) { tool(pane) }
             }
         }

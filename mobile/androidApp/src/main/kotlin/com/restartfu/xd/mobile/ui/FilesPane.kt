@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -303,7 +304,9 @@ private fun FileEditor(
         SyntaxVisualTransformation(language, ink)
     }
 
-    Column(Modifier.fillMaxSize()) {
+    // Clear of the keyboard, so the caret and Save stay in sight while typing.
+    // The app draws edge to edge, so nothing else makes room for it.
+    Column(Modifier.fillMaxSize().imePadding()) {
         error?.let { message ->
             Text(
                 message,
