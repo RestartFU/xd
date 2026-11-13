@@ -462,14 +462,18 @@ try {
     foreach ($launch in 'first', 'second') {
         $app = Start-App
         $shown = 0.0
+        $waited = [Diagnostics.Stopwatch]::StartNew()
         if ($app.Window -ne [IntPtr]::Zero) {
-            for ($attempt = 0; $attempt -lt 40 -and -not $app.Process.HasExited; $attempt++) {
+            # The first WebView2 on a machine sets itself up before it draws,
+            # which takes most of a minute on a slow one.
+            while ($waited.Elapsed.TotalSeconds -lt 90 -and -not $app.Process.HasExited) {
                 $frame = [Xd.Desktop]::Frame($app.Window)
                 $shown = Measure-Colour ($frame.Right - 440) ($frame.Top + 120) ($frame.Right - 20) `
                     ($frame.Bottom - 20) $page
                 if ($shown -gt 0.9) { break }
                 Start-Sleep -Milliseconds 500
             }
+            $waited.Stop()
             # Timers and host traffic keep arriving while the page settles.
             Start-Sleep -Seconds 3
         }
@@ -479,7 +483,7 @@ try {
         if ($alive) {
             Save-Screenshot "05-browser-$launch" ([Xd.Desktop]::Frame($app.Window))
             Add-Result "the page shows in the browser pane ($launch launch)" ($shown -gt 0.9) `
-                ("{0:P0} of the pane is the page" -f $shown)
+                ("{0:P0} of the pane is the page after {1:N0} s" -f $shown, $waited.Elapsed.TotalSeconds)
         } else {
             Save-Screenshot "05-browser-$launch" $null
         }
