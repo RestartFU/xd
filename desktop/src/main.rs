@@ -1458,6 +1458,8 @@ impl IconButton {
 /// list, and one for a form or a longer explanation.
 const DIALOG_WIDTH: f32 = 450.0;
 const DIALOG_WIDE_WIDTH: f32 = 480.0;
+/// The room between a dialog field's name and its frame.
+const DIALOG_LABEL_GAP: f32 = 6.0;
 
 /// The layer a dialog is centred in: a backdrop over the whole window that
 /// takes every click, with room left around the dialog.
@@ -25275,8 +25277,8 @@ impl XdDesktop {
                             "On the host, open Settings → Pair a device and copy its pairing code. Enter an address that reaches the host, then paste the code to connect directly.",
                             colors,
                         ).mb_2())
-                        .child(self.dialog_field(&self.remote_address_input, colors, cx))
-                        .child(self.dialog_field(&self.remote_pairing_input, colors, cx))
+                        .child(self.dialog_field("Host address", &self.remote_address_input, colors, cx))
+                        .child(self.dialog_field("Pairing code", &self.remote_pairing_input, colors, cx))
                         .when_some(panel.error.clone(), |card, error| {
                             card.child(div().text_size(text_px(TEXT_BODY)).text_color(rgb(colors.danger)).child(error))
                         })
@@ -25324,9 +25326,14 @@ impl XdDesktop {
                     .find(|folder| folder.id == parent)
                     .map(|folder| folder.name.clone())
             });
-            let (heading, action) = match kind {
-                WorkspaceCreateKind::Project => ("New project", "Create project"),
-                WorkspaceCreateKind::Folder => ("New folder", "Create folder"),
+            let (heading, action, name_label) = match kind {
+                WorkspaceCreateKind::Project => ("New project", "Create project", "Project name"),
+                WorkspaceCreateKind::Folder => ("New folder", "Create folder", "Folder name"),
+            };
+            let repo_label = if cfg!(target_os = "windows") {
+                "Linux repository path"
+            } else {
+                "Repository path (optional)"
             };
             dialog_layer(colors)
                 .track_focus(&minimal_popup_focus)
@@ -25347,13 +25354,13 @@ impl XdDesktop {
                                     )
                                 }),
                         )
-                        .child(self.dialog_field(&self.workspace_create_input, colors, cx))
+                        .child(self.dialog_field(name_label, &self.workspace_create_input, colors, cx))
                         .when(project, |card| {
-                            card.child(self.dialog_field(&self.workspace_repo_input, colors, cx))
-                                .child(self.dialog_field(&self.workspace_clone_input, colors, cx))
+                            card.child(self.dialog_field(repo_label, &self.workspace_repo_input, colors, cx))
+                                .child(self.dialog_field("Clone URL (optional)", &self.workspace_clone_input, colors, cx))
                         })
                         .when(!project, |card| {
-                            card.child(self.dialog_field(&self.workspace_org_input, colors, cx))
+                            card.child(self.dialog_field("GitHub organization (optional)", &self.workspace_org_input, colors, cx))
                         })
                         .child(div().flex_none().text_size(text_px(TEXT_LABEL)).text_color(rgb(colors.muted)).child(
                             match kind {
@@ -25439,7 +25446,7 @@ impl XdDesktop {
                 .child(
                     dialog_shell(DIALOG_WIDTH, colors)
                         .child(dialog_title(heading, colors))
-                        .child(self.dialog_field(&self.sidebar_edit_input, colors, cx))
+                        .child(self.dialog_field("Name", &self.sidebar_edit_input, colors, cx))
                         .child(
                             dialog_actions()
                                 .child(dialog_button(
@@ -26657,29 +26664,53 @@ impl XdDesktop {
         field_border(focused, self.settings.theme.colors())
     }
 
-    /// A dialog's text field in its frame, which Tab stops on.
+    /// A dialog's text field in its frame, which Tab stops on, under the
+    /// name of what it takes: its hint is gone once something is typed, and
+    /// the name stays. A press on the name puts the keyboard in the field.
     fn dialog_field(
         &self,
+        label: &'static str,
         input: &Entity<ComposerInput>,
         colors: ThemeColors,
         cx: &App,
     ) -> gpui::Div {
+        let focus = input.read(cx).focus_handle(cx);
         div()
-            .relative()
-            .h(px(DIALOG_FIELD_HEIGHT))
-            .px_3()
             .flex_none()
             .flex()
-            .items_center()
-            .rounded(px(RADIUS_CONTROL))
-            .border_1()
-            .border_color(self.field_frame(input, cx))
-            .bg(rgb(colors.background))
-            .child(input.clone())
-            .child(self.key_targets.mark(
-                KeyLayer::Dialog,
-                KeyStop::Field(input.read(cx).focus_handle(cx)),
-            ))
+            .flex_col()
+            .gap(px(DIALOG_LABEL_GAP))
+            .child(
+                div()
+                    .id(SharedString::from(format!("dialog-field-label:{label}")))
+                    .debug_selector(move || format!("dialog-field-label:{label}"))
+                    .text_size(text_px(TEXT_LABEL))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(colors.muted))
+                    .cursor_default()
+                    .on_mouse_down(MouseButton::Left, {
+                        let focus = focus.clone();
+                        move |_, window, _| window.focus(&focus)
+                    })
+                    .child(label),
+            )
+            .child(
+                div()
+                    .relative()
+                    .h(px(DIALOG_FIELD_HEIGHT))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .rounded(px(RADIUS_CONTROL))
+                    .border_1()
+                    .border_color(self.field_frame(input, cx))
+                    .bg(rgb(colors.background))
+                    .child(input.clone())
+                    .child(
+                        self.key_targets
+                            .mark(KeyLayer::Dialog, KeyStop::Field(focus)),
+                    ),
+            )
     }
 
     /// The topmost list's length, owner and layer, when it has rows.
@@ -32587,9 +32618,12 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert!(connect.contains("host.resume_interrupted(self.settings.auto_resume_chats)"));
 
         assert!(overlay.contains("Pair with a host"));
-        assert!(overlay.contains("self.dialog_field(&self.remote_address_input, colors, cx)"));
-        assert!(overlay.contains("self.dialog_field(&self.remote_pairing_input, colors, cx)"));
-        assert!(!overlay.contains("Pairing code"));
+        assert!(overlay.contains(
+            "self.dialog_field(\"Host address\", &self.remote_address_input, colors, cx)"
+        ));
+        assert!(overlay.contains(
+            "self.dialog_field(\"Pairing code\", &self.remote_pairing_input, colors, cx)"
+        ));
         assert!(!overlay.contains("remote_port_input"));
         assert!(production.contains("settings.remote_credentials = Some"));
     }
@@ -39583,7 +39617,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             "let sidebar_rename_overlay =",
             "\"Rename project\"",
             ".child(dialog_title(heading, colors))",
-            "self.dialog_field(&self.sidebar_edit_input, colors, cx)",
+            "self.dialog_field(\"Name\", &self.sidebar_edit_input, colors, cx)",
             "minimal-cancel-project-rename",
             "minimal-save-project-rename",
             "this.save_sidebar_edit(cx)",
