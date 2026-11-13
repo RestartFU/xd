@@ -164,7 +164,10 @@ jobs:
           ./scripts/build-windows.ps1 -Profile '${{ inputs.profile }}' -HostPayload .build-cache/windows-host/xd-host-linux
           "GPUI_FXC_PATH=$env:GPUI_FXC_PATH" >> $env:GITHUB_ENV
           $name = if ('${{ inputs.profile }}' -eq 'nightly') { 'xd-nightly' } else { 'xd' }
-          ./scripts/smoke-windows.ps1 -Installer "dist/windows/$name-windows-x86_64.msi" -Keep
+          # The same build packaged a second time is, to Windows Installer,
+          # another build: installing the real one over it is a real update.
+          ./scripts/build-windows.ps1 -Profile '${{ inputs.profile }}' -HostPayload .build-cache/windows-host/xd-host-linux -Executable "dist/windows/$name/xd.exe" -OutputDirectory dist/windows-previous
+          ./scripts/smoke-windows.ps1 -Installer "dist/windows/$name-windows-x86_64.msi" -Previous "dist/windows-previous/$name-windows-x86_64.msi" -Keep
           ./installer/windows/install-webview2.ps1
           "XD_INSTALLER=dist/windows/$name-windows-x86_64.msi" >> $env:GITHUB_ENV
           "XD_INSTALLED=$env:LOCALAPPDATA\Programs\$name\xd.exe" >> $env:GITHUB_ENV

@@ -56,11 +56,21 @@ delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
 [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wparam, IntPtr lparam, uint flags, uint timeout, out IntPtr result);
 [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")] static extern IntPtr GetClassLongPtr(IntPtr window, int index);
 [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out RECT value, int size);
+[DllImport("user32.dll")] static extern bool SystemParametersInfo(uint action, uint parameter, out RECT value, uint update);
 
 public static void Initialize() { SetProcessDPIAware(); }
 
 public static int ScreenWidth { get { return GetSystemMetrics(0); } }
 public static int ScreenHeight { get { return GetSystemMetrics(1); } }
+
+// The part of the screen the taskbar leaves for windows.
+public static RECT WorkArea {
+    get {
+        RECT area;
+        SystemParametersInfo(0x0030, 0, out area, 0);
+        return area;
+    }
+}
 
 // The app's window: GPUI registers every window under this class.
 public static IntPtr FindWindow(int process) {
@@ -124,12 +134,13 @@ public static void Release() { Send(0, 0, 0x0004); }
 '@
 [Xd.Desktop]::Initialize()
 
-# A hosted runner's screen is 1024x768, too small to move a window around on.
-if ([Xd.Desktop]::ScreenWidth -lt 1280 -and (Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue)) {
-    try { Set-DisplayResolution -Width 1920 -Height 1080 -Force | Out-Null } catch { }
+# Windows Server can change its screen size; a hosted runner starts at 1024x768.
+function Set-Screen([int] $Width, [int] $Height) {
+    if (-not (Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue)) { return $false }
+    try { Set-DisplayResolution -Width $Width -Height $Height -Force | Out-Null } catch { return $false }
     Start-Sleep -Seconds 2
+    return [Xd.Desktop]::ScreenWidth -eq $Width -and [Xd.Desktop]::ScreenHeight -eq $Height
 }
-Write-Host "Screen: $([Xd.Desktop]::ScreenWidth)x$([Xd.Desktop]::ScreenHeight)"
 
 $results = [Collections.Generic.List[object]]::new()
 function Add-Result([string] $Name, [bool] $Passed, [string] $Detail) {
@@ -275,6 +286,27 @@ function Stop-App($App) {
 $app = $null
 $server = $null
 try {
+    # ---- A laptop-sized screen -----------------------------------------------
+    # 1280x720 is a 1080p laptop panel at the 150% scaling Windows gives it. xd
+    # remembers no size yet, so this is the window a first launch opens.
+    if (Set-Screen 1280 720) {
+        $app = Start-App
+        if ($app.Window -ne [IntPtr]::Zero) {
+            $frame = [Xd.Desktop]::Frame($app.Window)
+            $area = [Xd.Desktop]::WorkArea
+            Save-Screenshot '00-first-launch-on-a-laptop' $null
+            $fits = $frame.Left -ge ($area.Left - 2) -and $frame.Top -ge ($area.Top - 2) -and
+                $frame.Right -le ($area.Right + 2) -and $frame.Bottom -le ($area.Bottom + 2)
+            Add-Result 'a first launch fits a laptop screen' $fits `
+                ("window at $($frame.Left),$($frame.Top) to $($frame.Right),$($frame.Bottom); " +
+                "room for windows is $($area.Left),$($area.Top) to $($area.Right),$($area.Bottom)")
+        }
+        Stop-App $app
+    }
+    # Room to move a window around in for the rest.
+    [void](Set-Screen 1920 1080)
+    Write-Host "Screen: $([Xd.Desktop]::ScreenWidth)x$([Xd.Desktop]::ScreenHeight)"
+
     # ---- The window frame ---------------------------------------------------
     Write-Settings @{ window_width = 900; window_height = 640 }
     $app = Start-App

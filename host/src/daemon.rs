@@ -420,10 +420,14 @@ fn replace_stale_daemon(
     let stops_with_app = info["stops_with_app"] == true;
     let stop = stop_command(options);
     let status = request(&mut stale, json!({"op": "host-update"})).unwrap_or_default();
-    // The Windows app's daemon in WSL belongs to no installation, so it
-    // cannot re-execute. It is stopped instead, once it is idle.
-    let stops_to_be_replaced =
-        app_runtime_host(options).is_some_and(|host| daemon_runs_from(info, &host));
+    // The Windows app's daemon in WSL belongs to no installation. A daemon
+    // of this version restarts from the copy the app replaced all the same;
+    // an earlier one cannot, and is stopped instead, once it is idle. Only one
+    // the app started: that daemon already stops whenever the app stays away,
+    // so its work was never promised to outlive the app. One started by hand
+    // from the same path keeps running until its owner stops it.
+    let stops_to_be_replaced = stops_with_app
+        && app_runtime_host(options).is_some_and(|host| daemon_runs_from(info, &host));
     if !stops_to_be_replaced && !restarts_into_this_host(info, &status) {
         return Err(format!(
             "A different xd daemon version is running. Stop it with `{stop}` and reconnect."
@@ -437,8 +441,11 @@ fn replace_stale_daemon(
         json!({"op": "host-update", "action": "restart"}),
     )
     .map_err(|e| e.to_string())?;
-    // A daemon checks for live work before it finds it has nothing to restart
-    // into, so that refusal says it is idle. Any other refusal says it is not.
+    // An earlier daemon checks for live work before it finds it has nothing
+    // to restart into, so that refusal says it is idle. Any other refusal says
+    // it is not. Work that starts between this answer and the stop is cut off,
+    // as it is when a daemon restarts itself a moment after the same check;
+    // daemons already released offer nothing tighter to ask.
     let idle_without_restart =
         stops_to_be_replaced && reply["error"].as_str() == Some(xd_host::CANNOT_RESTART);
     if reply["ok"] != true && !idle_without_restart {

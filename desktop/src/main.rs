@@ -7750,12 +7750,12 @@ impl XdDesktop {
     /// The Windows app's own host runs inside WSL, where a folder is known
     /// by its Linux path however Explorer names it. A paired host is another
     /// machine, and is sent what was typed.
-    fn host_path(&self, typed: &str) -> String {
+    fn host_path(&self, typed: &str) -> Result<String, String> {
         #[cfg(target_os = "windows")]
         if self.active_endpoint == ChatEndpoint::Local {
-            return xd_desktop::wsl::linux_path(typed);
+            return xd_desktop::wsl::linux_path(typed, xd_desktop::wsl::host_distribution);
         }
-        typed.to_owned()
+        Ok(typed.to_owned())
     }
 
     fn workspace_repo_changed(&mut self, text: String, cx: &mut Context<Self>) {
@@ -7860,9 +7860,18 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        let repo = optional_trimmed(&self.workspace_create_repo)
+        let repo = match optional_trimmed(&self.workspace_create_repo)
             .filter(|_| project)
-            .map(|typed| self.host_path(typed));
+            .map(|typed| self.host_path(typed))
+            .transpose()
+        {
+            Ok(repo) => repo,
+            Err(error) => {
+                self.model.connection_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
         let repo_url = optional_trimmed(&self.workspace_create_clone)
             .filter(|_| project)
             .map(str::to_owned);

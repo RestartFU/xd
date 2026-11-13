@@ -123,10 +123,10 @@ stored hashed on the host. `devices`, `rename-device`, `revoke-device`,
 session for that device immediately. A revoked token or changed certificate
 requires explicit re-pairing.
 
-`daemon-info` returns protocol/build identity, PID, and the installed host binary
-that an update restart re-executes (`executable`, null outside an installed
-bundle), and whether it stops once the xd app that started it closes
-(`stops_with_app`). `daemon-stop` acknowledges
+`daemon-info` returns protocol/build identity, PID, and the host binary that an
+update restart re-executes (`executable`: the installed bundle's, or the copy the
+Windows app keeps in WSL at `runtime/v1/xd-host`; null anywhere else), and whether
+it stops once the xd app that started it closes (`stops_with_app`). `daemon-stop` acknowledges
 before shutting down the shared runtime. `app-client` marks the connection as the
 xd app's; a daemon started with `--stop-with-app` stops once no such connection has
 been open for ten seconds. The local bridge sends it when `XD_APP_BRIDGE=1`. Remote listeners persist across daemon

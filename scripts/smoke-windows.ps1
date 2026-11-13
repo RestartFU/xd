@@ -8,6 +8,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string] $Installer,
+    # An installer of another build of the same channel. It is installed
+    # first, so that installing -Installer over it is a real upgrade.
+    [string] $Previous,
     # Leave xd installed once the checks pass.
     [switch] $Keep,
     # Only remove an installation a previous -Keep left, and check it is gone.
@@ -46,6 +49,8 @@ function Get-InstalledProduct {
             $product.InstallProperty('Publisher') -eq 'RestartFU') {
             [pscustomobject]@{
                 Version = $product.InstallProperty('VersionString')
+                # Unique to each installer file ever built.
+                Package = $product.InstallProperty('PackageCode')
                 # 0 is installed for one user, 1 for the whole machine.
                 Assignment = $product.InstallProperty('AssignmentType')
             }
@@ -75,7 +80,29 @@ if ((Test-Path -LiteralPath $installFolder) -and -not $Force) {
     throw "$productName is already installed in $installFolder. Pass -Force to replace it."
 }
 
+# An update is a different build installed over the one that is there. Two
+# builds of one version, which every nightly is, must still replace each other
+# rather than end up installed side by side.
+$earlier = $null
+if ($Previous) {
+    $previousPath = (Resolve-Path -LiteralPath $Previous).Path
+    Invoke-Installer @('/i', "`"$previousPath`"") 'Installing the earlier build'
+    $earlier = @(Get-InstalledProduct)
+    if ($earlier.Count -ne 1) { throw "The earlier build is listed as installed $($earlier.Count) times." }
+}
+
 Invoke-Installer @('/i', "`"$installerPath`"") 'Installing xd'
+
+if ($null -ne $earlier) {
+    $current = @(Get-InstalledProduct)
+    if ($current.Count -ne 1) {
+        throw "Installing over an earlier build left $($current.Count) copies of $productName installed."
+    }
+    if ($current[0].Package -eq $earlier[0].Package) {
+        throw 'Installing over an earlier build left the earlier build in place.'
+    }
+    Write-Host 'Windows installer: a newer build replaced the one installed'
+}
 
 # Only what the app needs: no readme or helper scripts beside the executable.
 $expectedFiles = @(

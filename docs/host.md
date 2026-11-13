@@ -54,6 +54,10 @@ Source builds and Windows installations require a manual app update; on Windows,
 run the newer installer, which replaces the installed version. Set
 `XD_DISABLE_AUTO_UPDATE=1` to disable background checks.
 
+The Windows app copies its matching host into WSL each time it starts. If the
+previous version's daemon is still running there, the new app replaces it once it
+is idle, and until then says which work it is waiting for.
+
 ## Resuming cut-off turns
 
 After a turn is stopped, cut off, or ended by a usage limit, the composer's send

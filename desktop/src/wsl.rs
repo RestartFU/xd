@@ -39,7 +39,15 @@ exec "$payload" --version
 /// drive, either in the quotes "Copy as path" adds. The host knows neither
 /// form, and said only that the directory did not exist. A Linux path, and
 /// anything else, is passed on as typed.
-pub fn linux_path(typed: &str) -> String {
+///
+/// `host_distribution` tells which distribution xd's host runs in, and is
+/// only asked when the answer matters. A folder named in another one is
+/// refused: the same path there is a different folder, or none, and agents
+/// would be set to work on the wrong files.
+pub fn linux_path(
+    typed: &str,
+    host_distribution: impl FnOnce() -> Option<String>,
+) -> Result<String, String> {
     let trimmed = typed.trim();
     let path = trimmed
         .strip_prefix('"')
@@ -53,14 +61,25 @@ pub fn linux_path(typed: &str) -> String {
         if let Some(head) = slashed.get(..share.len())
             && head.eq_ignore_ascii_case(share)
         {
-            let inside = slashed[share.len()..]
+            let (distribution, inside) = slashed[share.len()..]
                 .split_once('/')
-                .map_or("", |(_distribution, inside)| inside);
-            return format!("/{}", inside.trim_end_matches('/'));
+                .unwrap_or((&slashed[share.len()..], ""));
+            return match host_distribution() {
+                Some(host) if host.eq_ignore_ascii_case(distribution) => {
+                    Ok(format!("/{}", inside.trim_end_matches('/')))
+                }
+                Some(host) => Err(format!(
+                    "That folder is in the WSL distribution {distribution}, but xd runs in {host}. Choose a folder in {host}, or start xd with XD_WSL_DISTRIBUTION set to {distribution}."
+                )),
+                None => Err(
+                    "xd could not tell which WSL distribution it runs in. Enter the folder's Linux path instead, such as /home/you/project."
+                        .into(),
+                ),
+            };
         }
     }
 
-    // X:\... is mounted at /mnt/x.
+    // X:\... is mounted at /mnt/x in every distribution.
     let mut characters = slashed.chars();
     if let (Some(drive), Some(':')) = (characters.next(), characters.next())
         && drive.is_ascii_alphabetic()
@@ -68,10 +87,32 @@ pub fn linux_path(typed: &str) -> String {
         let rest = characters.as_str();
         if rest.is_empty() || rest.starts_with('/') {
             let rest = rest.trim_end_matches('/');
-            return format!("/mnt/{}{rest}", drive.to_ascii_lowercase());
+            return Ok(format!("/mnt/{}{rest}", drive.to_ascii_lowercase()));
         }
     }
-    typed.to_owned()
+    Ok(typed.to_owned())
+}
+
+/// The WSL distribution xd's host runs in, as WSL itself names it there.
+///
+/// Asked of WSL once and remembered; a failure is asked again next time, in
+/// case WSL was only still starting.
+#[cfg(windows)]
+pub fn host_distribution() -> Option<String> {
+    use std::sync::Mutex;
+
+    static NAME: Mutex<Option<String>> = Mutex::new(None);
+    let mut name = NAME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if name.is_none() {
+        let output = command(r#"printf '%s' "$WSL_DISTRO_NAME""#, &[])
+            .output()
+            .ok()?;
+        let reported = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if output.status.success() && !reported.is_empty() {
+            *name = Some(reported);
+        }
+    }
+    name.clone()
 }
 
 pub(crate) fn executable() -> PathBuf {
@@ -170,8 +211,8 @@ mod tests {
                 r"\\wsl.localhost\Ubuntu\home\me\project",
                 "/home/me/project",
             ),
-            (r"\\wsl$\Ubuntu-24.04\home\me\project\", "/home/me/project"),
-            (r"\\WSL.LOCALHOST\Ubuntu\srv", "/srv"),
+            (r"\\wsl$\Ubuntu\home\me\project\", "/home/me/project"),
+            (r"\\WSL.LOCALHOST\ubuntu\srv", "/srv"),
             ("//wsl.localhost/Ubuntu/home/me", "/home/me"),
             (r"\\wsl.localhost\Ubuntu", "/"),
             (r"\\wsl.localhost\Ubuntu\", "/"),
@@ -187,8 +228,34 @@ mod tests {
             ),
             (r"  C:\Users\me  ", "/mnt/c/Users/me"),
         ] {
-            assert_eq!(linux_path(typed), linux, "{typed}");
+            assert_eq!(
+                linux_path(typed, || Some("Ubuntu".into())).as_deref(),
+                Ok(linux),
+                "{typed}"
+            );
         }
+    }
+
+    #[test]
+    fn a_folder_in_another_distribution_is_refused_not_looked_up_in_this_one() {
+        // /home/me/project in Debian is not /home/me/project in Ubuntu.
+        let error = linux_path(r"\\wsl.localhost\Debian\home\me\project", || {
+            Some("Ubuntu".into())
+        })
+        .unwrap_err();
+        assert!(
+            error.contains("Debian") && error.contains("Ubuntu"),
+            "{error}"
+        );
+        assert!(error.contains("XD_WSL_DISTRIBUTION"), "{error}");
+        // Not knowing where xd runs is no licence to guess.
+        let error = linux_path(r"\\wsl$\Ubuntu\home\me", || None).unwrap_err();
+        assert!(error.contains("/home/you/project"), "{error}");
+        // A drive is the same folder from every distribution.
+        assert_eq!(
+            linux_path(r"C:\work", || panic!("a drive needs no distribution")).as_deref(),
+            Ok("/mnt/c/work")
+        );
     }
 
     #[test]
@@ -207,7 +274,11 @@ mod tests {
             // Another machine's share is not this distribution.
             r"\\server\share\project",
         ] {
-            assert_eq!(linux_path(typed), typed, "{typed}");
+            assert_eq!(
+                linux_path(typed, || panic!("a Linux path needs no distribution")).as_deref(),
+                Ok(typed),
+                "{typed}"
+            );
         }
     }
 

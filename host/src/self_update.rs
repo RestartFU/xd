@@ -34,6 +34,10 @@ struct SelfUpdateInner {
     state: Mutex<UpdateState>,
     events: Arc<EventBus>,
     install: Option<InstallLocation>,
+    /// The binary a restart re-executes: the installed one, or the copy the
+    /// Windows app keeps in WSL. Read at startup, while the path still names
+    /// this binary, because an update replaces the file there.
+    restart_host: Option<PathBuf>,
     channel: UpdateChannel,
     current: String,
 }
@@ -105,6 +109,13 @@ impl SelfUpdate {
     pub(crate) fn new(events: Arc<EventBus>) -> Self {
         let install = install_location();
         let channel = update_channel(install.as_ref());
+        let restart_host = install
+            .as_ref()
+            .map(|location| location.host.clone())
+            .or_else(|| {
+                let executable = fs::canonicalize(env::current_exe().ok()?).ok()?;
+                app_runtime_copy(&executable).then_some(executable)
+            });
         let updater = Self {
             inner: Arc::new(SelfUpdateInner {
                 state: Mutex::new(UpdateState {
@@ -114,6 +125,7 @@ impl SelfUpdate {
                 }),
                 events,
                 install,
+                restart_host,
                 channel,
                 current: current_version(channel),
             }),
@@ -140,12 +152,10 @@ impl SelfUpdate {
         updater
     }
 
-    /// The binary an update restart re-executes, if this is an installed bundle.
+    /// The binary an update restart re-executes, if this host has one: it is
+    /// an installed bundle, or the Windows app's copy in WSL.
     pub(crate) fn host_executable(&self) -> Option<&Path> {
-        self.inner
-            .install
-            .as_ref()
-            .map(|location| location.host.as_path())
+        self.inner.restart_host.as_deref()
     }
 
     pub(crate) fn perform(&self, action: Option<&str>) -> Result<Value, String> {
@@ -214,9 +224,9 @@ impl SelfUpdate {
     }
 
     fn restart(&self) -> Result<(), String> {
-        let location = self
+        let host = self
             .inner
-            .install
+            .restart_host
             .clone()
             .ok_or_else(|| CANNOT_RESTART.to_owned())?;
 
@@ -227,7 +237,7 @@ impl SelfUpdate {
             .spawn(move || {
                 thread::sleep(Duration::from_millis(250));
                 use std::os::unix::process::CommandExt;
-                let error = Command::new(location.host).args(arguments).exec();
+                let error = Command::new(host).args(arguments).exec();
                 eprintln!("xd-host: cannot restart after update: {error}");
             })
             .map(|_| ())
@@ -533,6 +543,16 @@ fn installer_command(installer: &Path, channel: UpdateChannel, _mode: InstallerM
     command
 }
 
+/// Whether `executable` is the host the Windows app copies into WSL, at
+/// `runtime/v1/xd-host` in its data directory, before each launch.
+///
+/// Nothing installs an update there, but the app replaces the file with its
+/// own matching host, so a daemon started from it can restart into the new
+/// one the same way an installed daemon does.
+fn app_runtime_copy(executable: &Path) -> bool {
+    executable.ends_with("runtime/v1/xd-host")
+}
+
 /// What a daemon outside an installation answers when asked to restart.
 ///
 /// A bridge replacing the Windows app's daemon in WSL recognises daemons of
@@ -707,6 +727,22 @@ mod tests {
                 available
             );
         }
+    }
+
+    #[test]
+    fn only_the_windows_apps_copy_in_wsl_restarts_without_an_installation() {
+        assert!(app_runtime_copy(Path::new(
+            "/home/me/.local/share/xd/runtime/v1/xd-host"
+        )));
+        assert!(app_runtime_copy(Path::new(
+            "/home/me/.local/share/xd-nightly/runtime/v1/xd-host"
+        )));
+        // A development build, or a host unpacked somewhere by hand.
+        assert!(!app_runtime_copy(Path::new(
+            "/src/xd/host/target/debug/xd-host"
+        )));
+        assert!(!app_runtime_copy(Path::new("/opt/xd/libexec/xd-host")));
+        assert!(!app_runtime_copy(Path::new("/tmp/runtime/v1/xd-host-old")));
     }
 
     #[test]
