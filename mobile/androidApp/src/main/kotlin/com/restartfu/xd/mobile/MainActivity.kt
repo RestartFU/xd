@@ -22,6 +22,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.ui.FatalScreen
 import com.restartfu.xd.mobile.ui.MinimalThemePreset
+import com.restartfu.xd.mobile.ui.navigationBarStyle
 import com.restartfu.xd.mobile.ui.systemBarStyle
 import com.restartfu.xd.mobile.ui.MinimalMobileApp
 import com.restartfu.xd.mobile.ui.ConnectScreen
@@ -53,8 +54,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun enableEdgeToEdge(theme: MinimalThemePreset) {
-        val style = theme.systemBarStyle()
-        enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+        enableEdgeToEdge(statusBarStyle = theme.systemBarStyle(), navigationBarStyle = theme.navigationBarStyle())
     }
 }
 

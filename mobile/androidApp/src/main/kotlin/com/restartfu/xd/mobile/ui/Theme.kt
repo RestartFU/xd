@@ -357,6 +357,20 @@ public fun MinimalThemePreset.systemBarStyle(): SystemBarStyle {
     return if (isLight) SystemBarStyle.light(clear, clear) else SystemBarStyle.dark(clear)
 }
 
+/**
+ * The navigation bar's style. Android 8.0 (API 26) cannot draw dark
+ * navigation buttons, so in Light its white buttons would sit on the light
+ * page; there the bar gets a dark scrim behind them, as `SystemBarStyle.auto`
+ * gives it. From 8.1 on it is clear, as the status bar is.
+ */
+public fun MinimalThemePreset.navigationBarStyle(): SystemBarStyle {
+    val clear = Color.Transparent.toArgb()
+    return if (isLight) SystemBarStyle.light(clear, NavigationBarDarkScrim.toArgb()) else SystemBarStyle.dark(clear)
+}
+
+/** Behind light navigation buttons where they cannot be made dark: `SystemBarStyle.auto`'s own dark scrim. */
+public val NavigationBarDarkScrim: Color = Color(0x801B1B1B)
+
 /** Paints the glass backdrop behind everything. */
 public fun Modifier.glassBackdrop(glass: XdGlass): Modifier = background(glass.backdrop)
 
