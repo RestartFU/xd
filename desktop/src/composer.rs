@@ -160,7 +160,7 @@ pub(super) fn ask_choice(
         .gap(px(14.0))
         .rounded(px(RADIUS_PANEL))
         .text_size(text_px(TEXT_BODY))
-        .line_height(px(20.0))
+        .line_height(px(LINE_CONTROL))
         // Waiting on the host, a choice reads as one that cannot be picked.
         .text_color(rgb(if enabled {
             colors.text

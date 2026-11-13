@@ -1052,7 +1052,10 @@ fn tab_pill(
         } else {
             0
         }))
-        .when(selected, |tab| tab.bg(rgb(colors.selected_surface)))
+        .when(selected, |tab| {
+            tab.bg(rgb(colors.selected_surface))
+                .child(crate::selection_marker(crate::MarkerEdge::Foot, colors))
+        })
         .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(if selected { colors.text } else { colors.muted }))
         .cursor_pointer()

@@ -135,6 +135,41 @@ pub(crate) const TEXT_DISPLAY: f32 = 28.0;
 /// The total that leads the Usage page.
 pub(crate) const TEXT_FIGURE: f32 = 36.0;
 
+/// Line heights, one for each way text is set. Each keeps a line of its size
+/// readable where it is used, and every text that wraps takes one of these.
+/// A caption that wraps.
+pub(crate) const LINE_CAPTION: f32 = 13.0;
+/// A label in the tight room of a tile.
+pub(crate) const LINE_LABEL_TIGHT: f32 = 15.0;
+/// A note or a description under a setting.
+pub(crate) const LINE_LABEL: f32 = 17.0;
+/// A label in a row of a list, such as an account's.
+pub(crate) const LINE_LABEL_ROW: f32 = 18.0;
+/// A label that runs to a few lines, such as an update's notes.
+pub(crate) const LINE_LABEL_LOOSE: f32 = 19.0;
+/// The words of a control or a choice that wraps.
+pub(crate) const LINE_CONTROL: f32 = 20.0;
+/// Body text in a dialog or a card.
+pub(crate) const LINE_BODY: f32 = 21.0;
+/// A message's prose in the transcript.
+pub(crate) const LINE_PROSE: f32 = 23.0;
+/// Monospace output in a tight row, such as a patch line.
+pub(crate) const LINE_MONO_TIGHT: f32 = 18.0;
+/// Monospace code and output: code blocks, details, previews.
+pub(crate) const LINE_MONO: f32 = 19.0;
+/// A monospace label in a row of steps or items.
+pub(crate) const LINE_MONO_ROW: f32 = 20.0;
+/// A monospace code set at the title's size, such as a sign-in code.
+pub(crate) const LINE_TITLE_MONO: f32 = 26.0;
+/// A page's title.
+pub(crate) const LINE_TITLE: f32 = 28.0;
+/// The figure that leads a page.
+pub(crate) const LINE_FIGURE: f32 = 40.0;
+
+/// Corners of a small mark: a bar, a swatch, the square in Stop.
+pub(crate) const RADIUS_MARK: f32 = 2.0;
+/// Corners of a line drawn a couple of pixels thick, such as a track.
+pub(crate) const RADIUS_LINE: f32 = 1.0;
 /// Corners of a control: buttons, icon buttons, fields, menu rows, tooltips.
 pub(crate) const RADIUS_CONTROL: f32 = 6.0;
 /// Corners of a tab and of a row that is picked like one.

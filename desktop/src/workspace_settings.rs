@@ -1,7 +1,7 @@
 use super::*;
 use crate::metrics::{
-    CONTROL_HEIGHT, RADIUS_CONTROL, RADIUS_PANEL, RADIUS_TAB, TEXT_CAPTION, TEXT_CONTROL,
-    TEXT_DISPLAY, TEXT_LABEL, TEXT_TITLE,
+    CONTROL_HEIGHT, LINE_LABEL, RADIUS_CONTROL, RADIUS_PANEL, RADIUS_TAB, TEXT_CAPTION,
+    TEXT_CONTROL, TEXT_DISPLAY, TEXT_LABEL, TEXT_TITLE,
 };
 
 /// Room for a theme name and the chosen dot.
@@ -202,6 +202,7 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ("Stop the running turn", format!("{m} .")),
                 ("Show or hide the side pane", format!("{m} B")),
                 ("Show or hide the terminal under the chat", "Ctrl `".into()),
+                ("The Terminal page", format!("{m} Shift T")),
                 ("Settings", format!("{m} ,")),
                 ("Usage", format!("{m} U")),
                 ("Larger / smaller interface", format!("{m} = / {m} -")),
@@ -239,8 +240,20 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                     "Enter or Space".into(),
                 ),
                 (
-                    "Open the menu of the open session, or of the current project on the landing page",
+                    "Open the menu of the open session, of the current project on the landing page, or of the sidebar row the ring is on",
                     "Shift F10 / Menu".into(),
+                ),
+                (
+                    "In the sidebar's projects and sessions, which Tab reaches as one: to the row above or below, the first or the last",
+                    "Up / Down, Home / End".into(),
+                ),
+                (
+                    "Close or open a project, folder or session's agents, or go to the row it is in or the first in it",
+                    "Left / Right".into(),
+                ),
+                (
+                    "Open the session the sidebar's ring is on, or close or open its project",
+                    "Enter".into(),
                 ),
                 (
                     "Through the tabs' close buttons, the header's pull requests, each message's Copy, the queue and the terminal's tabs",
@@ -355,7 +368,7 @@ fn setting_failure_line(error: SharedString, colors: ThemeColors) -> gpui::Div {
         .items_start()
         .gap(px(6.0))
         .text_size(text_px(TEXT_LABEL))
-        .line_height(px(17.0))
+        .line_height(px(LINE_LABEL))
         .text_color(rgb(colors.danger))
         .child(
             div()
@@ -408,7 +421,7 @@ fn settings_row(
                         div()
                             .mt(px(3.0))
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(17.0))
+                            .line_height(px(LINE_LABEL))
                             .text_color(rgb(colors.muted))
                             .child(description),
                     )
@@ -1507,7 +1520,7 @@ impl XdDesktop {
                             div()
                                 .mt(px(3.0))
                                 .text_size(text_px(TEXT_LABEL))
-                                .line_height(px(17.0))
+                                .line_height(px(LINE_LABEL))
                                 .text_color(rgb(colors.muted))
                                 .child(description),
                         ),
@@ -1597,7 +1610,7 @@ impl XdDesktop {
                     body.child(
                         div()
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(17.0))
+                            .line_height(px(LINE_LABEL))
                             .text_color(rgb(colors.muted))
                             .child(message),
                     )
@@ -1614,7 +1627,7 @@ impl XdDesktop {
                             .bg(rgb(colors.surface))
                             .font_family(MONO)
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(17.0))
+                            .line_height(px(LINE_LABEL))
                             .child(
                                 self.source_build_panel
                                     .output
@@ -2054,156 +2067,160 @@ impl XdDesktop {
             Vec::new()
         };
 
-        let navigation =
-            div()
-                .id("workspace-settings-navigation")
-                .w(px(if narrow {
-                    SETTINGS_NAV_NARROW_WIDTH
-                } else {
-                    SETTINGS_NAV_WIDTH
-                }))
-                .h_full()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .px(px(12.0))
-                .py(px(12.0))
-                .bg(crate::glass::pane(colors))
-                .border_r_1()
-                .border_color(crate::glass::edge(colors))
-                .child(
-                    ui_button("workspace-settings-close", ButtonKind::Ghost, colors)
-                        .debug_selector(|| "workspace-settings-back".into())
-                        .w(px(84.0))
-                        .px(px(6.0))
-                        .gap(px(4.0))
-                        .on_click(cx.listener(|this, _, window, cx| {
+        let navigation = div()
+            .id("workspace-settings-navigation")
+            .w(px(if narrow {
+                SETTINGS_NAV_NARROW_WIDTH
+            } else {
+                SETTINGS_NAV_WIDTH
+            }))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .px(px(12.0))
+            .py(px(12.0))
+            .bg(crate::glass::pane(colors))
+            .border_r_1()
+            .border_color(crate::glass::edge(colors))
+            .child(
+                ui_button("workspace-settings-close", ButtonKind::Ghost, colors)
+                    .debug_selector(|| "workspace-settings-back".into())
+                    .w(px(84.0))
+                    .px(px(6.0))
+                    .gap(px(4.0))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| {
                             this.close_minimal_theme_popup(window, cx)
-                        }))
-                        .child(icon(CHEVRON_LEFT_ICON, 14.0, colors.muted))
-                        .child(
-                            div()
-                                .text_size(text_px(TEXT_CONTROL))
-                                .text_color(rgb(colors.muted))
-                                .child("Back"),
-                        ),
-                )
-                .child(
+                        }),
+                    )
+                    .child(icon(CHEVRON_LEFT_ICON, 14.0, colors.muted))
+                    .child(
+                        div()
+                            .text_size(text_px(TEXT_CONTROL))
+                            .text_color(rgb(colors.muted))
+                            .child("Back"),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(14.0))
+                    .px(px(6.0))
+                    .text_size(text_px(TEXT_TITLE))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(colors.text))
+                    .child("Settings"),
+            )
+            .child(
+                div()
+                    .relative()
+                    .mt(px(14.0))
+                    .h(px(CONTROL_HEIGHT))
+                    .px(px(9.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(RADIUS_CONTROL))
+                    .child(self.key_targets.mark(
+                        KeyLayer::Overlay,
+                        KeyStop::Field(self.settings_search_input.read(cx).focus_handle(cx)),
+                    ))
+                    .border_1()
+                    .border_color(
+                        if self.frame_focus.as_ref()
+                            == Some(&self.settings_search_input.read(cx).focus_handle(cx))
+                        {
+                            rgb(colors.selected_border)
+                        } else {
+                            crate::glass::edge(colors)
+                        },
+                    )
+                    .bg(rgb(colors.surface))
+                    .text_size(text_px(TEXT_CONTROL))
+                    .child(icon(SEARCH_ICON, 13.0, colors.faint))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.settings_search_input.clone()),
+                    )
+                    .when(searching, |field| {
+                        field.child(
+                            icon_button(
+                                "workspace-settings-search-clear",
+                                "Clear the search",
+                                CLOSE_ICON,
+                                colors,
+                            )
+                            .size(24.0)
+                            .build()
+                            .mr(px(-5.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.clear_settings_search(cx);
+                                cx.notify();
+                            })),
+                        )
+                    }),
+            )
+            .child(div().mt(px(12.0)).flex().flex_col().gap(px(2.0)).children(
+                SETTINGS_SECTIONS.iter().enumerate().map(|(index, entry)| {
+                    let matches = found
+                        .iter()
+                        .find(|(found, _)| *found == index)
+                        .map(|(_, rows)| rows.len());
+                    let selected = !searching && section == index;
+                    let quiet = searching && matches.is_none();
                     div()
-                        .mt(px(14.0))
-                        .px(px(6.0))
-                        .text_size(text_px(TEXT_TITLE))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(colors.text))
-                        .child("Settings"),
-                )
-                .child(
-                    div()
-                        .relative()
-                        .mt(px(14.0))
-                        .h(px(CONTROL_HEIGHT))
-                        .px(px(9.0))
+                        .id(("workspace-settings-section", index))
+                        .h(px(SETTINGS_NAV_ROW_HEIGHT))
+                        .px(px(8.0))
                         .flex_none()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .rounded(px(RADIUS_CONTROL))
-                        .child(self.key_targets.mark(
-                            KeyLayer::Overlay,
-                            KeyStop::Field(self.settings_search_input.read(cx).focus_handle(cx)),
-                        ))
-                        .border_1()
-                        .border_color(
-                            if self.frame_focus.as_ref()
-                                == Some(&self.settings_search_input.read(cx).focus_handle(cx))
-                            {
-                                rgb(colors.selected_border)
-                            } else {
-                                crate::glass::edge(colors)
-                            },
-                        )
-                        .bg(rgb(colors.surface))
+                        .gap(px(10.0))
+                        .rounded(px(RADIUS_TAB))
                         .text_size(text_px(TEXT_CONTROL))
-                        .child(icon(SEARCH_ICON, 13.0, colors.faint))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(self.settings_search_input.clone()),
-                        )
-                        .when(searching, |field| {
-                            field.child(
-                                icon_button(
-                                    "workspace-settings-search-clear",
-                                    "Clear the search",
-                                    CLOSE_ICON,
-                                    colors,
-                                )
-                                .size(24.0)
-                                .build()
-                                .mr(px(-5.0))
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.clear_settings_search(cx);
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                        }),
-                )
-                .child(div().mt(px(12.0)).flex().flex_col().gap(px(2.0)).children(
-                    SETTINGS_SECTIONS.iter().enumerate().map(|(index, entry)| {
-                        let matches = found
-                            .iter()
-                            .find(|(found, _)| *found == index)
-                            .map(|(_, rows)| rows.len());
-                        let selected = !searching && section == index;
-                        let quiet = searching && matches.is_none();
-                        div()
-                            .id(("workspace-settings-section", index))
-                            .h(px(SETTINGS_NAV_ROW_HEIGHT))
-                            .px(px(8.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .rounded(px(RADIUS_TAB))
-                            .text_size(text_px(TEXT_CONTROL))
-                            .font_weight(if selected {
-                                FontWeight::MEDIUM
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(rgb(if selected {
-                                colors.text
-                            } else if quiet {
-                                colors.faint
-                            } else {
-                                colors.muted
-                            }))
-                            .when(selected, |item| item.bg(rgb(colors.selected_surface)))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                        .font_weight(if selected {
+                            FontWeight::MEDIUM
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(rgb(if selected {
+                            colors.text
+                        } else if quiet {
+                            colors.faint
+                        } else {
+                            colors.muted
+                        }))
+                        .when(selected, |item| {
+                            item.bg(rgb(colors.selected_surface))
+                                .child(super::selection_marker(super::MarkerEdge::Leading, colors))
+                        })
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
                                 this.open_settings_section(index, cx)
-                            }))
-                            .child(icon(
-                                entry.icon,
-                                15.0,
-                                if selected { colors.text } else { colors.muted },
-                            ))
-                            .child(truncating_label(entry.name).flex_1().min_w_0())
-                            .when_some(matches, |item, count| {
-                                item.child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(text_px(TEXT_CAPTION))
-                                        .text_color(rgb(colors.faint))
-                                        .child(count.to_string()),
-                                )
-                            })
-                    }),
-                ));
+                            }),
+                        )
+                        .child(icon(
+                            entry.icon,
+                            15.0,
+                            if selected { colors.text } else { colors.muted },
+                        ))
+                        .child(truncating_label(entry.name).flex_1().min_w_0())
+                        .when_some(matches, |item, count| {
+                            item.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(text_px(TEXT_CAPTION))
+                                    .text_color(rgb(colors.faint))
+                                    .child(count.to_string()),
+                            )
+                        })
+                }),
+            ));
 
         let mut page = div()
             .w(px(column))
@@ -2270,7 +2287,7 @@ impl XdDesktop {
                     div()
                         .mt(px(6.0))
                         .text_size(text_px(TEXT_CONTROL))
-                        .line_height(px(20.0))
+                        .line_height(px(LINE_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child(entry.summary),
                 );

@@ -350,7 +350,7 @@ impl XdDesktop {
                     body.child(
                         div()
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(18.0))
+                            .line_height(px(LINE_LABEL_ROW))
                             .text_color(rgb(if row.failed {
                                 colors.danger
                             } else {
@@ -371,7 +371,7 @@ impl XdDesktop {
                         div()
                             .flex_none()
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(19.0))
+                            .line_height(px(LINE_LABEL_LOOSE))
                             .text_color(rgb(colors.muted))
                             .child(panel.update_summary()),
                     )
@@ -390,7 +390,7 @@ impl XdDesktop {
                                         div()
                                             .mt_3()
                                             .text_size(text_px(TEXT_LABEL))
-                                            .line_height(px(18.0))
+                                            .line_height(px(LINE_LABEL_ROW))
                                             .text_color(rgb(colors.danger))
                                             .child(error),
                                     )

@@ -116,11 +116,16 @@ pub(crate) struct SettledCard {
 
 /// The shelf's rows, most recently settled first.
 pub(crate) fn settled_cards(folders: &[Folder], chats: &[ChatSummary]) -> Vec<SettledCard> {
+    // Each chat's project by id, rather than a scan of them all per chat.
+    let by_id = folders
+        .iter()
+        .map(|folder| (folder.id.as_str(), folder))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut cards = chats
         .iter()
         .filter_map(|chat| {
             let settled_at = chat.settled_at?;
-            let folder = folders.iter().find(|folder| folder.id == chat.folder)?;
+            let folder = by_id.get(chat.folder.as_str())?;
             let session = project_sessions(&chat.folder, std::slice::from_ref(chat)).pop()?;
             Some(SettledCard {
                 id: session.id,

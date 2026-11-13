@@ -73,7 +73,40 @@ pub struct ThemeColors {
     pub banner_wash: u32,
     /// A pill's fill: a quiet tint of its ink, as the alpha that tint takes.
     pub pill_alpha: u8,
+    /// The full-window image viewer and the buttons laid over pictures.
+    pub viewer: ViewerInk,
 }
+
+/// What the image viewer draws with, and the buttons laid over a picture.
+/// A picture is seen best on black whatever the theme, so both themes keep
+/// the viewer dark; it is still named here, with the other roles. Each is
+/// `0xRRGGBBAA` but `ink`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewerInk {
+    /// What the viewer lays over the window.
+    pub backdrop: u32,
+    /// A button over a picture, under the pointer, and its edge.
+    pub button: u32,
+    pub button_hover: u32,
+    pub button_edge: u32,
+    /// The viewer's side buttons under the pointer.
+    pub hover: u32,
+    /// Icons over a picture, opaque `0xRRGGBB`.
+    pub ink: u32,
+    /// The picture's name under it.
+    pub caption: u32,
+}
+
+/// The viewer's ink, which both themes share.
+const VIEWER_INK: ViewerInk = ViewerInk {
+    backdrop: 0x000000bf,
+    button: 0x000000a6,
+    button_hover: 0x000000cc,
+    button_edge: 0xffffff33,
+    hover: 0xffffff1a,
+    ink: 0xffffff,
+    caption: 0xffffffcc,
+};
 
 /// Usage's figures in shades of the text ink over the page, so colour stays
 /// reserved for status. Each shade is opaque and already mixed.
@@ -218,6 +251,7 @@ impl ThemePreset {
                 scroll_thumb: 0xffffff5c,
                 banner_wash: 0xff94a224,
                 pill_alpha: 0x24,
+                viewer: VIEWER_INK,
             },
             Self::Light => ThemeColors {
                 background: 0xeef0f9,
@@ -270,6 +304,7 @@ impl ThemePreset {
                 scroll_thumb: 0x1b1e2c84,
                 banner_wash: 0x97203a24,
                 pill_alpha: 0x24,
+                viewer: VIEWER_INK,
             },
         }
     }

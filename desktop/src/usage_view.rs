@@ -3,8 +3,8 @@
 //! follows T3 Code (MIT, see `data/licenses/t3code-LICENSE`).
 
 use crate::metrics::{
-    CONTROL_HEIGHT_COMPACT, HIT_MIN, RADIUS_COMPOSER, RADIUS_CONTROL, RADIUS_PANEL, TEXT_CAPTION,
-    TEXT_CONTROL, TEXT_FIGURE, TEXT_HEADING, TEXT_LABEL, TEXT_TITLE,
+    CONTROL_HEIGHT_COMPACT, HIT_MIN, LINE_FIGURE, LINE_TITLE, RADIUS_COMPOSER, RADIUS_CONTROL,
+    RADIUS_PANEL, TEXT_CAPTION, TEXT_CONTROL, TEXT_FIGURE, TEXT_HEADING, TEXT_LABEL, TEXT_TITLE,
 };
 use std::{cell::Cell, collections::BTreeMap, rc::Rc};
 
@@ -658,15 +658,13 @@ fn flyout_period_bars(
                     column.child(
                         div()
                             .h(px(2.0))
-                            .rounded(px(1.0))
+                            .rounded(px(RADIUS_LINE))
                             .bg(rgb(flyout_track(colors))),
                     )
                 })
-                .children(
-                    segments
-                        .into_iter()
-                        .map(|(color, height)| div().h(px(height)).rounded(px(1.0)).bg(rgb(color))),
-                )
+                .children(segments.into_iter().map(|(color, height)| {
+                    div().h(px(height)).rounded(px(RADIUS_LINE)).bg(rgb(color))
+                }))
         }))
 }
 
@@ -821,7 +819,7 @@ fn share_bar(
             .min_w(px(4.0))
             .flex_basis(relative((segment.value / total) as f32))
             .flex_grow()
-            .rounded(px(2.0))
+            .rounded(px(RADIUS_MARK))
             .bg(rgb(segment.color))
             .tooltip(usage_tooltip(
                 vec![format!(
@@ -839,7 +837,12 @@ fn share_bar(
             .items_center()
             .gap(px(6.0))
             .text_size(text_px(TEXT_LABEL))
-            .child(div().size(px(8.0)).rounded(px(2.0)).bg(rgb(segment.color)))
+            .child(
+                div()
+                    .size(px(8.0))
+                    .rounded(px(RADIUS_MARK))
+                    .bg(rgb(segment.color)),
+            )
             .child(div().text_color(rgb(colors.muted)).child(segment.label))
             .child(
                 div()
@@ -2198,7 +2201,7 @@ impl XdDesktop {
                     .child(
                         div()
                             .text_size(text_px(TEXT_TITLE))
-                            .line_height(px(28.0))
+                            .line_height(px(LINE_TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(colors.text))
                             .child(total),
@@ -2868,7 +2871,7 @@ impl XdDesktop {
             .child(figures(
                 div()
                     .text_size(text_px(TEXT_FIGURE))
-                    .line_height(px(40.0))
+                    .line_height(px(LINE_FIGURE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(colors.text))
                     .child(match metric {

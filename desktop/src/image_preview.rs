@@ -8,17 +8,11 @@ use std::io::Cursor;
 use gpui::{ClickEvent, ImageFormat, KeyDownEvent, MouseMoveEvent};
 
 use super::*;
+use crate::metrics::{LINE_CAPTION, LINE_LABEL_TIGHT};
 
 const TILE_SIZE: f32 = 64.0;
 const TILE_RADIUS: f32 = RADIUS_PANEL;
 const VIEWER_RADIUS: f32 = RADIUS_PANEL;
-const BACKDROP: u32 = 0x000000bf;
-const CLOSE_BACKGROUND: u32 = 0x000000a6;
-const CLOSE_HOVER_BACKGROUND: u32 = 0x000000cc;
-const CLOSE_RING: u32 = 0xffffff33;
-const NAVIGATION_HOVER_BACKGROUND: u32 = 0xffffff1a;
-const MEDIA_FOREGROUND: u32 = 0xffffff;
-const CAPTION_COLOR: u32 = 0xffffffcc;
 
 const MAX_ZOOM: f32 = 8.0;
 const CLICK_ZOOM: f32 = 2.0;
@@ -357,7 +351,7 @@ fn viewer_button(
     icon_button(id, label, icon_path, frame_colors())
         .size(size)
         .glyph(icon_size)
-        .ink(MEDIA_FOREGROUND)
+        .ink(frame_colors().viewer.ink)
         .build()
         .debug_selector(move || id.into())
         .absolute()
@@ -571,16 +565,16 @@ impl XdDesktop {
                             .justify_center()
                             .rounded(px(RADIUS_CONTROL))
                             .border_1()
-                            .border_color(rgba(CLOSE_RING))
-                            .bg(rgba(CLOSE_BACKGROUND))
+                            .border_color(rgba(frame_colors().viewer.button_edge))
+                            .bg(rgba(frame_colors().viewer.button))
                             .shadow_sm()
                             .cursor_pointer()
-                            .hover(|style| style.bg(rgba(CLOSE_HOVER_BACKGROUND)))
+                            .hover(|style| style.bg(rgba(frame_colors().viewer.button_hover)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.remove_draft_attachment(owner, image, window, cx);
                             }))
-                            .child(icon(CLOSE_ICON, 14.0, MEDIA_FOREGROUND)),
+                            .child(icon(CLOSE_ICON, 14.0, frame_colors().viewer.ink)),
                     )
             })
             .collect::<Vec<_>>();
@@ -643,13 +637,13 @@ impl XdDesktop {
                     .child(
                         truncating_label(attachment.name.clone())
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(15.0))
+                            .line_height(px(LINE_LABEL_TIGHT))
                             .text_color(rgb(colors.text)),
                     )
                     .child(
                         div()
                             .text_size(text_px(TEXT_CAPTION))
-                            .line_height(px(13.0))
+                            .line_height(px(LINE_CAPTION))
                             .text_color(rgb(colors.faint))
                             .child(file_size_label(attachment.bytes)),
                     ),
@@ -890,7 +884,7 @@ impl XdDesktop {
                     .max_w(px(ImagePreview::max_viewer_width(window_size.0)))
                     .text_size(text_px(TEXT_LABEL))
                     .line_height(px(CAPTION_LINE_HEIGHT))
-                    .text_color(rgba(CAPTION_COLOR)),
+                    .text_color(rgba(frame_colors().viewer.caption)),
             );
 
         let close = viewer_button(
@@ -903,10 +897,10 @@ impl XdDesktop {
         .top(px(margin_y))
         .right(px(margin_x))
         .border_1()
-        .border_color(rgba(CLOSE_RING))
-        .bg(rgba(CLOSE_BACKGROUND))
+        .border_color(rgba(frame_colors().viewer.button_edge))
+        .bg(rgba(frame_colors().viewer.button))
         .shadow_sm()
-        .hover(|style| style.bg(rgba(CLOSE_HOVER_BACKGROUND)))
+        .hover(|style| style.bg(rgba(frame_colors().viewer.button_hover)))
         .on_click(cx.listener(|this, _, window, cx| {
             cx.stop_propagation();
             this.close_image_preview(window, cx);
@@ -922,7 +916,7 @@ impl XdDesktop {
                 "Next image (Right)"
             };
             let button = viewer_button(id, label, 32.0, icon_path, 20.0)
-                .hover(|style| style.bg(rgba(NAVIGATION_HOVER_BACKGROUND)))
+                .hover(|style| style.bg(rgba(frame_colors().viewer.hover)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     if let Some(preview) = &mut this.image_preview {
@@ -956,7 +950,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(BACKDROP))
+                .bg(rgba(frame_colors().viewer.backdrop))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                     this.image_preview_key_down(event, cx);
                 }))

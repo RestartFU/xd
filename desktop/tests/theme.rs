@@ -255,6 +255,27 @@ fn scroll_thumbs_and_control_edges_read_at_three_to_one_on_every_ground() {
     }
 }
 
+/// The bar that marks the selected row, tab, segment or section is the one
+/// sign of selection that reads at 3:1: the selected fill stays quiet.
+#[test]
+fn the_selection_marker_reads_at_three_to_one_on_every_ground() {
+    for preset in ThemePreset::ALL {
+        let colors = preset.colors();
+        for (ground, color) in grounds(colors) {
+            let ratio = contrast(colors.selected_border, color);
+            assert!(
+                ratio >= 3.0,
+                "{preset:?} selection marker on {ground} is {ratio:.2}:1"
+            );
+        }
+        // The fill alone does not carry it.
+        assert!(
+            contrast(colors.selected_surface, colors.sidebar) < 3.0,
+            "{preset:?}"
+        );
+    }
+}
+
 fn contrast(foreground: u32, background: u32) -> f64 {
     let foreground = luminance(foreground);
     let background = luminance(background);

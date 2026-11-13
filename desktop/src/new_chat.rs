@@ -1967,6 +1967,7 @@ impl XdDesktop {
             .items_center()
             .gap(px(10.0))
             .bg(rgb(colors.chrome))
+            .children(self.sidebar_button(colors, cx))
             .child(
                 truncating_label(title)
                     .min_w_0()

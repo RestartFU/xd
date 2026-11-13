@@ -3,8 +3,8 @@
 //! chat shows when it moves to another account.
 use super::*;
 use crate::metrics::{
-    CONTROL_HEIGHT, RADIUS_CONTROL, RADIUS_PANEL, TEXT_CAPTION, TEXT_CONTROL, TEXT_LABEL,
-    TEXT_TITLE,
+    CONTROL_HEIGHT, LINE_LABEL, LINE_TITLE_MONO, RADIUS_CONTROL, RADIUS_PANEL, TEXT_CAPTION,
+    TEXT_CONTROL, TEXT_LABEL, TEXT_TITLE,
 };
 use serde_json::json;
 
@@ -126,7 +126,7 @@ pub(super) fn render_switch_notice(sentence: &str, colors: ThemeColors) -> gpui:
                 .flex_1()
                 .min_w_0()
                 .text_size(text_px(TEXT_CONTROL))
-                .line_height(px(20.0))
+                .line_height(px(LINE_CONTROL))
                 .text_color(rgb(colors.muted))
                 .child(sentence.to_owned()),
         )
@@ -479,7 +479,7 @@ impl XdDesktop {
             .child(
                 div()
                     .text_size(text_px(TEXT_LABEL))
-                    .line_height(px(18.0))
+                    .line_height(px(LINE_LABEL_ROW))
                     .text_color(rgb(colors.muted))
                     .child(ACCOUNTS_EXPLANATION),
             )
@@ -497,7 +497,7 @@ impl XdDesktop {
                         .flex()
                         .gap(px(8.0))
                         .text_size(text_px(TEXT_LABEL))
-                        .line_height(px(18.0))
+                        .line_height(px(LINE_LABEL_ROW))
                         .text_color(rgb(colors.danger))
                         .child(div().mt(px(2.0)).child(icon(
                             usage_view::ALERT_ICON,
@@ -634,7 +634,7 @@ impl XdDesktop {
                 block.child(
                     div()
                         .text_size(text_px(TEXT_LABEL))
-                        .line_height(px(18.0))
+                        .line_height(px(LINE_LABEL_ROW))
                         .text_color(rgb(colors.muted))
                         .child(notice),
                 )
@@ -665,7 +665,7 @@ impl XdDesktop {
                                     div()
                                         .mt(px(4.0))
                                         .text_size(text_px(TEXT_LABEL))
-                                        .line_height(px(18.0))
+                                        .line_height(px(LINE_LABEL_ROW))
                                         .text_color(rgb(colors.muted))
                                         .child(if id == "codex" {
                                             "At a 5-hour, weekly, or monthly limit, the chat continues on the next account with room. Codex starts a new session there, given the chat's messages."
@@ -960,7 +960,7 @@ impl XdDesktop {
                             .items_center()
                             .gap(px(6.0))
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(17.0))
+                            .line_height(px(LINE_LABEL))
                             .when(dot, |line| {
                                 line.child(
                                     div().flex_none().size(px(6.0)).rounded_full().bg(rgb(tone)),
@@ -1031,7 +1031,7 @@ impl XdDesktop {
                         heading.child(
                             div()
                                 .text_size(text_px(TEXT_LABEL))
-                                .line_height(px(18.0))
+                                .line_height(px(LINE_LABEL_ROW))
                                 .text_color(rgb(colors.muted))
                                 .child(
                                     "Sign in with the account you want to add. If your browser is already \
@@ -1065,7 +1065,7 @@ impl XdDesktop {
                                 .bg(rgb(colors.surface))
                                 .font_family(MONO)
                                 .text_size(text_px(TEXT_TITLE))
-                                .line_height(px(26.0))
+                                .line_height(px(LINE_TITLE_MONO))
                                 .text_color(rgb(colors.text))
                                 .child(code),
                         )
