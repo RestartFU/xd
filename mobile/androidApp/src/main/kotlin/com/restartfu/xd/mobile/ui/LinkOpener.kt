@@ -3,9 +3,9 @@ package com.restartfu.xd.mobile.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 
@@ -17,15 +17,27 @@ import androidx.compose.ui.platform.LocalUriHandler
 internal fun rememberLinkOpener(): (String) -> Unit {
     val handler = LocalUriHandler.current
     val context = LocalContext.current
-    return remember(handler, context) {
+    val notify = LocalNotice.current
+    return remember(handler, context, notify) {
         { url ->
             try {
                 handler.openUri(url)
             } catch (error: Exception) {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                 clipboard?.setPrimaryClip(ClipData.newPlainText("Link", url))
-                Toast.makeText(context, "No app could open the link, so it was copied.", Toast.LENGTH_LONG).show()
+                notify(LINK_COPIED_NOTICE)
             }
         }
     }
 }
+
+/** What is said when a link could not be opened and was copied instead. */
+internal const val LINK_COPIED_NOTICE = "No app could open the link, so it was copied."
+
+/**
+ * Says something brief to the reader where they are looking: the app's
+ * snackbar on a page, a line of its own inside a dialog, which is a window the
+ * snackbar would sit behind. Never a system toast, which the app cannot place,
+ * style or have read out with the rest of the screen.
+ */
+internal val LocalNotice = staticCompositionLocalOf<(String) -> Unit> { {} }
