@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
@@ -134,17 +133,18 @@ private fun PatchList(
     collapsedFiles: Set<String>,
     onToggle: (String) -> Unit,
 ) {
-    val fallback = LocalContentColor.current
+    val ink = codeInk()
     // Kept across a refresh, so the old patch stays up until the new one is ready.
     val parsed by produceState<PreparedDiff?>(null, patch) {
         val files = withContext(Dispatchers.Default) { CodeBlocks.diffFiles(patch) }
         value = PreparedDiff(patch, files.map { PreparedFile(it, it.lines.map(::plainDiffLine)) })
     }
     // Paired with the parse it colours, so a newer parse is never shown in older colours.
-    val coloured by produceState<Pair<PreparedDiff, PreparedDiff>?>(null, parsed, fallback) {
+    // Coloured again for a new theme as well as a new patch.
+    val coloured by produceState<Pair<PreparedDiff, PreparedDiff>?>(null, parsed, ink) {
         val plain = parsed ?: return@produceState
         value = plain to withContext(Dispatchers.Default) {
-            PreparedDiff(plain.patch, plain.files.map { PreparedFile(it.file, highlightDiff(it.file.lines, fallback)) })
+            PreparedDiff(plain.patch, plain.files.map { PreparedFile(it.file, highlightDiff(it.file.lines, ink)) })
         }
     }
     val diff = coloured?.takeIf { it.first === parsed }?.second ?: parsed

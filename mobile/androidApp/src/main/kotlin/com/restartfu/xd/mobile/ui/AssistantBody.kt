@@ -21,9 +21,34 @@ import kotlinx.coroutines.withContext
 /*
  * What an assistant's reply is read into before it is drawn: its pictures and
  * prose, the prose's sections, and each section's Markdown. It is all plain
- * data worked out from the text alone, so a reply still streaming in can have
- * it done away from the main thread; a finished one does it once, in place.
+ * data worked out from the text alone, so it is done away from the main
+ * thread: again and again for a reply still streaming in, and once for a
+ * finished one, which is then kept for every time its row comes back.
  */
+
+/** A finished reply: the message's id and its text, which a record may rewrite. */
+internal data class ReplyKey(val id: String, val text: String)
+
+/** Finished replies read into their parts, the newest few hundred kept. */
+internal val ReplyBodies = PreparedCache<ReplyKey, List<BodyPart>>(capacity = 300) {
+    assistantBody(it.text, live = false)
+}
+
+/**
+ * What the reply streaming in last read as. The finished message that takes
+ * its row is read again in the background; until then, if its words are the
+ * same, it draws this instead of its plain text, so the handover does not
+ * flicker.
+ */
+internal object LiveHandoff {
+    @Volatile private var last: Pair<String, List<BodyPart>>? = null
+
+    fun remember(text: String, parts: List<BodyPart>) {
+        last = text to parts
+    }
+
+    fun forText(text: String): List<BodyPart>? = last?.takeIf { it.first == text }?.second
+}
 
 /** One stretch of a reply: a picture, or prose. */
 internal sealed interface BodyPart {

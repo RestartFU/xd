@@ -38,14 +38,20 @@ import com.restartfu.xd.markdown.Block
 import com.restartfu.xd.markdown.Markdown
 import com.restartfu.xd.markdown.Span
 
-/** Draws a parsed Markdown document. */
+/** Markdown documents read into blocks, once each and in the background, for every view that draws them. */
+internal val MarkdownDocuments = PreparedCache<String, List<Block>>(capacity = 300) { Markdown.parse(it) }
+
+/**
+ * Draws a Markdown document. It is read into blocks once and kept (see
+ * [MarkdownDocuments]); until the blocks are ready its text shows as it is.
+ */
 @Composable
 internal fun MarkdownText(
     source: String,
     modifier: Modifier = Modifier,
 ) {
-    val blocks = remember(source) { Markdown.parse(source) }
-    MarkdownBlocks(blocks, modifier)
+    val blocks = rememberPrepared(MarkdownDocuments, source)
+    if (blocks == null) Text(source, modifier) else MarkdownBlocks(blocks, modifier)
 }
 
 /**

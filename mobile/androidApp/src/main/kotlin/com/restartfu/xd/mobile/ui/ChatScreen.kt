@@ -103,6 +103,8 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.snapshots.Snapshot
 import com.restartfu.xd.model.ChatState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -393,11 +395,20 @@ internal fun ChatScreen(
         }
     }
 
+    // The newest finished replies are read into their parts in the
+    // background as they arrive, so their rows have them on their first frame
+    // rather than showing plain text for a moment.
+    LaunchedEffect(rows) { newestReplies(rows).forEach(ReplyBodies::request) }
+    val landingIndex = rememberUpdatedState(lastTranscriptIndex)
     LaunchedEffect(state.chatId, !transcriptEmpty) {
         if (!model.landed && !transcriptEmpty) {
+            // The replies at the end read first, briefly: a row that changes
+            // height after the jump would move the end landed on.
+            withTimeoutOrNull(LANDING_PREPARE_MILLIS) { newestReplies(rows).map(ReplyBodies::request).awaitAll() }
+            androidx.compose.runtime.withFrameNanos { }
             // Jumped, not animated: scrolling through a loaded history on open
             // is motion the reader did not ask for.
-            listState.scrollToEnd(lastTranscriptIndex)
+            listState.scrollToEnd(landingIndex.value)
             following.value = true
             model.landed = true
         }
@@ -1723,16 +1734,22 @@ private fun SelectableMessageBody(item: TranscriptItem, model: ChatViewModel) {
 /**
  * An assistant's reply: its pictures, and its prose as rendered Markdown.
  *
- * A finished reply is read into its parts once, in place. One still arriving
- * is read again as it grows, on a background thread, and only what changed is
- * drawn again: see [assistantBody].
+ * One still arriving is read again as it grows, on a background thread, and
+ * only what changed is drawn again: see [assistantBody]. A finished one is
+ * read once, in the background, and kept for every time its row is shown
+ * again (see [ReplyBodies]); for the moment before that it shows as plain text.
  */
 @Composable
 internal fun AssistantBody(item: TranscriptItem, model: ChatViewModel) {
     val parts = if (item.live) {
         rememberOffMain(item.text) { text, previous: List<BodyPart>? -> assistantBody(text, live = true, previous) }
+            .also { LiveHandoff.remember(item.text, it) }
     } else {
-        remember(item.text) { assistantBody(item.text, live = false) }
+        rememberPrepared(ReplyBodies, ReplyKey(item.id, item.text)) ?: LiveHandoff.forText(item.text)
+    }
+    if (parts == null) {
+        Text(item.text)
+        return
     }
     CompositionLocalProvider(LocalStreaming provides item.live) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1830,6 +1847,21 @@ private suspend fun LazyListState.scrollToEnd(index: Int, animated: Boolean = fa
         if (moved <= 0f) break
     }
 }
+
+/** How long landing in a chat waits for its newest replies to be read. */
+private const val LANDING_PREPARE_MILLIS = 400L
+
+/** How many of the newest finished replies are read ahead of being drawn. */
+private const val PREPARED_REPLIES = 40
+
+/** The newest finished replies in [rows], newest first, as [ReplyBodies] keys them. */
+private fun newestReplies(rows: List<TranscriptRow>): List<ReplyKey> =
+    rows.asReversed().asSequence()
+        .mapNotNull { (it as? TranscriptRow.Single)?.item }
+        .filter { it.kind == com.restartfu.xd.model.TranscriptKind.ASSISTANT && !it.live }
+        .take(PREPARED_REPLIES)
+        .map { ReplyKey(it.id, it.text) }
+        .toList()
 
 /** What the chat's follower keeps in view: the end, as of the newest output. */
 private data class FollowTarget(

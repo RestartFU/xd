@@ -32,7 +32,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -297,11 +296,11 @@ private fun FileEditor(
     onSave: () -> Unit,
 ) {
     val language = remember(path) { Syntax.languageForPath(path) }
-    val fallback = LocalContentColor.current
+    val ink = codeInk()
     val large = remember(text) { isLargeFile(text) }
     var editingLargeFile by rememberSaveable(path) { mutableStateOf(false) }
-    val syntaxColours = remember(language, fallback) {
-        SyntaxVisualTransformation(language, fallback)
+    val syntaxColours = remember(language, ink) {
+        SyntaxVisualTransformation(language, ink)
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -376,16 +375,16 @@ private fun LargeFileView(
     modifier: Modifier = Modifier,
 ) {
     val language = remember(path) { Syntax.languageForPath(path) }
-    val fallback = LocalContentColor.current
+    val ink = codeInk()
     val lines = remember(text) { text.split('\n') }
     val highlighted by produceState<List<AnnotatedString>?>(
         initialValue = null,
         key1 = text,
         key2 = language,
-        key3 = fallback,
+        key3 = ink,
     ) {
         value = withContext(Dispatchers.Default) {
-            highlightLines(text, language, fallback)
+            highlightLines(text, language, ink)
         }
     }
     val horizontal = rememberScrollState()

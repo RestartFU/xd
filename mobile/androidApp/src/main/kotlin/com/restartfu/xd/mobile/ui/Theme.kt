@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import com.restartfu.xd.mobile.R
+import com.restartfu.xd.syntax.SyntaxToken
 
 /** Legacy accent preferences remain readable for compatibility. */
 public enum class AccentPreset(
@@ -242,6 +243,53 @@ public fun terminalPalette(theme: MinimalThemePreset): List<Color> = when (theme
 
 public val LocalXdTerminalPalette = staticCompositionLocalOf { terminalPalette(MinimalThemePreset.DARK) }
 
+/**
+ * Syntax colours by token. Dark is the desktop's shared token palette
+ * ([SyntaxToken.colour]), colour for colour. Light keeps the same hues,
+ * darkened so each reads at 4.5:1 or better on the Light code block and on
+ * the diff rows' tints; plain text takes the content colour.
+ */
+@Immutable
+public data class XdSyntax(
+    val keyword: Color,
+    val type: Color,
+    val function: Color,
+    val string: Color,
+    val number: Color,
+    val comment: Color,
+    val preprocessor: Color,
+) {
+    /** The colour of [token]; null for plain text, which is drawn in the content colour. */
+    public fun colour(token: SyntaxToken): Color? = when (token) {
+        SyntaxToken.TEXT -> null
+        SyntaxToken.KEYWORD -> keyword
+        SyntaxToken.TYPE -> type
+        SyntaxToken.FUNCTION -> function
+        SyntaxToken.STRING -> string
+        SyntaxToken.NUMBER -> number
+        SyntaxToken.COMMENT -> comment
+        SyntaxToken.PREPROCESSOR -> preprocessor
+    }
+}
+
+public fun xdSyntax(theme: MinimalThemePreset): XdSyntax = when (theme) {
+    MinimalThemePreset.DARK -> XdSyntax(
+        keyword = Color(0xFFDC8ADD), type = Color(0xFF78AEED), function = Color(0xFF99C1F1),
+        string = Color(0xFFF8E45C), number = Color(0xFFFFBE6F), comment = Color(0xFF8B8E8F),
+        preprocessor = Color(0xFFC061CC),
+    )
+    // Each Dark colour at half its brightness, as Light drew them before,
+    // except the string yellow, which at half was 4.2:1 on the code block:
+    // it is a deeper olive of the same hue.
+    MinimalThemePreset.LIGHT -> XdSyntax(
+        keyword = Color(0xFF6E456F), type = Color(0xFF3C5777), function = Color(0xFF4D6179),
+        string = Color(0xFF6E6114), number = Color(0xFF805F38), comment = Color(0xFF464748),
+        preprocessor = Color(0xFF603166),
+    )
+}
+
+public val LocalXdSyntax = staticCompositionLocalOf { xdSyntax(MinimalThemePreset.DARK) }
+
 /** Below this, text on its own cell background is replaced in the Light set, as on the desktop. */
 public const val MIN_CELL_CONTRAST: Float = 3f
 
@@ -325,6 +373,7 @@ public fun XdTheme(theme: MinimalThemePreset, content: @Composable () -> Unit) {
         LocalXdSignals provides xdSignals(theme),
         LocalXdGlass provides xdGlass(theme),
         LocalXdTerminalPalette provides terminalPalette(theme),
+        LocalXdSyntax provides xdSyntax(theme),
         LocalXdTheme provides theme,
     ) {
         MaterialTheme(
