@@ -172,14 +172,14 @@ mod native {
             },
             UI::{
                 Shell::{
-                    DefSubclassProc, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+                    DefSubclassProc, KF_FLAG_DEFAULT, RemoveWindowSubclass, SHGetKnownFolderPath,
                     SetCurrentProcessExplicitAppUserModelID, SetWindowSubclass,
                 },
                 WindowsAndMessaging::{
                     ENDSESSION_CLOSEAPP, EnumWindows, GetWindowThreadProcessId, IDYES, IsIconic,
                     IsWindowVisible, MB_ICONERROR, MB_SETFOREGROUND, MB_YESNO, MessageBoxW,
                     PostMessageW, PostQuitMessage, SW_RESTORE, SetForegroundWindow, ShowWindow,
-                    WM_CLOSE, WM_ENDSESSION, WM_QUERYENDSESSION,
+                    WM_CLOSE, WM_ENDSESSION, WM_NCDESTROY, WM_QUERYENDSESSION,
                 },
             },
         },
@@ -301,18 +301,34 @@ mod native {
             let name = wide(&instance_name(
                 &xd_desktop::channel::data_name().to_string_lossy(),
             ));
-            let handle = unsafe { CreateMutexW(None, false, &name) };
-            let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-            match handle {
-                Ok(handle) if exists => {
-                    let _ = unsafe { CloseHandle(handle) };
-                    show_running_instance();
-                    None
+            // Another xd without a window is starting, or on its way out
+            // after being closed. Give it a few seconds to do either.
+            for _ in 0..30 {
+                let handle = unsafe { CreateMutexW(None, false, &name) };
+                // Read at once: it is only meaningful straight after the call.
+                let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+                let Ok(handle) = handle else {
+                    // Windows could not say. Starting is better than refusing to.
+                    return Some(Self(HANDLE::default()));
+                };
+                if !exists {
+                    return Some(Self(handle));
                 }
-                Ok(handle) => Some(Self(handle)),
-                // Windows could not say. Starting is better than refusing to.
-                Err(_) => Some(Self(HANDLE::default())),
+                if show_running_instance() {
+                    let _ = unsafe { CloseHandle(handle) };
+                    return None;
+                }
+                // Let go before looking again: holding the name open would
+                // make the next try find it even after the other xd has gone.
+                let _ = unsafe { CloseHandle(handle) };
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
+            // It never showed a window and never left: stuck. Opening a
+            // second xd is better than opening nothing.
+            unsafe { CreateMutexW(None, false, &name) }
+                .ok()
+                .map(Self)
+                .or(Some(Self(HANDLE::default())))
         }
     }
 
@@ -339,7 +355,8 @@ mod native {
     }
 
     /// Bring the window of the xd that is already running to the front.
-    fn show_running_instance() {
+    /// Returns whether it has one to bring.
+    fn show_running_instance() -> bool {
         struct Search {
             executable: PathBuf,
             own_process: u32,
@@ -367,7 +384,7 @@ mod native {
         }
 
         let Ok(executable) = std::env::current_exe() else {
-            return;
+            return false;
         };
         let mut search = Search {
             executable,
@@ -376,14 +393,16 @@ mod native {
         };
         // Stopping the enumeration early reports as an error.
         let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize)) };
-        if let Some(window) = search.found {
-            unsafe {
-                if IsIconic(window).as_bool() {
-                    let _ = ShowWindow(window, SW_RESTORE);
-                }
-                let _ = SetForegroundWindow(window);
+        let Some(window) = search.found else {
+            return false;
+        };
+        unsafe {
+            if IsIconic(window).as_bool() {
+                let _ = ShowWindow(window, SW_RESTORE);
             }
+            let _ = SetForegroundWindow(window);
         }
+        true
     }
 
     /// Run as the crash dialog if that is what this process was started for.
@@ -484,6 +503,9 @@ mod native {
     /// GPUI answers neither message, so an update used to find xd unwilling to
     /// close and ask for a reboot instead.
     pub fn close_with_the_session(window: isize) {
+        /// Tells this subclass from any other on the window.
+        const SUBCLASS: usize = 1;
+
         unsafe extern "system" fn procedure(
             window: HWND,
             message: u32,
@@ -506,12 +528,16 @@ mod native {
                     }
                     return LRESULT(0);
                 }
+                // The window is going: take this procedure off it first.
+                WM_NCDESTROY => {
+                    let _ = unsafe { RemoveWindowSubclass(window, Some(procedure), SUBCLASS) };
+                }
                 _ => {}
             }
             unsafe { DefSubclassProc(window, message, wparam, lparam) }
         }
 
-        let _ = unsafe { SetWindowSubclass(HWND(window as _), Some(procedure), 1, 0) };
+        let _ = unsafe { SetWindowSubclass(HWND(window as _), Some(procedure), SUBCLASS, 0) };
     }
 }
 
