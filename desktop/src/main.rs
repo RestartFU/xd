@@ -1501,25 +1501,20 @@ fn chip_width(icon: f32, text: f32) -> f32 {
 /// shows the branch's name, cut short as the header narrows but never to
 /// less than that much of it; without, it is its icon alone. A name cut to a
 /// letter or two says nothing. The pointer reads the whole name either way.
+///
+/// It says what the session is on and does nothing when pressed, so it is
+/// drawn as a label, not a button: no fill, no hover, no pointer. Its icon
+/// alone is a Tab stop that shows the name under the ring, as under the
+/// pointer.
 fn branch_chip(
     branch: String,
     name_floor: Option<f32>,
+    keys: &KeyTargets,
     colors: ThemeColors,
 ) -> gpui::Stateful<gpui::Div> {
     let branch = SharedString::from(branch);
-    let chip = div()
-        .id("minimal-session-branch")
-        .debug_selector(|| "minimal-session-branch".into())
-        .h(hit_px(HIT_MIN))
-        .px(px(CHIP_PAD))
-        .flex()
-        .items_center()
-        .gap(px(CHIP_GAP))
-        .rounded_full()
-        .bg(rgb(colors.surface_high))
+    let chip = static_chip("minimal-session-branch", colors)
         .font_family(MONO)
-        .text_size(text_px(TEXT_LABEL))
-        .text_color(rgb(colors.muted))
         .child(icon(GIT_BRANCH_ICON, CHIP_ICON, colors.muted));
     match name_floor {
         // The name's own tooltip reads it out while it is cut short.
@@ -1527,8 +1522,47 @@ fn branch_chip(
             .min_w(px(chip_width(CHIP_ICON, floor)))
             .flex_shrink()
             .child(truncating_label(branch).min_w_0()),
-        None => chip.flex_none().tooltip(pane_tooltip(branch, colors)),
+        None => static_chip_named(chip, "minimal-session-branch", branch, keys, colors),
     }
+}
+
+/// A chip of the session header that only says something, such as the
+/// session's assistant or branch: its icon and words, set as a locked label
+/// is, with nothing that looks pressable.
+fn static_chip(id: &'static str, colors: ThemeColors) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .h(hit_px(HIT_MIN))
+        .px(px(CHIP_PAD))
+        .flex()
+        .items_center()
+        .gap(px(CHIP_GAP))
+        .cursor_default()
+        .text_size(text_px(TEXT_LABEL))
+        .text_color(rgb(colors.muted))
+}
+
+/// A static chip folded to its icon: the pointer reads its name, and so
+/// does the keyboard, as a Tab stop that shows the name under its ring and
+/// does nothing when pressed.
+fn static_chip_named(
+    chip: gpui::Stateful<gpui::Div>,
+    id: &'static str,
+    name: SharedString,
+    keys: &KeyTargets,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    key_reach(
+        chip.flex_none().tooltip(pane_tooltip(name.clone(), colors)),
+        keys,
+        KeyLayer::Page,
+        id,
+        Some(name),
+        FOCUS_RING_RADIUS,
+        colors,
+        |_, _, _| {},
+    )
 }
 
 /// The action a session row offers. While the pointer is over the row it
@@ -18688,43 +18722,34 @@ impl XdDesktop {
             .when_some(
                 selected_agent.zip(agent_name).filter(|_| fit.agent),
                 |toolbar, (agent, name)| {
-                    toolbar.child(
-                        div()
-                            .id("minimal-session-agent")
-                            .debug_selector(|| "minimal-session-agent".into())
-                            .h(hit_px(HIT_MIN))
-                            .px(px(CHIP_PAD))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(CHIP_GAP))
-                            .rounded_full()
-                            .bg(rgb(colors.surface_high))
-                            .text_size(text_px(TEXT_LABEL))
-                            .text_color(rgb(colors.muted))
-                            .child(assistant_icon(
-                                agent_icon(agent),
-                                13.0,
-                                colors.muted,
-                                colors,
-                            ))
-                            // With no room for its name the mark stands alone,
-                            // and says the name under the pointer.
-                            .map(|chip| {
-                                if fit.agent_name {
-                                    chip.child(name)
-                                } else {
-                                    chip.tooltip(pane_tooltip(name, colors))
-                                }
-                            }),
-                    )
+                    let chip = static_chip("minimal-session-agent", colors)
+                        .flex_none()
+                        .child(assistant_icon(
+                            agent_icon(agent),
+                            13.0,
+                            colors.muted,
+                            colors,
+                        ));
+                    // With no room for its name the mark stands alone, and
+                    // says the name under the pointer and under the ring.
+                    toolbar.child(if fit.agent_name {
+                        chip.child(name)
+                    } else {
+                        static_chip_named(
+                            chip,
+                            "minimal-session-agent",
+                            name.into(),
+                            &self.key_targets,
+                            colors,
+                        )
+                    })
                 },
             )
             .when_some(branch.filter(|_| fit.chips), |toolbar, branch| {
                 let name_floor = fit
                     .branch_name
                     .then(|| label(&branch, MONO).min(BRANCH_CHIP_NAME_FLOOR));
-                toolbar.child(branch_chip(branch, name_floor, colors))
+                toolbar.child(branch_chip(branch, name_floor, &self.key_targets, colors))
             })
             .when_some(
                 pull_request_url.filter(|_| fit.chips && fit.pull_requests > 0),
@@ -41471,6 +41496,92 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         let branch = cx.debug_bounds("minimal-session-branch").unwrap();
         assert!(branch.size.width >= px(chip_width(CHIP_ICON, BRANCH_CHIP_NAME_FLOOR)));
         assert!(cx.debug_bounds("toggle-bottom-pane").unwrap().right() <= window);
+        metrics::set_interface_size(100);
+    }
+
+    #[gpui::test]
+    fn a_static_header_chip_is_a_label_and_names_itself_under_the_ring(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The assistant and branch chips only say something: drawn as a
+        // locked label is, with no fill, hover or pointer of a button. The
+        // pull request's chip opens it, and stays a button.
+        let source = include_str!("main.rs");
+        let production = source.split_once("#[cfg(test)]\n#[allow(").unwrap().0;
+        let body = |name: &str| {
+            production
+                .split_once(&format!("fn {name}("))
+                .unwrap()
+                .1
+                .split_once("\n}\n")
+                .unwrap()
+                .0
+                .to_owned()
+        };
+        for name in ["static_chip", "static_chip_named", "branch_chip"] {
+            let body = body(name);
+            for button in [".bg(", ".hover(", "cursor_pointer", ".on_click("] {
+                assert!(!body.contains(button), "{name} has {button}");
+            }
+        }
+        let header = body("render_minimal_context_toolbar");
+        let pull_request = header
+            .split_once(".id(\"minimal-session-pull-request\")")
+            .unwrap()
+            .1;
+        assert!(pull_request.contains(".cursor_pointer()"));
+        assert!(pull_request.contains(".hover("));
+
+        // Folded to its icon, the branch is a Tab stop that shows its name
+        // under the ring, and pressing it does nothing.
+        let (desktop, cx) = sized_window(cx, 150, 1400.0, 780.0);
+        cx.simulate_keystrokes("alt-down");
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            let chat = desktop.model.selected_chat.clone().unwrap();
+            let chat = desktop
+                .model
+                .chats
+                .iter_mut()
+                .find(|known| known.id == chat)
+                .unwrap();
+            chat.branch = Some("xd/a-branch-with-a-long-name".into());
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+            cx.notify();
+        });
+        redraw(cx);
+        // Narrower, until the branch is its icon alone: only then is it a
+        // Tab stop.
+        let folded = |cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| {
+                desktop.stop_bounds("minimal-session-branch").is_some()
+            })
+        };
+        let mut width = 1400.0;
+        while !folded(cx) && width > 760.0 {
+            width -= 20.0;
+            cx.simulate_resize(size(window_px(width), window_px(780.0)));
+            redraw(cx);
+        }
+        assert!(folded(cx), "the branch folds to its icon");
+        let mut on = None;
+        for _ in 0..60 {
+            cx.simulate_keystrokes("tab");
+            redraw(cx);
+            on = ring(&desktop, cx).filter(|id| id == "minimal-session-branch");
+            if on.is_some() {
+                break;
+            }
+        }
+        assert!(on.is_some(), "Tab reaches the folded branch");
+        assert!(named_under_ring(&desktop, cx));
+        let chat = shown_chat(&desktop, cx);
+        cx.simulate_keystrokes("enter space");
+        redraw(cx);
+        assert_eq!(shown_chat(&desktop, cx), chat);
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("minimal-session-branch")
+        );
         metrics::set_interface_size(100);
     }
 
