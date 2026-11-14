@@ -125,6 +125,7 @@ import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.ChatViewModel
+import com.restartfu.xd.mobile.rememberUnsentDrafts
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
@@ -265,6 +266,9 @@ private fun MinimalMobileWorkspace(
     // Unsaved file edits by session, kept through Android ending the app.
     val unsavedFiles: UnsavedFileStore = viewModel()
     remember(unsavedFiles, sessionGeneration) { unsavedFiles.bindGeneration(sessionGeneration) }
+    // Composer drafts the host has not taken, kept the same way.
+    val unsentDrafts = rememberUnsentDrafts(model.client)
+    remember(unsentDrafts, sessionGeneration) { unsentDrafts.bindGeneration(sessionGeneration) }
     val savedChatState = rememberSaveableStateHolder()
     var activeSessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var chatSelections by rememberSaveable(stateSaver = ChatSelectionsSaver) { mutableStateOf(emptyMap()) }
@@ -315,6 +319,7 @@ private fun MinimalMobileWorkspace(
             // Only once the host has listed sessions: the tree is empty while the
             // app starts, and that must not drop the edits it is about to bring back.
             if (sessions.isNotEmpty()) unsavedFiles.retain(sessions.map { it.id }.toSet())
+            if (tree.chats.isNotEmpty()) unsentDrafts.retain(tree.chats.map { it.id }.toSet())
         }
     }
     val place = listOf(mobileDestination, activeSessionId, chatSelections, hiddenChatIds)
@@ -510,7 +515,7 @@ private fun MinimalMobileWorkspace(
                                 val chat: ChatViewModel = viewModel(
                                     key = "chat-${activeChat.id}",
                                     viewModelStoreOwner = stores.chat(activeChat.id),
-                                    factory = ChatViewModel.Factory(model.client, activeChat.id),
+                                    factory = ChatViewModel.Factory(model.client, activeChat.id, unsentDrafts),
                                 )
                                 ChatScreen(
                                     model = chat, goBack = showProjects,

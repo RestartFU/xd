@@ -32,6 +32,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -1120,10 +1121,14 @@ class MainViewModel @JvmOverloads constructor(
     }
 }
 
-class ChatViewModel(
+class ChatViewModel internal constructor(
     val client: XdClient,
     private val chatId: String,
+    /** Where a draft the host has not taken is kept through the end of the process; tests may leave it out. */
+    private val drafts: UnsentDrafts?,
 ) : ViewModel() {
+    constructor(client: XdClient, chatId: String) : this(client, chatId, null)
+
     val session: ChatSession = client.openChat(chatId)
     val state = session.state
     private val _sending = MutableStateFlow(false)
@@ -1187,6 +1192,10 @@ class ChatViewModel(
     private var draftTextDirty = false
     private var draftAttachmentsDirty = false
     private var draftRevision = -1L
+    /** The draft push on its way to the host, which a flush waits for rather than cancels. */
+    private var draftInFlight: Job? = null
+    /** How [drafts] asks this chat to send its draft now. */
+    private val pushDraftNow: suspend () -> Unit = { flushDraft() }
 
     /**
      * The reader's answers to agents' questions, kept beside the client, not
@@ -1218,6 +1227,14 @@ class ChatViewModel(
     private val draftKnown = MutableStateFlow(false)
 
     init {
+        // A draft typed and not sent before Android ended the app comes back
+        // still unsent, ahead of the host's, and goes to the host when it can.
+        drafts?.kept(chatId)?.let { text ->
+            _draft.value = text
+            draftTextDirty = true
+        }
+        drafts?.attach(chatId, pushDraftNow)
+        if (draftTextDirty) scheduleDraftSync()
         loadCatalog()
         viewModelScope.launch {
             // A request seen here and then gone was resolved or cleared, so its
@@ -1880,6 +1897,7 @@ class ChatViewModel(
     }
 
     override fun onCleared() {
+        drafts?.detach(chatId, pushDraftNow)
         draftSyncJob?.cancel()
         if (draftTextDirty || draftAttachmentsDirty) {
             val text = _draft.value
@@ -1892,7 +1910,8 @@ class ChatViewModel(
                 context = NonCancellable,
                 start = CoroutineStart.UNDISPATCHED,
             ) {
-                runCatching { session.setDraft(text, images) }
+                // Kept by [drafts] until the host takes it, which sends it again if this fails.
+                runCatching { session.setDraft(text, images) }.onSuccess { drafts?.sent(chatId, text) }
                 session.close()
             }
         } else {
@@ -1900,13 +1919,14 @@ class ChatViewModel(
         }
     }
 
-    class Factory(
+    class Factory internal constructor(
         private val client: XdClient,
         private val chatId: String,
+        private val drafts: UnsentDrafts? = null,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            ChatViewModel(client, chatId) as T
+            ChatViewModel(client, chatId, drafts) as T
     }
 
     private companion object {
@@ -1918,25 +1938,52 @@ class ChatViewModel(
     private fun scheduleDraftSync(attachments: Boolean = false) {
         draftTextDirty = true
         draftAttachmentsDirty = draftAttachmentsDirty || attachments
-        draftSyncJob?.cancel()
+        // Kept until the host has it, so neither going offline nor Android
+        // ending the app loses what was typed.
+        drafts?.keep(chatId, _draft.value)
+        if (draftSyncJob !== draftInFlight) draftSyncJob?.cancel()
         draftSyncJob = viewModelScope.launch {
             delay(DRAFT_SYNC_DELAY_MILLIS)
-            val includeAttachments = draftAttachmentsDirty
-            val images = if (includeAttachments) {
-                _attachments.value.map(Attachment::png)
-            } else {
-                null
-            }
-            draftTextDirty = false
-            draftAttachmentsDirty = false
-            try {
-                session.setDraft(_draft.value, images)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Throwable) {
-                draftTextDirty = true
-                draftAttachmentsDirty = draftAttachmentsDirty || includeAttachments
-            }
+            pushDraft()
+        }
+    }
+
+    /**
+     * Sends the draft at once, if the host has not taken it: when the app
+     * goes to the background, or the connection comes back. A push still
+     * waiting out the pause after typing goes now instead; one already on its
+     * way is waited for, and sent again if it failed.
+     */
+    internal suspend fun flushDraft() {
+        val waiting = draftSyncJob
+        if (waiting !== draftInFlight) waiting?.cancel()
+        draftInFlight?.join()
+        pushDraft()
+    }
+
+    private suspend fun pushDraft() {
+        if (!draftTextDirty && !draftAttachmentsDirty) return
+        val includeAttachments = draftAttachmentsDirty
+        val images = if (includeAttachments) {
+            _attachments.value.map(Attachment::png)
+        } else {
+            null
+        }
+        val text = _draft.value
+        draftTextDirty = false
+        draftAttachmentsDirty = false
+        val job = currentCoroutineContext()[Job]
+        draftInFlight = job
+        try {
+            session.setDraft(text, images)
+            if (!draftTextDirty) drafts?.sent(chatId, text)
+        } catch (error: Throwable) {
+            // Not taken: still to send, and still kept.
+            draftTextDirty = true
+            draftAttachmentsDirty = draftAttachmentsDirty || includeAttachments
+            if (error is CancellationException) throw error
+        } finally {
+            if (draftInFlight === job) draftInFlight = null
         }
     }
 

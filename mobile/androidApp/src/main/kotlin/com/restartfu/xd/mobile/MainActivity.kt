@@ -93,6 +93,8 @@ internal fun XdMobileApp(
     val credentialsReady by model.client.credentialsReady.collectAsStateWithLifecycle()
     val link by model.client.link.collectAsStateWithLifecycle()
     val connectError by model.connectError.collectAsStateWithLifecycle()
+    // Drafts the host has not taken go to it before the connection closes.
+    val drafts = rememberUnsentDrafts(model.client)
 
     // No foreground service: leaving closes the socket, returning reconnects
     // and re-snapshots. The host keeps no resumable event log, so there is
@@ -101,17 +103,19 @@ internal fun XdMobileApp(
     // the host at once instead of waiting out the backoff.
     val context = LocalContext.current
     val networkWatch = remember(context, model.client) { NetworkReturnWatch(context, model.client::retryConnection) }
-    DisposableEffect(lifecycleOwner, model.client) {
+    DisposableEffect(lifecycleOwner, model.client, drafts) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> {
+                    drafts.comeForward()
                     model.client.poke()
                     networkWatch.start()
                 }
                 Lifecycle.Event.ON_STOP -> {
                     networkWatch.stop()
                     if (activity?.isChangingConfigurations != true) {
-                        model.client.goBackground()
+                        // Sends what was typed in the last moment first, then closes.
+                        drafts.goBackground()
                     }
                 }
                 else -> Unit

@@ -639,6 +639,16 @@ public class XdClient(
     }
 
     /**
+     * Replaces [chatId]'s draft text on the host, its attachments left as they
+     * are, without opening the chat: for a draft typed while offline whose
+     * chat is no longer on screen when the connection comes back.
+     */
+    public suspend fun setDraft(chatId: String, text: String) {
+        require(chatId.isNotBlank()) { "Chat id must not be blank" }
+        actor.call(Ops.setDraft(chatId, text))
+    }
+
+    /**
      * Renames a chat. Tree-level alongside [deleteChat]: a title is how the
      * tree names a chat, not something the conversation holds.
      */
