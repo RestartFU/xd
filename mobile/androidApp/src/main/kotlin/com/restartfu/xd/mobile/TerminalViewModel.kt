@@ -14,12 +14,17 @@ import com.restartfu.xd.terminal.TerminalKeys
 import com.restartfu.xd.terminal.TerminalScreen
 import com.restartfu.xd.terminal.TerminalWire
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
 public data class TerminalPane(
     val id: String? = null,
@@ -38,6 +43,16 @@ public data class TerminalPane(
  * screen, so opening attaches to an existing terminal rather than starting a
  * second one. Replay is applied before live output, which is why the emulator
  * is fed from this one place and in order.
+ *
+ * The emulator runs on [emulation], one task at a time and never on the main
+ * thread: a build can print thousands of lines a second, and each one moves
+ * the grid. What it has drawn is copied out for the screen at most once per
+ * [FRAME_MILLIS], however much arrived in between.
+ *
+ * Which output belongs to the screen is still decided on the main thread, in
+ * the order the host sent it, as the reply carrying the replay is: the replay
+ * and every later write are queued on [emulation] from there, so they run in
+ * that order and no output between the replay and the first write is lost.
  */
 class TerminalViewModel(
     private val session: ChatSession,
@@ -45,20 +60,38 @@ class TerminalViewModel(
     private val closeSessionOnClear: Boolean = false,
     private val client: XdClient? = null,
 ) : ViewModel() {
+    /** Where the emulator runs: off the main thread, one task at a time, so its grid needs no lock. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val emulation: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1)
+
+    /** Only touched on [emulation]. */
     private var screen = TerminalScreen(COLUMNS, ROWS)
+
+    /** The terminal whose output is fed to [screen]. Only touched on the main thread. */
+    private var liveId: String? = null
+
+    /** Rung when the grid changed; however often, the screen is copied out once for all of it. */
+    private val redraw = Channel<Unit>(Channel.CONFLATED)
 
     // What the phone can show, once it has measured itself. Until then the
     // usual default, which is what a pty is given when nobody says otherwise.
-    private var columns = COLUMNS
-    private var rows = ROWS
+    @Volatile private var columns = COLUMNS
+    @Volatile private var rows = ROWS
     private val _state = MutableStateFlow(TerminalPane())
     val state: StateFlow<TerminalPane> = _state.asStateFlow()
 
     init {
+        viewModelScope.launch(emulation) {
+            for (request in redraw) {
+                publish()
+                delay(FRAME_MILLIS)
+            }
+        }
         client?.let { connected ->
             // Keep interpreting output while another chat or workspace pane is visible.
-            // Every terminal's output reaches every pane, so reading the events
-            // and decoding their bytes is done away from the main thread.
+            // Every terminal's output reaches every pane, so decoding the events and
+            // emulating them is done away from the main thread; only picking out this
+            // terminal's, in order with the replay, happens here.
             viewModelScope.launch {
                 connected.terminalEvents.flowOn(Dispatchers.Default).collect(::onEvent)
             }
@@ -74,31 +107,48 @@ class TerminalViewModel(
     }
 
     fun open() {
+        liveId = null
         _state.value = TerminalPane(connecting = true)
         viewModelScope.launch {
             try {
                 val existing = session.terminals().firstOrNull { it.agent == null }
                 val id = existing?.id ?: session.openTerminal(columns, rows, reuse = true)
-                screen = TerminalScreen(columns, rows)
-                // A terminal opened elsewhere already has scrollback. Replay
-                // rebuilds it, resize frames included and in order, so older
-                // output is interpreted at the geometry that produced it.
-                existing?.let { reply ->
-                    TerminalWire.frames(reply).forEach { frame ->
-                        when (frame) {
-                            is ReplayFrame.Output -> screen.write(frame.data)
-                            is ReplayFrame.Resize -> screen.resize(frame.columns, frame.rows)
+                // Still on the main thread, in order with the events: output
+                // accepted from here on is queued on the emulator after the replay.
+                liveId = id
+                launch(emulation) {
+                    try {
+                        val fresh = TerminalScreen(columns, rows)
+                        // A terminal opened elsewhere already has scrollback. Replay
+                        // rebuilds it, resize frames included and in order, so older
+                        // output is interpreted at the geometry that produced it.
+                        existing?.let { reply ->
+                            TerminalWire.frames(reply).forEach { frame ->
+                                when (frame) {
+                                    is ReplayFrame.Output -> fresh.write(frame.data)
+                                    is ReplayFrame.Resize -> fresh.resize(frame.columns, frame.rows)
+                                }
+                            }
+                            fresh.resize(columns, rows)
                         }
+                        screen = fresh
+                        _state.value = TerminalPane(
+                            id = id,
+                            rows = fresh.snapshot(),
+                            cursorRow = fresh.cursorRow,
+                            cursorColumn = fresh.cursorColumn,
+                        )
+                        // Fitted to the phone only once there is a screen to fit.
+                        viewModelScope.launch { runCatching { session.resizeTerminal(id, columns, rows) } }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        // A replay it cannot read leaves no screen to draw on, and
+                        // output for it is no longer taken: the failure stays shown.
+                        _state.value = TerminalPane(error = error.message ?: "Could not open a terminal")
+                        viewModelScope.launch { if (liveId == id) liveId = null }
                     }
-                    screen.resize(columns, rows)
                 }
-                _state.value = TerminalPane(
-                    id = id,
-                    rows = screen.snapshot(),
-                    cursorRow = screen.cursorRow,
-                    cursorColumn = screen.cursorColumn,
-                )
-                session.resizeTerminal(id, columns, rows)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -109,19 +159,28 @@ class TerminalViewModel(
         }
     }
 
-    fun onEvent(event: TerminalEvent) {
-        if (event.chatId != chatId || event.terminalId != _state.value.id) return
-        when (event) {
-            is TerminalEvent.Output -> {
-                screen.write(event.data)
-                _state.value = _state.value.copy(
-                    rows = screen.snapshot(),
-                    cursorRow = screen.cursorRow,
-                    cursorColumn = screen.cursorColumn,
-                )
+    /** Picks out this terminal's events on the main thread and queues them on [emulation], in order. */
+    private fun onEvent(event: TerminalEvent) {
+        if (event.chatId != chatId || event.terminalId != liveId) return
+        viewModelScope.launch(emulation) {
+            // A terminal that failed to open keeps showing why, whatever arrives after.
+            if (_state.value.error != null) return@launch
+            when (event) {
+                is TerminalEvent.Output -> {
+                    screen.write(event.data)
+                    redraw.trySend(Unit)
+                }
+                is TerminalEvent.Closed -> _state.update { it.copy(closed = true) }
             }
-            is TerminalEvent.Closed -> _state.value = _state.value.copy(closed = true)
         }
+    }
+
+    /** Copies the grid out for the screen. Runs on [emulation]. */
+    private fun publish() {
+        val rows = screen.snapshot()
+        val cursorRow = screen.cursorRow
+        val cursorColumn = screen.cursorColumn
+        _state.update { it.copy(rows = rows, cursorRow = cursorRow, cursorColumn = cursorColumn) }
     }
 
     /**
@@ -139,12 +198,10 @@ class TerminalViewModel(
 
         this.columns = width
         this.rows = height
-        screen.resize(width, height)
-        _state.value = _state.value.copy(
-            rows = screen.snapshot(),
-            cursorRow = screen.cursorRow,
-            cursorColumn = screen.cursorColumn,
-        )
+        viewModelScope.launch(emulation) {
+            screen.resize(width, height)
+            publish()
+        }
 
         val id = _state.value.id ?: return
         viewModelScope.launch {
@@ -207,6 +264,8 @@ class TerminalViewModel(
     }
 
     private companion object {
+        /** A display frame at 60 Hz: the screen is copied out no more often than it can be drawn. */
+        const val FRAME_MILLIS = 16L
         const val COLUMNS = 80
         const val ROWS = 24
         // A phone in portrait measures somewhere near 40 columns; the bounds

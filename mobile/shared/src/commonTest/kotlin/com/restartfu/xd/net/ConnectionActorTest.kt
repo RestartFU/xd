@@ -265,6 +265,38 @@ class ConnectionActorTest {
     }
 
     @Test
+    fun aWaitBeforeReconnectingCanBeCutShort() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = connectedActor(factory)
+        factory.latest.fail(message = "offline")
+        runCurrent()
+        // The second wait, so the backoff has moved on.
+        advanceTimeBy(2_000)
+        runCurrent()
+        factory.latest.fail(message = "offline")
+        runCurrent()
+        assertEquals(Link.Down("offline", 5_000), actor.link.value)
+        val before = factory.sockets.size
+
+        actor.retry()
+        runCurrent()
+        assertEquals(before + 1, factory.sockets.size)
+        assertEquals(Link.Connecting, actor.link.value)
+        // Asking again while that attempt is under way starts no other.
+        actor.retry()
+        runCurrent()
+        assertEquals(before + 1, factory.sockets.size)
+        // The cancelled wait does not start one of its own later.
+        advanceTimeBy(10_000)
+        runCurrent()
+        assertEquals(before + 1, factory.sockets.size)
+        // Failing again waits as long as the next step of the backoff.
+        factory.latest.fail(message = "offline")
+        runCurrent()
+        assertEquals(Link.Down("offline", 15_000), actor.link.value)
+    }
+
+    @Test
     fun hostKeyMismatchIsFatalAndNeverRetries() = runTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(
@@ -427,6 +459,42 @@ class ConnectionActorTest {
 
         assertEquals(FatalReason.PROTOCOL, assertIs<Link.Fatal>(actor.link.value).reason)
         assertTrue(factory.latest.closed)
+    }
+
+    @Test
+    fun aProtocolFailureCanBeTriedAgain() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = connectedActor(factory)
+        factory.latest.receive("not-json")
+        runCurrent()
+        assertTrue(assertIs<Link.Fatal>(actor.link.value).retryable)
+
+        actor.retry()
+        runCurrent()
+        assertEquals(2, factory.sockets.size)
+        assertEquals(Link.Connecting, actor.link.value)
+        factory.latest.connected()
+        runCurrent()
+        // The host answers the new connection's own first request.
+        val request = Regex("\"_xd_request\":(\\d+)").find(factory.latest.writeText())!!.groupValues[1]
+        factory.latest.receive("""{"ok":true,"nodes":[],"_xd_request":$request}""")
+        runCurrent()
+        assertIs<Link.Up>(actor.link.value)
+    }
+
+    @Test
+    fun aChangedHostKeyCannotBeTriedAgain() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(credentials()), backgroundScope)
+        runCurrent()
+        factory.latest.fail(SocketFailureKind.HOST_KEY_MISMATCH, "host key changed")
+        runCurrent()
+        assertTrue(!assertIs<Link.Fatal>(actor.link.value).retryable)
+
+        actor.retry()
+        runCurrent()
+        assertIs<Link.Fatal>(actor.link.value)
+        assertEquals(1, factory.sockets.size)
     }
 
     private suspend fun kotlinx.coroutines.test.TestScope.connectedActor(

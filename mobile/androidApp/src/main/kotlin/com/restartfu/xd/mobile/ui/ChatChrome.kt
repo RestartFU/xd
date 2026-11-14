@@ -5,15 +5,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -35,8 +34,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.mobile.R
 import com.restartfu.xd.model.ChatSummary
@@ -54,6 +54,8 @@ internal class SessionChats(
     /** Null where the host cannot settle sessions or this one already is. */
     val settleSession: (() -> Unit)? = null,
     val renameSession: () -> Unit = {},
+    /** How a chat stands, marked on its row in the chat menu; null for a quiet one. */
+    val statusOf: (ChatSummary) -> StatusMark? = { null },
 )
 
 /** A delegated agent opened as its own tab inside the chat that started it. */
@@ -124,8 +126,9 @@ internal fun CompactChatBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(glassPane())
-                .statusBarsPadding()
-                .height(56.dp)
+                .safeTopPadding()
+                // One 56dp row; taller only when enlarged text needs the room.
+                .heightIn(min = 56.dp)
                 .padding(start = 4.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -135,7 +138,7 @@ internal fun CompactChatBar(
             Box(Modifier.weight(1f)) {
                 Column(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(MaterialTheme.shapes.small)
                         .clickable(onClickLabel = "Switch chat", role = Role.DropdownList) { choosingChat = true }
                         .heightIn(min = 48.dp)
                         .padding(horizontal = 6.dp),
@@ -148,7 +151,9 @@ internal fun CompactChatBar(
                             style = MaterialTheme.typography.titleSmall,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
+                            // Takes the focus as a chat opens, not as its name changes:
+                            // a title that arrives mid-message must not leave the composer.
+                            modifier = Modifier.weight(1f, fill = false).pageHeading(key = chats.selectedId),
                         )
                         Icon(
                             painterResource(R.drawable.ic_chevron_down), null,
@@ -156,45 +161,28 @@ internal fun CompactChatBar(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (subtitle.isNotBlank()) Text(
-                            subtitle,
-                            modifier = Modifier.weight(1f, fill = false),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        if (linkedPullRequests != null) {
-                            // Every pull request linked to the chat, as the desktop's header lists them.
-                            LinkedPullRequestChips(
-                                pullRequests = linkedPullRequests,
-                                limit = PullRequestChipLimit.PHONE,
-                                style = MaterialTheme.typography.labelSmall,
-                                open = openPullRequest,
-                                showAll = { showPullRequests?.invoke() },
-                            )
-                        } else {
-                            // The branch's pull request, as the desktop's session header shows it.
-                            pullRequest?.let { url ->
-                                Text(
-                                    pullRequestLabel(url),
-                                    modifier = Modifier.clickable(role = Role.Button) { openPullRequest(url) },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = LocalXdSignals.current.link,
-                                    textDecoration = TextDecoration.Underline,
-                                )
-                            }
-                        }
-                    }
+                    // Read here and opened from More: a line of small text
+                    // inside the title's button has no room for touch targets.
+                    HeaderSubtitle(subtitle, linkedPullRequests, pullRequest)
                 }
                 DropdownMenu(expanded = choosingChat, onDismissRequest = { choosingChat = false }) {
                     chats.chats.forEach { chat ->
+                        val open = chat.id == chats.selectedId && agents.viewing == null
+                        // How the chat stands, as the desktop's tabs mark it.
+                        val status = chats.statusOf(chat)
                         DropdownMenuItem(
                             text = { Text(chat.title.ifBlank { "New chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             leadingIcon = { BackendIcon(chat.backend, size = 18.dp) },
-                            trailingIcon = if (chat.id == chats.selectedId && agents.viewing == null) {
-                                { Icon(painterResource(R.drawable.ic_check), "Open", Modifier.size(18.dp)) }
+                            trailingIcon = if (open || status != null) {
+                                {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    ) {
+                                        status?.let { StatusMarkIcon(it) }
+                                        if (open) Icon(painterResource(R.drawable.ic_check), "Open", Modifier.size(18.dp))
+                                    }
+                                }
                             } else {
                                 null
                             },
@@ -210,7 +198,7 @@ internal fun CompactChatBar(
                                 leadingIcon = { BackendIcon(agent.provider.lowercase(), size = 18.dp) },
                                 trailingIcon = {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        if (agent.running) PulseDot(LocalXdSignals.current.working)
+                                        if (agent.running) StatusMarkIcon(StatusMark.WORKING)
                                         if (agent.key == agents.viewing) {
                                             Icon(
                                                 painterResource(R.drawable.ic_check), "Open",
@@ -243,13 +231,13 @@ internal fun CompactChatBar(
                 // swaps the whole screen for Changes, Files or Terminal.
                 Surface(
                     onClick = { choosingPane = true },
-                    shape = RoundedCornerShape(8.dp),
+                    shape = MaterialTheme.shapes.small,
                     color = if (pane == Pane.CHAT) Color.Transparent else MaterialTheme.colorScheme.secondaryContainer,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    border = BorderStroke(1.dp, controlBorder()),
                     modifier = Modifier.semantics { contentDescription = "Workspace view: ${pane.label}" },
                 ) {
                     Row(
-                        modifier = Modifier.height(32.dp).padding(start = 10.dp, end = 6.dp),
+                        modifier = Modifier.heightIn(min = 32.dp).padding(start = 10.dp, end = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
@@ -294,6 +282,16 @@ internal fun CompactChatBar(
                         HorizontalDivider()
                         DropdownMenuItem(text = { Text("Close chat") }, onClick = { more = false; chats.close(selected.id) })
                         DropdownMenuItem(text = { Text("Rename chat") }, onClick = { more = false; chats.rename(selected) })
+                        // Each pull request the header names opens from here.
+                        val openable = linkedPullRequests
+                            ?.let { shownPullRequests(it, PullRequestChipLimit.PHONE).first.map(LinkedPullRequest::url) }
+                            ?: listOfNotNull(pullRequest)
+                        openable.forEach { url ->
+                            DropdownMenuItem(
+                                text = { Text(openPullRequestLabel(url)) },
+                                onClick = { more = false; openPullRequest(url) },
+                            )
+                        }
                         showPullRequests?.let { show ->
                             DropdownMenuItem(text = { Text("Pull requests") }, onClick = { more = false; show() })
                         }
@@ -311,5 +309,95 @@ internal fun CompactChatBar(
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    }
+}
+
+/** How the pull requests fit beside the subtitle in the phone header. */
+internal enum class SubtitleLinks { ALL, COUNT, NONE }
+
+/**
+ * Whether the pull request labels fit beside the subtitle: all of them, or
+ * a count in their place, or none. The subtitle names the session and keeps
+ * its room; the labels give theirs up first. Widths are in pixels.
+ */
+internal fun subtitleLinks(available: Int, subtitle: Int, labels: Int, count: Int?, gap: Int): SubtitleLinks = when {
+    labels == 0 -> SubtitleLinks.NONE
+    subtitle + gap + labels <= available -> SubtitleLinks.ALL
+    count != null && subtitle + gap + count <= available -> SubtitleLinks.COUNT
+    subtitle == 0 && count != null -> SubtitleLinks.COUNT
+    else -> SubtitleLinks.NONE
+}
+
+/**
+ * The phone header's second line: the session and project, then the chat's
+ * pull requests while they fit beside them. Enlarged text gives the line
+ * less room; the labels then collapse into a count, then step aside, rather
+ * than cut the session's name short. More lists them all either way.
+ */
+@Composable
+private fun HeaderSubtitle(subtitle: String, linkedPullRequests: List<LinkedPullRequest>?, pullRequest: String?) {
+    val style = MaterialTheme.typography.labelSmall
+    val gap = 8.dp
+    val labels = when {
+        linkedPullRequests != null -> shownPullRequests(linkedPullRequests, PullRequestChipLimit.PHONE).let { (shown, more) ->
+            shown.map { pullRequestLabel(it.url) } + listOfNotNull("+$more".takeIf { more > 0 })
+        }
+        pullRequest != null -> listOf(pullRequestLabel(pullRequest))
+        else -> emptyList()
+    }
+    val total = linkedPullRequests?.size ?: labels.size
+    // A count only stands in for two or more: one label is no wider than its count.
+    val countLabel = "$total PRs".takeIf { total > 1 }
+    val measurer = rememberTextMeasurer()
+    BoxWithConstraints {
+        val gapPx = with(LocalDensity.current) { gap.roundToPx() }
+        val fit = remember(subtitle, labels, countLabel, style, constraints.maxWidth, gapPx) {
+            fun width(text: String) = measurer.measure(text, style, maxLines = 1, softWrap = false).size.width
+            subtitleLinks(
+                available = constraints.maxWidth,
+                subtitle = if (subtitle.isBlank()) 0 else width(subtitle),
+                labels = labels.sumOf { width(it) } + gapPx * (labels.size - 1).coerceAtLeast(0),
+                count = countLabel?.let(::width),
+                gap = gapPx,
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+            if (subtitle.isNotBlank()) Text(
+                subtitle,
+                modifier = Modifier.weight(1f, fill = false),
+                style = style,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            when (fit) {
+                SubtitleLinks.ALL -> if (linkedPullRequests != null) {
+                    // Every pull request linked to the chat, as the desktop's header lists them.
+                    LinkedPullRequestLabels(
+                        pullRequests = linkedPullRequests,
+                        limit = PullRequestChipLimit.PHONE,
+                        style = style,
+                    )
+                } else {
+                    // The branch's pull request, as the desktop's session header shows it.
+                    pullRequest?.let { url ->
+                        Text(
+                            pullRequestLabel(url),
+                            modifier = Modifier.semantics { contentDescription = "Pull request ${pullRequestLabel(url)}" },
+                            style = style,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                SubtitleLinks.COUNT -> Text(
+                    countLabel.orEmpty(),
+                    modifier = Modifier.semantics { contentDescription = "$total pull requests" },
+                    style = style,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+                SubtitleLinks.NONE -> Unit
+            }
+        }
     }
 }

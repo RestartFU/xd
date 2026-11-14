@@ -3,6 +3,10 @@ package com.restartfu.xd.mobile.ui
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,7 +21,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -101,7 +104,7 @@ internal fun AgentsTray(
             .fillMaxWidth()
             .padding(horizontal = if (compact) 8.dp else 12.dp)
             .padding(top = 6.dp),
-        shape = RoundedCornerShape(14.dp),
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
@@ -110,16 +113,18 @@ internal fun AgentsTray(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 48.dp)
-                    .clickable(onClickLabel = if (open) "Hide agents" else "Show agents", onClick = onToggle)
+                    .clickable(
+                        role = Role.Button,
+                        onClickLabel = if (open) "Hide agents" else "Show agents",
+                        onClick = onToggle,
+                    )
+                    .semantics { stateDescription = if (open) "Expanded" else "Collapsed" }
                     .padding(horizontal = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (allWaiting) {
-                    Box(Modifier.size(8.dp).clip(androidx.compose.foundation.shape.CircleShape).background(signals.waiting))
-                } else {
-                    PulseDot(signals.working)
-                }
+                // The label beside it says which; the shape is the shared mark for each.
+                StatusMarkIcon(if (allWaiting) StatusMark.WAITING else StatusMark.WORKING, labelled = false)
                 Text(
                     AgentsTray.label(running, workers),
                     style = MaterialTheme.typography.bodyMedium,
@@ -160,11 +165,15 @@ internal fun AgentsTray(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            AgentAvatar(if (needsYou) signals.waiting else signals.working, size = 24.dp) {
+                            AgentAvatar(
+                                if (needsYou) signals.waiting else signals.working,
+                                size = 24.dp,
+                                status = if (needsYou) StatusMark.WAITING else StatusMark.WORKING,
+                            ) {
                                 BackendIcon(worker.backend, size = 12.dp)
                             }
                             Text(
-                                worker.title.ifBlank { "New Chat" },
+                                worker.title.ifBlank { "New chat" },
                                 modifier = Modifier.weight(1f),
                                 style = MaterialTheme.typography.bodyMedium,
                                 maxLines = 1,
@@ -190,7 +199,7 @@ internal fun AgentsTray(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            AgentAvatar(signals.working, size = 24.dp) {
+                            AgentAvatar(signals.working, size = 24.dp, status = StatusMark.WORKING) {
                                 if (run.isShell) {
                                     Icon(
                                         painterResource(R.drawable.ic_terminal),
@@ -259,7 +268,7 @@ internal fun AgentView(
         SubagentState.RUNNING -> signals.working
         SubagentState.SUCCESS -> signals.faint
         SubagentState.FAILURE -> MaterialTheme.colorScheme.error
-        SubagentState.FINISHED -> MaterialTheme.colorScheme.outline
+        SubagentState.FINISHED -> signals.faint
     }
     val now = rememberNow(running && run.startedAtMillis != null)
     val stats = run.statsAt(if (running) now else null)
@@ -319,7 +328,7 @@ internal fun AgentView(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(MaterialTheme.shapes.small)
                     .background(MaterialTheme.colorScheme.background)
                     .padding(8.dp),
             ) {
@@ -387,7 +396,7 @@ internal fun UserBubble(text: String, caption: String? = null) {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 contentColor = MaterialTheme.colorScheme.onSurface,
-                shape = RoundedCornerShape(20.dp),
+                shape = MaterialTheme.shapes.large,
             ) {
                 SelectionContainer(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) { Text(text) }
             }
@@ -433,15 +442,16 @@ internal fun AgentComposer(
         val faint = LocalXdSignals.current.faint
         val canSend = draft.isNotBlank() && !sending
         Surface(
-            shape = RoundedCornerShape(24.dp),
+            shape = MaterialTheme.shapes.extraLarge,
             color = MaterialTheme.colorScheme.surfaceContainer,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            border = BorderStroke(1.dp, controlBorder()),
         ) {
-            Row(Modifier.padding(4.dp), verticalAlignment = Alignment.Bottom) {
+            // As the chat's composer: send sits in a 48dp slot that is its touch target alone.
+            Row(verticalAlignment = Alignment.Bottom) {
                 BasicTextField(
                     value = draft,
                     onValueChange = onDraft,
-                    modifier = Modifier.weight(1f).heightIn(min = 40.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
                     maxLines = 6,
@@ -449,7 +459,7 @@ internal fun AgentComposer(
                     keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
                     decorationBox = { field ->
                         Box(
-                            Modifier.padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                            Modifier.padding(start = 16.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
                             contentAlignment = Alignment.CenterStart,
                         ) {
                             if (draft.isEmpty()) {
@@ -461,24 +471,27 @@ internal fun AgentComposer(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            field()
+                            // Named by its placeholder, and once it holds text by its name in the field.
+                            FieldName("Message this agent", draft.isNotEmpty(), field)
                         }
                     },
                 )
-                FilledIconButton(
-                    onClick = onSend,
-                    enabled = canSend,
-                    modifier = Modifier.size(40.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        disabledContentColor = faint,
-                    ),
-                ) {
-                    Icon(
-                        painterResource(R.drawable.ic_send),
-                        contentDescription = if (sending) "Sending" else "Send",
-                        modifier = Modifier.size(17.dp),
-                    )
+                Box(Modifier.size(ComposerSlot), contentAlignment = Alignment.Center) {
+                    FilledIconButton(
+                        onClick = onSend,
+                        enabled = canSend,
+                        modifier = Modifier.size(40.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            disabledContentColor = faint,
+                        ),
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ic_send),
+                            contentDescription = if (sending) "Sending" else "Send",
+                            modifier = Modifier.size(17.dp),
+                        )
+                    }
                 }
             }
         }

@@ -1,10 +1,11 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,14 +15,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -35,6 +36,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -75,53 +78,96 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
     val provider = state.provider
     var selectedModel by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedProvider by rememberSaveable { mutableStateOf<String?>(null) }
-    BackHandler(selectedModel != null) { selectedModel = null; selectedProvider = null }
+    // A model's detail is a page within Usage: Back's gesture brings the
+    // overview back in as it is dragged, and cuts with animations off.
+    val detail = selectedModel?.let { selectedProvider to it }
+    val details = rememberPageTransition(detail, "usage-detail")
+    PredictiveBack(details, enabled = selectedModel != null, back = null) { selectedModel = null; selectedProvider = null }
+    val still = reducedMotion()
+    val returns = LocalReturnFocus.current
+    // By model or by day: one choice for the overview and a model's detail,
+    // kept as either comes and goes.
+    var byTime by rememberSaveable { mutableStateOf(false) }
     var pricesOpen by rememberSaveable { mutableStateOf(false) }
-    var confirmingReset by remember { mutableStateOf<UsageAccountReply?>(null) }
-    Column(
+    // Saved by account, so turning the device keeps the question open.
+    var confirmingResetKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val confirmingReset = confirmingResetKey?.let { key -> state.accounts?.firstOrNull { it.accountKey == key } }
+    // The page scrolls across its whole width; its content stops at the
+    // reading measure and sits in the middle of a wide window, as Projects
+    // and Settings do.
+    Box(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(rememberScrollState()),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+    Column(
+        Modifier
+            .widthIn(max = ReadingMeasure + 32.dp)
+            .fillMaxWidth()
             .padding(16.dp)
             .navigationBarsPadding()
             // Room to scroll the last card clear of the floating bar.
             .padding(bottom = bottomInset),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Each row is one choice of several: a screen reader hears radio buttons, and how many.
+        FlowRow(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("Cost", "Tokens", "Limits").forEach { option ->
-                FilterChip(selected = metric == option, onClick = { model.showMetric(option); selectedModel = null; selectedProvider = null }, label = { Text(option) })
+                ChoiceChip(selected = metric == option, onClick = { model.showMetric(option); selectedModel = null; selectedProvider = null }, label = { Text(option) })
             }
         }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("All providers", "Codex", "Claude").forEach { option ->
-                FilterChip(selected = provider == option, onClick = { model.showProvider(option); selectedModel = null; selectedProvider = null }, label = { Text(option) })
+                ChoiceChip(selected = provider == option, onClick = { model.showProvider(option); selectedModel = null; selectedProvider = null }, label = { Text(option) })
             }
         }
         if (metric != "Limits") {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Ops.USAGE_DAYS.forEach { days ->
-                    FilterChip(
+                    ChoiceChip(
                         selected = state.days == days,
                         onClick = { model.showDays(days) },
                         label = { Text(if (days == 1) "Past 24h" else "$days days") },
                     )
                 }
             }
-            selectedModel?.let { name ->
+            // Into a model's detail and back out along one axis, as stepping into any page.
+            details.transition.AnimatedContent(
+                transitionSpec = { pageMotion(still, sharedAxisX(forward = targetState != null)) },
+            ) { shown ->
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            val shownModel = shown?.second
+            // The overview back from a model's detail: the focus goes to that model's row.
+            if (shownModel == null) LaunchedEffect(Unit) { returns?.restore() }
+            shownModel?.let { name ->
                 TextButton(onClick = { selectedModel = null; selectedProvider = null }) { Text("Back to overview") }
-                Text(name, style = MaterialTheme.typography.titleMedium)
+                // A page of its own within Usage: said as it opens, with the focus on its name.
+                androidx.compose.runtime.key(name) {
+                    Text(
+                        name,
+                        modifier = Modifier.page("Usage for $name").pageHeading(),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
             }
-            val summary = state.summary?.filtered(provider, selectedProvider, selectedModel)
+            val summary = state.summary?.filtered(provider, shown?.first, shownModel)
             when {
                 summary == null && state.summaryError != null -> ErrorLine(state.summaryError.orEmpty(), model::refresh)
                 summary == null -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    CircularProgressIndicator(Modifier.height(18.dp))
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Text("Reading usage…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                else -> SummarySection(summary, state.summaryLoading, model, metric, selectedModel != null) { backend, name -> selectedProvider = backend; selectedModel = name }
+                else -> SummarySection(summary, state.summaryLoading, model, metric, shownModel != null, byTime, { byTime = it }) { backend, name ->
+                    // Back to the overview puts the focus on this row again.
+                    returns?.open(usageRowKey(backend, name))
+                    selectedProvider = backend
+                    selectedModel = name
+                }
             }
             state.summaryError?.takeIf { summary != null }?.let { ErrorLine(it, model::refresh) }
+            }
+            }
         } else {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Limits", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
@@ -141,7 +187,7 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
                         resetting = state.resetting,
                         unsettled = unsettled,
                         // Checking an earlier attempt again spends nothing new, so it needs no question.
-                        onReset = { if (unsettled) account.accountKey?.let(model::useResetCredit) else confirmingReset = account },
+                        onReset = { if (unsettled) account.accountKey?.let(model::useResetCredit) else confirmingResetKey = account.accountKey },
                     )
                 }
             }
@@ -161,9 +207,10 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
             TextButton(onClick = { pricesOpen = true }) { Text("Edit") }
         }
     }
+    }
     confirmingReset?.let { account ->
         AlertDialog(
-            onDismissRequest = { confirmingReset = null },
+            onDismissRequest = { confirmingResetKey = null },
             title = { Text("Use a reset credit?") },
             text = {
                 Text(
@@ -173,11 +220,11 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    confirmingReset = null
+                    confirmingResetKey = null
                     account.accountKey?.let(model::useResetCredit)
                 }) { Text("Use credit") }
             },
-            dismissButton = { TextButton(onClick = { confirmingReset = null }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { confirmingResetKey = null }) { Text("Cancel") } },
         )
     }
     if (pricesOpen) ModelPricesDialog(model, onDismiss = { pricesOpen = false })
@@ -186,15 +233,23 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
 @Composable
 private fun ErrorLine(message: String, retry: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(message, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        Text(message, modifier = Modifier.weight(1f).announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         TextButton(onClick = retry) { Text("Try again") }
     }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: UsageViewModel, metric: String, detail: Boolean, onModel: (String, String) -> Unit) {
-    var byTime by rememberSaveable { mutableStateOf(false) }
+private fun SummarySection(
+    summary: UsageSummaryReply,
+    loading: Boolean,
+    model: UsageViewModel,
+    metric: String,
+    detail: Boolean,
+    byTime: Boolean,
+    onByTime: (Boolean) -> Unit,
+    onModel: (String, String) -> Unit,
+) {
     val signals = LocalXdSignals.current
     val cost = summary.buckets.sumOf(UsageBucketReply::costUsd)
     val tokens = summary.buckets.sumOf { it.totals.all }
@@ -216,6 +271,7 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
             Text(
                 "Some ${if (source.provider == "claude") "Claude" else "Codex"} transcripts could not be read, " +
                     "so these totals may be incomplete." + (source.message?.let { " $it" } ?: ""),
+                modifier = Modifier.announced(),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -241,9 +297,9 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
             }
         }
         Text("Breakdown", style = MaterialTheme.typography.titleSmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = !byTime, onClick = { byTime = false }, label = { Text("Model") })
-            FilterChip(selected = byTime, onClick = { byTime = true }, label = { Text(if (summary.resolution == "hour") "Hour" else "Day") })
+        Row(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChoiceChip(selected = !byTime, onClick = { onByTime(false) }, label = { Text("Model") })
+            ChoiceChip(selected = byTime, onClick = { onByTime(true) }, label = { Text(if (summary.resolution == "hour") "Hour" else "Day") })
         }
         if (byTime) {
             summary.periods.forEach { period ->
@@ -259,7 +315,7 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
                 .map { (key, buckets) -> Triple(key, buckets.sumOf(UsageBucketReply::costUsd), buckets.sumOf { it.totals.all }) }
                 .sortedByDescending { if (metric == "Cost") it.second else it.third.toDouble() }
                 .forEach { (key, modelCost, modelTokens) ->
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { onModel(key.first, key.second) }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).returnsFocus(usageRowKey(key.first, key.second)).clickable { onModel(key.first, key.second) }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         BackendIcon(key.first, size = 16.dp)
                         Text(key.second, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontFamily = XdMonoFamily, style = MaterialTheme.typography.bodySmall)
                         Text(if (metric == "Cost") compact(modelTokens) else usd(modelCost), color = signals.faint, style = MaterialTheme.typography.labelMedium)
@@ -278,6 +334,21 @@ private fun Stat(label: String, value: String) {
     }
 }
 
+/** What the usage chart shows, for a screen reader: its span and its highest bar. */
+internal fun usageChartDescription(
+    metric: String,
+    labels: List<String>,
+    values: List<Double>,
+    format: (Double) -> String,
+): String {
+    val what = if (metric == "Cost") "Cost over time" else "Tokens over time"
+    if (values.isEmpty() || labels.isEmpty()) return "$what: no usage yet"
+    val span = if (labels.size == 1) labels.first() else "${labels.first()} to ${labels.last()}"
+    val peak = values.indices.maxBy { values[it] }
+    if (values[peak] <= 0.0) return "$what, $span: no usage"
+    return "$what, $span. Highest: ${format(values[peak])}, ${labels.getOrElse(peak) { labels.last() }}"
+}
+
 /** The selected metric per day, or per hour over the past day. */
 @Composable
 private fun UsageChart(summary: UsageSummaryReply, metric: String) {
@@ -289,7 +360,16 @@ private fun UsageChart(summary: UsageSummaryReply, metric: String) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(if (metric == "Cost") "Cost over time (USD)" else "Tokens over time", style = MaterialTheme.typography.labelMedium)
         Text(if (metric == "Cost") usd(peak) else compact(peak.toLong()), style = MaterialTheme.typography.labelSmall)
-        Canvas(Modifier.fillMaxWidth().height(96.dp)) {
+        // The bars in words: the span they cover and where the most was used.
+        val described = remember(summary, metric) {
+            usageChartDescription(
+                metric = metric,
+                labels = summary.periods.map { it.label },
+                values = values,
+                format = { if (metric == "Cost") usd(it) else compact(it.toLong()) },
+            )
+        }
+        Canvas(Modifier.fillMaxWidth().height(96.dp).semantics { contentDescription = described }) {
             if (values.isEmpty()) return@Canvas
             val slot = size.width / values.size
             val width = (slot * 0.7f).coerceAtLeast(1f)
@@ -324,7 +404,7 @@ private fun LimitsCard(account: UsageAccountReply, resetting: Boolean, unsettled
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(MaterialTheme.shapes.medium)
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -502,6 +582,7 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
                                         label = { Text("Model ID") },
                                         singleLine = true,
                                         enabled = !saving,
+                                        colors = xdFieldColors(),
                                     )
                                     TextButton(onClick = { rows = rows?.filter { it.id != row.id } }, enabled = !saving) { Text("Remove") }
                                 }
@@ -521,7 +602,7 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
                 if (rows != null && !hostKeepsAliases) {
                     Text(OLDER_HOST_PRICES, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                error?.let { Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
         confirmButton = {
@@ -546,6 +627,7 @@ private fun PriceField(label: String, value: String, enabled: Boolean, modifier:
         singleLine = true,
         enabled = enabled,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        colors = xdFieldColors(),
     )
 }
 
@@ -577,3 +659,6 @@ internal fun UsageSummaryReply.filtered(provider: String, modelProvider: String?
         sources = sources.filter { includes(it.provider) && (modelProvider == null || it.provider == modelProvider) },
     )
 }
+
+/** A model's row in the overview, for [ReturnFocus]. */
+private fun usageRowKey(provider: String, model: String) = "model-$provider-$model"

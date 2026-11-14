@@ -20,6 +20,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -36,13 +38,32 @@ import com.restartfu.xd.markdown.Block
 import com.restartfu.xd.markdown.Markdown
 import com.restartfu.xd.markdown.Span
 
-/** Draws a parsed Markdown document. */
+/** Markdown documents read into blocks, once each and in the background, for every view that draws them. */
+internal val MarkdownDocuments = PreparedCache<String, List<Block>>(capacity = 300) { Markdown.parse(it) }
+
+/**
+ * Draws a Markdown document. It is read into blocks once and kept (see
+ * [MarkdownDocuments]); until the blocks are ready its text shows as it is.
+ */
 @Composable
 internal fun MarkdownText(
     source: String,
     modifier: Modifier = Modifier,
 ) {
-    val blocks = remember(source) { Markdown.parse(source) }
+    val blocks = rememberPrepared(MarkdownDocuments, source)
+    if (blocks == null) Text(source, modifier) else MarkdownBlocks(blocks, modifier)
+}
+
+/**
+ * Draws a document already parsed. A block that is the same object as last
+ * time is skipped, which is how a reply still streaming in lays out only the
+ * block being written.
+ */
+@Composable
+internal fun MarkdownBlocks(
+    blocks: List<Block>,
+    modifier: Modifier = Modifier,
+) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         blocks.forEach { BlockContent(it) }
     }
@@ -55,6 +76,7 @@ private fun BlockContent(block: Block, depth: Int = 0) {
 
         is Block.Heading -> Text(
             block.spans.annotated(),
+            modifier = Modifier.semantics { heading() },
             style = when (block.level) {
                 1 -> MaterialTheme.typography.titleLarge
                 2 -> MaterialTheme.typography.titleMedium
@@ -103,7 +125,7 @@ private fun BlockContent(block: Block, depth: Int = 0) {
                     Text(
                         if (block.ordered) "${block.start + index}." else "•",
                         modifier = Modifier.width(24.dp),
-                        color = MaterialTheme.colorScheme.outline,
+                        color = LocalXdSignals.current.faint,
                     )
                     Column(
                         modifier = Modifier.weight(1f),

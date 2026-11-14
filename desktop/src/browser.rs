@@ -12,6 +12,10 @@
 //! native call goes through [`NativeBrowser::with_view`], and results return as
 //! [`NativeEvent`]s.
 
+use crate::metrics::{
+    CONTROL_HEIGHT, CONTROL_HEIGHT_COMPACT, HIT_MIN, RADIUS_CONTROL, RADIUS_TAB, TEXT_CAPTION,
+    TEXT_CONTROL, TEXT_HEADING, TEXT_LABEL, px, text_px,
+};
 use std::{
     cell::{Cell, RefCell},
     env,
@@ -25,7 +29,7 @@ use async_channel::Sender;
 use gpui::{
     App, Bounds, Context, DispatchPhase, ElementId, Entity, EventEmitter, Focusable, FontWeight,
     GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseDownEvent, Pixels, Render,
-    RenderImage, ScrollHandle, Style, Timer, Window, div, prelude::*, px, relative, rgb, rgba,
+    RenderImage, ScrollHandle, Style, Timer, Window, div, prelude::*, relative, rgb, rgba,
 };
 #[cfg(not(target_os = "linux"))]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle, WindowHandle};
@@ -66,6 +70,11 @@ pub use chromium::{run_smoke_test_if_requested, run_subprocess_if_requested};
 #[derive(Clone, Debug)]
 pub enum BrowserEvent {
     Close,
+    /// One of the app's shortcuts, pressed in the page, as GPUI writes its
+    /// keys. The page has given the keyboard back; the app acts on the keys.
+    /// Only Linux's engine reports one.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    AppShortcut(&'static str),
     SessionChanged(BrowserSession),
     AuxiliarySelected(Option<SideTab>),
     AuxiliaryClosed(SideTab),
@@ -120,6 +129,12 @@ enum TabEvent {
     /// The page closed itself, which closes its tab.
     #[cfg(target_os = "linux")]
     Closed,
+    /// See [`NativeEvent::AppShortcut`].
+    #[cfg(target_os = "linux")]
+    AppShortcut(&'static str),
+    /// See [`NativeEvent::TakeFocus`].
+    #[cfg(target_os = "linux")]
+    TakeFocus,
 }
 
 enum NativeEvent {
@@ -159,6 +174,13 @@ enum NativeEvent {
     /// The page closed itself, so there is no browser left in its tab.
     #[cfg(target_os = "linux")]
     Closed,
+    /// One of the app's shortcuts was pressed while the page had the
+    /// keyboard, as GPUI writes its keys: it goes to the app.
+    #[cfg(target_os = "linux")]
+    AppShortcut(&'static str),
+    /// Tab went past the page's last control, or Shift+Tab before its first.
+    #[cfg(target_os = "linux")]
+    TakeFocus,
 }
 
 #[derive(Default)]
@@ -312,6 +334,8 @@ pub struct BrowserPane {
     auxiliary: Option<SideTab>,
     auxiliary_tabs: Vec<SideTab>,
     tools_enabled: bool,
+    /// The window's Tab stops, which the pane's tabs and buttons join.
+    keys: crate::KeyTargets,
 }
 
 impl EventEmitter<BrowserEvent> for BrowserPane {}
@@ -356,6 +380,7 @@ impl BrowserPane {
             auxiliary: None,
             auxiliary_tabs: Vec::new(),
             tools_enabled: false,
+            keys: crate::KeyTargets::default(),
         };
         for url in session.tabs {
             pane.insert_tab(url, window, cx);
@@ -454,6 +479,18 @@ impl BrowserPane {
     pub fn set_covered(&mut self, covered: bool) {
         self.covered = covered;
         self.update_visibility();
+    }
+
+    /// Joins the pane's tabs and buttons, and its pages' toolbars, to the
+    /// window's Tab stops.
+    pub fn set_key_targets(&mut self, keys: &crate::KeyTargets, cx: &mut Context<Self>) {
+        if Rc::ptr_eq(&self.keys.0, &keys.0) {
+            return;
+        }
+        self.keys = keys.clone();
+        for tab in &self.tabs {
+            tab.entity.update(cx, |tab, _| tab.keys = keys.clone());
+        }
     }
 
     pub fn set_colors(&mut self, colors: ThemeColors, cx: &mut Context<Self>) {
@@ -622,7 +659,11 @@ impl BrowserPane {
     fn insert_tab(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let entity = cx.new(|cx| BrowserTab::new(url, self.colors, window, cx));
+        let entity = cx.new(|cx| {
+            let mut tab = BrowserTab::new(url, self.colors, window, cx);
+            tab.keys = self.keys.clone();
+            tab
+        });
         let display = entity.read(cx).display.clone();
         self.session.tabs.push(entity.read(cx).current_url());
         cx.subscribe_in(&entity, window, move |pane, _, event, window, cx| {
@@ -642,6 +683,26 @@ impl BrowserPane {
                 }
                 #[cfg(target_os = "linux")]
                 TabEvent::Closed => pane.close_tab(index, window, cx),
+                // The keyboard leaves the page for the app, which acts on
+                // the shortcut.
+                #[cfg(target_os = "linux")]
+                TabEvent::AppShortcut(keys) => {
+                    if index == pane.session.active_tab {
+                        pane.release_page_keyboard(cx);
+                        cx.emit(BrowserEvent::AppShortcut(keys));
+                    }
+                    return;
+                }
+                // Past either end of the page, the keyboard goes to the
+                // toolbar's address field, the control next to the page.
+                #[cfg(target_os = "linux")]
+                TabEvent::TakeFocus => {
+                    if index == pane.session.active_tab {
+                        pane.release_page_keyboard(cx);
+                        let tab = pane.tabs[index].entity.read(cx);
+                        tab.address.read(cx).focus_handle(cx).focus(window);
+                    }
+                }
             }
             cx.notify();
         })
@@ -731,6 +792,15 @@ impl BrowserPane {
         }
     }
 
+    /// Takes the keyboard back from the page on screen, to the app's window.
+    #[cfg(target_os = "linux")]
+    fn release_page_keyboard(&self, cx: &mut Context<Self>) {
+        let tab = self.tabs[self.session.active_tab].entity.read(cx);
+        if let Some(native) = tab.display.native() {
+            native.with_view(blur_native_view);
+        }
+    }
+
     fn focus_active_tab(&self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.visible || self.covered || self.auxiliary.is_some() {
             return;
@@ -768,28 +838,53 @@ impl Render for BrowserPane {
             }
         }
         let colors = self.colors;
+        let keys = self.keys.clone();
+        let pane_handle = cx.entity().downgrade();
+        let stop = |control: gpui::Stateful<gpui::Div>,
+                    id: String,
+                    label: Option<&'static str>,
+                    radius: f32,
+                    run: PaneKeyRun| {
+            pane_press(
+                &keys,
+                &pane_handle,
+                control,
+                id,
+                label,
+                radius,
+                colors,
+                cx,
+                run,
+            )
+        };
         let auxiliary_tabs = self
             .auxiliary_tabs
             .iter()
             .copied()
             .enumerate()
             .map(|(index, tab)| {
-                tab_pill(
+                let pill = tab_pill(
                     ("side-tool-tab", index),
                     self.auxiliary == Some(tab),
                     colors,
                 )
-                .on_click(cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)))
                 .child(crate::icon(tab.icon(), 13., colors.muted))
-                .child(tab.label())
-                .child(
-                    tab_close(("close-side-tool", index), colors).on_click(cx.listener(
-                        move |pane, _, _, cx| {
-                            cx.stop_propagation();
-                            pane.close_auxiliary(tab, cx);
-                        },
-                    )),
+                .child(tab.label());
+                let close = tab_close(("close-side-tool", index), "Close", colors);
+                stop(
+                    pill,
+                    format!("side-tool-tab-{index}"),
+                    None,
+                    TAB_RING_RADIUS,
+                    Box::new(move |pane, _, cx| pane.select_auxiliary(Some(tab), cx)),
                 )
+                .child(stop(
+                    close,
+                    format!("close-side-tool-{index}"),
+                    Some("Close"),
+                    crate::FOCUS_RING_RADIUS,
+                    Box::new(move |pane, _, cx| pane.close_auxiliary(tab, cx)),
+                ))
             })
             .collect::<Vec<_>>();
         let tools = self.tools_enabled.then(|| {
@@ -799,15 +894,18 @@ impl Render for BrowserPane {
                 // An open tool already has its tab; only offer the others.
                 .filter(|(_, tab)| !self.auxiliary_tabs.contains(tab))
                 .map(|(index, tab)| {
-                    crate::pane_icon_button(
-                        ("side-add-tool", index),
-                        tab.label(),
-                        tab.icon(),
-                        false,
-                        colors,
-                    )
-                    .on_click(
-                        cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)),
+                    stop(
+                        crate::icon_button(
+                            ("side-add-tool", index),
+                            tab.label(),
+                            tab.icon(),
+                            colors,
+                        )
+                        .build(),
+                        format!("side-add-tool-{index}"),
+                        Some(tab.label()),
+                        crate::FOCUS_RING_RADIUS,
+                        Box::new(move |pane, _, cx| pane.select_auxiliary(Some(tab), cx)),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -853,34 +951,50 @@ impl Render for BrowserPane {
                                 };
                                 let active =
                                     self.auxiliary.is_none() && index == self.session.active_tab;
-                                tab_pill(("browser-tab", slot.id), active, colors)
+                                let pill = tab_pill(("browser-tab", slot.id), active, colors)
                                     .w(px(BROWSER_TAB_WIDTH))
-                                    .on_click(cx.listener(move |pane, _, window, cx| {
-                                        pane.select_tab(index, window, cx)
-                                    }))
                                     .child(crate::icon(crate::BROWSER_ICON, 13., colors.muted))
-                                    .child(div().flex_1().min_w_0().text_ellipsis().child(label))
-                                    .child(
-                                        tab_close(("browser-close-tab", slot.id), colors).on_click(
-                                            cx.listener(move |pane, _, window, cx| {
-                                                cx.stop_propagation();
-                                                pane.close_tab(index, window, cx);
-                                            }),
-                                        ),
-                                    )
+                                    // Cut short with an ellipsis, the whole
+                                    // title under the pointer.
+                                    .child(crate::truncating_label(label).flex_1());
+                                let close =
+                                    tab_close(("browser-close-tab", slot.id), "Close tab", colors);
+                                stop(
+                                    pill,
+                                    format!("browser-tab-{}", slot.id),
+                                    None,
+                                    TAB_RING_RADIUS,
+                                    Box::new(move |pane, window, cx| {
+                                        pane.select_tab(index, window, cx)
+                                    }),
+                                )
+                                .child(stop(
+                                    close,
+                                    format!("browser-close-tab-{}", slot.id),
+                                    Some("Close tab"),
+                                    crate::FOCUS_RING_RADIUS,
+                                    Box::new(move |pane, window, cx| {
+                                        pane.close_tab(index, window, cx)
+                                    }),
+                                ))
                             }))
                             .children(auxiliary_tabs),
                     )
                     .when_some(tools, |bar, tools| bar.children(tools))
-                    .child(
-                        crate::ui_button("browser-new-tab", crate::ButtonKind::Ghost, colors)
-                            .size(px(28.))
-                            .px_0()
-                            .on_click(
-                                cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
-                            )
-                            .child(crate::plus_icon(colors.muted)),
-                    ),
+                    .child(stop(
+                        crate::icon_button(
+                            "browser-new-tab",
+                            "New browser tab",
+                            crate::PLUS_ICON,
+                            colors,
+                        )
+                        .drawn(crate::plus_icon)
+                        .build(),
+                        "browser-new-tab".into(),
+                        Some("New browser tab"),
+                        crate::FOCUS_RING_RADIUS,
+                        Box::new(on_pane_new_tab),
+                    )),
             )
             .when(self.auxiliary.is_none(), |pane| {
                 pane.child(
@@ -893,6 +1007,90 @@ impl Render for BrowserPane {
     }
 }
 
+/// What a click on one of the pane's controls, or Enter or Space on it, does
+/// to the pane.
+type PaneKeyRun = Box<PaneRun>;
+type PaneRun = dyn Fn(&mut BrowserPane, &mut Window, &mut Context<BrowserPane>);
+
+/// One of the pane's own controls: a click runs `run`, and so do Enter and
+/// Space once the window's Tab ring is on it. The click goes no further, so
+/// a tab's close does not also pick the tab it sits in.
+#[allow(clippy::too_many_arguments)]
+fn pane_press(
+    keys: &crate::KeyTargets,
+    pane: &gpui::WeakEntity<BrowserPane>,
+    control: gpui::Stateful<gpui::Div>,
+    id: String,
+    label: Option<&'static str>,
+    radius: f32,
+    colors: ThemeColors,
+    cx: &Context<BrowserPane>,
+    run: PaneKeyRun,
+) -> gpui::Stateful<gpui::Div> {
+    let run: Rc<PaneRun> = Rc::from(run);
+    let click = run.clone();
+    let pane = pane.clone();
+    crate::key_stop_in_view(
+        control.on_click(cx.listener(move |pane, _, window, cx| {
+            cx.stop_propagation();
+            click(pane, window, cx);
+        })),
+        keys,
+        crate::KeyLayer::Page,
+        id,
+        label.map(gpui::SharedString::from),
+        radius,
+        colors,
+        move |window, cx| {
+            let _ = pane.update(cx, |pane, cx| run(pane, window, cx));
+        },
+    )
+}
+
+/// [`pane_press`] for a browser tab's own controls: its toolbar and what its
+/// empty and error states offer. One that cannot be used now is neither
+/// clicked nor a Tab stop.
+#[allow(clippy::too_many_arguments)]
+fn tab_press(
+    keys: &crate::KeyTargets,
+    control: gpui::Stateful<gpui::Div>,
+    id: impl Into<gpui::SharedString>,
+    label: Option<&'static str>,
+    enabled: bool,
+    colors: ThemeColors,
+    cx: &Context<BrowserTab>,
+    run: impl Fn(&mut BrowserTab, &mut Window, &mut Context<BrowserTab>) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    if !enabled {
+        return control;
+    }
+    let run = Rc::new(run);
+    let click = run.clone();
+    let tab = cx.entity().downgrade();
+    crate::key_stop_in_view(
+        control.on_click(cx.listener(move |tab, _, window, cx| {
+            cx.stop_propagation();
+            click(tab, window, cx);
+        })),
+        keys,
+        crate::KeyLayer::Page,
+        id,
+        label.map(gpui::SharedString::from),
+        crate::FOCUS_RING_RADIUS,
+        colors,
+        move |window, cx| {
+            let _ = tab.update(cx, |tab, cx| run(tab, window, cx));
+        },
+    )
+}
+
+/// The corners of the focus ring around one of the pane's tabs.
+const TAB_RING_RADIUS: f32 = RADIUS_TAB + crate::FOCUS_RING_GAP;
+
+fn on_pane_new_tab(pane: &mut BrowserPane, window: &mut Window, cx: &mut Context<BrowserPane>) {
+    pane.add_tab(None, window, cx);
+}
+
 /// The side pane's tab, in the shape of the chat tabs beside it.
 fn tab_pill(
     id: impl Into<ElementId>,
@@ -901,38 +1099,40 @@ fn tab_pill(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
-        .h(px(30.))
+        .h(px(CONTROL_HEIGHT))
         .flex_none()
         .flex()
         .items_center()
         .gap_1()
         .pl_2()
         .pr_1()
-        .rounded(px(7.))
+        .rounded(px(RADIUS_TAB))
         .border_1()
         .border_color(rgba(if selected {
             (colors.border << 8) | 0xff
         } else {
             0
         }))
-        .when(selected, |tab| tab.bg(rgb(colors.selected_surface)))
-        .text_size(px(12.))
+        .when(selected, |tab| {
+            tab.bg(rgb(colors.selected_surface))
+                .child(crate::selection_marker(crate::MarkerEdge::Foot, colors))
+        })
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(if selected { colors.text } else { colors.muted }))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(colors.surface_high)))
 }
 
-fn tab_close(id: impl Into<ElementId>, colors: ThemeColors) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .size(px(22.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(5.))
-        .hover(|style| style.bg(rgb(colors.surface_high)))
-        .child(crate::icon(crate::CLOSE_ICON, 11., colors.muted))
+/// A tab's close button. It is an icon alone, so `label` names it.
+fn tab_close(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    crate::icon_button(id, label, crate::CLOSE_ICON, colors)
+        .size(HIT_MIN)
+        .glyph(11.)
+        .build()
 }
 
 struct BrowserTab {
@@ -957,6 +1157,8 @@ struct BrowserTab {
     last_history_gesture: Option<std::time::Instant>,
     /// Tabs this tab's pages asked for that the pane has opened.
     popups_handled: u64,
+    /// The window's Tab stops, which the toolbar joins.
+    keys: crate::KeyTargets,
 }
 
 impl EventEmitter<TabEvent> for BrowserTab {}
@@ -1021,6 +1223,7 @@ impl BrowserTab {
             #[cfg(target_os = "linux")]
             last_history_gesture: None,
             popups_handled: 0,
+            keys: crate::KeyTargets::default(),
         };
         cx.subscribe_in(&address, window, |pane, _, event, _, cx| match event {
             ComposerEvent::Changed(text) => {
@@ -1242,6 +1445,21 @@ impl BrowserTab {
                 cx.emit(TabEvent::Closed);
                 return;
             }
+            // Only from the page on screen, which alone has the keyboard.
+            #[cfg(target_os = "linux")]
+            NativeEvent::AppShortcut(keys) => {
+                if self.display.native_visible.get() {
+                    cx.emit(TabEvent::AppShortcut(keys));
+                }
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            NativeEvent::TakeFocus => {
+                if self.display.native_visible.get() {
+                    cx.emit(TabEvent::TakeFocus);
+                }
+                return;
+            }
             // This arrives several times a second, so it must only redraw when
             // something changed; it returns before the unconditional notify.
             NativeEvent::Navigation {
@@ -1410,23 +1628,35 @@ impl BrowserTab {
                 .items_center()
                 .gap(px(8.))
                 .when(error == WEBVIEW2_MISSING, |row| {
-                    row.child(
+                    row.child(tab_press(
+                        &self.keys,
                         crate::ui_button(
                             "browser-get-webview2",
                             crate::ButtonKind::Primary,
                             colors,
                         )
-                        .h(px(28.))
-                        .on_click(|_, _, cx| cx.open_url(WEBVIEW2_INSTALLER))
+                        .h(px(CONTROL_HEIGHT_COMPACT))
                         .child("Get WebView2"),
-                    )
+                        "browser-get-webview2",
+                        None,
+                        true,
+                        colors,
+                        cx,
+                        |_, _, cx| cx.open_url(WEBVIEW2_INSTALLER),
+                    ))
                 })
-                .child(
+                .child(tab_press(
+                    &self.keys,
                     crate::ui_button("browser-retry", crate::ButtonKind::Secondary, colors)
-                        .h(px(28.))
-                        .on_click(cx.listener(|pane, _, window, cx| pane.retry(window, cx)))
+                        .h(px(CONTROL_HEIGHT_COMPACT))
                         .child("Try again"),
-                )
+                    "browser-retry",
+                    None,
+                    true,
+                    colors,
+                    cx,
+                    |tab, window, cx| tab.retry(window, cx),
+                ))
                 .into_any_element(),
         )
     }
@@ -1455,29 +1685,18 @@ impl BrowserTab {
         .detach();
     }
 
+    /// A toolbar button. It is an icon alone, so `label` names it.
     fn button(
         &self,
         id: &'static str,
+        label: &'static str,
         path: &'static str,
         enabled: bool,
     ) -> gpui::Stateful<gpui::Div> {
-        let colors = self.colors;
-        div()
-            .id(id)
-            .w(px(28.))
-            .h(px(28.))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.))
-            .opacity(if enabled { 1. } else { 0.4 })
-            .when(enabled, |button| {
-                button
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.surface_high)))
-            })
-            .child(crate::icon(path, 15., colors.muted))
+        crate::icon_button(id, label, path, self.colors)
+            .glyph(15.)
+            .enabled(enabled)
+            .build()
     }
 }
 
@@ -1494,6 +1713,16 @@ impl Render for BrowserTab {
         let forward_enabled = self.can_forward;
         let colors = self.colors;
         let address_focused = self.address.read(cx).focus_handle(cx).is_focused(window);
+        let keys = self.keys.clone();
+        // A toolbar button the window's Tab stops on while it can be used:
+        // Enter or Space does what a click does.
+        let stop = |button: gpui::Stateful<gpui::Div>,
+                    id: &'static str,
+                    label: &'static str,
+                    enabled: bool,
+                    run: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            tab_press(&keys, button, id, Some(label), enabled, colors, cx, run)
+        };
         let mut pane = div()
             .size_full()
             .min_w_0()
@@ -1513,44 +1742,49 @@ impl Render for BrowserTab {
                     .px(px(8.))
                     .border_b_1()
                     .border_color(rgb(colors.border))
-                    .child(
-                        self.button("browser-back", crate::ARROW_LEFT_ICON, back_enabled)
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                if back_enabled {
-                                    pane.history(true, cx);
-                                }
-                            })),
-                    )
-                    .child(
-                        self.button("browser-forward", crate::ARROW_RIGHT_ICON, forward_enabled)
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                if forward_enabled {
-                                    pane.history(false, cx);
-                                }
-                            })),
-                    )
-                    .child(
+                    .child(stop(
+                        self.button("browser-back", "Back", crate::ARROW_LEFT_ICON, back_enabled),
+                        "browser-back",
+                        "Back",
+                        back_enabled,
+                        |tab, _, cx| tab.history(true, cx),
+                    ))
+                    .child(stop(
+                        self.button(
+                            "browser-forward",
+                            "Forward",
+                            crate::ARROW_RIGHT_ICON,
+                            forward_enabled,
+                        ),
+                        "browser-forward",
+                        "Forward",
+                        forward_enabled,
+                        |tab, _, cx| tab.history(false, cx),
+                    ))
+                    .child(stop(
                         self.button(
                             "browser-reload",
+                            "Reload",
                             crate::ROTATE_CW_ICON,
                             has_page || self.engine_failed,
-                        )
-                        .on_click(cx.listener(
-                            move |pane, _, window, cx| {
-                                if pane.engine_failed {
-                                    pane.retry(window, cx);
-                                } else if has_page {
-                                    pane.reload(cx);
-                                }
-                            },
-                        )),
-                    )
+                        ),
+                        "browser-reload",
+                        "Reload",
+                        has_page || self.engine_failed,
+                        |tab, window, cx| {
+                            if tab.engine_failed {
+                                tab.retry(window, cx);
+                            } else if tab.url.is_some() {
+                                tab.reload(cx);
+                            }
+                        },
+                    ))
                     .child(
                         div()
                             .id("browser-address")
                             .flex_1()
                             .min_w_0()
-                            .h(px(28.))
+                            .h(px(CONTROL_HEIGHT_COMPACT))
                             .mx(px(4.))
                             .flex()
                             .items_center()
@@ -1563,7 +1797,7 @@ impl Render for BrowserTab {
                             } else {
                                 colors.border
                             }))
-                            .rounded(px(6.))
+                            .rounded(px(RADIUS_CONTROL))
                             .cursor_text()
                             .on_mouse_down(
                                 gpui::MouseButton::Left,
@@ -1572,24 +1806,36 @@ impl Render for BrowserTab {
                                 }),
                             )
                             .child(div().flex_1().min_w_0().child(self.address.clone()))
+                            .child(keys.mark(
+                                crate::KeyLayer::Page,
+                                crate::KeyStop::Field(self.address.read(cx).focus_handle(cx)),
+                            ))
                             .when(self.loading, |field| {
                                 field.child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(11.))
+                                        .text_size(text_px(TEXT_CAPTION))
                                         .text_color(rgb(colors.faint))
                                         .child("Loading…"),
                                 )
                             }),
                     )
-                    .child(
-                        self.button("browser-external", crate::EXTERNAL_LINK_ICON, has_page)
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                if let Some(url) = &pane.url {
-                                    cx.open_url(url);
-                                }
-                            })),
-                    ),
+                    .child(stop(
+                        self.button(
+                            "browser-external",
+                            "Open in your browser",
+                            crate::EXTERNAL_LINK_ICON,
+                            has_page,
+                        ),
+                        "browser-external",
+                        "Open in your browser",
+                        has_page,
+                        |tab, _, cx| {
+                            if let Some(url) = &tab.url {
+                                cx.open_url(url);
+                            }
+                        },
+                    )),
             );
         if let Some(error) = &self.error {
             pane = pane.child(
@@ -1606,18 +1852,24 @@ impl Render for BrowserTab {
                         div()
                             .max_w(px(320.))
                             .text_center()
-                            .text_size(px(13.))
+                            .text_size(text_px(TEXT_CONTROL))
                             .text_color(rgb(colors.muted))
                             .child(error.clone()),
                     )
                     .map(|state| match self.engine_recovery(error, cx) {
                         Some(recovery) => state.child(recovery),
-                        None if has_page => state.child(
+                        None if has_page => state.child(tab_press(
+                            &keys,
                             crate::ui_button("browser-retry", crate::ButtonKind::Secondary, colors)
-                                .h(px(28.))
-                                .on_click(cx.listener(|pane, _, window, cx| pane.retry(window, cx)))
+                                .h(px(CONTROL_HEIGHT_COMPACT))
                                 .child("Reload"),
-                        ),
+                            "browser-retry",
+                            None,
+                            true,
+                            colors,
+                            cx,
+                            |tab, window, cx| tab.retry(window, cx),
+                        )),
                         None => state,
                     }),
             );
@@ -1669,13 +1921,13 @@ impl Render for BrowserTab {
                     .text_center()
                     .child(
                         div()
-                            .text_size(px(16.))
+                            .text_size(text_px(TEXT_HEADING))
                             .font_weight(FontWeight::MEDIUM)
                             .child("Preview your app"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(text_px(TEXT_LABEL))
                             .text_color(rgb(colors.muted))
                             .child("Enter a URL above, or open a local development server."),
                     )
@@ -1687,21 +1939,27 @@ impl Render for BrowserTab {
                             .justify_center()
                             .gap(px(8.))
                             .children([3000_u32, 5173, 8080].map(|port| {
-                                crate::ui_button(
-                                    ("browser-localhost", port),
-                                    crate::ButtonKind::Secondary,
+                                tab_press(
+                                    &keys,
+                                    crate::ui_button(
+                                        ("browser-localhost", port),
+                                        crate::ButtonKind::Secondary,
+                                        colors,
+                                    )
+                                    .h(px(CONTROL_HEIGHT_COMPACT))
+                                    .font_family(crate::MONO)
+                                    .text_size(text_px(TEXT_LABEL))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .child(format!("localhost:{port}")),
+                                    format!("browser-localhost-{port}"),
+                                    None,
+                                    true,
                                     colors,
-                                )
-                                .h(px(28.))
-                                .font_family(crate::MONO)
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::NORMAL)
-                                .child(format!("localhost:{port}"))
-                                .on_click(cx.listener(
-                                    move |pane, _, _, cx| {
-                                        pane.navigate(&format!("http://localhost:{port}"), cx);
+                                    cx,
+                                    move |tab, _, cx| {
+                                        tab.navigate(&format!("http://localhost:{port}"), cx);
                                     },
-                                ))
+                                )
                             })),
                     ),
             );
@@ -2689,6 +2947,50 @@ mod tests {
                 tab.native_event(NativeEvent::HistoryGesture(true), cx);
                 assert_eq!(tab.loading_generation, started);
             });
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn the_page_on_screen_hands_the_keyboard_back_for_the_apps_keys_and_past_its_ends(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                Some("example.com".into()),
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        let shortcuts = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let shortcuts = shortcuts.clone();
+            cx.subscribe(&pane, move |_, event: &BrowserEvent, _| {
+                if let BrowserEvent::AppShortcut(keys) = event {
+                    shortcuts.borrow_mut().push(*keys);
+                }
+            })
+            .detach();
+        });
+        let tab = pane.read_with(cx, |pane, _| pane.tabs[0].entity.clone());
+        let send = |cx: &mut gpui::VisualTestContext, event: NativeEvent| {
+            cx.update(|_, cx| tab.update(cx, |tab, cx| tab.native_event(event, cx)));
+            cx.run_until_parked();
+        };
+        // A page that is not on screen has no keyboard to give back.
+        tab.read_with(cx, |tab, _| tab.display.native_visible.set(false));
+        send(cx, NativeEvent::AppShortcut("ctrl-l"));
+        assert!(shortcuts.borrow().is_empty());
+        tab.read_with(cx, |tab, _| tab.display.native_visible.set(true));
+        send(cx, NativeEvent::AppShortcut("ctrl-l"));
+        send(cx, NativeEvent::AppShortcut("shift-escape"));
+        assert_eq!(*shortcuts.borrow(), ["ctrl-l", "shift-escape"]);
+        // Tab past the page's last control goes to the address field.
+        send(cx, NativeEvent::TakeFocus);
+        cx.update(|window, cx| {
+            let tab = tab.read(cx);
+            assert!(tab.address.read(cx).focus_handle(cx).is_focused(window));
         });
     }
 

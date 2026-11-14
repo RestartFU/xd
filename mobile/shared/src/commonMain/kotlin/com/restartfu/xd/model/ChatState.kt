@@ -81,6 +81,8 @@ public data class ChatState(
     val interactionEpoch: String = "",
     val pendingUser: TranscriptItem? = null,
     val transcriptLoaded: Boolean = false,
+    /** The last read of the chat and its messages failed, and [error] says why; reading again can fix it. */
+    val loadFailed: Boolean = false,
     /**
      * The chat's own reply has been applied, so [draft] is the host's draft
      * rather than the empty default. Messages alone do not set it.

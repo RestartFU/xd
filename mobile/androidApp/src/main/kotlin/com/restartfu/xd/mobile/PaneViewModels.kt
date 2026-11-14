@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.restartfu.xd.files.FileTab
+import com.restartfu.xd.files.OpenFile
 import com.restartfu.xd.files.FileTree
 import com.restartfu.xd.files.OpenFiles
 import com.restartfu.xd.store.ChatSession
@@ -12,6 +13,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 public data class DiffPane(
@@ -204,7 +207,23 @@ public data class FilesPane(
     val open: OpenFiles = OpenFiles(),
     val loading: Boolean = false,
     val error: String? = null,
+    /** [error] is a folder that could not be listed, which reading the tree again can fix. */
+    val listFailed: Boolean = false,
+    /** Open files whose edits are too large to keep if Android ends the app before they are saved. */
+    val unkept: Set<String> = emptySet(),
 )
+
+/**
+ * Where a session's unsaved file edits are kept while Android may end the
+ * app in the background: they come back, still unsaved, with the app.
+ */
+public interface UnsavedFiles {
+    /** The edits kept from before, each still unsaved. */
+    public fun restore(): List<OpenFile>
+
+    /** Keeps [files]' edits in place of any kept before; returns the paths too large to keep. */
+    public fun keep(files: List<OpenFile>): Set<String>
+}
 
 /**
  * The working directory as a tree, and the files opened out of it.
@@ -214,20 +233,37 @@ public data class FilesPane(
  * whole, and most of it is never looked at.
  */
 class FilesViewModel(
+    /** Keeps unsaved edits through the end of the app's process; null keeps them only in memory. */
+    private val unsaved: UnsavedFiles? = null,
     private val session: () -> ChatSession,
 ) : ViewModel() {
     private val _state = MutableStateFlow(FilesPane())
     val state: StateFlow<FilesPane> = _state.asStateFlow()
 
     init {
+        // Edits Android's ending of the app cut off come back as they were,
+        // unsaved, with the first of them in front.
+        unsaved?.restore()?.takeIf { it.isNotEmpty() }?.let { files ->
+            _state.value = FilesPane(open = OpenFiles(files, FileTab.File(files.first().path)))
+        }
         list("")
+        unsaved?.let { store ->
+            viewModelScope.launch {
+                _state.map { pane -> pane.open.files.filter { it.dirty } }
+                    .distinctUntilChanged()
+                    .collect { dirty ->
+                        val tooLarge = store.keep(dirty)
+                        if (_state.value.unkept != tooLarge) _state.value = _state.value.copy(unkept = tooLarge)
+                    }
+            }
+        }
     }
 
     /** Opens or closes a folder, fetching its entries the first time. */
     fun toggle(path: String) {
         val current = _state.value
         val opening = !current.tree.isExpanded(path)
-        _state.value = current.copy(tree = current.tree.toggled(path), error = null)
+        _state.value = current.copy(tree = current.tree.toggled(path), error = null, listFailed = false)
         if (opening && !current.tree.isLoaded(path)) list(path)
     }
 
@@ -238,7 +274,7 @@ class FilesViewModel(
             show(FileTab.File(path))
             return
         }
-        _state.value = _state.value.copy(loading = true, error = null)
+        _state.value = _state.value.copy(loading = true, error = null, listFailed = false)
         viewModelScope.launch {
             try {
                 val content = session().readFile(path)
@@ -262,6 +298,7 @@ class FilesViewModel(
         _state.value = _state.value.let { it.copy(open = it.open.showing(tab)) }
     }
 
+    /** Closes a tab as it is: the caller asks first when it holds unsaved edits. */
     fun close(path: String) {
         _state.value = _state.value.let { it.copy(open = it.open.closed(path)) }
     }
@@ -277,7 +314,23 @@ class FilesViewModel(
      * so anything typed while it was in flight stays unsaved rather than being
      * marked written.
      */
-    fun save(path: String) {
+    fun save(path: String) = write(path, thenClose = false)
+
+    /**
+     * Saves a file and then closes its tab. A save that fails leaves it open
+     * and in front, with the reason on it, so nothing typed is lost.
+     */
+    fun saveAndClose(path: String) {
+        val file = _state.value.open.files.find { it.path == path } ?: return
+        if (!file.dirty) {
+            close(path)
+            return
+        }
+        show(FileTab.File(path))
+        write(path, thenClose = true)
+    }
+
+    private fun write(path: String, thenClose: Boolean) {
         val file = _state.value.open.files.find { it.path == path } ?: return
         if (file.saving || !file.dirty) return
         val sending = file.text
@@ -287,6 +340,9 @@ class FilesViewModel(
             try {
                 session().writeFile(path, against, sending)
                 _state.value = _state.value.let { it.copy(open = it.open.saved(path, sending)) }
+                // Only once all of it is written: anything typed meanwhile keeps the tab.
+                val written = _state.value.open.files.find { it.path == path }
+                if (thenClose && written != null && !written.dirty) close(path)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -311,7 +367,7 @@ class FilesViewModel(
      */
     fun refresh() {
         val current = _state.value
-        _state.value = current.copy(tree = current.tree.invalidated(), error = null)
+        _state.value = current.copy(tree = current.tree.invalidated(), error = null, listFailed = false)
         list("")
         for (row in current.tree.rows()) {
             if (row.directory && row.expanded) list(row.path)
@@ -333,15 +389,19 @@ class FilesViewModel(
                     it.copy(
                         tree = it.tree.failed(path),
                         error = error.message ?: "Could not list that directory",
+                        listFailed = true,
                     )
                 }
             }
         }
     }
 
-    class Factory(private val session: () -> ChatSession) : ViewModelProvider.Factory {
+    class Factory(
+        private val unsaved: UnsavedFiles? = null,
+        private val session: () -> ChatSession,
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            FilesViewModel(session) as T
+            FilesViewModel(unsaved, session) as T
     }
 }

@@ -1,11 +1,26 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.runtime.SideEffect
+import androidx.compose.foundation.layout.consumeWindowInsets
 import android.app.Activity
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -16,14 +31,22 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.material3.TextField
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.VerticalDivider
+import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -65,7 +88,6 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -77,8 +99,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.snapshots.Snapshot
 import com.restartfu.xd.model.ChatState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -136,6 +164,9 @@ internal enum class Pane(val label: String) {
 internal class WorkspacePaneModel : ViewModel() {
     var pane by mutableStateOf(Pane.CHAT)
     lateinit var chat: com.restartfu.xd.store.ChatSession
+
+    /** Whether a screen has given it the view saved with it; only a model made new takes one. */
+    var restored = false
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -154,6 +185,8 @@ internal fun ChatScreen(
     workspaceId: String = model.state.value.chatId,
     terminalChatId: String = model.state.value.chatId,
     workspaceOwner: ViewModelStoreOwner? = null,
+    /** Keeps the session's unsaved file edits if Android ends the app; null keeps them in memory only. */
+    unsavedFiles: com.restartfu.xd.mobile.UnsavedFiles? = null,
     productHeader: @Composable () -> Unit = {},
     /**
      * The tablet's chat tabs, given the open chat's agent tabs to show after
@@ -174,8 +207,19 @@ internal fun ChatScreen(
     startedBy: com.restartfu.xd.model.ChatSummary? = null,
     /** Opens another of this host's chats by id. */
     openChat: (String) -> Unit = {},
+    /**
+     * The window is wide enough for two panes: Changes, Files and Terminal
+     * open beside the chat instead of in its place.
+     */
+    sideBySide: Boolean = false,
 ) {
-    val state by model.state.collectAsStateWithLifecycle()
+    // The chat as the host has it, words streaming in included. Read here it
+    // would draw the whole screen again for every word, so the screen reads
+    // [state], which leaves those words out, and only the reply's own row and
+    // the follower read them.
+    val streamingState = model.state.collectAsStateWithLifecycle()
+    val state by remember(streamingState) { derivedStateOf { streamingState.value.withoutLiveText() } }
+    val liveText = remember(streamingState) { { streamingState.value.liveSegment } }
     val sending by model.sending.collectAsStateWithLifecycle()
     val cancelling by model.cancelling.collectAsStateWithLifecycle()
     val steering by model.steering.collectAsStateWithLifecycle()
@@ -194,12 +238,32 @@ internal fun ChatScreen(
         viewModelStoreOwner = workspaceOwner ?: checkNotNull(androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner.current),
     )
     workspacePane.chat = model.session
+    // The open view lives in the model, which a rotation keeps but the end of
+    // the process does not: saved with the screen too, a model made new takes
+    // the view that was open, rather than falling back to the chat.
+    var savedPane by rememberSaveable(workspaceId) { mutableStateOf(workspacePane.pane) }
+    // Only into a model made new: the session's chats share one, and a chat
+    // tab shown again must not put back the view it had before.
+    remember(workspacePane) {
+        if (!workspacePane.restored) workspacePane.pane = savedPane
+        workspacePane.restored = true
+    }
     var pane by workspacePane::pane
-    // On a phone the workspace views replace the chat under one header, so
-    // Back returns to the chat before it leaves the session.
-    androidx.activity.compose.BackHandler(enabled = sessionChats != null && pane != Pane.CHAT) { pane = Pane.CHAT }
-    // An agent tab sits over the chat it belongs to, so Back returns to the chat.
-    androidx.activity.compose.BackHandler(enabled = pane == Pane.CHAT && viewingAgent != null) { model.showChat() }
+    SideEffect { savedPane = pane }
+    // Wherever a workspace view replaces the chat (a phone, or a tablet too
+    // narrow for two panes, where the tab row switches them), Back returns to
+    // the chat before it leaves the session. Beside the chat on a wide window,
+    // Back closes the tool first, for the same reason.
+    // Held as a gesture, the chat comes back in as it is dragged.
+    val panes = rememberPageTransition(pane, "pane")
+    PredictiveBack(panes, enabled = pane != Pane.CHAT, back = Pane.CHAT) { pane = Pane.CHAT }
+    // The conversation is on screen: always beside a tool, otherwise while no tool has taken its place.
+    val chatShown = sideBySide || pane == Pane.CHAT
+    // An agent tab sits over the chat it belongs to, so Back returns to the
+    // chat, which comes in as the gesture is dragged; a cut with animations off.
+    val agentPages = rememberPageTransition(viewingAgent, "agent")
+    PredictiveBack(agentPages, enabled = pane == Pane.CHAT && viewingAgent != null, back = null) { model.showChat() }
+    val still = reducedMotion()
     var choosingModel by rememberSaveable(state.chatId) { mutableStateOf(false) }
     var choosingOptions by rememberSaveable(state.chatId) { mutableStateOf(false) }
 
@@ -252,6 +316,14 @@ internal fun ChatScreen(
         // While a turn runs the branch may still move, so only forget a stale link.
         model.refreshPullRequest(branch, fetch = !busy)
     }
+    // A screen reader is told when the turn ends: on screen the working row
+    // just goes away. Said through a polite live region (see [TurnFinishedNotice]).
+    var wasWorking by remember(state.chatId) { mutableStateOf(state.working) }
+    var turnFinished by remember(state.chatId) { mutableStateOf(false) }
+    LaunchedEffect(state.working) {
+        if (state.working) turnFinished = false else if (wasWorking) turnFinished = true
+        wasWorking = state.working
+    }
     val listState = rememberLazyListState()
     // A run of ordinary tool calls collapses to one line; inline diffs keep
     // their own file-change row, and a lone call shows its command. Grouped
@@ -261,6 +333,8 @@ internal fun ChatScreen(
     val settledRows = transcript.settled
     val rows = transcript.rows
     val answered = transcript.answered
+    // Who a reply is from, said first when a screen reader reads it.
+    val assistantName = DisplayLabels.backend(state.backend, catalog)
     val transcriptEmpty = transcript.isEmpty
     // The chat's agents by record key: the host rewrites one record per agent,
     // so each key is one row holding the agent's newest snapshot.
@@ -277,7 +351,7 @@ internal fun ChatScreen(
     }
     // Kept while its agents are unchanged, so the tabs and header that take
     // it are not drawn again for every streamed word.
-    val agents = remember(agentTabKeys, agentRuns, viewingAgent, model, workspacePane) {
+    val agents = remember(agentTabKeys, agentRuns, viewingAgent, model, workspacePane, sideBySide) {
         AgentTabs(
             tabs = agentTabKeys.map { key ->
                 val run = agentRuns[key]
@@ -290,7 +364,8 @@ internal fun ChatScreen(
             },
             viewing = viewingAgent,
             open = { key ->
-                workspacePane.pane = Pane.CHAT
+                // An agent shows where the chat does, so a tool in its place gives way.
+                if (!sideBySide) workspacePane.pane = Pane.CHAT
                 model.openAgent(key)
             },
             close = model::closeAgent,
@@ -342,11 +417,37 @@ internal fun ChatScreen(
         }
     }
 
+    // A queued message dropped or a picture taken off the draft: "Removed",
+    // with an Undo that puts it back where it was. Shown once: spent when it
+    // times out, is dismissed or its Undo is pressed, and when the reader
+    // leaves the chat while it shows, so coming back does not say it again.
+    // Only a rotation, which makes the same chat again, shows it again.
+    val removed by model.removed.collectAsStateWithLifecycle()
+    val undoNotice = LocalUndoNotice.current
+    LaunchedEffect(removed) {
+        val gone = removed ?: return@LaunchedEffect
+        try {
+            if (undoNotice?.invoke(REMOVED_NOTICE) == true) model.undoRemove(gone) else model.consumeRemoved(gone)
+        } catch (left: CancellationException) {
+            if (activity?.isChangingConfigurations != true) model.consumeRemoved(gone)
+            throw left
+        }
+    }
+
+    // The newest finished replies are read into their parts in the
+    // background as they arrive, so their rows have them on their first frame
+    // rather than showing plain text for a moment.
+    LaunchedEffect(rows) { newestReplies(rows).forEach(ReplyBodies::request) }
+    val landingIndex = rememberUpdatedState(lastTranscriptIndex)
     LaunchedEffect(state.chatId, !transcriptEmpty) {
         if (!model.landed && !transcriptEmpty) {
+            // The replies at the end read first, briefly: a row that changes
+            // height after the jump would move the end landed on.
+            withTimeoutOrNull(LANDING_PREPARE_MILLIS) { newestReplies(rows).map(ReplyBodies::request).awaitAll() }
+            androidx.compose.runtime.withFrameNanos { }
             // Jumped, not animated: scrolling through a loaded history on open
             // is motion the reader did not ask for.
-            listState.scrollToEnd(lastTranscriptIndex)
+            listState.scrollToEnd(landingIndex.value)
             following.value = true
             model.landed = true
         }
@@ -364,6 +465,11 @@ internal fun ChatScreen(
             lastIndex = lastTranscriptIndex,
         ),
     )
+    // The words streamed so far, which [state] leaves out: kept up with each
+    // frame, as the rest of the target is, by something small enough to run
+    // for every word.
+    val streamed = remember { mutableStateOf("") }
+    StreamedText(streamingState, streamed)
     LaunchedEffect(listState, model) {
         var lastFollowed: Pair<FollowTarget?, Int?> = null to null
         // The newest message's drawn height too: a streaming reply is drawn
@@ -371,7 +477,9 @@ internal fun ChatScreen(
         // this. It is the row above the working row while a turn runs, and
         // the end stays the place scrolled to.
         snapshotFlow {
-            val target = followTarget.value
+            val target = followTarget.value.let {
+                if (it.lastText == LIVE_TEXT_ELSEWHERE) it.copy(lastText = streamed.value) else it
+            }
             val newest = target.lastIndex - target.trailing
             val drawnHeight = listState.layoutInfo.visibleItemsInfo
                 .firstOrNull { it.index == newest }?.size
@@ -395,7 +503,77 @@ internal fun ChatScreen(
         }
     }
 
+    // A tool opening or closing beside the chat changes its width, and so
+    // where its lines break. A reader who was at the end is kept at the end;
+    // one who had scrolled away is left where they were.
+    val toolBeside = sideBySide && pane != Pane.CHAT
+    var toolWasBeside by remember { mutableStateOf(toolBeside) }
+    LaunchedEffect(toolBeside) {
+        if (toolBeside == toolWasBeside) return@LaunchedEffect
+        toolWasBeside = toolBeside
+        if (model.landed && following.value) {
+            // Once the chat has been laid out at its new width.
+            androidx.compose.runtime.withFrameNanos { }
+            listState.scrollToEnd(followTarget.value.lastIndex)
+        }
+    }
+
+    // What the reader writes into, under the conversation: the open agent's
+    // composer, or the chat's with its agents tray. No wider than the reading
+    // measure, so on a wide window it sits under the text it answers.
+    val composerBar: @Composable () -> Unit = {
+        // A notice on the app's snackbar shows above it, never over what is being written.
+        Box(Modifier.fillMaxWidth().keepsSnackbarAbove(), contentAlignment = Alignment.TopCenter) {
+            Box(Modifier.widthIn(max = ReadingMeasure + TranscriptEdge * 2)) {
+                if (viewingAgent != null) {
+                    val key = viewingAgent
+                    AgentComposer(
+                        run = shownAgent,
+                        draft = key?.let { agentDrafts[it] }.orEmpty(),
+                        onDraft = { text -> key?.let { model.updateAgentDraft(it, text) } },
+                        sending = messagingAgent,
+                        onSend = { shownAgent?.let(model::messageAgent) },
+                        compact = sessionChats != null,
+                    )
+                } else {
+                    Column {
+                        AgentsTray(
+                            running = runningAgents,
+                            open = trayOpen,
+                            onToggle = { trayOpen = !trayOpen },
+                            onOpenAgent = agents.open,
+                            compact = sessionChats != null,
+                            // The chat's agent chats as the tree has them now: their
+                            // rows may be far up the chat, or not loaded at all.
+                            workers = trayWorkers,
+                            onOpenChat = openChat,
+                        )
+                        Composer(
+                            state = state,
+                            composer = composer,
+                            sending = sending,
+                            cancelling = cancelling,
+                            steering = steering,
+                            model = model,
+                            compact = sessionChats != null,
+                            onModel = { choosingModel = true },
+                        )
+                    }
+                }
+            }
+        }
+    }
+    // The chat's name, said as the page appears and when another chat takes
+    // its place: the name it had then. A title the host gives the chat later
+    // shows in the header, and is not said as though a page had opened.
+    val chatName = sessionChats?.chats?.firstOrNull { it.id == sessionChats.selectedId }?.title?.ifBlank { null }
+        ?: state.title.ifEmpty { "New chat" }
+    // Until the host has answered for the chat (its backend is known), a
+    // tablet has no name for it but "New chat": the name it answers with counts.
+    val named = sessionChats != null || state.backend.isNotEmpty()
+    val announcedName = remember(state.chatId, named) { chatName }
     Scaffold(
+        modifier = Modifier.page(announcedName),
         containerColor = GlassPage,
         contentColor = MaterialTheme.colorScheme.onSurface,
         topBar = {
@@ -432,62 +610,80 @@ internal fun ChatScreen(
                         linkedPullRequests = linkedPullRequests,
                         showPullRequests = showPullRequests,
                     )
+                    // Nothing while connected, so the header stays one row.
+                    ConnectionLine()
                 }
             } else Column {
+                // One pane of glass for the whole header: the bars on it are
+                // clear, so the title, the chat tabs and the views read as one.
+                Column(Modifier.background(glassPane())) {
                 productHeader()
-                TopAppBar(
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column {
-                                Text(
-                                    sessionTitle.ifBlank { state.title.ifEmpty { "Session" } },
-                                    style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
+                // A row rather than Material's top app bar, whose height is
+                // fixed: enlarged text makes the title's two lines taller, and
+                // the header grows with them instead of cutting them off.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .safeTopPadding()
+                        .heightIn(min = 64.dp)
+                        .padding(start = 4.dp, end = 4.dp)
+                        .testTag(TABLET_CHAT_HEADER_TAG),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = goBack) {
+                        Icon(painterResource(R.drawable.ic_back), contentDescription = "Back")
+                    }
+                    Column(Modifier.weight(1f).padding(start = 4.dp, end = 8.dp)) {
+                        Text(
+                            sessionTitle.ifBlank { state.title.ifEmpty { "Session" } },
+                            modifier = Modifier.pageHeading(key = state.chatId),
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (projectName.isNotBlank()) Text(
+                            projectName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Beside the title rather than in its second line, so
+                        // each link is a button of full touch size.
+                        if (linkedPullRequests != null) {
+                            // Every pull request linked to the chat, as the desktop's header lists them.
+                            LinkedPullRequestButtons(
+                                pullRequests = linkedPullRequests,
+                                limit = PullRequestChipLimit.TABLET,
+                                open = openLink,
+                                showAll = { showingPullRequests = true },
+                            )
+                        } else {
+                            // The branch's pull request, as the desktop's session header shows it.
+                            pullRequest?.let { url ->
+                                PullRequestButton(
+                                    label = pullRequestLabel(url),
+                                    description = "Pull request ${pullRequestLabel(url)}",
+                                    color = LocalXdSignals.current.link,
+                                    decoration = TextDecoration.Underline,
+                                    onClick = { openLink(url) },
                                 )
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    if (projectName.isNotBlank()) Text(
-                                        projectName,
-                                        modifier = Modifier.weight(1f, fill = false),
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                    if (linkedPullRequests != null) {
-                                        // Every pull request linked to the chat, as the desktop's header lists them.
-                                        LinkedPullRequestChips(
-                                            pullRequests = linkedPullRequests,
-                                            limit = PullRequestChipLimit.TABLET,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            open = openLink,
-                                            showAll = { showingPullRequests = true },
-                                        )
-                                    } else {
-                                        // The branch's pull request, as the desktop's session header shows it.
-                                        pullRequest?.let { url ->
-                                            Text(
-                                                pullRequestLabel(url),
-                                                modifier = Modifier.clickable(role = Role.Button) { openLink(url) },
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = LocalXdSignals.current.link,
-                                                textDecoration = TextDecoration.Underline,
-                                            )
-                                        }
-                                    }
-                                }
                             }
                         }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = goBack) {
-                            Icon(painterResource(R.drawable.ic_back), contentDescription = "Back")
-                        }
-                    },
-                    actions = {
-                        if (pane == Pane.CHAT) {
+                        // Beside the chat the tools are switches, not places: any of them opens next to it.
+                        if (sideBySide) ToolSwitches(pane) { pane = it }
+                        if (chatShown) {
                             TextButton(
                                 onClick = { choosingModel = true },
+                                // Says what it does, not only the model it names, as the composer's does.
+                                modifier = Modifier.semantics {
+                                    onClick(label = "Choose model") {
+                                        choosingModel = true
+                                        true
+                                    }
+                                },
                                 colors = ButtonDefaults.textButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 ),
@@ -506,12 +702,12 @@ internal fun ChatScreen(
                                 )
                             }
                         }
-                    },
-                )
+                    }
+                }
                 sessionTabs(agents, showPullRequests)
-                TabRow(
+                if (!sideBySide) TabRow(
                     selectedTabIndex = pane.ordinal,
-                    containerColor = glassPane(),
+                    containerColor = Color.Transparent,
                     contentColor = MaterialTheme.colorScheme.onSurface,
                     divider = { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) },
                 ) {
@@ -525,49 +721,22 @@ internal fun ChatScreen(
                         )
                     }
                 }
-            }
-        },
-        bottomBar = {
-            if (pane == Pane.CHAT && viewingAgent != null) {
-                val key = viewingAgent
-                AgentComposer(
-                    run = shownAgent,
-                    draft = key?.let { agentDrafts[it] }.orEmpty(),
-                    onDraft = { text -> key?.let { model.updateAgentDraft(it, text) } },
-                    sending = messagingAgent,
-                    onSend = { shownAgent?.let(model::messageAgent) },
-                    compact = sessionChats != null,
-                )
-            } else if (pane == Pane.CHAT) {
-                Column {
-                    AgentsTray(
-                        running = runningAgents,
-                        open = trayOpen,
-                        onToggle = { trayOpen = !trayOpen },
-                        onOpenAgent = agents.open,
-                        compact = sessionChats != null,
-                        // The chat's agent chats as the tree has them now: their
-                        // rows may be far up the chat, or not loaded at all.
-                        workers = trayWorkers,
-                        onOpenChat = openChat,
-                    )
-                Composer(
-                    state = state,
-                    composer = composer,
-                    sending = sending,
-                    cancelling = cancelling,
-                    steering = steering,
-                    model = model,
-                    compact = sessionChats != null,
-                    onModel = { choosingModel = true },
-                )
                 }
+                // Its own line under the header, as on every page.
+                ConnectionLine()
             }
         },
-    ) { padding ->
-        if (pane != Pane.CHAT) {
-            Box(Modifier.padding(padding)) {
-                when (pane) {
+        bottomBar = { if (!sideBySide && pane == Pane.CHAT) composerBar() },
+    ) { scaffoldPadding ->
+        TurnFinishedNotice(turnFinished)
+        ChatPanes(
+            sideBySide = sideBySide,
+            pane = pane,
+            panes = panes,
+            padding = scaffoldPadding,
+            composer = composerBar,
+            tool = { shown ->
+                when (shown) {
                     Pane.DIFF -> DiffPaneContent(
                         viewModel(
                             key = "diff-$workspaceId",
@@ -579,7 +748,7 @@ internal fun ChatScreen(
                         viewModel(
                             key = "files-$workspaceId",
                             viewModelStoreOwner = workspaceOwner ?: checkNotNull(androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner.current),
-                            factory = FilesViewModel.Factory { workspacePane.chat },
+                            factory = FilesViewModel.Factory(unsavedFiles) { workspacePane.chat },
                         ),
                     )
                     Pane.TERMINAL -> {
@@ -592,10 +761,16 @@ internal fun ChatScreen(
                     }
                     else -> Unit
                 }
-            }
-            return@Scaffold
-        }
-        if (viewingAgent != null) {
+            },
+        ) { padding ->
+        // An agent's tab and the chat it belongs to share this place; Back's
+        // gesture brings the chat back in as it is dragged.
+        agentPages.transition.AnimatedContent(
+            modifier = Modifier.fillMaxSize(),
+            transitionSpec = { pageMotion(still, fadeThrough()) },
+        ) chat@{ shownKey ->
+        if (shownKey != null) {
+            val shownAgent = agentRuns[shownKey]
             val address = shownAgent?.messageAddress
             val sent = remember(transcript.items, address) {
                 if (address == null) {
@@ -609,19 +784,21 @@ internal fun ChatScreen(
             val queued = remember(state.queue, address) {
                 if (address == null) emptyList() else state.queue.mapNotNull(AgentRelay::parse).filter { it.address == address }
             }
-            val pending = viewingAgent?.let { subagentActions[it] }
+            val pending = subagentActions[shownKey]
             shownAgent?.let { SettleSubagentAction(it, pending, model) }
-            androidx.compose.runtime.key(viewingAgent) {
-                AgentView(
-                    run = shownAgent,
-                    sent = sent,
-                    queued = queued,
-                    pendingAction = pending,
-                    onAction = model::controlSubagent,
-                    modifier = Modifier.padding(padding),
-                )
+            androidx.compose.runtime.key(shownKey) {
+                Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
+                    AgentView(
+                        run = shownAgent,
+                        sent = sent,
+                        queued = queued,
+                        pendingAction = pending,
+                        onAction = model::controlSubagent,
+                        modifier = Modifier.widthIn(max = ReadingMeasure + TranscriptEdge * 2),
+                    )
+                }
             }
-            return@Scaffold
+            return@chat
         }
         if (state.transcriptLoaded && !state.loading && !state.hasOlderMessages &&
             transcriptEmpty && state.error == null && !state.working
@@ -648,15 +825,19 @@ internal fun ChatScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                 }
             }
-            return@Scaffold
+            return@chat
         }
+        // The list is as wide as its pane, so it scrolls from its margins too;
+        // what it holds stops at the reading measure and sits in the middle.
+        BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
+        val side = readingInset(maxWidth, TranscriptEdge)
         LazyColumn(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
+                .testTag(TRANSCRIPT_TAG)
                 .nestedScroll(followReader),
-            contentPadding = PaddingValues(12.dp),
+            contentPadding = PaddingValues(horizontal = side, vertical = TranscriptEdge),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (startedBy != null) {
@@ -678,10 +859,27 @@ internal fun ChatScreen(
                 }
             }
             if (state.loading && transcriptEmpty) {
-                item { CircularProgressIndicator() }
+                item {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                }
             }
             state.error?.let { error ->
-                item { Text(error, color = MaterialTheme.colorScheme.error) }
+                item {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            error,
+                            // Told to a screen reader when it appears: nothing else says the chat failed.
+                            modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        // A transcript that did not load is read again from here.
+                        if (state.loadFailed) {
+                            TextButton(onClick = model::reload, enabled = !state.loading) { Text("Try again") }
+                        }
+                    }
+                }
             }
             items(rows, key = { it.key }, contentType = ::rowContentType) { row ->
                 when (row) {
@@ -692,7 +890,7 @@ internal fun ChatScreen(
                         if (report != null) {
                             AgentReportLine(report, agentChats[report.chatId]) { openChat(report.chatId) }
                         } else {
-                            TranscriptRow(row.item, model, answered[row.item.id])
+                            TranscriptRow(row.item, model, assistantName, answered[row.item.id], liveText)
                         }
                     }
                     is TranscriptRow.Tools -> ToolGroupRow(row)
@@ -729,6 +927,106 @@ internal fun ChatScreen(
                 }
             }
         }
+        }
+        }
+        }
+    }
+}
+
+/** The space between the conversation and the edge of its pane, and beside the composer. */
+private val TranscriptEdge = 12.dp
+
+/**
+ * Lays the conversation out with the tool beside it or in its place.
+ *
+ * On a window wide enough for two panes the chat and its [composer] are
+ * always here: a tool opens to their right and takes the room left once the
+ * chat has its reading measure. The chat stays the same piece of the screen
+ * whether a tool is open or not, so it keeps its place when one opens.
+ * Anywhere else a tool takes the chat's place, as it always has, and the
+ * composer is the page's bottom bar.
+ */
+@Composable
+private fun ChatPanes(
+    sideBySide: Boolean,
+    pane: Pane,
+    /** How the view in the chat's place changes, which Back's gesture can drive. */
+    panes: PageTransition<Pane>,
+    padding: PaddingValues,
+    composer: @Composable () -> Unit,
+    tool: @Composable (Pane) -> Unit,
+    chat: @Composable (PaddingValues) -> Unit,
+) {
+    if (!sideBySide) {
+        // The bars' room is taken here, so a tool that keeps clear of the
+        // keyboard counts only what the keyboard covers beyond them.
+        val still = reducedMotion()
+        panes.transition.AnimatedContent(transitionSpec = { pageMotion(still, fadeThrough()) }) { shown ->
+            if (shown != Pane.CHAT) {
+                Box(Modifier.padding(padding).consumeWindowInsets(padding).page(shown.label)) { tool(shown) }
+            } else {
+                chat(padding)
+            }
+        }
+        return
+    }
+    BoxWithConstraints(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
+        val open = pane != Pane.CHAT
+        val chatWidth = chatPaneWidth(maxWidth, TranscriptEdge)
+        Row(Modifier.fillMaxSize()) {
+            Column(if (open) Modifier.width(chatWidth) else Modifier.weight(1f)) {
+                Box(Modifier.weight(1f)) { chat(PaddingValues(0.dp)) }
+                composer()
+            }
+            if (open) {
+                VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .testTag(TOOL_PANE_TAG)
+                        .page(pane.label)
+                        .padding(bottom = padding.calculateBottomPadding())
+                        .consumeWindowInsets(PaddingValues(bottom = padding.calculateBottomPadding())),
+                ) { tool(pane) }
+            }
+        }
+    }
+}
+
+/** What the notice says when a queued message or a picture is removed. */
+internal const val REMOVED_NOTICE = "Removed"
+
+/** The tool open beside the chat, and the conversation's list, for tests. */
+internal const val TOOL_PANE_TAG = "tool-pane"
+
+/** The tablet chat's header row, for tests. */
+internal const val TABLET_CHAT_HEADER_TAG = "tablet-chat-header"
+internal const val TRANSCRIPT_TAG = "transcript"
+
+/**
+ * Changes, Files and Terminal as switches in the tablet header: each opens its
+ * tool beside the chat, and closes it again.
+ */
+@Composable
+private fun ToolSwitches(pane: Pane, onPane: (Pane) -> Unit) {
+    Row(
+        Modifier.padding(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Pane.entries.filter { it != Pane.CHAT }.forEach { tool ->
+            val open = pane == tool
+            FilterChip(
+                selected = open,
+                onClick = { onPane(if (open) Pane.CHAT else tool) },
+                label = { Text(tool.label) },
+                leadingIcon = if (open) {
+                    { Icon(painterResource(R.drawable.ic_check), contentDescription = null, modifier = Modifier.size(18.dp)) }
+                } else {
+                    null
+                },
+            )
+        }
     }
 }
 
@@ -751,6 +1049,7 @@ private fun SettleSubagentAction(run: com.restartfu.xd.model.SubagentRun, pendin
  * is what Enter does on the desktop for the same reason: the button is a stop
  * by then.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Composer(
     state: com.restartfu.xd.model.ChatState,
@@ -832,7 +1131,7 @@ private fun Composer(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     message,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).announced(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -872,7 +1171,7 @@ private fun Composer(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = 160.dp),
-                shape = RoundedCornerShape(14.dp),
+                shape = MaterialTheme.shapes.medium,
                 color = MaterialTheme.colorScheme.surfaceContainer,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             ) {
@@ -888,19 +1187,30 @@ private fun Composer(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     state.todos.forEach { todo ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
+                        Row(
+                            // One stop for a screen reader, which hears how the task stands in words.
+                            modifier = Modifier.semantics(mergeDescendants = true) {
+                                stateDescription = when (todo.status) {
+                                    TodoStatus.PENDING -> "Not started"
+                                    TodoStatus.IN_PROGRESS -> "In progress"
+                                    TodoStatus.COMPLETED -> "Done"
+                                }
+                            },
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            // A ring, a dot or a check, level with the first line of the task.
+                            Box(
+                                Modifier.height(with(LocalDensity.current) { 16.sp.toDp() }),
+                                contentAlignment = Alignment.Center,
+                            ) {
                                 when (todo.status) {
-                                    TodoStatus.PENDING -> "○"
-                                    TodoStatus.IN_PROGRESS -> "●"
-                                    TodoStatus.COMPLETED -> "✓"
-                                },
-                                color = when (todo.status) {
-                                    TodoStatus.PENDING -> MaterialTheme.colorScheme.onSurfaceVariant
-                                    TodoStatus.IN_PROGRESS -> MaterialTheme.colorScheme.primary
-                                    TodoStatus.COMPLETED -> MaterialTheme.colorScheme.tertiary
-                                },
-                            )
+                                    TodoStatus.PENDING -> BackgroundRing(MaterialTheme.colorScheme.onSurfaceVariant, size = 9.dp)
+                                    TodoStatus.IN_PROGRESS -> Box(
+                                        Modifier.size(9.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
+                                    )
+                                    TodoStatus.COMPLETED -> StatusMarkIcon(StatusMark.DONE, labelled = false)
+                                }
+                            }
                             Text(
                                 todo.text,
                                 style = MaterialTheme.typography.bodySmall,
@@ -944,7 +1254,7 @@ private fun Composer(
             }
         }
         queueNotice?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
         if (state.queue.isNotEmpty()) {
             Row(
@@ -953,9 +1263,8 @@ private fun Composer(
             ) {
                 state.queue.forEachIndexed { index, queued ->
                     AssistChip(
-                        // Tapping opens the controls rather than dropping:
-                        // discarding a queued message on a stray tap, with no
-                        // undo, is not a good trade for one less tap.
+                        // Tapping opens the controls (Steer, Save, Move, Drop),
+                        // so a stray tap never drops one.
                         onClick = { model.openQueuedMessage(index) },
                         label = {
                             Text(
@@ -980,30 +1289,50 @@ private fun Composer(
         // One rounded box, the way the desktop draws it: what waits on the
         // reader on top, then the message, then attach and send.
         Surface(
-            shape = RoundedCornerShape(20.dp),
+            shape = MaterialTheme.shapes.large,
             color = glassComposer(),
-            border = BorderStroke(1.dp, glassEdge()),
+            border = BorderStroke(1.dp, controlBorder()),
         ) {
             Column {
                 prompt.section?.invoke()
                 Column(Modifier.padding(start = 4.dp, end = 8.dp, top = 2.dp, bottom = 6.dp)) {
-                    TextField(
+                    // Material's filled field with its fill and line taken off,
+                    // drawn from its parts so the name can sit inside it.
+                    val fieldColors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        disabledIndicatorColor = Color.Transparent,
+                    )
+                    val fieldInteractions = remember { MutableInteractionSource() }
+                    androidx.compose.foundation.text.BasicTextField(
                         value = composer,
                         onValueChange = model::updateDraft,
-                        modifier = Modifier.fillMaxWidth(),
-                        placeholder = {
-                            Text(prompt.placeholder ?: "Ask anything, or describe a task…", color = LocalXdSignals.current.faint)
-                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minWidth = TextFieldDefaults.MinWidth, minHeight = TextFieldDefaults.MinHeight),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = androidx.compose.ui.graphics.SolidColor(fieldColors.cursorColor),
+                        interactionSource = fieldInteractions,
                         minLines = 1,
                         maxLines = 6,
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent,
-                            disabledContainerColor = Color.Transparent,
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent,
-                            disabledIndicatorColor = Color.Transparent,
-                        ),
+                        decorationBox = { field ->
+                            TextFieldDefaults.DecorationBox(
+                                value = composer,
+                                // Named by its placeholder, and once it holds text by its name in the field.
+                                innerTextField = { FieldName(COMPOSER_NAME, composer.isNotEmpty(), field) },
+                                enabled = true,
+                                singleLine = false,
+                                visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
+                                interactionSource = fieldInteractions,
+                                placeholder = {
+                                    Text(prompt.placeholder ?: "Ask anything, or describe a task…", color = LocalXdSignals.current.faint)
+                                },
+                                colors = fieldColors,
+                            )
+                        },
                         // The desktop queues with Enter while a turn runs, since its
                         // button is the stop. The keyboard's own action key is where
                         // that lives here.
@@ -1155,17 +1484,20 @@ private fun CompactComposerRow(
     val catalog by model.catalog.collectAsStateWithLifecycle()
     val faint = LocalXdSignals.current.faint
     Surface(
-        shape = RoundedCornerShape(24.dp),
+        shape = MaterialTheme.shapes.extraLarge,
         color = glassComposer(),
-        border = BorderStroke(1.dp, glassEdge()),
+        border = BorderStroke(1.dp, controlBorder()),
     ) {
         Column {
             prompt.section?.invoke()
-            Row(
-                modifier = Modifier.padding(4.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                IconButton(onClick = onAttach, enabled = attached < Limits.MAX_IMAGES, modifier = Modifier.size(40.dp)) {
+            // No padding of its own: each control sits in a 48dp slot that is
+            // its touch target and no neighbour's, drawn at 40dp inside it.
+            Row(verticalAlignment = Alignment.Bottom) {
+                IconButton(
+                    onClick = onAttach,
+                    enabled = attached < Limits.MAX_IMAGES,
+                    modifier = Modifier.size(ComposerSlot),
+                ) {
                     Icon(
                         painterResource(R.drawable.ic_add),
                         contentDescription = "Attach images",
@@ -1176,7 +1508,7 @@ private fun CompactComposerRow(
                 androidx.compose.foundation.text.BasicTextField(
                     value = composer,
                     onValueChange = model::updateDraft,
-                    modifier = Modifier.weight(1f).heightIn(min = 40.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                     cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.onSurface),
                     maxLines = 6,
@@ -1191,7 +1523,7 @@ private fun CompactComposerRow(
                         },
                     ),
                     decorationBox = { field ->
-                        Box(Modifier.padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), contentAlignment = Alignment.CenterStart) {
+                        Box(Modifier.padding(end = 4.dp, top = 12.dp, bottom = 12.dp), contentAlignment = Alignment.CenterStart) {
                             if (composer.isEmpty()) {
                                 Text(
                                     prompt.placeholder ?: "Ask anything…",
@@ -1202,53 +1534,88 @@ private fun CompactComposerRow(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            field()
+                            // Named by its placeholder, and once it holds text by its name in the field.
+                            FieldName(COMPOSER_NAME, composer.isNotEmpty(), field)
                         }
                     },
                 )
-                // Drawn at 32dp in the 40dp control line. The platform still
-                // extends its touch area to 48dp around it.
-                Box(Modifier.height(40.dp), contentAlignment = Alignment.Center) {
-                CompositionLocalProvider(androidx.compose.material3.LocalMinimumInteractiveComponentSize provides 0.dp) {
-                Surface(
-                    onClick = onModel,
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color.Transparent,
-                    modifier = Modifier.padding(horizontal = 2.dp),
+                // The agent and model: the whole slot's height takes the tap,
+                // and nothing is drawn around it until it is pressed.
+                val modelLabel = DisplayLabels.model(state.model, state.backend, catalog)
+                // With enlarged text the name would leave the message no room,
+                // so the agent's mark stands alone and the name is spoken.
+                val nameShown = LocalDensity.current.fontScale <= LARGE_TEXT_SCALE
+                Row(
+                    modifier = Modifier
+                        .height(ComposerSlot)
+                        .widthIn(min = ComposerSlot)
+                        .clip(MaterialTheme.shapes.large)
+                        .clickable(role = Role.Button, onClickLabel = "Choose model", onClick = onModel)
+                        .semantics { if (!nameShown) contentDescription = modelLabel }
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
                 ) {
-                    Row(
-                        modifier = Modifier.height(32.dp).padding(horizontal = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        BackendIcon(state.backend, size = 14.dp)
-                        Text(
-                            DisplayLabels.model(state.model, state.backend, catalog),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.widthIn(max = 96.dp),
-                        )
-                    }
+                    BackendIcon(state.backend, size = if (nameShown) 14.dp else 18.dp)
+                    if (nameShown) Text(
+                        modelLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 96.dp),
+                    )
                 }
+                Box(Modifier.size(ComposerSlot), contentAlignment = Alignment.Center) {
+                    SendButton(
+                        state = state,
+                        empty = composer.isBlank() && attached == 0,
+                        sending = sending,
+                        cancelling = cancelling,
+                        steering = steering,
+                        model = model,
+                        size = 40.dp,
+                        answer = prompt.answer?.takeIf { composer.isNotBlank() },
+                        submittingAnswer = prompt.submitting,
+                    )
                 }
-                }
-                SendButton(
-                    state = state,
-                    empty = composer.isBlank() && attached == 0,
-                    sending = sending,
-                    cancelling = cancelling,
-                    steering = steering,
-                    model = model,
-                    size = 40.dp,
-                    answer = prompt.answer?.takeIf { composer.isNotBlank() },
-                    submittingAnswer = prompt.submitting,
-                )
             }
         }
     }
 }
+
+/** The touch target each control of the one-row composer gets, around its 40dp drawing. */
+internal val ComposerSlot = 48.dp
+
+/** The font scale past which rows drop words they have no room for. */
+internal const val LARGE_TEXT_SCALE = 1.3f
+
+/** What a screen reader is told when the turn ends. */
+internal const val TURN_FINISHED_ANNOUNCEMENT = "Reply finished"
+
+/**
+ * Tells a screen reader that a reply finished, as a polite live region: the
+ * words are set when the turn ends, and cleared when the next one starts so
+ * the next ending is a change to tell again. Nothing is drawn.
+ */
+@Composable
+private fun TurnFinishedNotice(finished: Boolean) {
+    Box(
+        Modifier
+            .size(1.dp)
+            .testTag(TURN_FINISHED_TAG)
+            .semantics {
+                liveRegion = LiveRegionMode.Polite
+                if (finished) contentDescription = TURN_FINISHED_ANNOUNCEMENT
+            },
+    )
+}
+
+/** The live region that says a reply finished, for tests. */
+internal const val TURN_FINISHED_TAG = "turn-finished"
+
+/** What a screen reader calls the chat's composer, whatever it holds. */
+internal const val COMPOSER_NAME = "Message"
 
 /** What the composer's one round button does. */
 internal enum class SendAction { SEND, STOP, RESUME, SEND_ANSWER, ANSWER_BUSY }
@@ -1399,6 +1766,7 @@ private fun QueuedMessageDialog(
                     label = { Text("Message") },
                     minLines = 2,
                     maxLines = 6,
+                    colors = xdFieldColors(),
                 )
                 if (canMoveUp || canMoveDown) {
                     // Reordering moves the message as it was queued; an edit
@@ -1417,7 +1785,7 @@ private fun QueuedMessageDialog(
                     Text(
                         "Update the host to change queued messages from here.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 if (working) {
@@ -1425,7 +1793,7 @@ private fun QueuedMessageDialog(
                     Text(
                         "Steering stops the running turn and starts this instead.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -1462,20 +1830,17 @@ private fun QueuedMessageDialog(
  */
 @Composable
 private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
-    val parts = remember(item.text, item.kind) {
-        ImageReference.parts(item.text, markdown = item.kind == TranscriptKind.ASSISTANT)
+    if (item.kind == TranscriptKind.ASSISTANT) {
+        AssistantBody(item, model)
+        return
     }
+    val parts = remember(item.text, item.kind) { ImageReference.parts(item.text) }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         parts.forEach { part ->
             when (part) {
                 is MessagePart.Image -> MessageImage(model, part.path)
                 is MessagePart.Prose -> when (item.kind) {
-                    TranscriptKind.ASSISTANT -> AssistantProse(
-                        text = part.text,
-                        messageId = item.id,
-                        live = item.live,
-                    )
                     TranscriptKind.SYSTEM ->
                         Text(
                             part.text,
@@ -1497,6 +1862,40 @@ private fun SelectableMessageBody(item: TranscriptItem, model: ChatViewModel) {
 }
 
 /**
+ * An assistant's reply: its pictures, and its prose as rendered Markdown.
+ *
+ * One still arriving is read again as it grows, on a background thread, and
+ * only what changed is drawn again: see [assistantBody]. A finished one is
+ * read once, in the background, and kept for every time its row is shown
+ * again (see [ReplyBodies]); for the moment before that it shows as plain text.
+ */
+@Composable
+internal fun AssistantBody(item: TranscriptItem, model: ChatViewModel) {
+    val parts = if (item.live) {
+        rememberOffMain(item.text) { text, previous: List<BodyPart>? -> assistantBody(text, live = true, previous) }
+            ?.also { LiveHandoff.remember(item.text, it) }
+            // Until the first reading is ready, what an earlier frame of this reply rendered.
+            ?: LiveHandoff.forText(item.text)
+    } else {
+        rememberPrepared(ReplyBodies, ReplyKey(item.id, item.text)) ?: LiveHandoff.forText(item.text)
+    }
+    if (parts == null) {
+        Text(item.text)
+        return
+    }
+    CompositionLocalProvider(LocalStreaming provides item.live) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            parts.forEach { part ->
+                when (part) {
+                    is BodyPart.Image -> MessageImage(model, part.path)
+                    is BodyPart.Prose -> AssistantProse(part.document, messageId = item.id)
+                }
+            }
+        }
+    }
+}
+
+/**
  * Assistant prose with its client-side presentation blocks lifted out.
  *
  * `<ask>` becomes the existing question controls, `<analysis>` is an initially
@@ -1504,28 +1903,19 @@ private fun SelectableMessageBody(item: TranscriptItem, model: ChatViewModel) {
  */
 @Composable
 private fun AssistantProse(
-    text: String,
+    document: ProseDocument,
     messageId: String,
-    live: Boolean,
 ) {
-    val ask = remember(text) { AskBlock.parse(text) }
-    val source = ask?.remainder ?: text
-    val visible = remember(source, live) {
-        val projected = if (live) AssistantSections.stream(source) else source
-        SpeakTagVisibility.render(projected, live)
-    }
-    val sections = remember(visible) { AssistantSections.parse(visible) }
-
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        sections.forEachIndexed { index, section ->
+        document.sections.forEachIndexed { index, section ->
             when (section.kind) {
                 AssistantSectionKind.NORMAL ->
-                    if (section.text.isNotBlank()) MarkdownText(section.text)
+                    section.blocks?.takeIf { it.isNotEmpty() }?.let { MarkdownBlocks(it) }
                 AssistantSectionKind.ANALYSIS ->
                     AnalysisDisclosure(messageId, index, section)
             }
         }
-        ask?.let { Text(it.ask.question, fontWeight = FontWeight.Bold) }
+        document.question?.let { Text(it, fontWeight = FontWeight.Bold) }
     }
 }
 
@@ -1533,21 +1923,22 @@ private fun AssistantProse(
 private fun AnalysisDisclosure(
     messageId: String,
     ordinal: Int,
-    section: AssistantSection,
+    section: ProseSection,
 ) {
     val key = "$messageId-analysis-$ordinal"
     var expanded by rememberSaveable(key) { mutableStateOf(false) }
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
-        shape = RoundedCornerShape(14.dp),
+        shape = MaterialTheme.shapes.medium,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { expanded = !expanded }
+                    .disclosure(expanded) { expanded = !expanded }
+                    .heightIn(min = 48.dp)
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1557,13 +1948,11 @@ private fun AnalysisDisclosure(
                     color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Disclosure(expanded)
+                DisclosureChevron(expanded)
             }
             if (expanded && section.text.isNotBlank()) {
-                MarkdownText(
-                    section.text,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                )
+                val inset = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                section.blocks?.let { MarkdownBlocks(it, inset) } ?: MarkdownText(section.text, inset)
             }
         }
     }
@@ -1591,6 +1980,21 @@ private suspend fun LazyListState.scrollToEnd(index: Int, animated: Boolean = fa
     }
 }
 
+/** How long landing in a chat waits for its newest replies to be read. */
+private const val LANDING_PREPARE_MILLIS = 400L
+
+/** How many of the newest finished replies are read ahead of being drawn. */
+private const val PREPARED_REPLIES = 40
+
+/** The newest finished replies in [rows], newest first, as [ReplyBodies] keys them. */
+private fun newestReplies(rows: List<TranscriptRow>): List<ReplyKey> =
+    rows.asReversed().asSequence()
+        .mapNotNull { (it as? TranscriptRow.Single)?.item }
+        .filter { it.kind == com.restartfu.xd.model.TranscriptKind.ASSISTANT && !it.live }
+        .take(PREPARED_REPLIES)
+        .map { ReplyKey(it.id, it.text) }
+        .toList()
+
 /** What the chat's follower keeps in view: the end, as of the newest output. */
 private data class FollowTarget(
     val count: Int,
@@ -1608,16 +2012,46 @@ private const val LIVE_TEXT_INTERVAL_MILLIS = 80L
  * [LIVE_TEXT_INTERVAL_MILLIS]. The first value shows at once.
  */
 @Composable
-private fun rememberPacedText(text: String): String {
+private fun rememberPacedText(text: () -> String): String {
     val latest = rememberUpdatedState(text)
-    var shown by remember { mutableStateOf(text) }
+    // Read without subscribing: the row is drawn again when [shown] moves on,
+    // at its pace, not whenever the text does.
+    var shown by remember { mutableStateOf(Snapshot.withoutReadObservation { text() }) }
     LaunchedEffect(Unit) {
-        snapshotFlow { latest.value }.collect { value ->
-            shown = value
-            delay(LIVE_TEXT_INTERVAL_MILLIS)
+        snapshotFlow { latest.value() }.collect { value ->
+            // The reply's last words stay up until its finished row takes over.
+            if (value.isNotEmpty()) {
+                shown = value
+                delay(LIVE_TEXT_INTERVAL_MILLIS)
+            }
         }
     }
     return shown
+}
+
+/**
+ * Stands in for the words of the reply streaming in, in the state the screen
+ * as a whole reads: see [withoutLiveText].
+ */
+internal const val LIVE_TEXT_ELSEWHERE = "\u2026"
+
+/**
+ * The chat without the words of the reply still streaming in, so that what
+ * reads it is not drawn again for each of them. Whether a reply is streaming,
+ * and everything else, is as it was; the words are read where they are drawn.
+ */
+internal fun ChatState.withoutLiveText(): ChatState =
+    if (working && liveSegment.isNotEmpty()) copy(liveSegment = LIVE_TEXT_ELSEWHERE, turnSequence = 0) else this
+
+/**
+ * Keeps [into] at the words streamed so far, for the follower: read here, so
+ * only this small scope runs again for each word, and written once the frame's
+ * composition is applied, never while it is under way.
+ */
+@Composable
+private fun StreamedText(state: State<ChatState>, into: MutableState<String>) {
+    val words = state.value.liveSegment
+    SideEffect { into.value = words }
 }
 
 /** Rows drawn alike, so the list can reuse one's layout for another. */
@@ -1641,43 +2075,34 @@ private fun ToolGroupRow(row: TranscriptRow.Tools) {
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
-        shape = RoundedCornerShape(14.dp),
+        shape = MaterialTheme.shapes.medium,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { expanded = !expanded }
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.fillMaxWidth()) {
+            // The line itself is the button; the calls under it have their own.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .disclosure(expanded) { expanded = !expanded }
+                    .heightIn(min = 48.dp)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
                     row.label,
                     modifier = Modifier.weight(1f),
                     color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Disclosure(expanded)
+                DisclosureChevron(expanded)
             }
             if (expanded) {
-                Spacer(Modifier.height(8.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 6.dp)) {
                     row.items.forEach { ToolRow(it, nested = true) }
                 }
             }
         }
     }
-}
-
-/** The chevron at the end of anything that opens. */
-@Composable
-private fun Disclosure(expanded: Boolean) {
-    Icon(
-        painterResource(if (expanded) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
-        contentDescription = if (expanded) "Collapse" else "Expand",
-        tint = LocalXdSignals.current.faint,
-        modifier = Modifier.size(14.dp),
-    )
 }
 
 /**
@@ -1696,16 +2121,17 @@ private fun ToolRow(item: TranscriptItem, nested: Boolean = false) {
 
     Surface(
         color = if (nested) Color.Transparent else MaterialTheme.colorScheme.surfaceContainer,
-        shape = RoundedCornerShape(if (nested) 8.dp else 14.dp),
+        shape = if (nested) MaterialTheme.shapes.small else MaterialTheme.shapes.medium,
         border = if (nested) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .let { if (detail == null) it else it.clickable { expanded = !expanded } }
-                .padding(horizontal = if (nested) 0.dp else 14.dp, vertical = if (nested) 5.dp else 10.dp),
-        ) {
+        Column(Modifier.fillMaxWidth()) {
+            // A full-height row whether it opens or not, so a run of calls keeps one rhythm.
             Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .disclosure(expanded, enabled = detail != null) { expanded = !expanded }
+                    .heightIn(min = 48.dp)
+                    .padding(horizontal = if (nested) 0.dp else 14.dp, vertical = if (nested) 5.dp else 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -1718,20 +2144,21 @@ private fun ToolRow(item: TranscriptItem, nested: Boolean = false) {
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = XdMonoFamily,
                 )
-                if (detail != null) Disclosure(expanded)
+                if (detail != null) DisclosureChevron(expanded)
             }
             if (expanded && detail != null) {
-                Spacer(Modifier.height(8.dp))
-                if (isPatch) {
-                    DiffText(detail)
-                } else {
-                    Text(
-                        detail,
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        fontFamily = XdMonoFamily,
-                        style = MaterialTheme.typography.bodySmall,
-                        softWrap = false,
-                    )
+                Box(Modifier.padding(start = if (nested) 0.dp else 14.dp, end = if (nested) 0.dp else 14.dp, bottom = 10.dp)) {
+                    if (isPatch) {
+                        DiffText(detail)
+                    } else {
+                        Text(
+                            detail,
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            fontFamily = XdMonoFamily,
+                            style = MaterialTheme.typography.bodySmall,
+                            softWrap = false,
+                        )
+                    }
                 }
             }
         }
@@ -1770,11 +2197,19 @@ private fun AccountSwitchNotice(sentence: String) {
  * boxes where the only difference is which side is narrower.
  */
 @Composable
-private fun TranscriptRow(row: TranscriptItem, model: ChatViewModel, answering: String? = null) {
+private fun TranscriptRow(
+    row: TranscriptItem,
+    model: ChatViewModel,
+    /** The chat's assistant by name, as a screen reader says who a reply is from. */
+    assistantName: String,
+    answering: String? = null,
+    /** The words of the reply streaming in, as they stand now. */
+    liveText: () -> String = { row.text },
+) {
     // The reply still streaming in is drawn at a steady pace rather than
     // parsed and laid out again for every word.
     val item = if (row.id == ChatState.LIVE_SEGMENT_ID) {
-        val shown = rememberPacedText(row.text)
+        val shown = rememberPacedText { if (row.text == LIVE_TEXT_ELSEWHERE) liveText() else row.text }
         remember(row.id, shown) { row.copy(text = shown) }
     } else {
         row
@@ -1801,16 +2236,21 @@ private fun TranscriptRow(row: TranscriptItem, model: ChatViewModel, answering: 
     }
     if (item.kind != TranscriptKind.USER) {
         // A reply is the page itself, without a name over it; only system
-        // text keeps its label, so it cannot be mistaken for the agent.
+        // text keeps its label, so it cannot be mistaken for the agent. A
+        // screen reader is told the name instead.
+        if (item.kind == TranscriptKind.ASSISTANT) {
+            SpokenMessage(assistantName, Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                SelectableMessageBody(item, model)
+            }
+            return
+        }
         Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-            if (item.kind == TranscriptKind.SYSTEM) {
-                item.label?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = LocalXdSignals.current.faint,
-                    )
-                }
+            item.label?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = LocalXdSignals.current.faint,
+                )
             }
             SelectableMessageBody(item, model)
         }
@@ -1824,7 +2264,9 @@ private fun TranscriptRow(row: TranscriptItem, model: ChatViewModel, answering: 
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         contentAlignment = Alignment.CenterEnd,
     ) {
-        Column(Modifier.fillMaxWidth(0.86f), horizontalAlignment = Alignment.End) {
+        // The bubble's side and tint say whose it is; a screen reader is told.
+        SpokenMessage(YOU, Modifier.fillMaxWidth(0.86f)) {
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
             // What the message answers, attached above it like a reply's quote.
             (answering?.let(::answeredQuestionLabel) ?: relay?.let { agentRelayLabel(it.description) })?.let { caption ->
                 Row(
@@ -1851,13 +2293,32 @@ private fun TranscriptRow(row: TranscriptItem, model: ChatViewModel, answering: 
                 // the bubble has to carry the distinction on its own.
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 contentColor = MaterialTheme.colorScheme.onSurface,
-                shape = RoundedCornerShape(20.dp),
+                shape = MaterialTheme.shapes.large,
             ) {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                     SelectableMessageBody(shown, model)
                 }
             }
         }
+        }
+    }
+}
+
+/** Who the reader's own messages are from, to a screen reader. */
+internal const val YOU = "You"
+
+/**
+ * One message as one stop for a screen reader, starting with who it is from.
+ * The name is a node of its own under the message, first in it, so it is
+ * read before the words; the stop itself carries no text, so a screen reader
+ * reads all it holds. Links, pictures and anything else that acts on its own
+ * stay stops of their own, and selection is untouched.
+ */
+@Composable
+private fun SpokenMessage(speaker: String, modifier: Modifier, content: @Composable () -> Unit) {
+    Box(modifier.semantics(mergeDescendants = true) {}) {
+        Box(Modifier.matchParentSize().semantics { text = AnnotatedString(speaker) })
+        content()
     }
 }
 

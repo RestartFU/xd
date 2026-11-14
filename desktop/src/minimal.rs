@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use xd_desktop::model::{ChatSummary, Folder};
+use xd_desktop::model::{ChatSummary, DEFAULT_CHAT_TITLE, Folder};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AgentCli {
@@ -28,7 +28,7 @@ impl AgentCli {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
-            Self::Claude => "Claude",
+            Self::Claude => "Claude Code",
             Self::Other => "Assistant",
         }
     }
@@ -116,11 +116,16 @@ pub(crate) struct SettledCard {
 
 /// The shelf's rows, most recently settled first.
 pub(crate) fn settled_cards(folders: &[Folder], chats: &[ChatSummary]) -> Vec<SettledCard> {
+    // Each chat's project by id, rather than a scan of them all per chat.
+    let by_id = folders
+        .iter()
+        .map(|folder| (folder.id.as_str(), folder))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut cards = chats
         .iter()
         .filter_map(|chat| {
             let settled_at = chat.settled_at?;
-            let folder = folders.iter().find(|folder| folder.id == chat.folder)?;
+            let folder = by_id.get(chat.folder.as_str())?;
             let session = project_sessions(&chat.folder, std::slice::from_ref(chat)).pop()?;
             Some(SettledCard {
                 id: session.id,
@@ -187,12 +192,24 @@ pub(crate) fn project_cards(
     chats: &[ChatSummary],
     started_by_agent: impl Fn(&ChatSummary) -> bool,
 ) -> Vec<ProjectCard> {
+    // Each project's sessions, gathered in one pass over the chats.
+    let mut by_folder = std::collections::HashMap::<&str, Vec<&ChatSummary>>::new();
+    for chat in chats {
+        if AgentCli::from_backend(&chat.backend).is_some() {
+            by_folder
+                .entry(chat.folder.as_str())
+                .or_default()
+                .push(chat);
+        }
+    }
     folders
         .iter()
         .map(|folder| {
-            let project_chats = chats.iter().filter(|chat| {
-                chat.folder == folder.id && AgentCli::from_backend(&chat.backend).is_some()
-            });
+            let project_chats = by_folder
+                .get(folder.id.as_str())
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .copied();
             ProjectCard {
                 id: folder.id.clone(),
                 name: folder.name.clone(),
@@ -222,7 +239,11 @@ pub(crate) struct TreeRow {
 /// The folders in sidebar order: each one followed by what it holds, siblings
 /// in the host's order. A folder whose parent is not listed sits at the top.
 pub(crate) fn folder_tree(folders: &[Folder]) -> Vec<TreeRow> {
-    let listed = |id: &str| folders.iter().any(|folder| folder.id == id);
+    let ids = folders
+        .iter()
+        .map(|folder| folder.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let listed = |id: &str| ids.contains(id);
     let mut children = std::collections::HashMap::<&str, Vec<usize>>::new();
     let mut roots = Vec::new();
     for (index, folder) in folders.iter().enumerate() {
@@ -280,7 +301,7 @@ pub(crate) fn project_sessions(project_id: &str, chats: &[ChatSummary]) -> Vec<S
                     .title
                     .as_deref()
                     .filter(|title| !title.trim().is_empty())
-                    .unwrap_or("New Session")
+                    .unwrap_or(DEFAULT_CHAT_TITLE)
                     .to_owned(),
                 agent: AgentCli::from_backend(&chat.backend)?,
                 branch: chat

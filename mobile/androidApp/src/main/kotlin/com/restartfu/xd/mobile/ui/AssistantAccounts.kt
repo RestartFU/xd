@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -21,7 +20,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -37,6 +35,13 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -217,9 +222,9 @@ internal fun ProviderAccounts(
         Column(
             Modifier
                 .fillMaxWidth()
-                .clip(PANEL_SHAPE)
+                .clip(MaterialTheme.shapes.medium)
                 .background(MaterialTheme.colorScheme.surfaceContainer)
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, PANEL_SHAPE),
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium),
         ) {
             accounts.forEachIndexed { index, account ->
                 if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -426,6 +431,31 @@ private fun AllowanceMeter(label: String, left: Int) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SignInSteps(provider: AgentAuthProviderReply, account: AgentAccountReply, model: MainViewModel) {
+    // Said in the panel itself: this is a dialog, a window of its own that
+    // the app's snackbar would sit behind.
+    var notice by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(notice) {
+        if (notice != null) {
+            delay(NOTICE_MILLIS)
+            notice = null
+        }
+    }
+    CompositionLocalProvider(LocalNotice provides { notice = it }) {
+        SignInStepsContent(provider, account, model, notice)
+    }
+}
+
+/** How long a line such as "Copied" stays up: about as long as a short snackbar. */
+private const val NOTICE_MILLIS = 4_000L
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SignInStepsContent(
+    provider: AgentAuthProviderReply,
+    account: AgentAccountReply,
+    model: MainViewModel,
+    notice: String?,
+) {
     val openLink = rememberLinkOpener()
     val copy = rememberCopier()
     val drafts by model.signInDrafts.collectAsStateWithLifecycle()
@@ -470,9 +500,9 @@ private fun SignInSteps(provider: AgentAuthProviderReply, account: AgentAccountR
                     code,
                     modifier = Modifier
                         .align(Alignment.CenterVertically)
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(MaterialTheme.shapes.small)
                         .background(MaterialTheme.colorScheme.surfaceContainer)
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.small)
                         .padding(horizontal = 14.dp, vertical = 8.dp),
                     fontFamily = XdMonoFamily,
                     style = MaterialTheme.typography.titleLarge,
@@ -513,6 +543,7 @@ private fun SignInSteps(provider: AgentAuthProviderReply, account: AgentAccountR
                 placeholder = { Text("Code from the sign-in page") },
                 singleLine = true,
                 enabled = !sending,
+                colors = xdFieldColors(),
             )
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
@@ -525,6 +556,15 @@ private fun SignInSteps(provider: AgentAuthProviderReply, account: AgentAccountR
                 ) { Text(if (sending) "Sending…" else "Submit code") }
             }
         }
+        notice?.let {
+            Text(
+                it,
+                // Read out when it appears, as a snackbar is.
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
     }
 }
 
@@ -532,13 +572,11 @@ private fun SignInSteps(provider: AgentAuthProviderReply, account: AgentAccountR
 @Composable
 private fun rememberCopier(): (String, String) -> Unit {
     val context = LocalContext.current
+    val notify = LocalNotice.current
     return { label, text ->
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
         clipboard?.setPrimaryClip(ClipData.newPlainText(label, text))
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
-        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) notify("Copied")
     }
 }
 
-private val PANEL_SHAPE = RoundedCornerShape(12.dp)

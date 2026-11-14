@@ -1,5 +1,7 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -85,7 +87,7 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
                             } else {
                                 "This may be out of date: the host could not be asked again."
                             },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.weight(1f).announced(),
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -224,6 +226,7 @@ internal fun AgentSecretsDialog(
                                     singleLine = true,
                                     enabled = !saving,
                                     visualTransformation = PasswordVisualTransformation(),
+                                    colors = xdFieldColors(),
                                 )
                                 TextButton(onClick = { removed = removed + name }, enabled = !saving) { Text("Remove") }
                             }
@@ -241,6 +244,7 @@ internal fun AgentSecretsDialog(
                                     singleLine = true,
                                     enabled = !saving,
                                     isError = name.isNotBlank() && !SECRET_NAME.matches(name.trim()),
+                                    colors = xdFieldColors(),
                                 )
                                 OutlinedTextField(
                                     value = value,
@@ -250,6 +254,7 @@ internal fun AgentSecretsDialog(
                                     singleLine = true,
                                     enabled = !saving,
                                     visualTransformation = PasswordVisualTransformation(),
+                                    colors = xdFieldColors(),
                                 )
                                 TextButton(onClick = { added = added.filter { it.id != row.id } }, enabled = !saving) { Text("Remove") }
                             }
@@ -258,7 +263,7 @@ internal fun AgentSecretsDialog(
                         TextButton(onClick = { added = added + AddedSecret("", "") }, enabled = !saving) { Text("Add secret") }
                     }
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                error?.let { Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
         confirmButton = {
@@ -398,9 +403,10 @@ internal fun ProjectContextDialog(
                         onValueChange = { text = it },
                         modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 360.dp),
                         enabled = !saving,
+                        colors = xdFieldColors(),
                     )
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                error?.let { Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
         confirmButton = {
@@ -434,13 +440,21 @@ internal fun ChatTitleSettings(model: MainViewModel) {
     if (current == null) {
         Text(
             error ?: "Reading chat title settings…",
+            modifier = Modifier.announced(),
             color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
         if (error != null) TextButton(onClick = model::retryChatTitles) { Text("Try again") }
         return
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    // One stop, named by its words: a tap anywhere on the row turns it.
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(value = current.enabled, role = Role.Switch, onValueChange = model::setChatTitlesEnabled),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
             Text("Generate chat titles", fontWeight = FontWeight.SemiBold)
             Text(
@@ -449,13 +463,13 @@ internal fun ChatTitleSettings(model: MainViewModel) {
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Switch(checked = current.enabled, onCheckedChange = model::setChatTitlesEnabled)
+        Switch(checked = current.enabled, onCheckedChange = null)
     }
     if (catalog.isEmpty() && catalogError != null) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 catalogError.orEmpty(),
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).announced(),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -476,7 +490,7 @@ internal fun ChatTitleSettings(model: MainViewModel) {
     }
     error?.let {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(it, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(it, modifier = Modifier.weight(1f).announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = model::retryChatTitles) { Text("Try again") }
         }
     }

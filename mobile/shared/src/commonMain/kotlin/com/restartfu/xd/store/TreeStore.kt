@@ -136,6 +136,7 @@ internal class TreeStore(
                     snapshotSequence = maxOf(snapshotSequence, result.sequence)
                     val authoritativeSequence = snapshotSequence
                     _state.value = TreeSnapshot(
+                        loaded = true,
                         folders = reply.folders.map {
                             Folder(
                                 id = it.id,
@@ -219,7 +220,7 @@ internal class TreeStore(
                 stateMutex.withLock {
                     _state.value = _state.value.copy(
                         loading = false,
-                        error = error.message ?: "Could not load the workspace tree",
+                        error = error.message ?: "Could not load projects",
                     )
                 }
             }

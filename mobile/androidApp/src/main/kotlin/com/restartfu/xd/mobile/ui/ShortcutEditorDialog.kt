@@ -59,7 +59,7 @@ internal fun ShortcutEditorDialog(
                     CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
                 } else {
                     state.error?.let { message ->
-                        Text(message, color = MaterialTheme.colorScheme.error)
+                        Text(message, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error)
                     }
                     if (!state.loaded) {
                         TextButton(onClick = onRetry) { Text("Try again") }
@@ -79,6 +79,7 @@ internal fun ShortcutEditorDialog(
                                 minLines = 1,
                                 maxLines = 4,
                                 enabled = editable,
+                                colors = xdFieldColors(),
                             )
                             TextButton(
                                 onClick = {

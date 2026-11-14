@@ -1,6 +1,7 @@
 package com.restartfu.xd.mobile.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,20 +15,21 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -35,18 +37,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.foundation.focusable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -76,7 +76,7 @@ internal const val QUOTA_PER_CHAT_DETAIL = "A chat's own quota, chosen when it s
 internal const val SETTLE_MERGED_DETAIL =
     "Settle a session when its pull request merges. A closed pull request settles it while either rule here is on."
 internal const val SETTLE_INACTIVE_DETAIL =
-    "Sessions with no activity for a while settle on their own. Any new activity un-settles them."
+    "Sessions with no activity for a while settle on their own. Any new activity brings them back."
 internal const val SETTLE_DAYS_DETAIL = "How long a session sits without activity before it settles."
 internal const val SETTLE_KEEP_PR_DETAIL =
     "Inactivity does not settle sessions with a pull request. Merge and close still do."
@@ -107,8 +107,11 @@ internal fun SettingsPage(
     model: MainViewModel,
     settings: MobileSettings,
     onClose: () -> Unit,
-    onDisconnect: () -> Unit,
+    /** Erases this device's pairing with the host, once the reader has confirmed it. */
+    onForget: () -> Unit,
     modifier: Modifier = Modifier,
+    /** The page's own coming and going, which a back gesture from its home drives. */
+    closing: PageTransition<Boolean>? = null,
 ) {
     val theme by settings.theme.collectAsStateWithLifecycle()
     val allPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
@@ -123,6 +126,7 @@ internal fun SettingsPage(
     var updatingHost by rememberSaveable { mutableStateOf(false) }
     var accountsOpen by rememberSaveable { mutableStateOf(false) }
     var secretsOpen by rememberSaveable { mutableStateOf(false) }
+    var confirmingForget by rememberSaveable { mutableStateOf(false) }
 
     val entries = buildList {
         add(SettingsEntry(SettingsSection.APPEARANCE, listOf("Theme", "Dark", "Light")) {
@@ -189,8 +193,15 @@ internal fun SettingsPage(
                 ) { AutoSettleSettings(model) },
             )
         }
-        add(SettingsEntry(SettingsSection.DEVICES, listOf("Disconnect", DISCONNECT_DETAIL, "remote", "host")) {
-            SettingAction(title = "Disconnect", detail = DISCONNECT_DETAIL, action = "Disconnect", onClick = onDisconnect)
+        // Found under its old name too: it used to be called Disconnect.
+        add(SettingsEntry(SettingsSection.DEVICES, listOf(FORGET_HOST_TITLE, FORGET_HOST_DETAIL, "disconnect", "unpair", "remote")) {
+            SettingAction(
+                title = FORGET_HOST_TITLE,
+                detail = FORGET_HOST_DETAIL,
+                // The dots say a question follows: nothing is forgotten on this tap.
+                action = "Forget…",
+                destructive = true,
+            ) { confirmingForget = true }
         })
         add(SettingsEntry(SettingsSection.UPDATES, listOf("Host updates", UPDATES_DETAIL)) {
             SettingAction(title = "Host updates", detail = UPDATES_DETAIL, action = "Check") { updatingHost = true }
@@ -198,13 +209,10 @@ internal fun SettingsPage(
     }
 
     // The workspace stays composed beneath the page, so Settings takes the
-    // focus and the keyboard from whatever editor or terminal had them.
-    val pageFocus = remember { FocusRequester() }
+    // focus (on its heading, see [pageHeading]) and the keyboard from
+    // whatever editor or terminal had them.
     val keyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(Unit) {
-        pageFocus.requestFocus()
-        keyboard?.hide()
-    }
+    LaunchedEffect(Unit) { keyboard?.hide() }
     // Search reads the quota's current share, so read it as soon as the host
     // says it has quotas, rather than only once its row is shown.
     LaunchedEffect(tree.chatQuotas) {
@@ -214,27 +222,34 @@ internal fun SettingsPage(
         if (tree.settlement) model.refreshAutoSettle()
     }
 
-    BackHandler {
-        when {
-            section != null -> section = null
-            query.isNotEmpty() -> query = ""
-            else -> onClose()
-        }
-    }
-
     val open = section
+    val returns = rememberReturnFocus()
+    // Back leaves a section, then clears a search, then closes Settings. A
+    // back gesture shows the page it returns to as it is dragged: the
+    // Settings home from a section, the page beneath from the home.
+    val sections = rememberPageTransition(open, "settings-section")
+    if (closing != null) {
+        PredictiveBack(closing, enabled = open == null && query.isEmpty(), back = false, onBack = onClose)
+    } else {
+        BackHandler(enabled = open == null && query.isEmpty(), onBack = onClose)
+    }
+    BackHandler(enabled = open == null && query.isNotEmpty()) { query = "" }
+    PredictiveBack(sections, enabled = open != null, back = null) { section = null }
+
     // A Surface, so taps on the page never reach the workspace beneath it.
     Surface(
         modifier
             .fillMaxSize()
             .testTag(SETTINGS_PAGE_TAG)
-            .focusRequester(pageFocus)
-            .focusable(),
+            // Said as it opens, and again as a section opens or closes.
+            .page(open?.title ?: "Settings"),
         color = LocalXdGlass.current.backdrop,
     ) {
     Column(Modifier.fillMaxSize()) {
         SettingsTopBar(
             title = open?.title ?: "Settings",
+            // On the home, the row of the section left takes the focus in the heading's place.
+            returnTo = returns.takeIf { open == null },
             // The same order as system Back: leave a section, then a search, then Settings.
             onBack = {
                 when {
@@ -244,22 +259,38 @@ internal fun SettingsPage(
                 }
             },
         )
-        Column(
+        // Into a section and back out along one axis, as stepping into any page.
+        val still = reducedMotion()
+        sections.transition.AnimatedContent(
+            modifier = Modifier.fillMaxSize(),
+            transitionSpec = { pageMotion(still, sharedAxisX(forward = targetState != null)) },
+        ) { shown ->
+        // The page scrolls across its whole width; its rows stop at the
+        // reading measure and sit in the middle of a wide window.
+        Box(
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .navigationBarsPadding()
+                // Ends above the keyboard as well as the navigation bar, so
+                // every search result can scroll into view; the larger of the two.
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+        Column(
+            Modifier
+                .widthIn(max = ReadingMeasure + 32.dp)
+                .fillMaxWidth()
                 .padding(horizontal = 16.dp)
                 .padding(top = 12.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (open != null) {
+            if (shown != null) {
                 Text(
-                    open.subtitle,
+                    shown.subtitle,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                SettingsCard(entries.filter { it.section == open })
+                SettingsCard(entries.filter { it.section == shown })
             } else {
                 SettingsSearchField(query) { query = it }
                 if (query.isBlank()) {
@@ -274,7 +305,12 @@ internal fun SettingsPage(
                                 else -> candidate.subtitle
                             }
                         },
-                        onOpen = { section = it },
+                        onOpen = {
+                            // Back to the home puts the focus on this section's row again.
+                            returns.open(it.name)
+                            section = it
+                        },
+                        returns = returns,
                     )
                 } else {
                     val matches = entries.filter { settingsMatch(query, it.section, it.words) }
@@ -292,6 +328,8 @@ internal fun SettingsPage(
                 }
             }
         }
+        }
+        }
     }
     }
     if (updatingHost) {
@@ -303,16 +341,25 @@ internal fun SettingsPage(
     if (secretsOpen) {
         AgentSecretsDialog(model = model, folderId = null, title = "Agent secrets", onDismiss = { secretsOpen = false })
     }
+    if (confirmingForget) {
+        ForgetHostDialog(
+            onForget = {
+                confirmingForget = false
+                onForget()
+            },
+            onDismiss = { confirmingForget = false },
+        )
+    }
 }
 
 @Composable
-private fun SettingsTopBar(title: String, onBack: () -> Unit) {
+private fun SettingsTopBar(title: String, returnTo: ReturnFocus?, onBack: () -> Unit) {
     Column(Modifier.background(glassPane())) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .statusBarsPadding()
-                .height(56.dp)
+                .safeTopPadding()
+                .heightIn(min = 56.dp)
                 .padding(start = 4.dp, end = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -327,21 +374,26 @@ private fun SettingsTopBar(title: String, onBack: () -> Unit) {
             }
             Text(
                 title,
-                modifier = Modifier.weight(1f).semantics { heading() },
+                // Takes the focus as Settings opens and as each section does.
+                modifier = Modifier.weight(1f).pageHeading(key = title, returnTo = returnTo),
                 style = MaterialTheme.typography.titleLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
         HorizontalDivider(color = glassEdge())
+        // Settings changes the host too, so it says when the host is out of reach.
+        ConnectionLine(divider = glassEdge())
     }
 }
 
 @Composable
 private fun SettingsSearchField(query: String, onQuery: (String) -> Unit) {
-    OutlinedTextField(
+    NamedOutlinedField(
         value = query,
         onValueChange = onQuery,
+        // Named by its placeholder, and once it holds a search by its name in the field.
+        name = "Search settings",
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
         placeholder = { Text("Search settings") },
@@ -359,12 +411,8 @@ private fun SettingsSearchField(query: String, onQuery: (String) -> Unit) {
                 }
             }
         },
-        shape = RoundedCornerShape(12.dp),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedContainerColor = glassPane(),
-            unfocusedContainerColor = glassPane(),
-            unfocusedBorderColor = glassEdge(),
-        ),
+        shape = MaterialTheme.shapes.medium,
+        colors = xdFieldColors(focusedContainerColor = glassPane(), unfocusedContainerColor = glassPane()),
     )
 }
 
@@ -374,6 +422,7 @@ private fun SettingsSectionList(
     sections: List<SettingsSection>,
     summary: (SettingsSection) -> String,
     onOpen: (SettingsSection) -> Unit,
+    returns: ReturnFocus,
 ) {
     SettingsCardFrame {
         sections.forEachIndexed { index, item ->
@@ -382,6 +431,7 @@ private fun SettingsSectionList(
                 Modifier
                     .fillMaxWidth()
                     .heightIn(min = 64.dp)
+                    .returnsFocus(item.name, returns)
                     .clickable { onOpen(item) }
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -390,7 +440,7 @@ private fun SettingsSectionList(
                 Box(
                     Modifier
                         .size(32.dp)
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(MaterialTheme.shapes.small)
                         .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -449,7 +499,7 @@ private fun SettingsCard(entries: List<SettingsEntry>) {
 
 @Composable
 private fun SettingsCardFrame(content: @Composable () -> Unit) {
-    val shape = RoundedCornerShape(12.dp)
+    val shape = MaterialTheme.shapes.medium
     Column(
         Modifier
             .fillMaxWidth()
@@ -466,5 +516,6 @@ private const val ACCOUNTS_DETAIL = "Manage sign-in and the installed assistant 
 private const val PERMISSIONS_DETAIL =
     "New chats pass the agent's unrestricted flag: no approvals or sandbox where the CLI supports it."
 private const val SECRETS_DETAIL = "Environment variables the host gives every agent."
-private const val DISCONNECT_DETAIL = "Disconnect from this host and forget it on this phone."
+internal const val FORGET_HOST_TITLE = "Forget this host"
+private const val FORGET_HOST_DETAIL = "Remove this device's pairing with the connected host."
 private const val UPDATES_DETAIL = "Check for a new xd build on the connected machine."

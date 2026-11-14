@@ -86,8 +86,8 @@ internal fun ModelPicker(
                 effortBackendId != null && !modelReady && selectionError != null -> Column(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Text(selectionError.orEmpty(), color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = { effortModelId?.let(model::selectModel) }) { Text("Retry") }
+                    Text(selectionError.orEmpty(), modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = { effortModelId?.let(model::selectModel) }) { Text("Try again") }
                 }
 
                 effortBackendId != null && !modelReady -> Box(
@@ -126,8 +126,8 @@ internal fun ModelPicker(
                 error != null && catalog.isEmpty() -> Column(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = model::loadCatalog) { Text("Retry") }
+                    Text(error.orEmpty(), modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = model::loadCatalog) { Text("Try again") }
                 }
 
                 currentAssistant == null -> Text(
@@ -146,7 +146,7 @@ internal fun ModelPicker(
                             Text(
                                 DisplayLabels.backend(currentAssistant.id, catalog),
                                 style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.outline,
+                                color = LocalXdSignals.current.faint,
                             )
                         }
                         HorizontalDivider()
@@ -182,7 +182,7 @@ internal fun ModelPicker(
                                     Text(
                                         "${entry.contextWindow / 1000}k context",
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.outline,
+                                        color = LocalXdSignals.current.faint,
                                     )
                                 }
                             }

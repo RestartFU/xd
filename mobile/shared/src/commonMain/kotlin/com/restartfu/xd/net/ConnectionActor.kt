@@ -41,7 +41,14 @@ public sealed interface Link {
     public data class Fatal(
         val reason: FatalReason,
         val message: String,
-    ) : Link
+    ) : Link {
+        /**
+         * Whether connecting again with the same pairing can get past it. A
+         * reply the client could not read may not come again; a changed host
+         * key or a refused device needs a new pairing.
+         */
+        val retryable: Boolean get() = reason == FatalReason.PROTOCOL
+    }
 }
 
 public enum class FatalReason {
@@ -141,6 +148,16 @@ internal class ConnectionActor(
         sendToMailbox(Message.Background)
     }
 
+    /**
+     * Connects again now: after a failure that [Link.Fatal.retryable] says
+     * another attempt can get past, or, while the link is down and waiting to
+     * try again, at once instead of at the end of the wait. Anything else is
+     * left as it is: an attempt already under way, or a link the app let go.
+     */
+    fun retry() {
+        sendToMailbox(Message.RetryNow)
+    }
+
     suspend fun connect(connection: SshConnection): ConnectResult {
         validateConnection(connection)
         val result = CompletableDeferred<ConnectResult>()
@@ -216,6 +233,7 @@ internal class ConnectionActor(
                 is Message.CallTimedOut -> handleCallTimedOut(message)
                 is Message.ProtocolFailure -> handleProtocolFailure(message)
                 is Message.Retry -> handleRetry()
+                Message.RetryNow -> handleRetryNow()
             }
         }
     }
@@ -511,6 +529,26 @@ internal class ConnectionActor(
         }
     }
 
+    private fun handleRetryNow() {
+        if (_link.value is Link.Down) {
+            // The wait is cut short; the backoff stays where it was, so an
+            // attempt that fails again waits as long as the next one would have.
+            if (!wanted || socket != null || (connectionAttempt == null && credentials == null)) return
+            retryJob?.cancel()
+            retryJob = null
+            connectSocket()
+            return
+        }
+        val fatal = _link.value as? Link.Fatal ?: return
+        if (!fatal.retryable || credentials == null) return
+        retryJob?.cancel()
+        retryJob = null
+        backoff.reset()
+        wanted = true
+        _link.value = Link.Idle
+        if (socket == null) connectSocket()
+    }
+
     private fun connectSocket() {
         check(socket == null)
         val connection = connectionAttempt?.connection ?: credentials?.connection ?: return
@@ -627,6 +665,7 @@ internal class ConnectionActor(
         data object Poke : Message
         data object Background : Message
         data object Retry : Message
+        data object RetryNow : Message
 
         data class Connect(
             val connection: SshConnection,

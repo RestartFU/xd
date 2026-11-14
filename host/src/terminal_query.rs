@@ -47,6 +47,24 @@ impl TerminalQueryResponder {
         )
     }
 
+    /// The colours in a request, when it names a valid pair.
+    pub(crate) fn requested_colors(request: &Value) -> Option<(u32, u32)> {
+        let color = |name: &str| {
+            request
+                .get(name)
+                .and_then(Value::as_u64)
+                .filter(|color| *color <= u64::from(0xffffff_u32))
+                .map(|color| color as u32)
+        };
+        Some((color("foreground")?, color("background")?))
+    }
+
+    /// Answers later colour queries with a client's new theme.
+    pub(crate) fn set_colors(&mut self, foreground: u32, background: u32) {
+        self.foreground_reply = color_reply(10, foreground);
+        self.background_reply = color_reply(11, background);
+    }
+
     fn with_colors(foreground: u32, background: u32) -> Self {
         Self {
             parser: Parser::default(),
@@ -261,6 +279,36 @@ mod tests {
                 "\x1b]11;rgb:fafa/fafa/fafa\x1b\\"
             )
             .as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_theme_change_replaces_the_colours_later_queries_get() {
+        let mut responder = TerminalQueryResponder::from_request(&json!({
+            "foreground": 0xf2f2f2,
+            "background": 0x0b0b0b,
+        }));
+        let request = json!({"foreground": 0x1b1e2c, "background": 0xeef0f9});
+        let (foreground, background) = TerminalQueryResponder::requested_colors(&request).unwrap();
+        responder.set_colors(foreground, background);
+
+        assert_eq!(
+            responder.feed(b"\x1b]10;?\x07\x1b]11;?\x07"),
+            concat!(
+                "\x1b]10;rgb:1b1b/1e1e/2c2c\x1b\\",
+                "\x1b]11;rgb:eeee/f0f0/f9f9\x1b\\"
+            )
+            .as_bytes()
+        );
+        assert_eq!(
+            TerminalQueryResponder::requested_colors(&json!({"foreground": 0x1b1e2c})),
+            None
+        );
+        assert_eq!(
+            TerminalQueryResponder::requested_colors(
+                &json!({"foreground": 0x1000000, "background": 0})
+            ),
+            None
         );
     }
 

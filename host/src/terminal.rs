@@ -101,7 +101,12 @@ struct TerminalSession {
     /// Held while output is marked as use, so closing an idle terminal sees
     /// it. Separate from `writer`, which a blocked input write can hold.
     output_use: Mutex<()>,
+    /// Colours a client set since the reader last looked: `NEW_COLORS`, the
+    /// foreground and the background, or zero for none.
+    new_colors: AtomicU64,
 }
+
+const NEW_COLORS: u64 = 1 << 48;
 
 impl TerminalManager {
     pub fn new(events: Arc<EventBus>) -> Self {
@@ -397,6 +402,19 @@ impl TerminalManager {
             RecordOutcome::Unchanged => Ok(json!({"ok": true, "changed": false})),
             RecordOutcome::Closing => Err("The terminal is closed.".into()),
         }
+    }
+
+    /// Replaces the colours a terminal reports to programs that ask for them,
+    /// after the client that draws it changed theme.
+    pub fn colors(&self, request: &Value) -> Result<Value, String> {
+        let session = self.session(text(request, "terminal", "A terminal id is required.")?)?;
+        let (foreground, background) = TerminalQueryResponder::requested_colors(request)
+            .ok_or_else(|| "terminal-colors needs a foreground and a background.".to_string())?;
+        session.new_colors.store(
+            NEW_COLORS | (u64::from(foreground) << 24) | u64::from(background),
+            Ordering::Release,
+        );
+        Ok(json!({"ok": true}))
     }
 
     pub fn kill(&self, request: &Value) -> Result<Value, String> {
@@ -699,6 +717,7 @@ impl TerminalSession {
             state: Mutex::new(TerminalState::new(columns, rows)),
             last_used: AtomicI64::new(crate::settlement::now_seconds()),
             output_use: Mutex::new(()),
+            new_colors: AtomicU64::new(0),
         });
         Ok((session, reader))
     }
@@ -981,6 +1000,10 @@ fn start_reader(
                 session.mark_output();
                 let data = buffer[..count].to_vec();
                 let activity_updates = activity.feed(&data);
+                let colors = session.new_colors.swap(0, Ordering::AcqRel);
+                if colors != 0 {
+                    queries.set_colors((colors >> 24) as u32 & 0xffffff, colors as u32 & 0xffffff);
+                }
                 let replies = queries.feed(&data);
                 if !replies.is_empty()
                     && let Ok(mut writer) = session.writer.lock()
@@ -1377,6 +1400,69 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "the PTY child never received xd's terminal-query reply: {:?}",
+                String::from_utf8_lossy(&output)
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        manager.kill(&json!({"terminal": terminal})).unwrap();
+    }
+
+    #[test]
+    fn a_terminal_reports_the_colours_a_client_set_after_opening_it() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let opened = manager
+            .open(
+                &json!({"chat": "colour-chat", "foreground": 0xf2f2f2, "background": 0x0b0b0b}),
+                Path::new("/tmp"),
+            )
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+        assert!(manager.colors(&json!({"terminal": terminal})).is_err());
+        assert!(
+            manager
+                .colors(&json!({"terminal": "missing", "foreground": 0, "background": 0}))
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .colors(&json!({
+                    "terminal": terminal, "foreground": 0x1b1e2c, "background": 0xeef0f9,
+                }))
+                .unwrap()["ok"],
+            true
+        );
+        // The shell asks for its background (OSC 11) and prints the 24-byte reply.
+        manager
+            .input(&json!({
+                "terminal": terminal,
+                "data": STANDARD.encode(
+                    b"stty raw -echo; printf '\\033]11;?\\007'; reply=$(dd bs=1 count=24 2>/dev/null); stty sane; printf '\\nxd-colour-reply:%s\\n' \"$reply\"\n"
+                ),
+            }))
+            .unwrap();
+
+        let expected = b"xd-colour-reply:\x1b]11;rgb:eeee/f0f0/f9f9";
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let output = manager.list("colour-chat")["terminals"]
+                .as_array()
+                .and_then(|terminals| terminals.first())
+                .and_then(|terminal| terminal["replay"].as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|frame| frame["data"].as_str())
+                .filter_map(|data| STANDARD.decode(data).ok())
+                .flatten()
+                .collect::<Vec<_>>();
+            if output
+                .windows(expected.len())
+                .any(|window| window == expected)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the PTY child never received the new background: {:?}",
                 String::from_utf8_lossy(&output)
             );
             thread::sleep(Duration::from_millis(10));

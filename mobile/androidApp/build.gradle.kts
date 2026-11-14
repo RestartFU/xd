@@ -75,6 +75,11 @@ android {
         getByName("release") {
             signingConfig = releaseSigning
             isDebuggable = false
+            // R8 shrinks, optimises and obfuscates the code and drops unused
+            // resources; proguard-rules.pro keeps what is only reached by name.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
 
@@ -114,7 +119,8 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.androidx.navigation.compose)
+    // Installs the baseline profile in src/main on devices without Play's cloud profiles.
+    implementation(libs.androidx.profileinstaller)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     testImplementation(platform(libs.androidx.compose.bom))

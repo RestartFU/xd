@@ -2,13 +2,13 @@ package com.restartfu.xd.mobile.ui
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -92,12 +92,13 @@ internal fun PipelineCard(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { expanded = !expanded }
+                    .disclosure(expanded) { expanded = !expanded }
+                    .heightIn(min = 48.dp)
                     .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
                 Text(
                     "Workflow",
-                    color = MaterialTheme.colorScheme.outline,
+                    color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                 )
@@ -134,7 +135,7 @@ internal fun PipelineCard(
                     )?.let { elapsed ->
                         Text(
                             elapsed,
-                            color = MaterialTheme.colorScheme.outline,
+                            color = LocalXdSignals.current.faint,
                             style = MaterialTheme.typography.labelMedium,
                         )
                         Spacer(Modifier.width(8.dp))
@@ -153,10 +154,7 @@ internal fun PipelineCard(
                         )
                     }
                     Spacer(Modifier.width(8.dp))
-                    Text(
-                        if (expanded) "▾" else "▸",
-                        color = MaterialTheme.colorScheme.outline,
-                    )
+                    DisclosureChevron(expanded)
                 }
             }
 
@@ -167,7 +165,7 @@ internal fun PipelineCard(
                 ) {
                     Text(
                         "${run.repository} · #${run.id}",
-                        color = MaterialTheme.colorScheme.outline,
+                        color = LocalXdSignals.current.faint,
                         style = MaterialTheme.typography.labelSmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -176,7 +174,7 @@ internal fun PipelineCard(
                         if (status.jobs.isEmpty()) {
                             Text(
                                 "No jobs reported yet",
-                                color = MaterialTheme.colorScheme.outline,
+                                color = LocalXdSignals.current.faint,
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         } else {
@@ -235,7 +233,7 @@ private fun PipelineJob(job: WorkflowJobReply) {
             elapsedText(job.startedAt, job.completedAt, terminal)?.let { elapsed ->
                 Text(
                     elapsed,
-                    color = MaterialTheme.colorScheme.outline,
+                    color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.labelSmall,
                 )
                 Spacer(Modifier.width(8.dp))
@@ -251,7 +249,7 @@ private fun PipelineJob(job: WorkflowJobReply) {
         job.log?.takeIf(String::isNotBlank)?.let { activity ->
             Text(
                 activity,
-                color = MaterialTheme.colorScheme.outline,
+                color = LocalXdSignals.current.faint,
                 fontFamily = XdMonoFamily,
                 style = MaterialTheme.typography.bodySmall,
                 maxLines = 1,
@@ -309,5 +307,5 @@ private fun workflowIcon(conclusion: String?): String = when (conclusion) {
 private fun workflowColour(conclusion: String?) = when (conclusion) {
     "success" -> LocalXdSignals.current.working
     "failure", "timed_out", "startup_failure" -> MaterialTheme.colorScheme.error
-    else -> MaterialTheme.colorScheme.outline
+    else -> LocalXdSignals.current.faint
 }

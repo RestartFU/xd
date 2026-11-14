@@ -22,6 +22,7 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasScrollToKeyAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.AndroidComposeTestRule
@@ -270,7 +271,11 @@ class ProjectsScreenshotTest {
         check(model.startingSessions.value.isEmpty()) { "still starting: ${model.startingSessions.value}" }
         val draft = drafts.getString("xd/new", null)
         check(draft?.contains("Fix the footer (refused)") == true) { "draft is $draft" }
-        check(model.error.value?.contains("Fix the footer (refused)") == true) { "error is ${model.error.value}" }
+        // Said once, on the snackbar: still waiting to be said, or on it now.
+        val said = model.operationErrors.value.any { "Fix the footer (refused)" in it.message } ||
+            this@ProjectsScreenshotTest.compose.onAllNodes(hasText("Could not create “Fix the footer (refused)”", substring = true), useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        check(said) { "errors are ${model.operationErrors.value}" }
     }
 
     @Test fun openingAnotherFormKeepsAStartingSessionFromOpening() = shoot("starting-form-dark", MinimalThemePreset.DARK) {
@@ -484,7 +489,10 @@ class ProjectsScreenshotTest {
         longTree = true
         try {
             shoot(name, theme) {
-                check(shows("Quota bars") && shows("New"))
+                // Each session is a lazy row, so on a short screen "Quota bars" is held by
+                // the list without being laid out: ask the list rather than the screen.
+                val list = this@ProjectsScreenshotTest.compose.onNode(hasScrollToKeyAction()).fetchSemanticsNode()
+                check(list.config[SemanticsProperties.IndexForKey]("session-x10") >= 0 && shows("New"))
                 // The round button sits above the bar at any width, so neither covers the other.
                 val usage = bounds { hasContentDescription("Usage") }
                 val button = bounds { hasContentDescription("New") }

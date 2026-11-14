@@ -32,6 +32,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -121,6 +122,15 @@ data class CreatedDirectSession(
     val place: Any? = null,
 )
 
+/**
+ * An operation the host refused or could not be asked for, said once on the
+ * app's snackbar. [id] tells two failures with the same words apart.
+ */
+data class OperationError(val id: Long, val message: String)
+
+/** The most failures waiting to be said; past it the oldest go unsaid. */
+internal const val MAX_PENDING_ERRORS = 3
+
 data class PendingHostKeyConfirmation(
     val hostKey: SshHostKey,
     val host: String,
@@ -155,7 +165,9 @@ class MainViewModel @JvmOverloads constructor(
     private val _deletingChat = MutableStateFlow(false)
     private val _renamingChat = MutableStateFlow(false)
     private val _pausingAll = MutableStateFlow(false)
-    private val _error = MutableStateFlow<String?>(null)
+    private val _connectError = MutableStateFlow<String?>(null)
+    private val _operationErrors = MutableStateFlow<List<OperationError>>(emptyList())
+    private var operationErrorIds = 0L
     private val _shortcutEditor = MutableStateFlow<ShortcutEditorState?>(null)
 
     val connecting: StateFlow<Boolean> = _connecting.asStateFlow()
@@ -164,7 +176,35 @@ class MainViewModel @JvmOverloads constructor(
     val createdDirectSession: StateFlow<CreatedDirectSession?> =
         _createdDirectSession.asStateFlow()
     val startingSessions: StateFlow<List<StartingSession>> = _startingSessions.asStateFlow()
-    val error: StateFlow<String?> = _error.asStateFlow()
+    /**
+     * Why pairing or connecting failed, or forgetting the host: said on the
+     * pairing form and the fatal screen, and nowhere else.
+     */
+    val connectError: StateFlow<String?> = _connectError.asStateFlow()
+
+    /**
+     * Operations that failed, oldest first, each to be said once: the app's
+     * snackbar shows the first and calls [consumeError] once it has gone, by
+     * timing out or being dismissed. They wait here while no snackbar is on
+     * screen (the app in the background, a dialog's own window over it), so
+     * none is lost, and they live only as long as this view model: a
+     * rotation keeps them, the end of the process does not. A host that
+     * refuses the device (the fatal screen), or a host forgotten or changed,
+     * drops them, as they were about a connection that is gone.
+     */
+    val operationErrors: StateFlow<List<OperationError>> = _operationErrors.asStateFlow()
+
+    /** Queues [message] to be said once; see [operationErrors]. */
+    internal fun reportError(message: String) {
+        // Said about a host that has refused the device, it would only be read after pairing again.
+        if (client.link.value is Link.Fatal) return
+        _operationErrors.update { (it + OperationError(++operationErrorIds, message)).takeLast(MAX_PENDING_ERRORS) }
+    }
+
+    /** [error] has been shown, and is not shown again. */
+    fun consumeError(error: OperationError) {
+        _operationErrors.update { it - error }
+    }
     val creatingWorkspace: StateFlow<Boolean> = _creatingWorkspace.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
     val renamingChat: StateFlow<Boolean> = _renamingChat.asStateFlow()
@@ -235,6 +275,10 @@ class MainViewModel @JvmOverloads constructor(
             var wasUp = false
             client.link.collect { link ->
                 val up = link is Link.Up
+                // What failed before the host refused the device is not said on the fatal screen, nor after it.
+                if (link is Link.Fatal) _operationErrors.value = emptyList()
+                // Connected: an earlier pairing or connection failure no longer stands.
+                if (up) _connectError.value = null
                 // A change made elsewhere while this phone was away was not broadcast to it.
                 if (up && !wasUp && chatTitlesWanted) loadChatTitles()
                 if (up && !wasUp && (application as XdApplication).settings.resumeChats.value) {
@@ -262,6 +306,7 @@ class MainViewModel @JvmOverloads constructor(
         // Per-host state belongs to the host it came from.
         viewModelScope.launch {
             client.sessionGeneration.collect {
+                _operationErrors.value = emptyList()
                 _accountsError.value = null
                 _signInDrafts.value = emptyMap()
                 _chatTitles.value = null
@@ -542,7 +587,7 @@ class MainViewModel @JvmOverloads constructor(
                 authentication = SshAuthentication.Paired(fingerprint = fingerprint, code = invitation.code),
                 hostKey = SshHostKey("TLS-SHA256", pin, fingerprint),
             ))
-        } catch (error: Throwable) { _error.value = error.message ?: "Invalid pairing code" }
+        } catch (error: Throwable) { _connectError.value = error.message ?: "Invalid pairing code" }
     }
 
     fun connect(
@@ -556,7 +601,7 @@ class MainViewModel @JvmOverloads constructor(
         val authentication = if (usePrivateKey) {
             val key = privateKeyBytes
             if (key == null) {
-                _error.value = "Choose an SSH private key"
+                _connectError.value = "Choose an SSH private key"
                 return
             }
             SshAuthentication.PrivateKey(key.copyOf(), passphrase.ifEmpty { null })
@@ -578,11 +623,11 @@ class MainViewModel @JvmOverloads constructor(
                 clearPrivateKey()
                 privateKeyBytes = bytes
                 _privateKeyName.value = displayName ?: "Imported private key"
-                _error.value = null
+                _connectError.value = null
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not import the private key"
+                _connectError.value = error.message ?: "Could not import the private key"
             }
         }
     }
@@ -608,7 +653,7 @@ class MainViewModel @JvmOverloads constructor(
         if (_connecting.value) return
         clearPendingConnection()
         _connecting.value = true
-        _error.value = null
+        _connectError.value = null
         viewModelScope.launch {
             try {
                 when (val result = client.connect(connection)) {
@@ -622,12 +667,12 @@ class MainViewModel @JvmOverloads constructor(
                             username = connection.username,
                         )
                     }
-                    is ConnectResult.Failure -> _error.value = result.message
+                    is ConnectResult.Failure -> _connectError.value = result.message
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not connect over SSH"
+                _connectError.value = error.message ?: "Could not connect over SSH"
             } finally {
                 _connecting.value = false
             }
@@ -647,7 +692,7 @@ class MainViewModel @JvmOverloads constructor(
     fun forget() {
         if (_forgetting.value) return
         _forgetting.value = true
-        _error.value = null
+        _connectError.value = null
         viewModelScope.launch {
             try {
                 val host = client.host.value
@@ -656,7 +701,9 @@ class MainViewModel @JvmOverloads constructor(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not forget the remote"
+                // Said where Forget was pressed: the fatal screen, or Settings' snackbar.
+                val failure = error.message ?: "Could not forget the remote"
+                if (client.link.value is Link.Fatal) _connectError.value = failure else reportError(failure)
             } finally {
                 _forgetting.value = false
             }
@@ -675,8 +722,7 @@ class MainViewModel @JvmOverloads constructor(
         plan: Boolean? = null,
         account: String? = null,
     ) {
-        _error.value = null
-        val named = title.takeIf(String::isNotBlank) ?: if (sessionId == null) "New Session" else "New chat"
+        val named = title.takeIf(String::isNotBlank) ?: "New chat"
         val starting = StartingSession(++startingIds, folderId, sessionId, named, agent)
         _startingSessions.update { it + starting }
         // Only the newest opens when made: one started earlier and made
@@ -717,7 +763,7 @@ class MainViewModel @JvmOverloads constructor(
                 if (sentDraft != null && drafts.getString(draftKey, null) == null) {
                     drafts.edit().putString(draftKey, sentDraft).apply()
                 }
-                _error.value = "Could not create “$named”: ${error.message ?: "the host refused it."}"
+                reportError("Could not create “$named”: ${error.message ?: "the host refused it."}")
             } finally {
                 openWhenMade -= starting.id
                 _startingSessions.update { it - starting }
@@ -740,7 +786,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun createWorkspace(name: String, repository: String? = null, parentId: String? = null) =
-        createInTree("Could not create the workspace") {
+        createInTree("Could not create the project") {
             client.createFolder(name = name, parentId = parentId, repository = repository)
         }
 
@@ -753,14 +799,13 @@ class MainViewModel @JvmOverloads constructor(
     private fun createInTree(failure: String, create: suspend () -> Unit) {
         if (_creatingWorkspace.value) return
         _creatingWorkspace.value = true
-        _error.value = null
         viewModelScope.launch {
             try {
                 create()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: failure
+                reportError(error.message ?: failure)
             } finally {
                 _creatingWorkspace.value = false
             }
@@ -770,14 +815,13 @@ class MainViewModel @JvmOverloads constructor(
     fun deleteChat(chatId: String) {
         if (_deletingChat.value) return
         _deletingChat.value = true
-        _error.value = null
         viewModelScope.launch {
             try {
                 client.deleteChat(chatId)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not delete the chat"
+                reportError(error.message ?: "Could not delete the chat")
             } finally {
                 _deletingChat.value = false
             }
@@ -787,14 +831,13 @@ class MainViewModel @JvmOverloads constructor(
     fun renameChat(chatId: String, title: String) {
         if (_renamingChat.value) return
         _renamingChat.value = true
-        _error.value = null
         viewModelScope.launch {
             try {
                 client.renameChat(chatId, title)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not rename the chat"
+                reportError(error.message ?: "Could not rename the chat")
             } finally {
                 _renamingChat.value = false
             }
@@ -803,14 +846,13 @@ class MainViewModel @JvmOverloads constructor(
 
     /** Runs one tree change on the host, reporting a refusal where the app shows errors. */
     private fun treeAction(failure: String, action: suspend () -> Unit) {
-        _error.value = null
         viewModelScope.launch {
             try {
                 action()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: failure
+                reportError(error.message ?: failure)
             }
         }
     }
@@ -865,14 +907,13 @@ class MainViewModel @JvmOverloads constructor(
     private fun pauseOrResumeAll(failure: String, action: suspend () -> Unit) {
         if (_pausingAll.value) return
         _pausingAll.value = true
-        _error.value = null
         viewModelScope.launch {
             try {
                 action()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: failure
+                reportError(error.message ?: failure)
             } finally {
                 _pausingAll.value = false
             }
@@ -1080,10 +1121,23 @@ class MainViewModel @JvmOverloads constructor(
     }
 }
 
-class ChatViewModel(
+/** Something just taken out of a chat's queue or composer, which an Undo can put back. */
+sealed interface Removed {
+    /** Queued message [text], which stood at [index]. Compared by identity: each removal is its own. */
+    class Queued(val index: Int, val text: String) : Removed
+
+    /** A picture taken off the composer's draft, from [index]. */
+    class Image(val index: Int, val attachment: Attachment) : Removed
+}
+
+class ChatViewModel internal constructor(
     val client: XdClient,
     private val chatId: String,
+    /** Where a draft the host has not taken is kept through the end of the process; tests may leave it out. */
+    private val drafts: UnsentDrafts?,
 ) : ViewModel() {
+    constructor(client: XdClient, chatId: String) : this(client, chatId, null)
+
     val session: ChatSession = client.openChat(chatId)
     val state = session.state
     private val _sending = MutableStateFlow(false)
@@ -1147,6 +1201,10 @@ class ChatViewModel(
     private var draftTextDirty = false
     private var draftAttachmentsDirty = false
     private var draftRevision = -1L
+    /** The draft push on its way to the host, which a flush waits for rather than cancels. */
+    private var draftInFlight: Job? = null
+    /** How [drafts] asks this chat to send its draft now. */
+    private val pushDraftNow: suspend () -> Unit = { flushDraft() }
 
     /**
      * The reader's answers to agents' questions, kept beside the client, not
@@ -1178,6 +1236,14 @@ class ChatViewModel(
     private val draftKnown = MutableStateFlow(false)
 
     init {
+        // A draft typed and not sent before Android ended the app comes back
+        // still unsent, ahead of the host's, and goes to the host when it can.
+        drafts?.kept(chatId)?.let { text ->
+            _draft.value = text
+            draftTextDirty = true
+        }
+        drafts?.attach(chatId, pushDraftNow)
+        if (draftTextDirty) scheduleDraftSync()
         loadCatalog()
         viewModelScope.launch {
             // A request seen here and then gone was resolved or cleared, so its
@@ -1366,8 +1432,62 @@ class ChatViewModel(
     }
 
     fun removeAttachment(index: Int) {
+        val image = _attachments.value.getOrNull(index) ?: return
         _attachments.value = _attachments.value.filterIndexed { at, _ -> at != index }
         scheduleDraftSync(attachments = true)
+        _removed.value = Removed.Image(index, image)
+    }
+
+    private val _removed = MutableStateFlow<Removed?>(null)
+
+    /**
+     * What was just taken out of the queue or the composer, which its notice's
+     * Undo puts back; kept here, so a rotation while the notice shows keeps it.
+     */
+    val removed: StateFlow<Removed?> = _removed.asStateFlow()
+
+    /** Its notice has gone, with or without Undo. */
+    fun consumeRemoved(removed: Removed) {
+        _removed.compareAndSet(removed, null)
+    }
+
+    /**
+     * Puts [removed] back where it was. A queued message joins the end of the
+     * queue and then moves back to its place, as on the desktop; once the turn
+     * has ended there is no queue to return it to, so it goes back into the
+     * composer instead.
+     */
+    fun undoRemove(removed: Removed) {
+        _removed.compareAndSet(removed, null)
+        when (removed) {
+            is Removed.Image -> {
+                val images = _attachments.value
+                if (images.size >= Limits.MAX_IMAGES || images.contains(removed.attachment)) return
+                _attachments.value = images.toMutableList().apply { add(removed.index.coerceIn(0, size), removed.attachment) }
+                scheduleDraftSync(attachments = true)
+            }
+            is Removed.Queued -> {
+                if (!state.value.working) {
+                    val draft = _draft.value
+                    updateDraft(if (draft.isBlank()) removed.text else "${draft.trimEnd()}\n\n${removed.text}")
+                    return
+                }
+                launchGuarded(_droppingQueued) {
+                    val before = state.value.queue
+                    session.enqueue(removed.text)
+                    // At the end of the queue once the host says so; then one step back to its place.
+                    val queued = withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
+                        state.first { it.queue.size > before.size && it.queue.lastOrNull() == removed.text }
+                    } ?: return@launchGuarded
+                    val end = queued.queue.lastIndex
+                    if (removed.index >= end || queued.queueRevision == null) return@launchGuarded
+                    session.reorderQueued(
+                        end, removed.text, removed.index, queued.queue[removed.index],
+                        after = false, revision = queued.queueRevision,
+                    )
+                }
+            }
+        }
     }
 
     fun clearAttachmentError() {
@@ -1788,6 +1908,8 @@ class ChatViewModel(
         if (opened.revision == null) return
         launchGuarded(_droppingQueued) {
             session.dropQueued(index, text, opened.revision)
+            // Dropped at once, as on the desktop, with an Undo to put it back.
+            _removed.value = Removed.Queued(index, text)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != before }
             }
@@ -1796,6 +1918,11 @@ class ChatViewModel(
 
     fun loadOlder() {
         launchGuarded { session.loadOlder() }
+    }
+
+    /** Reads the chat again after a load that failed. */
+    fun reload() {
+        session.reload()
     }
 
     /** False, with a notice saying so, when the queue moved on since a message was opened. */
@@ -1835,6 +1962,7 @@ class ChatViewModel(
     }
 
     override fun onCleared() {
+        drafts?.detach(chatId, pushDraftNow)
         draftSyncJob?.cancel()
         if (draftTextDirty || draftAttachmentsDirty) {
             val text = _draft.value
@@ -1847,7 +1975,8 @@ class ChatViewModel(
                 context = NonCancellable,
                 start = CoroutineStart.UNDISPATCHED,
             ) {
-                runCatching { session.setDraft(text, images) }
+                // Kept by [drafts] until the host takes it, which sends it again if this fails.
+                runCatching { session.setDraft(text, images) }.onSuccess { drafts?.sent(chatId, text) }
                 session.close()
             }
         } else {
@@ -1855,13 +1984,14 @@ class ChatViewModel(
         }
     }
 
-    class Factory(
+    class Factory internal constructor(
         private val client: XdClient,
         private val chatId: String,
+        private val drafts: UnsentDrafts? = null,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            ChatViewModel(client, chatId) as T
+            ChatViewModel(client, chatId, drafts) as T
     }
 
     private companion object {
@@ -1873,25 +2003,52 @@ class ChatViewModel(
     private fun scheduleDraftSync(attachments: Boolean = false) {
         draftTextDirty = true
         draftAttachmentsDirty = draftAttachmentsDirty || attachments
-        draftSyncJob?.cancel()
+        // Kept until the host has it, so neither going offline nor Android
+        // ending the app loses what was typed.
+        drafts?.keep(chatId, _draft.value)
+        if (draftSyncJob !== draftInFlight) draftSyncJob?.cancel()
         draftSyncJob = viewModelScope.launch {
             delay(DRAFT_SYNC_DELAY_MILLIS)
-            val includeAttachments = draftAttachmentsDirty
-            val images = if (includeAttachments) {
-                _attachments.value.map(Attachment::png)
-            } else {
-                null
-            }
-            draftTextDirty = false
-            draftAttachmentsDirty = false
-            try {
-                session.setDraft(_draft.value, images)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Throwable) {
-                draftTextDirty = true
-                draftAttachmentsDirty = draftAttachmentsDirty || includeAttachments
-            }
+            pushDraft()
+        }
+    }
+
+    /**
+     * Sends the draft at once, if the host has not taken it: when the app
+     * goes to the background, or the connection comes back. A push still
+     * waiting out the pause after typing goes now instead; one already on its
+     * way is waited for, and sent again if it failed.
+     */
+    internal suspend fun flushDraft() {
+        val waiting = draftSyncJob
+        if (waiting !== draftInFlight) waiting?.cancel()
+        draftInFlight?.join()
+        pushDraft()
+    }
+
+    private suspend fun pushDraft() {
+        if (!draftTextDirty && !draftAttachmentsDirty) return
+        val includeAttachments = draftAttachmentsDirty
+        val images = if (includeAttachments) {
+            _attachments.value.map(Attachment::png)
+        } else {
+            null
+        }
+        val text = _draft.value
+        draftTextDirty = false
+        draftAttachmentsDirty = false
+        val job = currentCoroutineContext()[Job]
+        draftInFlight = job
+        try {
+            session.setDraft(text, images)
+            if (!draftTextDirty) drafts?.sent(chatId, text)
+        } catch (error: Throwable) {
+            // Not taken: still to send, and still kept.
+            draftTextDirty = true
+            draftAttachmentsDirty = draftAttachmentsDirty || includeAttachments
+            if (error is CancellationException) throw error
+        } finally {
+            if (draftInFlight === job) draftInFlight = null
         }
     }
 

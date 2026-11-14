@@ -2,6 +2,9 @@
 //! chat may use, and what a chat's composer shows once it has used its share.
 
 use super::*;
+use crate::metrics::{
+    CONTROL_HEIGHT, RADIUS_CONTROL, TEXT_CAPTION, TEXT_CONTROL, TEXT_LABEL, TEXT_TITLE,
+};
 use xd_desktop::model::{parse_quota_percent, quota_points};
 
 /// What the open chat's quota card holds between frames.
@@ -10,7 +13,7 @@ pub(super) struct QuotaCard {
     /// The stop the field was last filled for: the chat and the quota it
     /// stopped at. A new stop fills it again; a frame of the same one keeps
     /// what the user typed.
-    filled_for: Option<(String, Option<u8>)>,
+    pub(super) filled_for: Option<(String, Option<u8>)>,
     /// What the new quota field holds.
     pub(super) text: String,
     /// The chat a `set-chat-quota` is on its way for, so its buttons wait.
@@ -151,7 +154,7 @@ impl XdDesktop {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(22.0))
+                        .text_size(text_px(TEXT_TITLE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!("{}%", quota_points(quota.used))),
                 )
@@ -169,17 +172,15 @@ impl XdDesktop {
         let can_continue = !waiting && self.model.connected && percent.is_some();
         let can_lift = !waiting && self.model.connected;
         let invalid = percent.is_none();
-        let focused = self
-            .quota_input
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window);
+        let field = self.quota_input.read(cx).focus_handle(cx);
+        let focused = field.is_focused(window);
+        let keys = self.key_targets.clone();
         let field_border = if invalid {
             colors.danger
         } else if focused {
             colors.selected_border
         } else {
-            colors.border
+            colors.control_border
         };
         Some(
             div()
@@ -189,7 +190,7 @@ impl XdDesktop {
                 .flex()
                 .flex_col()
                 .gap(px(12.0))
-                .text_size(px(13.0))
+                .text_size(text_px(TEXT_CONTROL))
                 .text_color(rgb(colors.text))
                 .child(
                     composer::ask_header("This chat reached its quota", None, colors)
@@ -207,13 +208,13 @@ impl XdDesktop {
                             div()
                                 .id("chat-quota-input")
                                 .w(px(70.0))
-                                .h(px(30.0))
+                                .h(px(CONTROL_HEIGHT))
                                 .px(px(10.0))
                                 .flex()
                                 .items_center()
                                 .gap_1()
                                 .cursor_text()
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_CONTROL))
                                 .border_1()
                                 .border_color(rgb(field_border))
                                 .bg(rgb(colors.background))
@@ -224,30 +225,45 @@ impl XdDesktop {
                                     }),
                                 )
                                 .child(div().flex_1().min_w_0().child(self.quota_input.clone()))
-                                .child(div().flex_none().text_color(rgb(colors.faint)).child("%")),
+                                .child(div().flex_none().text_color(rgb(colors.faint)).child("%"))
+                                // Tab stops on it; Enter in it is Continue.
+                                .child(keys.mark(KeyLayer::Page, KeyStop::Field(field))),
                         )
                         .child(
-                            ui_button("chat-quota-continue", ButtonKind::Primary, colors)
-                                .debug_selector(|| "chat-quota-continue".into())
-                                .when(!can_continue, |button| button.opacity(0.5))
-                                .when_some(percent.filter(|_| can_continue), |button, percent| {
-                                    button.on_click(cx.listener(move |this, _, _, cx| {
-                                        this.continue_with_quota(Some(percent), cx)
-                                    }))
-                                })
-                                .child("Continue"),
+                            ui_button_when(
+                                can_continue,
+                                "chat-quota-continue",
+                                ButtonKind::Primary,
+                                colors,
+                            )
+                            .debug_selector(|| "chat-quota-continue".into())
+                            .when_some(percent.filter(|_| can_continue), |button, percent| {
+                                button.key_stop(
+                                    &keys,
+                                    KeyLayer::Page,
+                                    "chat-quota-continue",
+                                    colors,
+                                    cx,
+                                    move |this, _, cx| this.continue_with_quota(Some(percent), cx),
+                                )
+                            })
+                            .child("Continue"),
                         )
                         .child(div().flex_1())
                         // No limit at all is the bigger step, so it asks for
                         // less attention than going on with a quota.
                         .child(
-                            ui_button("chat-quota-lift", ButtonKind::Ghost, colors)
+                            ui_button_when(can_lift, "chat-quota-lift", ButtonKind::Ghost, colors)
                                 .debug_selector(|| "chat-quota-lift".into())
-                                .when(!can_lift, |button| button.opacity(0.5))
                                 .when(can_lift, |button| {
-                                    button.on_click(cx.listener(|this, _, _, cx| {
-                                        this.continue_with_quota(None, cx)
-                                    }))
+                                    button.key_stop(
+                                        &keys,
+                                        KeyLayer::Page,
+                                        "chat-quota-lift",
+                                        colors,
+                                        cx,
+                                        |this, _, cx| this.continue_with_quota(None, cx),
+                                    )
                                 })
                                 .child("Continue without a limit"),
                         ),
@@ -256,7 +272,7 @@ impl XdDesktop {
                     card.child(
                         div()
                             .debug_selector(|| "chat-quota-invalid".into())
-                            .text_size(px(12.0))
+                            .text_size(text_px(TEXT_LABEL))
                             .text_color(rgb(colors.danger))
                             .child("Enter a whole number from 1 to 100."),
                     )
@@ -281,17 +297,14 @@ impl XdDesktop {
                 .debug_selector(|| "native-quota-meter".into())
                 .flex_none()
                 .mr_2()
-                .text_size(px(11.0))
+                .text_size(text_px(TEXT_CAPTION))
                 .text_color(rgb(tone))
-                .tooltip(move |_, cx| {
-                    cx.new(|_| PaneTooltip {
-                        label: "How much of its account's 5-hour limit this chat has used, \
-                                against its quota. An estimate: chats working on one \
-                                account share each rise.",
-                        colors,
-                    })
-                    .into()
-                })
+                .tooltip(pane_tooltip(
+                    "How much of its account's 5-hour limit this chat has used, \
+                     against its quota. An estimate: chats working on one \
+                     account share each rise.",
+                    colors,
+                ))
                 .child(format!(
                     "Quota {}% of {}%",
                     quota_points(quota.used),

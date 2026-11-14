@@ -1,19 +1,22 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.selection.toggleable
 import android.content.Context
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -32,12 +35,12 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -138,10 +141,12 @@ internal fun NewSessionFlow(
 ) {
     FullScreenSheet(onDismiss) {
         // Forward into the form, back out to the list, as a stack of pages moves.
-        AnimatedContent(
-            targetState = projectId,
-            transitionSpec = { pageTransition(forward = targetState != null) },
-            label = "new-session-step",
+        // Held as a gesture, Back from the form brings the list in as it is dragged.
+        val still = reducedMotion()
+        val steps = rememberPageTransition(projectId, "new-session-step")
+        PredictiveBack(steps, enabled = returnsToList && projectId != null, back = null) { onChoose(null) }
+        steps.transition.AnimatedContent(
+            transitionSpec = { pageMotion(still, pageTransition(forward = targetState != null)) },
         ) { id ->
             val chosen = choices.firstOrNull { it.project.id == id }
             if (id == null || chosen == null) {
@@ -226,30 +231,82 @@ private data class FormHeader(
     val session: Boolean = false,
 )
 
-private fun pageTransition(forward: Boolean) =
-    (slideInHorizontally(tween(220)) { width -> if (forward) width / 5 else -width / 5 } + fadeIn(tween(220)))
-        .togetherWith(slideOutHorizontally(tween(180)) { width -> if (forward) -width / 5 else width / 5 } + fadeOut(tween(180)))
+private fun pageTransition(forward: Boolean) = sharedAxisX(forward)
 
-/** A whole-screen surface over the app, rising from the bottom as a full-screen dialog does. */
+/**
+ * New session's surface. In a compact window, a phone's, a whole-screen
+ * surface rising from the bottom, as Material's full-screen dialog does. With
+ * a medium or expanded width and the height to go with it, a tablet's, a
+ * basic dialog instead: centred, no wider than [BasicDialogWidth], with the
+ * same top bar and scrolling page inside, over the dimmed app. A phone on its
+ * side keeps the whole screen: a dialog in its short height would leave the
+ * form a sliver. One dialog window either way, so the form keeps its state
+ * when the window changes size.
+ */
 @Composable
 private fun FullScreenSheet(onDismiss: () -> Unit, content: @Composable () -> Unit) {
+    val basic = rememberWindowLayout().tabletChat
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
         val window = (LocalView.current.parent as? DialogWindowProvider)?.window
-        LaunchedEffect(window) { window?.setWindowAnimations(android.R.style.Animation_InputMethod) }
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) { content() }
+        LaunchedEffect(window, basic) {
+            window?.setWindowAnimations(if (basic) android.R.style.Animation_Dialog else android.R.style.Animation_InputMethod)
+        }
+        // Its own window, so its bars are set here: the activity's do not reach it.
+        DialogSystemBars()
+        if (basic) {
+            var card by remember { mutableStateOf(Rect.Zero) }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    // A tap on the dimmed app around it closes it, as a dialog's
+                    // scrim does; the form keeps its draft for next time.
+                    .pointerInput(onDismiss) { detectTapGestures { if (!card.contains(it)) onDismiss() } }
+                    // Clear of the bars, a cutout and the keyboard: the page
+                    // inside has none of them to keep clear of.
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(BasicDialogMargin),
+                contentAlignment = Alignment.Center,
+            ) {
+                Surface(
+                    Modifier
+                        .widthIn(max = BasicDialogWidth)
+                        .heightIn(max = BasicDialogHeight)
+                        .fillMaxSize()
+                        .onGloballyPositioned { card = it.boundsInRoot() },
+                    shape = MaterialTheme.shapes.extraLarge,
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, glassEdge()),
+                    shadowElevation = 6.dp,
+                ) { content() }
+            }
+        } else {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+                // Clear of a cutout or a navigation bar at either side.
+                Box(Modifier.fillMaxSize().safeSidesPadding()) { content() }
+            }
+        }
     }
 }
+
+/** The widest New session is drawn as a basic dialog: Material's widest basic dialog. */
+private val BasicDialogWidth = 560.dp
+
+/** The tallest it is drawn as one, so a tall tablet does not stretch a short list. */
+private val BasicDialogHeight = 720.dp
+
+/** Its least gap to the window's edges. */
+private val BasicDialogMargin = 24.dp
 
 @Composable
 private fun TopBar(title: String, navigation: Navigation) {
     Row(
         Modifier
             .fillMaxWidth()
-            .statusBarsPadding()
-            .height(64.dp)
+            .safeTopPadding()
+            .heightIn(min = 64.dp)
             .padding(start = 4.dp, end = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -263,7 +320,8 @@ private fun TopBar(title: String, navigation: Navigation) {
         }
         Text(
             title,
-            modifier = Modifier.semantics { heading() },
+            // Where the focus lands as the sheet or its page appears.
+            modifier = Modifier.pageHeading(),
             style = MaterialTheme.typography.titleLarge,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -285,12 +343,15 @@ private fun ProjectStep(
 ) {
     var filter by rememberSaveable { mutableStateOf("") }
     val shown = choices.matching(filter)
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().page("New session")) {
         TopBar("New session", Navigation.Close(onClose))
+        // As wide as the sheet, so it scrolls from its margins too; its rows
+        // stop at the reading measure and sit in the middle of a wide window.
+        BoxWithConstraints(Modifier.weight(1f)) {
         LazyColumn(
             // Ends above the keyboard and navigation bar, so the last rows can scroll into view.
-            modifier = Modifier.weight(1f).windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
+            contentPadding = readingInset(maxWidth, 16.dp).let { side -> PaddingValues(start = side, end = side, top = 4.dp, bottom = 24.dp) },
         ) {
             item("question") {
                 Text(
@@ -309,6 +370,7 @@ private fun ProjectStep(
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                        colors = xdFieldColors(),
                     )
                 }
             }
@@ -338,10 +400,10 @@ private fun ProjectStep(
                 }
             }
         }
+        }
     }
 }
 
-private val GROUP_RADIUS = 14.dp
 
 @Composable
 private fun ProjectChoiceRow(
@@ -458,7 +520,6 @@ private fun SessionForm(
             }
         }
     }
-    if (navigation is Navigation.Back) BackHandler(onBack = navigation.action)
 
     val efforts = backends.firstOrNull { it.id == agent.wire }?.efforts.orEmpty()
     val accountChoices = accounts?.get(agent.wire).orEmpty()
@@ -497,10 +558,12 @@ private fun SessionForm(
         )
     }
 
-    AnimatedContent(
-        targetState = page,
-        transitionSpec = { pageTransition(forward = targetState == FormPage.BASE) },
-        label = "new-session-page",
+    // Back from the branch list returns to the form; held as a gesture, the form comes in as it is dragged.
+    val still = reducedMotion()
+    val pages = rememberPageTransition(page, "new-session-page")
+    PredictiveBack(pages, enabled = page == FormPage.BASE, back = FormPage.FORM) { page = FormPage.FORM }
+    pages.transition.AnimatedContent(
+        transitionSpec = { pageMotion(still, pageTransition(forward = targetState == FormPage.BASE)) },
     ) { shown ->
         when (shown) {
             FormPage.BASE -> BasePicker(
@@ -512,12 +575,21 @@ private fun SessionForm(
                     page = FormPage.FORM
                 },
             )
-            FormPage.FORM -> Column(Modifier.fillMaxSize()) {
+            FormPage.FORM -> Column(Modifier.fillMaxSize().page(if (chatTab) "New chat" else "New session")) {
                 TopBar(if (chatTab) "New chat" else "New session", navigation)
-                Column(
+                // Scrolls across the sheet's width; the form stops at the
+                // reading measure and sits in the middle of a wide window.
+                Box(
                     Modifier
                         .weight(1f)
-                        .verticalScroll(rememberScrollState())
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    contentAlignment = Alignment.TopCenter,
+                ) {
+                Column(
+                    Modifier
+                        .widthIn(max = ReadingMeasure + 32.dp)
+                        .fillMaxWidth()
                         .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(28.dp),
                 ) {
@@ -533,6 +605,7 @@ private fun SessionForm(
                             imeAction = ImeAction.Done,
                         ),
                         modifier = Modifier.fillMaxWidth(),
+                        colors = xdFieldColors(),
                     )
                     FormSection("Assistant") {
                         // Effort and accounts belong to one assistant.
@@ -542,11 +615,11 @@ private fun SessionForm(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     catalogError,
-                                    modifier = Modifier.weight(1f).padding(start = 4.dp),
+                                    modifier = Modifier.weight(1f).padding(start = 4.dp).announced(),
                                     color = MaterialTheme.colorScheme.error,
                                     style = MaterialTheme.typography.bodySmall,
                                 )
-                                retryCatalog?.let { TextButton(onClick = it) { Text("Retry") } }
+                                retryCatalog?.let { TextButton(onClick = it) { Text("Try again") } }
                             }
                         }
                     }
@@ -578,6 +651,7 @@ private fun SessionForm(
                         )
                     }
                 }
+                }
                 ActionBar(
                     label = if (chatTab) "Start chat" else "Start session",
                     blocker = blocker,
@@ -597,10 +671,10 @@ private fun SessionForm(
 private fun segmentedColors() = SegmentedButtonDefaults.colors(
     activeContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
     activeContentColor = MaterialTheme.colorScheme.onSurface,
-    activeBorderColor = MaterialTheme.colorScheme.outline,
+    activeBorderColor = controlBorder(),
     inactiveContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
     inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-    inactiveBorderColor = MaterialTheme.colorScheme.outline,
+    inactiveBorderColor = controlBorder(),
 )
 
 @Composable
@@ -619,7 +693,7 @@ private fun FormSection(label: String, content: @Composable ColumnScope.() -> Un
 /** A grouped surface for rows that belong together. */
 @Composable
 private fun Group(content: @Composable ColumnScope.() -> Unit) {
-    val shape = RoundedCornerShape(GROUP_RADIUS)
+    val shape = MaterialTheme.shapes.medium
     Column(
         Modifier
             .fillMaxWidth()
@@ -683,22 +757,23 @@ private fun AgentTiles(selected: DirectAgent, onSelect: (DirectAgent) -> Unit) {
     Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         DirectAgent.entries.forEach { candidate ->
             val chosen = candidate == selected
-            val shape = RoundedCornerShape(GROUP_RADIUS)
+            val shape = MaterialTheme.shapes.medium
             Box(
                 Modifier
                     .weight(1f)
-                    .height(84.dp)
+                    // At least this tall, and taller for enlarged text rather than clipping it.
+                    .heightIn(min = 84.dp)
                     .clip(shape)
                     .background(if (chosen) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow)
                     .border(
                         if (chosen) 1.5.dp else 1.dp,
-                        if (chosen) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.outlineVariant,
+                        if (chosen) MaterialTheme.colorScheme.outline else controlBorder(),
                         shape,
                     )
                     .selectable(selected = chosen, role = Role.RadioButton, onClick = { onSelect(candidate) }),
             ) {
                 Column(
-                    Modifier.align(Alignment.Center),
+                    Modifier.align(Alignment.Center).padding(horizontal = 8.dp, vertical = 14.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -837,7 +912,7 @@ private fun WorkspaceSection(
             places.sourcesError?.let {
                 Text(
                     "Branches and pull requests could not be listed: $it",
-                    modifier = Modifier.padding(start = 4.dp),
+                    modifier = Modifier.padding(start = 4.dp).announced(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -851,9 +926,21 @@ private fun WorkspaceSection(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+            // Nothing to choose between: said, so the heading is not left over nothing.
+            if (places.worktrees.isEmpty() && !canNew && places.sourcesError == null && places.pullRequestError == null) {
+                Text(
+                    NO_WORKSPACE_CHOICE,
+                    modifier = Modifier.padding(start = 4.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }
+
+/** Said under Workspace when a project has no checkouts or branches to pick from. */
+internal const val NO_WORKSPACE_CHOICE = "Uses the project's own directory. There is no other checkout or branch to choose."
 
 /** The branch or pull request a new worktree starts from, chosen on its own page. */
 @Composable
@@ -934,10 +1021,12 @@ private fun ChoiceRow(label: String, detail: String, chosen: Boolean, onClick: (
 
 @Composable
 private fun SwitchRow(title: String, detail: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    // One stop, named by its words: a tap anywhere on the row turns it.
     Row(
         Modifier
             .fillMaxWidth()
             .heightIn(min = 64.dp)
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -946,7 +1035,7 @@ private fun SwitchRow(title: String, detail: String, checked: Boolean, onChecked
             Text(title, style = MaterialTheme.typography.bodyLarge)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = LocalXdSignals.current.faint)
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 
@@ -1051,7 +1140,10 @@ private fun ValueRow(
     onSelect: (String) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
-    val tone = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+    // Disabled, it takes the theme's faint ink rather than a see-through one:
+    // still readable, and plainly not the row's usual colour.
+    val faint = LocalXdSignals.current.faint
+    val tone = if (enabled) MaterialTheme.colorScheme.onSurface else faint
     Row(
         Modifier
             .fillMaxWidth()
@@ -1067,7 +1159,7 @@ private fun ValueRow(
         }
         Box {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(value, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(value, style = MaterialTheme.typography.bodyMedium, color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else faint)
                 Icon(
                     painterResource(R.drawable.ic_chevron_down),
                     contentDescription = null,
@@ -1098,6 +1190,11 @@ private fun ActionBar(label: String, blocker: String?, busy: Boolean, onClick: (
         Column(
             Modifier
                 .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+                // Under the form it starts, as wide as it is.
+                .fillMaxWidth()
+                .wrapContentWidth(Alignment.CenterHorizontally)
+                .widthIn(max = ReadingMeasure + 32.dp)
+                .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -1116,8 +1213,9 @@ private fun ActionBar(label: String, blocker: String?, busy: Boolean, onClick: (
             Button(
                 onClick = onClick,
                 enabled = blocker == null,
-                shape = RoundedCornerShape(GROUP_RADIUS),
-                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = MaterialTheme.shapes.medium,
+                // At least 52dp, and taller for enlarged text rather than clipping it.
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
             ) { Text(label, style = MaterialTheme.typography.labelLarge) }
         }
     }
@@ -1150,7 +1248,6 @@ private fun BasePicker(
     onBack: () -> Unit,
     onPick: (Ops.NewSessionWorktree) -> Unit,
 ) {
-    BackHandler(onBack = onBack)
     var filter by rememberSaveable { mutableStateOf("") }
     val query = filter.trim()
     val pulls = places?.pullRequests.orEmpty()
@@ -1161,12 +1258,13 @@ private fun BasePicker(
     val chosenBranch = (selected as? Ops.NewSessionWorktree.Branch)?.reference
     val (shownPulls, hiddenPulls) = limitPlaces(pulls, places?.pullRequests.orEmpty()) { it.number == chosenPull }
     val (shownBranches, hiddenBranches) = limitPlaces(branches, places?.branches.orEmpty()) { it.reference == chosenBranch }
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().page("Branch or pull request")) {
         TopBar("Branch or pull request", Navigation.Back(onBack))
+        BoxWithConstraints(Modifier.weight(1f)) {
         LazyColumn(
             // Ends above the keyboard and navigation bar, so the last rows can scroll into view.
-            modifier = Modifier.weight(1f).windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
+            contentPadding = readingInset(maxWidth, 16.dp).let { side -> PaddingValues(start = side, end = side, top = 4.dp, bottom = 24.dp) },
         ) {
             item("filter") {
                 OutlinedTextField(
@@ -1176,6 +1274,7 @@ private fun BasePicker(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp),
+                    colors = xdFieldColors(),
                 )
             }
             placeGroup(
@@ -1237,6 +1336,7 @@ private fun BasePicker(
                     )
                 }
             }
+        }
         }
     }
 }

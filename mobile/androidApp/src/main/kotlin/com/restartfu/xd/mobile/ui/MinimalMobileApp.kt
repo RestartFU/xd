@@ -2,6 +2,10 @@
 
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,6 +18,8 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
+import kotlin.math.roundToInt
+import com.restartfu.xd.mobile.UnsavedFileStore
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -36,7 +42,6 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -61,7 +66,15 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.material3.ButtonDefaults
 import androidx.lifecycle.ViewModel
 import com.restartfu.xd.model.ChatSummary
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -73,6 +86,7 @@ import androidx.compose.material3.rememberTooltipState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.ui.unit.Dp
 import androidx.compose.material3.MaterialTheme
@@ -82,6 +96,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -90,6 +105,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -105,12 +121,12 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.ChatViewModel
+import com.restartfu.xd.mobile.rememberUnsentDrafts
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
@@ -124,7 +140,10 @@ import com.restartfu.xd.model.backgroundTasksLabel
 import com.restartfu.xd.model.minimalProjects
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.layout.ContentScale
 import com.restartfu.xd.model.FolderDestination
 import com.restartfu.xd.model.MinimalFolder
@@ -163,6 +182,12 @@ private enum class MobileDestination {
     USAGE,
 }
 
+/**
+ * The page drawn for a destination. Projects stands in for a session that
+ * went away, so this is what the transition between pages follows.
+ */
+private enum class WorkspacePage { PROJECTS, SESSION, TERMINAL, USAGE }
+
 private const val GLOBAL_TERMINAL_CHAT_ID = "global:mobile"
 
 private val ChatSelectionsSaver = listSaver<Map<String, String>, String>(
@@ -187,6 +212,18 @@ internal class MobileWorkspaceModels : ViewModel() {
     private var usageOwner: SessionViewModelOwner? = null
     fun usage(): ViewModelStoreOwner = usageOwner ?: SessionViewModelOwner().also { usageOwner = it }
 
+    // The global Terminal's shell: kept here, so a rotation or a resized
+    // window finds the same terminal, scrollback and all, without opening it
+    // again; let go of when the reader leaves the Terminal page.
+    private var terminalOwner: SessionViewModelOwner? = null
+    fun terminal(): ViewModelStoreOwner = terminalOwner ?: SessionViewModelOwner().also { terminalOwner = it }
+
+    /** Closes the global Terminal's shell, as leaving its page does. */
+    fun leaveTerminal() {
+        terminalOwner?.viewModelStore?.clear()
+        terminalOwner = null
+    }
+
     fun retain(chatIds: Set<String>, sessionIds: Set<String>) {
         // Panes can reference a chat connection, so release them first.
         workspaces.keys.filterNot { it in sessionIds }.forEach { workspaces.remove(it)?.viewModelStore?.clear() }
@@ -194,6 +231,7 @@ internal class MobileWorkspaceModels : ViewModel() {
     }
 
     private fun clearStores() {
+        leaveTerminal()
         usageOwner?.viewModelStore?.clear()
         usageOwner = null
         workspaces.values.forEach { it.viewModelStore.clear() }
@@ -211,43 +249,72 @@ internal fun MinimalMobileApp(
     link: Link,
     settings: MobileSettings,
 ) {
+    // Said once for the whole app: every page's connection line reads it.
+    CompositionLocalProvider(
+        LocalConnectionNotice provides rememberConnectionNotice(link),
+        // The line's Try again: the next attempt at once, in place of the wait.
+        LocalConnectionRetry provides model.client::retryConnection,
+    ) {
+        MinimalMobileWorkspace(model, settings)
+    }
+}
+
+@Composable
+private fun MinimalMobileWorkspace(
+    model: MainViewModel,
+    settings: MobileSettings,
+) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
     val waitingChats by model.client.waitingChats.collectAsStateWithLifecycle()
+    val unreadChats by model.client.unreadChats.collectAsStateWithLifecycle()
+    // How each of the open session's chats stands, for its tab and menu row.
+    val chatStatusOf = { chat: ChatSummary -> chatStatus(chat, chat.id in waitingChats, chat.id in unreadChats) }
     val created by model.createdDirectSession.collectAsStateWithLifecycle()
-    val operationError by model.error.collectAsStateWithLifecycle()
+    val operationErrors by model.operationErrors.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     val stores: MobileWorkspaceModels = viewModel()
     val sessionGeneration by model.client.sessionGeneration.collectAsStateWithLifecycle()
     remember(stores, sessionGeneration) { stores.bindGeneration(sessionGeneration) }
+    // Unsaved file edits by session, kept through Android ending the app.
+    val unsavedFiles: UnsavedFileStore = viewModel()
+    remember(unsavedFiles, sessionGeneration) { unsavedFiles.bindGeneration(sessionGeneration) }
+    // Composer drafts the host has not taken, kept the same way.
+    val unsentDrafts = rememberUnsentDrafts(model.client)
+    remember(unsentDrafts, sessionGeneration) { unsentDrafts.bindGeneration(sessionGeneration) }
     val savedChatState = rememberSaveableStateHolder()
     var activeSessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var chatSelections by rememberSaveable(stateSaver = ChatSelectionsSaver) { mutableStateOf(emptyMap()) }
     var hiddenChatIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var mobileDestination by rememberSaveable { mutableStateOf(MobileDestination.PROJECTS) }
-    var createChatIn by remember { mutableStateOf<MinimalSession?>(null) }
+    // These four are saved by id, so a rotation does not close a form or a question half answered.
+    var createChatInId by rememberSaveable { mutableStateOf<String?>(null) }
     // Saved by id, so a chat rename survives rotating the phone.
     var renameChatId by rememberSaveable { mutableStateOf<String?>(null) }
     val renameChat = tree.chats.firstOrNull { it.id == renameChatId }
-    var deleteChat by remember { mutableStateOf<ChatSummary?>(null) }
+    var deleteChatId by rememberSaveable { mutableStateOf<String?>(null) }
+    val deleteChat = tree.chats.firstOrNull { it.id == deleteChatId }
     val deleting by model.deletingChat.collectAsStateWithLifecycle()
     val renamingChats by model.renamingChat.collectAsStateWithLifecycle()
     // Saved by id, so a rename in progress survives rotating the phone.
     var renamingSessionId by rememberSaveable { mutableStateOf<String?>(null) }
-    var deletingSession by remember { mutableStateOf<MinimalSession?>(null) }
+    var deletingSessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var renamingProjectId by rememberSaveable { mutableStateOf<String?>(null) }
-    var deletingProject by remember { mutableStateOf<MinimalProject?>(null) }
+    var deletingProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     val settledNotice by model.settledNotice.collectAsStateWithLifecycle()
     // Held here, not in the projects list, so Back from a chat returns to the same place in it.
     val projectsList = rememberLazyListState()
+    // And with the focus on the row that was opened: a session's on Projects, a model's on Usage.
+    val projectsReturns = rememberReturnFocus()
+    val usageReturns = rememberReturnFocus()
     val sessionActions = SessionActions(
         settlement = tree.settlement,
         settle = { model.settleSession(it.id, it.title) },
         unsettle = { model.unsettleSession(it.id) },
         setAutoSettle = { session, enabled -> model.setSessionAutoSettle(session.id, enabled) },
         rename = { renamingSessionId = it.id },
-        delete = { deletingSession = it },
+        delete = { deletingSessionId = it.id },
     )
     // Worked out once per tree, not on every recomposition of the app.
     val projects = remember(tree) { tree.minimalProjects() }
@@ -263,9 +330,16 @@ internal fun MinimalMobileApp(
     val openChats = sessionChats.filterNot { it.id in hiddenChatIds }
     val activeChat = openChats.firstOrNull { it.id == chatSelections[activeSessionId] } ?: openChats.firstOrNull()
 
-    LaunchedEffect(tree.chats, tree.loading, tree.error) {
+    LaunchedEffect(tree.chats, tree.loading, tree.error, tree.loaded) {
         if (!tree.loading && tree.error == null) {
             stores.retain(tree.chats.map { it.id }.toSet(), sessions.map { it.id }.toSet())
+            // Only once the host's tree has arrived: the tree is empty while the
+            // app starts, and that must not drop the edits it is about to bring
+            // back. A tree that arrived empty does drop them: those chats are gone.
+            if (tree.loaded) {
+                unsavedFiles.retain(sessions.map { it.id }.toSet())
+                unsentDrafts.retain(tree.chats.map { it.id }.toSet())
+            }
         }
     }
     val place = listOf(mobileDestination, activeSessionId, chatSelections, hiddenChatIds)
@@ -305,18 +379,22 @@ internal fun MinimalMobileApp(
     val addChat: (MinimalSession) -> Unit = { session ->
         if (session.terminalChatId.startsWith("session:")) {
             model.stopOpeningStartingSessions()
-            createChatIn = session
+            createChatInId = session.id
         } else {
             scope.launch { snackbar.showSnackbar("Update the connected host to add chats inside a session.") }
         }
     }
-    BackHandler(enabled = mobileDestination != MobileDestination.PROJECTS, onBack = showProjects)
-    val expanded = LocalConfiguration.current.screenWidthDp >= 600
+    // Which layout the window gets, from its width and its height: see [WindowLayout].
+    val layout = rememberWindowLayout()
     val imeVisible = WindowInsets.isImeVisible
     val chatOpen = mobileDestination == MobileDestination.SESSIONS && activeChat != null
-    val showBottomNavigation = !expanded && !imeVisible && !chatOpen
+    val showBottomNavigation = !layout.rail && !imeVisible && !chatOpen
     // The floating bar is drawn over the page, which keeps this much of its bottom clear.
     val barInset = if (showBottomNavigation) FloatingBarClearance else 0.dp
+    // A session is opened from Projects and Back returns there, so the rail and
+    // the bar show Projects as the current place while one is open, and their
+    // Projects goes back to it as Back does.
+    val barDestination = if (mobileDestination == MobileDestination.SESSIONS) MobileDestination.PROJECTS else mobileDestination
     // Projects also stands in for a session that went away, so this follows the page shown.
     val projectsShown = when (mobileDestination) {
         MobileDestination.TERMINAL, MobileDestination.USAGE -> false
@@ -324,8 +402,13 @@ internal fun MinimalMobileApp(
         MobileDestination.PROJECTS -> true
     }
 
-    LaunchedEffect(operationError) {
-        operationError?.let { snackbar.showSnackbar(it) }
+    // Each failure once: taken off the queue only when its snackbar has gone,
+    // so a rotation while it shows shows it again, and one after does not.
+    val nextError = operationErrors.firstOrNull()
+    LaunchedEffect(nextError) {
+        val error = nextError ?: return@LaunchedEffect
+        snackbar.showSnackbar(error.message)
+        model.consumeError(error)
     }
     // A session settled by hand can come straight back, as on the desktop.
     LaunchedEffect(settledNotice) {
@@ -341,7 +424,41 @@ internal fun MinimalMobileApp(
         if (result == SnackbarResult.ActionPerformed) model.undoSettle(notice)
         model.consumeSettledNotice(notice)
     }
-    Box(Modifier.fillMaxSize()) {
+    // Animations turned off cut straight from one page to the next.
+    val still = reducedMotion()
+    val page = when {
+        mobileDestination == MobileDestination.TERMINAL -> WorkspacePage.TERMINAL
+        mobileDestination == MobileDestination.USAGE -> WorkspacePage.USAGE
+        mobileDestination == MobileDestination.SESSIONS && activeSession != null -> WorkspacePage.SESSION
+        else -> WorkspacePage.PROJECTS
+    }
+    // Back from a session, or from a page the bar switches to, returns to
+    // Projects; held as a gesture, Projects comes in as it is dragged.
+    val pages = rememberPageTransition(page, "page")
+    PredictiveBack(
+        pages,
+        enabled = mobileDestination != MobileDestination.PROJECTS,
+        back = WorkspacePage.PROJECTS,
+        onBack = showProjects,
+    )
+    // A brief word to the reader goes on the app's one snackbar, not a system toast.
+    val notify: (String) -> Unit = remember(scope, snackbar) { { text -> scope.launch { snackbar.showSnackbar(text) } } }
+    // The open chat's composer says how far up it reaches, so the snackbar keeps above it.
+    val snackbarClearance = remember { SnackbarClearance() }
+    // Removing a queued message or a picture leaves a notice with Undo, in place of asking first.
+    val undoNotice: suspend (String) -> Boolean = remember(snackbar) {
+        { text ->
+            snackbar.showSnackbar(text, actionLabel = "Undo", duration = SnackbarDuration.Long) == SnackbarResult.ActionPerformed
+        }
+    }
+    CompositionLocalProvider(
+        LocalNotice provides notify,
+        LocalUndoNotice provides undoNotice,
+        LocalSnackbarClearance provides snackbarClearance,
+    ) {
+    // Clear of a cutout or a navigation bar at either side, as a phone on its
+    // side has: the backdrop still runs under them, nothing else does.
+    Box(Modifier.fillMaxSize().safeSidesPadding()) {
     Row(
         Modifier
             .fillMaxSize()
@@ -349,19 +466,46 @@ internal fun MinimalMobileApp(
             // Settings covers it; neither TalkBack nor a search should find what is beneath.
             .then(if (settingsOpen) Modifier.clearAndSetSemantics {} else Modifier),
     ) {
-        if (expanded) {
-            XdNavigationRail(mobileDestination, showProjects, showTerminal, showUsage)
+        if (layout.rail) {
+            XdNavigationRail(barDestination, showProjects, showTerminal, showUsage)
         }
         Column(Modifier.weight(1f)) {
             Box(Modifier.weight(1f)) {
-                when {
-                    mobileDestination == MobileDestination.TERMINAL -> MinimalGlobalTerminal(
-                        model, link, showProjects, barInset, onSettings = { settingsOpen = true },
+                pages.transition.AnimatedContent(
+                    modifier = Modifier.fillMaxSize(),
+                    // Into a session and back out along one axis; between the
+                    // places the bar switches, a fade through.
+                    transitionSpec = {
+                        pageMotion(
+                            still,
+                            when {
+                                targetState == WorkspacePage.SESSION -> sharedAxisX(forward = true)
+                                initialState == WorkspacePage.SESSION -> sharedAxisX(forward = false)
+                                else -> fadeThrough()
+                            },
+                        )
+                    },
+                ) { shown ->
+                // Each page says its name as it appears; a session's chat says its own.
+                val named = when (shown) {
+                    WorkspacePage.TERMINAL -> Modifier.page("Terminal")
+                    WorkspacePage.USAGE -> Modifier.page("Usage")
+                    WorkspacePage.PROJECTS -> Modifier.page("Projects")
+                    WorkspacePage.SESSION -> Modifier
+                }
+                Box(Modifier.fillMaxSize().then(named)) {
+                when (shown) {
+                    WorkspacePage.TERMINAL -> MinimalGlobalTerminal(
+                        model, stores, barInset, onSettings = { settingsOpen = true },
+                        // Gone from the screen because the reader went elsewhere, not
+                        // because the window turned or was resized and is made again.
+                        left = { mobileDestination != MobileDestination.TERMINAL },
                     )
-                    mobileDestination == MobileDestination.USAGE -> Column(
+                    WorkspacePage.USAGE -> CompositionLocalProvider(LocalReturnFocus provides usageReturns) {
+                    Column(
                         Modifier.fillMaxSize().background(GlassPage),
                     ) {
-                        ProductHeader(link = link, title = "Usage", onSettings = { settingsOpen = true })
+                        ProductHeader(title = "Usage", onSettings = { settingsOpen = true })
                         // Kept with the other per-host stores, so leaving Usage keeps what it read.
                         val usage: UsageViewModel = viewModel(
                             key = "usage",
@@ -370,7 +514,9 @@ internal fun MinimalMobileApp(
                         )
                         UsageContent(usage, bottomInset = barInset)
                     }
-                    mobileDestination == MobileDestination.SESSIONS && activeSession != null -> {
+                    }
+                    // Gone while its page is still leaving: nothing is drawn for those frames.
+                    WorkspacePage.SESSION -> if (activeSession != null) {
                         val selectTab = { id: String ->
                             // A tab picked: a chat still starting does not take its place.
                             model.stopOpeningStartingSessions()
@@ -387,7 +533,7 @@ internal fun MinimalMobileApp(
                         }
                         val tabStrip: @Composable (AgentTabs, (() -> Unit)?) -> Unit = { agents, showPullRequests ->
                             SessionTabStrip(
-                                compact = !expanded,
+                                compact = !layout.tabletChat,
                                 chats = sessionChats,
                                 hiddenChatIds = hiddenChatIds,
                                 selectedChatId = activeChat?.id,
@@ -395,11 +541,12 @@ internal fun MinimalMobileApp(
                                 closeTab = closeTab,
                                 addTab = { addChat(activeSession) },
                                 renameChat = { renameChatId = it.id },
-                                deleteChat = { deleteChat = it },
+                                deleteChat = { deleteChatId = it.id },
                                 session = activeSession,
                                 actions = sessionActions,
                                 agents = agents,
                                 showPullRequests = showPullRequests,
+                                statusOf = chatStatusOf,
                             )
                         }
                         if (activeChat != null) {
@@ -407,7 +554,7 @@ internal fun MinimalMobileApp(
                                 val chat: ChatViewModel = viewModel(
                                     key = "chat-${activeChat.id}",
                                     viewModelStoreOwner = stores.chat(activeChat.id),
-                                    factory = ChatViewModel.Factory(model.client, activeChat.id),
+                                    factory = ChatViewModel.Factory(model.client, activeChat.id, unsentDrafts),
                                 )
                                 ChatScreen(
                                     model = chat, goBack = showProjects,
@@ -419,20 +566,24 @@ internal fun MinimalMobileApp(
                                     workspaceId = activeSession.id,
                                     terminalChatId = activeSession.terminalChatId,
                                     workspaceOwner = stores.workspace(activeSession.id),
+                                    unsavedFiles = unsavedFiles.session(activeSession.id),
                                     sessionTabs = tabStrip,
                                     // A phone keeps one header row and moves the
-                                    // tabs into it; a tablet has room for the tabs.
-                                    sessionChats = if (expanded) null else SessionChats(
+                                    // tabs into it, upright or on its side; a
+                                    // window with a tablet's height has room for the tabs.
+                                    sideBySide = layout.sideBySide,
+                                    sessionChats = if (layout.tabletChat) null else SessionChats(
                                         chats = sessionChats,
                                         selectedId = activeChat.id,
                                         select = selectTab,
                                         add = { addChat(activeSession) },
                                         close = closeTab,
                                         rename = { renameChatId = it.id },
-                                        delete = { deleteChat = it },
+                                        delete = { deleteChatId = it.id },
                                         settleSession = { sessionActions.settle(activeSession) }
                                             .takeIf { sessionActions.settlement && !activeSession.settled },
                                         renameSession = { sessionActions.rename(activeSession) },
+                                        statusOf = chatStatusOf,
                                     ),
                                     linkedPullRequests = activeChat.pullRequests.takeIf { tree.linkedPullRequests },
                                     agentChats = tree.chats.filter { it.parentId == activeChat.id }
@@ -443,6 +594,8 @@ internal fun MinimalMobileApp(
                                         tree.chats.firstOrNull { it.id == id }?.let { chat ->
                                             // Unfolded on the way, so its row shows on the Projects page.
                                             settings.setSessionsFolded(tree.sessionsAbove(chat.sessionId), false)
+                                            // Back to Projects goes to the row of the session it is in.
+                                            projectsReturns.open(sessionRowKey(chat.sessionId))
                                             activeSessionId = chat.sessionId
                                             chatSelections = chatSelections + (chat.sessionId to chat.id)
                                             hiddenChatIds = hiddenChatIds - chat.id
@@ -452,9 +605,9 @@ internal fun MinimalMobileApp(
                                 )
                             }
                         } else {
-                            Column(Modifier.fillMaxSize()) {
-                                ProductHeader(link, activeSession.title, onSettings = { settingsOpen = true })
-                                tabStrip(AgentTabs(), null)
+                            Column(Modifier.fillMaxSize().page(activeSession.title)) {
+                                ProductHeader(activeSession.title, onSettings = { settingsOpen = true })
+                                Column(Modifier.background(glassPane())) { tabStrip(AgentTabs(), null) }
                                 Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                         Text("Your chats are saved", style = MaterialTheme.typography.titleLarge)
@@ -464,17 +617,20 @@ internal fun MinimalMobileApp(
                                 }
                             }
                         }
-                    }
-                    else -> MinimalProjectsHome(
-                        model, settings, link, projects, tree.loading, tree.error, showTerminal,
+                    } else Unit
+                    WorkspacePage.PROJECTS -> CompositionLocalProvider(LocalReturnFocus provides projectsReturns) {
+                    MinimalProjectsHome(
+                        model, settings, projects, tree.loading, tree.error,
                         onSettings = { settingsOpen = true },
                         listState = projectsList,
                         newSessionAboveBar = showBottomNavigation,
                         actions = sessionActions,
                         onRenameProject = { renamingProjectId = it.id },
-                        onDeleteProject = { deletingProject = it },
+                        onDeleteProject = { deletingProjectId = it.id },
                         open = { _, session ->
                             model.stopOpeningStartingSessions()
+                            // Back to Projects puts the focus on this row again.
+                            projectsReturns.open(sessionRowKey(session.id))
                             activeSessionId = session.id
                             // Opening a session always reveals at least its most recent chat.
                             if (session.chatIds.all { it in hiddenChatIds }) {
@@ -483,10 +639,13 @@ internal fun MinimalMobileApp(
                             mobileDestination = MobileDestination.SESSIONS
                         },
                     )
+                    }
+                }
+                }
                 }
                 if (showBottomNavigation) {
                     XdNavigationBar(
-                        mobileDestination, showProjects, showTerminal, showUsage,
+                        barDestination, showProjects, showTerminal, showUsage,
                         Modifier.align(Alignment.BottomCenter),
                     )
                 }
@@ -497,11 +656,12 @@ internal fun MinimalMobileApp(
         snackbar,
         Modifier
             .align(Alignment.BottomCenter)
-            .navigationBarsPadding()
             .padding(horizontal = 16.dp)
             // Bottom only: a short split-screen window still leaves the snackbar its height.
-            .padding(
-                bottom = when {
+            // Over an open chat's composer; else above the keyboard or the navigation bar.
+            .snackbarPlacement(
+                snackbarClearance,
+                above = when {
                     // Above Projects' New session button, as Material places snackbars over a FAB.
                     showBottomNavigation && projectsShown -> NewSessionBottom + FloatingBarHeight + 8.dp
                     showBottomNavigation -> FloatingBarClearance
@@ -509,17 +669,25 @@ internal fun MinimalMobileApp(
                 },
             ),
     )
-    if (settingsOpen) {
-        // Over everything, rail and bars included: Settings is its own page.
+    // Over everything, rail and bars included: Settings is its own page,
+    // stepped into from whichever page its button was on.
+    val settingsShown = rememberPageTransition(settingsOpen, "settings")
+    settingsShown.transition.AnimatedVisibility(
+        visible = { it },
+        enter = if (still) EnterTransition.None else sharedAxisEnter(forward = true),
+        exit = if (still) ExitTransition.None else sharedAxisExit(forward = false),
+    ) {
         SettingsPage(
             model = model,
+            closing = settingsShown,
             settings = settings,
             onClose = { settingsOpen = false },
-            onDisconnect = {
+            onForget = {
                 settingsOpen = false
                 model.forget()
             },
         )
+    }
     }
     }
     val shortcutEditor by model.shortcutEditor.collectAsStateWithLifecycle()
@@ -551,15 +719,15 @@ internal fun MinimalMobileApp(
             },
         )
     }
-    deletingSession?.let { session ->
+    sessions.firstOrNull { it.id == deletingSessionId }?.let { session ->
         ConfirmDeleteDialog(
             title = "Delete session?",
             busy = !session.grouped && deleting,
             text = "This permanently removes ${session.title} and all its chats from xd. Project files are kept.",
             confirm = "Delete session",
-            onDismiss = { deletingSession = null },
+            onDismiss = { deletingSessionId = null },
             onConfirm = {
-                deletingSession = null
+                deletingSessionId = null
                 if (session.id == activeSessionId) mobileDestination = MobileDestination.PROJECTS
                 if (session.grouped) model.deleteSession(session.id) else model.deleteChat(session.id)
             },
@@ -578,14 +746,14 @@ internal fun MinimalMobileApp(
             },
         )
     }
-    deletingProject?.let { project ->
+    projects.firstOrNull { it.id == deletingProjectId }?.let { project ->
         ConfirmDeleteDialog(
             title = "Delete project?",
             text = "This removes ${project.name} and all its sessions from xd. Its files will be moved to the workspace trash.",
             confirm = "Delete project",
-            onDismiss = { deletingProject = null },
+            onDismiss = { deletingProjectId = null },
             onConfirm = {
-                deletingProject = null
+                deletingProjectId = null
                 if (activeProject?.id == project.id) mobileDestination = MobileDestination.PROJECTS
                 model.deleteProject(project.id)
             },
@@ -608,18 +776,23 @@ internal fun MinimalMobileApp(
     }
     deleteChat?.let { chat ->
         AlertDialog(
-            onDismissRequest = { if (!deleting) deleteChat = null },
-            title = { Text("Delete this chat?") },
-            text = { Text("This permanently deletes “${chat.title}” and its history. Other chats in this session stay saved.") },
+            onDismissRequest = { if (!deleting) deleteChatId = null },
+            title = { Text("Delete chat?") },
+            text = {
+                Text(
+                    "This permanently removes ${chat.title.ifBlank { "New chat" }} and its conversation from xd. " +
+                        "Project files are kept.",
+                )
+            },
             confirmButton = {
-                TextButton(onClick = { model.deleteChat(chat.id); deleteChat = null }, enabled = !deleting) {
-                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { model.deleteChat(chat.id); deleteChatId = null }, enabled = !deleting) {
+                    Text("Delete chat", color = MaterialTheme.colorScheme.error)
                 }
             },
-            dismissButton = { TextButton(onClick = { deleteChat = null }, enabled = !deleting) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { deleteChatId = null }, enabled = !deleting) { Text("Cancel") } },
         )
     }
-    createChatIn?.let { session ->
+    sessions.firstOrNull { it.id == createChatInId }?.let { session ->
         LaunchedEffect(session.id) { model.loadCreationCatalog() }
         NewSessionDialog(
             projectName = session.title,
@@ -629,9 +802,9 @@ internal fun MinimalMobileApp(
             retryCatalog = model::loadCreationCatalog,
             accounts = rememberChatAccounts(model),
             chatTab = true,
-            onDismiss = { createChatIn = null },
+            onDismiss = { createChatInId = null },
             onCreate = { request ->
-                createChatIn = null
+                createChatInId = null
                 activeProject?.let { project ->
                     model.createDirectSession(
                         project.id, request.title, request.agent, session.id,
@@ -648,11 +821,9 @@ internal fun MinimalMobileApp(
 private fun MinimalProjectsHome(
     model: MainViewModel,
     settings: MobileSettings,
-    link: Link,
     projects: List<MinimalProject>,
     loading: Boolean,
     treeError: String?,
-    onTerminal: () -> Unit,
     onSettings: () -> Unit,
     listState: LazyListState,
     newSessionAboveBar: Boolean,
@@ -670,8 +841,9 @@ private fun MinimalProjectsHome(
     // Folders of projects have context and secrets too, which reach every project inside.
     val contextFor = tree.folders.firstOrNull { it.id == contextForId }
     val secretsFor = tree.folders.firstOrNull { it.id == secretsForId }
-    val settled = if (actions.settlement) tree.settledSessions() else emptyList()
-    val operationError by model.error.collectAsStateWithLifecycle()
+    val settled = remember(tree, actions.settlement) {
+        if (actions.settlement) tree.settledSessions() else emptyList()
+    }
     // What the New menu or a folder's menu is making ("project" or "folder"), and in which folder.
     var creating by rememberSaveable { mutableStateOf<String?>(null) }
     var createParentId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -683,17 +855,22 @@ private fun MinimalProjectsHome(
     // An earlier project or folder is still being made; another waits rather than being dropped.
     val creatingWorkspace by model.creatingWorkspace.collectAsStateWithLifecycle()
     val ownerIcons by model.client.ownerIcons.collectAsStateWithLifecycle()
-    val rows = tree.projectTree(collapsed)
+    // Built again only when the tree or what is folded changes, not each time the page is drawn.
+    val rows = remember(tree, collapsed) { tree.projectTree(collapsed) }
     // Every row, as if no folder were closed: built once per tree, since building it reads every chat.
     val openTree = remember(tree) { tree.projectTree() }
-    val folders = openTree.mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
+    val folders = remember(openTree) { openTree.mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder } }
     // Opens the folders [id] sits in, and [id] itself, so what lands there is in view.
     val reveal = { id: String? ->
         if (id != null) (tree.ancestors(id) + id).forEach { settings.setFolderOpen(it, true) }
     }
     val newProjectIn = { parentId: String? -> createParentId = parentId; creating = "project" }
     val newFolderIn = { parentId: String? -> createParentId = parentId; creating = "folder" }
-    val canMove = { id: String, parentId: String? -> parentId != null || tree.moveDestinations(id).isNotEmpty() }
+    // Asked for every row drawn, and each answer walks the folders: answered once per item and tree.
+    val movable = remember(tree) { HashMap<String, Boolean>() }
+    val canMove = { id: String, parentId: String? ->
+        parentId != null || movable.getOrPut(id) { tree.moveDestinations(id).isNotEmpty() }
+    }
     // The project New session was opened for; it closes if that project goes away.
     var createSessionIn by rememberSaveable { mutableStateOf<String?>(null) }
     // New session asks which project first, unless there is only one.
@@ -734,8 +911,13 @@ private fun MinimalProjectsHome(
     }
     // An agent's session lists while it has something going on: its lead got
     // the report of a finished one, and its card in the lead's chat opens it.
+    // Worked out once per project, tree and set of waiting chats: every row
+    // drawn asks for it, and each answer reads the project's every session.
+    val listedByProject = remember(tree, waiting) { HashMap<String, List<MinimalSession>>() }
     val listed = { projectId: String ->
-        tree.listedSessions(projectId) { session -> session.chatIds.any { it in waiting } }
+        listedByProject.getOrPut(projectId) {
+            tree.listedSessions(projectId) { session -> session.chatIds.any { it in waiting } }
+        }
     }
     // What a session passes up to a folded or closed row above it: an agent's
     // session passes nothing but a wait on the user, since its lead already
@@ -753,8 +935,12 @@ private fun MinimalProjectsHome(
     ) {
         val pausingAll by model.pausingAll.collectAsStateWithLifecycle()
         // Each project's own pause button, beside its +; hidden with nothing to pause.
+        val pauseActions = remember(tree) { HashMap<String, PauseAllAction?>() }
         val pauseFor: (MinimalProject) -> (@Composable () -> Unit)? = { project ->
-            tree.pauseActionFor(project.id)?.let { action ->
+            // Looked up by key, since "nothing to pause" is an answer worth keeping too.
+            val action = if (project.id in pauseActions) pauseActions[project.id]
+            else tree.pauseActionFor(project.id).also { pauseActions[project.id] = it }
+            action?.let { action ->
                 {
                     PauseProjectButton(
                         projectName = project.name,
@@ -768,37 +954,73 @@ private fun MinimalProjectsHome(
                 }
             }
         }
-        ProductHeader(link = link, title = "Projects", onSettings = onSettings)
+        ProductHeader(title = "Projects", onSettings = onSettings)
         when {
             loading && projects.isEmpty() -> Box(
                 Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
             ) { CircularProgressIndicator() }
 
-            else -> Box(Modifier.fillMaxSize()) { LazyColumn(
+            else -> BoxWithConstraints(Modifier.fillMaxSize()) {
+            // As wide as the page, so it scrolls from its margins; its rows stop at the reading measure.
+            val side = readingInset(maxWidth, 12.dp)
+            LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 state = listState,
-                contentPadding = PaddingValues(12.dp, 14.dp, 12.dp, if (newSessionAboveBar) NewSessionBottom + FloatingBarHeight + 12.dp else 96.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                contentPadding = PaddingValues(side, 14.dp, side, if (newSessionAboveBar) NewSessionBottom + FloatingBarHeight + 12.dp else 96.dp),
             ) {
-                (treeError ?: operationError)?.let { error ->
-                    item("error") {
-                        Text(
-                            error,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
-                            color = MaterialTheme.colorScheme.error,
-                        )
+                // Every session is a row of its own, laid out only while on
+                // screen. Each row brings the space above it: the list's own
+                // gap between projects, and a closer one between the sessions
+                // of an open project, which sits padded as one drawer.
+                var first = true
+                var afterDrawer = false
+                fun row(key: String, type: String, gap: Dp, drawerHead: Boolean = false, content: @Composable () -> Unit) {
+                    val top = (if (first) 0.dp else gap + if (afterDrawer && type != "session") DrawerPadding else 0.dp) +
+                        if (drawerHead) DrawerPadding else 0.dp
+                    first = false
+                    afterDrawer = drawerHead || (type == "session" && key.startsWith("session-"))
+                    item(key = key, contentType = type) {
+                        Column {
+                            if (top > 0.dp) Spacer(Modifier.height(top))
+                            content()
+                        }
+                    }
+                }
+                // A tree that did not load stays said here until it does; an
+                // operation's failure is said once, on the snackbar.
+                treeError?.let { error ->
+                    row("error", "error", ListGap) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                error,
+                                // Told as it appears, since the list may look as it did before.
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(vertical = 8.dp)
+                                    .semantics { liveRegion = LiveRegionMode.Polite },
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            // A tree that did not load is read again from here.
+                            TextButton(onClick = model.client::refreshTree, enabled = !loading) { Text("Try again") }
+                        }
                     }
                 }
                 if (rows.isEmpty()) {
-                    item("empty-projects") {
-                        EmptyCard("Create a workspace, then start a Codex or Claude session.")
+                    // With nothing read there is nothing to suggest making yet.
+                    if (treeError == null) {
+                        row("empty-projects", "empty", ListGap) {
+                            EmptyCard("Create a project, then start a Codex or Claude session in it.")
+                        }
                     }
                 } else {
-                    items(rows, key = ProjectTreeRow::id) { row ->
+                    rows.forEach { row ->
                         val indent = Modifier.padding(start = (row.depth * FOLDER_INDENT).dp)
                         when (row) {
-                            is ProjectTreeRow.FolderRow -> FolderRow(
+                            is ProjectTreeRow.FolderRow -> row(row.id, "folder", ListGap) { FolderRow(
                                 folder = row.folder,
                                 open = row.open,
                                 icon = ownerIcons[row.folder.owner],
@@ -824,8 +1046,8 @@ private fun MinimalProjectsHome(
                                         onDelete = { deletingFolderId = row.folder.id },
                                     )
                                 },
-                            )
-                            is ProjectTreeRow.ProjectRow -> Box(indent) {
+                            ) }
+                            is ProjectTreeRow.ProjectRow -> {
                                 val project = row.project
                                 // Projects open and close on their own, like folders,
                                 // so several can be open at once.
@@ -846,46 +1068,84 @@ private fun MinimalProjectsHome(
                                     )
                                 }
                                 if (projectOpen) {
-                                    OpenDrawer(
-                                        project = project,
-                                        icon = ownerIcons[project.owner],
-                                        sessions = listed(project.id),
-                                        starting = starting.filter { it.projectId == project.id && it.sessionId == null },
-                                        signalOf = signalOf,
-                                        outwardOf = outwardOf,
-                                        open = { session -> open(project, session) },
-                                        actions = actions,
-                                        expanded = expandedSessions,
-                                        fold = { session, folded -> settings.setSessionsFolded(listOf(session.id), folded) },
-                                        toggle = toggle,
-                                        onNewSession = { newSessionIn(project.id) },
-                                        pause = pauseFor(project),
-                                        menu = menu,
-                                    )
+                                    val sessions = listed(project.id)
+                                    val startingHere = starting.filter { it.projectId == project.id && it.sessionId == null }
+                                    row(row.id, "open-project", ListGap, drawerHead = true) {
+                                        Box(indent) {
+                                            OpenDrawerHead(
+                                                project = project,
+                                                icon = ownerIcons[project.owner],
+                                                empty = sessions.isEmpty(),
+                                                starting = startingHere,
+                                                toggle = toggle,
+                                                onNewSession = { newSessionIn(project.id) },
+                                                pause = pauseFor(project),
+                                                menu = menu,
+                                            )
+                                        }
+                                    }
+                                    // A folded session hides the run of sessions below it that its agent started,
+                                    // and every such session starts folded until the user unfolds it.
+                                    var hiddenUntil = 0
+                                    sessions.forEachIndexed { index, session ->
+                                        if (index < hiddenUntil) return@forEachIndexed
+                                        val workers = sessions.startedBelow(index)
+                                        val isFolded = workers > 0 && session.id !in expandedSessions
+                                        if (isFolded) hiddenUntil = index + 1 + workers
+                                        val hidden = if (isFolded) sessions.subList(index + 1, hiddenUntil).map(outwardOf) else emptyList()
+                                        // Keyed by its session, so its open menu stays with it when others come and go.
+                                        row("session-${session.id}", "session", DrawerGap) {
+                                            Box(indent) {
+                                                SessionRow(
+                                                    session = session,
+                                                    signal = signalOf(session),
+                                                    onClick = { open(project, session) },
+                                                    actions = actions,
+                                                    fold = if (workers == 0) null else SessionFold(
+                                                        workers = workers,
+                                                        folded = isFolded,
+                                                        hidden = hidden,
+                                                        toggle = { settings.setSessionsFolded(listOf(session.id), !isFolded) },
+                                                    ),
+                                                )
+                                            }
+                                        }
+                                    }
                                 } else {
-                                    DrawerRow(
-                                        project = project,
-                                        open = false,
-                                        icon = ownerIcons[project.owner],
-                                        signals = listed(project.id).map(outwardOf),
-                                        onClick = toggle,
-                                        pause = pauseFor(project),
-                                        menu = menu,
-                                    )
+                                    row(row.id, "project", ListGap) {
+                                        Box(indent) {
+                                            DrawerRow(
+                                                project = project,
+                                                open = false,
+                                                icon = ownerIcons[project.owner],
+                                                signals = listed(project.id).map(outwardOf),
+                                                onClick = toggle,
+                                                pause = pauseFor(project),
+                                                menu = menu,
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 if (settled.isNotEmpty()) {
-                    item("settled-shelf") {
-                        SettledShelf(
-                            settled = settled,
-                            expanded = shelfOpen,
-                            toggle = { shelfOpen = !shelfOpen },
-                            open = { open(it.project, it.session) },
-                            actions = actions,
-                        )
+                    row("settled-shelf", "shelf", ListGap + ShelfGap) {
+                        SettledShelfHead(count = settled.size, expanded = shelfOpen, toggle = { shelfOpen = !shelfOpen })
+                    }
+                    if (shelfOpen) {
+                        settled.forEach { entry ->
+                            row("settled-${entry.session.id}", "session", DrawerGap) {
+                                SessionRow(
+                                    session = entry.session,
+                                    signal = SessionSignal.IDLE,
+                                    onClick = { open(entry.project, entry.session) },
+                                    actions = actions,
+                                    subtitle = entry.project.name,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1059,23 +1319,38 @@ private fun MinimalProjectsHome(
 @Composable
 private fun MinimalGlobalTerminal(
     model: MainViewModel,
-    link: Link,
-    onProjects: () -> Unit,
+    stores: MobileWorkspaceModels,
     bottomInset: Dp,
     onSettings: () -> Unit,
+    /** Whether the reader has gone to another page, read as the page leaves the screen. */
+    left: () -> Boolean,
 ) {
-    val terminalOwner = remember { SessionViewModelOwner() }
-    DisposableEffect(terminalOwner) {
-        onDispose { terminalOwner.viewModelStore.clear() }
+    // Leaving the page closes the shell, as it always has; a configuration
+    // change keeps it, since the page it comes back to is still Terminal.
+    val leaving by rememberUpdatedState(left)
+    DisposableEffect(stores) {
+        onDispose { if (leaving()) stores.leaveTerminal() }
     }
     val terminal: TerminalViewModel = viewModel(
         key = "global-shell",
-        viewModelStoreOwner = terminalOwner,
+        viewModelStoreOwner = stores.terminal(),
         factory = TerminalViewModel.ShellFactory(
             client = model.client,
             chatId = GLOBAL_TERMINAL_CHAT_ID,
         ),
     )
+    val state by terminal.state.collectAsStateWithLifecycle()
+    // Saved, so turning the phone keeps the question up.
+    var confirmingStop by rememberSaveable { mutableStateOf(false) }
+    if (confirmingStop) {
+        StopTerminalDialog(
+            onStop = {
+                confirmingStop = false
+                terminal.kill()
+            },
+            onDismiss = { confirmingStop = false },
+        )
+    }
 
     Column(
         Modifier
@@ -1083,33 +1358,32 @@ private fun MinimalGlobalTerminal(
             .background(GlassPage)
             .navigationBarsPadding(),
     ) {
-        ProductHeader(link = link, title = "Terminal", onSettings = onSettings)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(54.dp)
-                .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Terminal", modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-            TextButton(onClick = terminal::kill) {
-                Text("Stop", color = MaterialTheme.colorScheme.error)
+        // The header names the page once and holds the shell's one action,
+        // in place of a second row that only repeated "Terminal".
+        ProductHeader(title = "Terminal", onSettings = onSettings) {
+            // A shell that failed to open says Try again under its error instead.
+            if (state.closed) {
+                TextButton(onClick = terminal::open) { Text("Reopen") }
+            } else if (state.error == null) {
+                // The shell is shared: Stop asks first, since it ends it everywhere.
+                TextButton(
+                    onClick = { confirmingStop = true },
+                    enabled = state.id != null,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Stop") }
             }
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(bottom = bottomInset)
                 .padding(10.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp)),
+                .clip(MaterialTheme.shapes.medium)
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium),
         ) {
             TerminalPaneContent(terminal, showSessionBar = false)
         }
     }
-
 }
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -1130,15 +1404,19 @@ private fun SessionTabStrip(
     agents: AgentTabs = AgentTabs(),
     /** Opens the open chat's Pull requests list; null where the host cannot link them. */
     showPullRequests: (() -> Unit)? = null,
+    /** How a chat stands, marked on its tab as on the desktop's; null for a quiet one. */
+    statusOf: (ChatSummary) -> StatusMark? = { null },
 ) {
     var openMenu by remember { mutableStateOf(false) }
     Row(
-        modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = 8.dp),
+        // Clear: it sits on its header's one pane of glass.
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Row(
-            modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()).padding(vertical = 6.dp),
+            // One group of tabs, so a screen reader says which is open and how many there are.
+            modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()).padding(vertical = 6.dp).selectableGroup(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             chats.filterNot { it.id in hiddenChatIds }.forEach { chat ->
@@ -1152,13 +1430,13 @@ private fun SessionTabStrip(
                 }
                 Surface(
                     modifier = Modifier.bringIntoViewRequester(reveal),
-                    shape = RoundedCornerShape(12.dp),
-                    color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-                    border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
+                    shape = MaterialTheme.shapes.medium,
+                    color = selectedTabFill(selected),
+                    border = selectedTabEdge(selected),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Row(
-                            modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Tab) { agents.showChat(); selectTab(chat.id) }.padding(start = 12.dp, end = 8.dp),
+                            modifier = Modifier.heightIn(min = 48.dp).selectable(selected = selected, role = Role.Tab) { agents.showChat(); selectTab(chat.id) }.padding(start = 12.dp, end = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
@@ -1167,6 +1445,7 @@ private fun SessionTabStrip(
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.labelLarge,
                                 color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                            statusOf(chat)?.let { StatusMarkIcon(it) }
                         }
                         if (!compact) {
                             IconButton(onClick = { closeTab(chat.id) }, modifier = Modifier.size(48.dp)) {
@@ -1189,10 +1468,26 @@ private fun SessionTabStrip(
             }
             DropdownMenu(expanded = openMenu, onDismissRequest = { openMenu = false }) {
                 chats.forEach { chat ->
+                    val open = chat.id == selectedChatId && agents.viewing == null
+                    val status = statusOf(chat)
                     DropdownMenuItem(
                         text = { Text(chat.title.ifBlank { "New chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         leadingIcon = { BackendIcon(chat.backend, size = 18.dp) },
-                        onClick = { openMenu = false; selectTab(chat.id) },
+                        // The open chat is checked, as in the phone's menu.
+                        trailingIcon = if (open || status != null) {
+                            {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    status?.let { StatusMarkIcon(it) }
+                                    if (open) Icon(painterResource(R.drawable.ic_check), "Open", Modifier.size(18.dp))
+                                }
+                            }
+                        } else {
+                            null
+                        },
+                        onClick = { openMenu = false; agents.showChat(); selectTab(chat.id) },
                     )
                 }
                 chats.firstOrNull { it.id == selectedChatId }?.let { active ->
@@ -1233,6 +1528,19 @@ private fun SessionTabStrip(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
+/*
+ * The selected chat or agent tab on the tablet header, drawn as the floating
+ * bar's selected tab is: a raised fill, edged in the control border, which
+ * stands at 3:1 on the header's glass as on the bar.
+ */
+@Composable
+private fun selectedTabFill(selected: Boolean): Color =
+    if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent
+
+@Composable
+private fun selectedTabEdge(selected: Boolean): BorderStroke? =
+    if (selected) BorderStroke(1.dp, controlBorder()) else null
+
 /** One of the open chat's agents in the tab row: its provider, task, a dot while it runs, and close. */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -1246,13 +1554,13 @@ private fun AgentTabChip(agent: AgentTab, selected: Boolean, agents: AgentTabs) 
     }
     Surface(
         modifier = Modifier.bringIntoViewRequester(reveal),
-        shape = RoundedCornerShape(12.dp),
-        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-        border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
+        shape = MaterialTheme.shapes.medium,
+        color = selectedTabFill(selected),
+        border = selectedTabEdge(selected),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(
-                modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Tab) { agents.open(agent.key) }.padding(start = 12.dp, end = 4.dp),
+                modifier = Modifier.heightIn(min = 48.dp).selectable(selected = selected, role = Role.Tab) { agents.open(agent.key) }.padding(start = 12.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -1263,7 +1571,7 @@ private fun AgentTabChip(agent: AgentTab, selected: Boolean, agents: AgentTabs) 
                     style = MaterialTheme.typography.labelLarge,
                     color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (agent.running) PulseDot(LocalXdSignals.current.working)
+                if (agent.running) StatusMarkIcon(StatusMark.WORKING)
             }
             IconButton(onClick = { agents.close(agent.key) }, modifier = Modifier.size(48.dp)) {
                 Icon(painterResource(R.drawable.ic_close), "Close ${agent.title}", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1272,49 +1580,58 @@ private fun AgentTabChip(agent: AgentTab, selected: Boolean, agents: AgentTabs) 
     }
 }
 
+/**
+ * A top-level page's header: the mark, the page's name, its own action if it
+ * has one, a dot while the host is connected, and Settings. While the host is
+ * not connected the dot is gone and the line below says so in words.
+ */
 @Composable
 private fun ProductHeader(
-    link: Link,
     title: String,
     onSettings: () -> Unit,
+    action: (@Composable () -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(glassPane())
-            .statusBarsPadding()
-            .height(56.dp)
+            .safeTopPadding()
+            // At least, not exactly: enlarged text makes the title taller.
+            .heightIn(min = 56.dp)
             .padding(start = 16.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        // Decorative: the title beside it already names the page.
         Icon(
             painterResource(R.drawable.ic_xd_mark),
-            contentDescription = "xd",
+            contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.size(22.dp),
         )
         Text(
             title,
-            modifier = Modifier.weight(1f),
+            // Where the focus lands when the page appears, unless Back
+            // brought the reader to a list from one of its rows.
+            modifier = Modifier.weight(1f).pageHeading(returnTo = LocalReturnFocus.current),
             style = MaterialTheme.typography.titleMedium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        val up = link is Link.Up
+        action?.invoke()
         Box(
             modifier = Modifier.size(48.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Box(
-                Modifier
-                    .size(9.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (up) LocalXdSignals.current.working
-                        else MaterialTheme.colorScheme.error,
-                    ),
-            )
+            if (LocalConnectionNotice.current.value == null) {
+                Box(
+                    Modifier
+                        .size(9.dp)
+                        .clip(CircleShape)
+                        .background(LocalXdSignals.current.working)
+                        .semantics { contentDescription = "Connected" },
+                )
+            }
         }
         IconButton(onClick = onSettings, modifier = Modifier.size(48.dp)) {
             Icon(
@@ -1325,6 +1642,7 @@ private fun ProductHeader(
         }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    ConnectionLine()
 }
 
 /**
@@ -1403,6 +1721,9 @@ private fun XdNavigationBar(
                             .size(width = FloatingTabWidth, height = 48.dp)
                             .clip(CircleShape)
                             .background(if (selected) colors.surfaceContainerHighest else Color.Transparent)
+                            // The selected pill is edged in the control border, 3:1 on the bar,
+                            // as Material's indicator stands out from its bar.
+                            .then(if (selected) Modifier.border(1.dp, controlBorder(), CircleShape) else Modifier)
                             .selectable(selected = selected, role = Role.Tab, onClick = onClick)
                             .semantics { contentDescription = label },
                         contentAlignment = Alignment.Center,
@@ -1458,56 +1779,65 @@ private fun XdNavigationRail(
 }
 
 /** What a session's signal tab says about its agent, as on the desktop. */
-private enum class SessionSignal(val label: String) {
+internal enum class SessionSignal(val label: String, val mark: StatusMark? = null) {
     IDLE("Idle"),
-    WORKING("Working"),
-    WAITING("Waiting on you"),
+    WORKING("Working", StatusMark.WORKING),
+    WAITING("Waiting on you", StatusMark.WAITING),
     /** No turn running, but background agents or shells are. */
     BACKGROUND("Waiting on background tasks"),
     /** Stopped by pausing every chat; resuming them continues it. */
-    PAUSED("Paused"),
-    DONE("Done"),
+    PAUSED("Paused", StatusMark.PAUSED),
+    DONE("Done", StatusMark.DONE),
 }
 
 @Composable
-private fun SessionSignal.color(): Color {
-    val signals = LocalXdSignals.current
-    return when (this) {
-        SessionSignal.IDLE, SessionSignal.PAUSED -> signals.faint
-        SessionSignal.WORKING -> signals.working
-        SessionSignal.BACKGROUND -> MaterialTheme.colorScheme.onSurfaceVariant
-        SessionSignal.WAITING -> signals.waiting
-        SessionSignal.DONE -> signals.done
-    }
-}
+private fun SessionSignal.color(): Color =
+    mark?.color() ?: if (this == SessionSignal.BACKGROUND) MaterialTheme.colorScheme.onSurfaceVariant
+    else LocalXdSignals.current.faint
 
 /**
- * The small status mark at the end of a session row: a dot for work and
- * unread turns, nothing for a quiet session. Waiting on the user is the one
- * state that also says so in words.
+ * What a closed row says of the sessions it hides, for a screen reader: how
+ * many stand each way, the ones that need the reader first. Quiet and paused
+ * sessions are left out, as their marks are.
+ */
+internal fun signalSummary(signals: List<SessionSignal>): String =
+    listOf(SessionSignal.WAITING, SessionSignal.WORKING, SessionSignal.BACKGROUND, SessionSignal.DONE)
+        .mapNotNull { signal ->
+            val count = signals.count { it == signal }
+            if (count == 0) null else "$count ${signal.label.lowercase()}"
+        }
+        .joinToString(", ")
+
+/**
+ * The status at the end of a session row: nothing for a quiet session, the
+ * shared mark for work and unread turns, and the mark with its words for the
+ * two states that ask something of the reader. [wordless] leaves the words
+ * out where the row says them elsewhere.
  */
 @Composable
-private fun SignalMark(signal: SessionSignal, modifier: Modifier = Modifier, backgroundTasks: Int = 0) {
+private fun SignalMark(
+    signal: SessionSignal,
+    modifier: Modifier = Modifier,
+    backgroundTasks: Int = 0,
+    wordless: Boolean = false,
+) {
     when (signal) {
         SessionSignal.IDLE -> Unit
-        SessionSignal.WAITING -> StatusPill("Waiting", signal.color(), modifier)
-        SessionSignal.PAUSED -> StatusPill("Paused", signal.color(), modifier)
-        SessionSignal.WORKING -> PulseDot(signal.color(), modifier)
+        SessionSignal.WAITING, SessionSignal.PAUSED -> {
+            val mark = checkNotNull(signal.mark)
+            if (wordless) StatusMarkIcon(mark, modifier, labelled = false)
+            else StatusPill(signal.label, signal.color(), modifier, mark = mark)
+        }
+        SessionSignal.WORKING, SessionSignal.DONE -> StatusMarkIcon(checkNotNull(signal.mark), modifier)
         // The count beside a still ring; the words are for screen readers.
         SessionSignal.BACKGROUND -> Row(
-            modifier.semantics { contentDescription = backgroundTasksLabel(backgroundTasks) },
+            modifier.clearAndSetSemantics { contentDescription = backgroundTasksLabel(backgroundTasks) },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text("$backgroundTasks", color = signal.color(), fontSize = 11.sp)
+            Text("$backgroundTasks", color = signal.color(), style = MaterialTheme.typography.labelSmall)
             BackgroundRing(signal.color())
         }
-        SessionSignal.DONE -> Box(
-            modifier
-                .size(7.dp)
-                .clip(CircleShape)
-                .background(signal.color()),
-        )
     }
 }
 
@@ -1532,8 +1862,13 @@ private fun DrawerRow(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClickLabel = if (open) "Close project" else "Open project", onClick = onClick)
+            .clip(MaterialTheme.shapes.small)
+            .clickable(
+                role = Role.Button,
+                onClickLabel = if (open) "Close project" else "Open project",
+                onClick = onClick,
+            )
+            .semantics { stateDescription = if (open) "Expanded" else "Collapsed" }
             .padding(start = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1567,7 +1902,8 @@ private fun DrawerRow(
             )
             Text(
                 project.sessions.toString(),
-                fontSize = 12.sp,
+                modifier = Modifier.semantics { contentDescription = counted(project.sessions, "session") },
+                style = MaterialTheme.typography.labelMedium,
                 color = faint,
             )
         }
@@ -1588,25 +1924,29 @@ private fun DrawerRow(
     }
 }
 
-/** A dot for each of up to five sessions that need a look; quiet ones draw nothing. */
+/** "1 session", "3 sessions": a bare count, said with what it counts. */
+private fun counted(count: Int, noun: String): String = "$count $noun${if (count == 1) "" else "s"}"
+
+/**
+ * A mark for each of up to five sessions that need a look; quiet ones draw
+ * nothing. Each state has its own shape, and a screen reader hears the count
+ * of each instead of the marks one by one.
+ */
 @Composable
 private fun SignalDots(signals: List<SessionSignal>) {
+    // A paused session is quiet until resumed; the header's Resume button says so.
+    val shown = signals.filter { it != SessionSignal.IDLE && it != SessionSignal.PAUSED }
+    if (shown.isEmpty()) return
+    val summary = signalSummary(shown)
     Row(
+        modifier = Modifier.clearAndSetSemantics { contentDescription = summary },
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // A paused session is quiet until resumed; the header's Resume button says so.
-        signals.filter { it != SessionSignal.IDLE && it != SessionSignal.PAUSED }.take(5).forEach { signal ->
-            if (signal == SessionSignal.BACKGROUND) {
-                BackgroundRing(signal.color(), size = 6.dp)
-            } else {
-                Box(
-                    Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(signal.color()),
-                )
-            }
+        shown.take(5).forEach { signal ->
+            val mark = signal.mark
+            if (mark == null) BackgroundRing(signal.color(), size = 8.dp)
+            else StatusMarkIcon(mark, labelled = false, still = true)
         }
     }
 }
@@ -1674,23 +2014,54 @@ private const val FOLDER_INDENT = 16
 /** Told when New folder is offered by a host that would make a project instead. */
 private const val NEEDS_NEWER_HOST = "Needs a newer xd host"
 
-/** An account's avatar, or [fallback] until the host has one to show. */
+/**
+ * An account's avatar, or [fallback] until the host has one to show. The
+ * picture is decoded once per account, off the main thread and at about the
+ * size it is drawn, and kept: a row scrolled back into view finds it ready.
+ */
 @Composable
 internal fun OwnerAvatar(icon: ByteArray?, fallback: Int, tint: Color, size: Dp = 16.dp) {
-    val bitmap = remember(icon) {
-        icon?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull() }
+    val key = remember(icon) { icon?.let(::avatarKey) }
+    var bitmap by remember(key) { mutableStateOf(key?.let(decodedAvatars::get)) }
+    if (icon != null && key != null && bitmap == null) {
+        LaunchedEffect(key) {
+            bitmap = withContext(Dispatchers.Default) { decodeAvatar(icon) }?.also { decodedAvatars.put(key, it) }
+        }
     }
-    if (bitmap != null) {
+    val shown = bitmap
+    if (shown != null) {
         Image(
-            bitmap = bitmap,
+            bitmap = shown,
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            modifier = Modifier.size(size).clip(RoundedCornerShape(4.dp)),
+            modifier = Modifier.size(size).clip(MaterialTheme.shapes.extraSmall),
         )
     } else {
         Icon(painterResource(fallback), contentDescription = null, tint = tint, modifier = Modifier.size(size))
     }
 }
+
+/** The most pixels an avatar is drawn across: 24dp on the densest screens. */
+private const val AVATAR_SIDE = 96
+
+/** Decoded avatars by their bytes' fingerprint, so the same picture sent again is not decoded again. */
+private val decodedAvatars = android.util.LruCache<String, ImageBitmap>(64)
+
+/** Tells one avatar's bytes from another's: the same picture always has the same key. */
+internal fun avatarKey(bytes: ByteArray): String = "${bytes.size}:${bytes.contentHashCode()}"
+
+/**
+ * Decodes an avatar no larger than it needs to be: the host sends them at
+ * hundreds of pixels a side, and they are drawn at a few dozen.
+ */
+internal fun decodeAvatar(bytes: ByteArray): ImageBitmap? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    var sample = 1
+    while (minOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= AVATAR_SIDE) sample *= 2
+    val options = BitmapFactory.Options().apply { inSampleSize = sample }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
+}.getOrNull()
 
 /** A menu entry, with a line saying why it cannot be used when it cannot. */
 @Composable
@@ -1760,8 +2131,13 @@ private fun FolderRow(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClickLabel = if (open) "Close folder" else "Open folder", onClick = toggle)
+            .clip(MaterialTheme.shapes.small)
+            .clickable(
+                role = Role.Button,
+                onClickLabel = if (open) "Close folder" else "Open folder",
+                onClick = toggle,
+            )
+            .semantics { stateDescription = if (open) "Expanded" else "Collapsed" }
             .padding(start = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1787,7 +2163,12 @@ private fun FolderRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(folder.items.toString(), fontSize = 12.sp, color = faint)
+            Text(
+                folder.items.toString(),
+                modifier = Modifier.semantics { contentDescription = counted(folder.items, "item") },
+                style = MaterialTheme.typography.labelMedium,
+                color = faint,
+            )
         }
         // A closed folder shows which of the sessions inside need a look.
         if (!open) SignalDots(signals)
@@ -1896,6 +2277,7 @@ private fun NewFolderDialog(
                     isError = nameError != null,
                     supportingText = nameError?.let { { Text(it) } },
                     modifier = Modifier.fillMaxWidth(),
+                    colors = xdFieldColors(),
                 )
                 OutlinedTextField(
                     value = organization,
@@ -1911,6 +2293,7 @@ private fun NewFolderDialog(
                         )
                     },
                     modifier = Modifier.fillMaxWidth(),
+                    colors = xdFieldColors(),
                 )
                 Text(
                     "Folders hold projects and other folders. Use Move to on a project to put it in one.",
@@ -1948,7 +2331,7 @@ private fun MoveDialog(
         onDismissRequest = onDismiss,
         title = { Text("Move $name", maxLines = 1, overflow = TextOverflow.Ellipsis) },
         text = {
-            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()).selectableGroup()) {
                 MoveRow(
                     label = "Top level",
                     depth = 0,
@@ -1993,8 +2376,8 @@ private fun MoveRow(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(role = Role.RadioButton, onClick = onClick)
+            .clip(MaterialTheme.shapes.small)
+            .selectable(selected = chosen, role = Role.RadioButton, onClick = onClick)
             .padding(start = (depth * 12).dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2016,20 +2399,13 @@ private fun MoveRow(
 
 /** An open project, with one row per session beneath it. */
 @Composable
-private fun OpenDrawer(
+private fun OpenDrawerHead(
     project: MinimalProject,
     icon: ByteArray?,
-    sessions: List<MinimalSession>,
+    /** The project has no sessions. */
+    empty: Boolean,
     /** New sessions sent to the host and not made yet. */
     starting: List<StartingSession>,
-    signalOf: (MinimalSession) -> SessionSignal,
-    /** What a session shows on a folded row above it. */
-    outwardOf: (MinimalSession) -> SessionSignal,
-    open: (MinimalSession) -> Unit,
-    actions: SessionActions,
-    /** Sessions unfolded to show the sessions their agents started; the rest list folded. */
-    expanded: Set<String>,
-    fold: (MinimalSession, Boolean) -> Unit,
     /** Closes the project. */
     toggle: () -> Unit,
     onNewSession: () -> Unit,
@@ -2037,10 +2413,8 @@ private fun OpenDrawer(
     menu: @Composable () -> Unit,
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(DrawerGap),
     ) {
         DrawerRow(
             project = project,
@@ -2056,7 +2430,7 @@ private fun OpenDrawer(
             key("starting-${session.id}") { StartingRow(session) }
         }
         // Kept to one quiet line: several empty projects can be open at once.
-        if (sessions.isEmpty() && starting.isEmpty()) {
+        if (empty && starting.isEmpty()) {
             Text(
                 "No sessions yet",
                 modifier = Modifier.padding(start = 30.dp, end = 10.dp, bottom = 6.dp),
@@ -2064,32 +2438,16 @@ private fun OpenDrawer(
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
-        // A folded session hides the run of sessions below it that its agent started,
-        // and every such session starts folded until the user unfolds it.
-        var hiddenUntil = 0
-        sessions.forEachIndexed { index, session ->
-            if (index < hiddenUntil) return@forEachIndexed
-            val workers = sessions.startedBelow(index)
-            val isFolded = workers > 0 && session.id !in expanded
-            if (isFolded) hiddenUntil = index + 1 + workers
-            // Keyed so a row's open menu stays with its session when others come and go.
-            key(session.id) {
-                SessionRow(
-                    session = session,
-                    signal = signalOf(session),
-                    onClick = { open(session) },
-                    actions = actions,
-                    fold = if (workers == 0) null else SessionFold(
-                        workers = workers,
-                        folded = isFolded,
-                        hidden = if (isFolded) sessions.subList(index + 1, hiddenUntil).map(outwardOf) else emptyList(),
-                        toggle = { fold(session, !isFolded) },
-                    ),
-                )
-            }
-        }
     }
 }
+
+/** The space between rows of the Projects list, between the rows inside an open project, and around one. */
+private val ListGap = 4.dp
+private val DrawerGap = 2.dp
+private val DrawerPadding = 4.dp
+
+/** The extra space above the Settled shelf. */
+private val ShelfGap = 12.dp
 
 /** A new session the host is still setting up, laid out as its row will be. */
 @Composable
@@ -2133,6 +2491,9 @@ private class SessionFold(
     val toggle: () -> Unit,
 )
 
+/** A session's row on Projects, for [ReturnFocus]. */
+private fun sessionRowKey(id: String) = "session-$id"
+
 /**
  * One session, on one line: its agent, its title, and a status mark only when
  * there is something to say. A branch shows when the session has its own.
@@ -2147,6 +2508,10 @@ private fun SessionRow(
     fold: SessionFold? = null,
 ) {
     val signals = LocalXdSignals.current
+    // With enlarged text the words of a status would squeeze the title out of
+    // the row, so they move to the line under it and the mark stays at the end.
+    val wordsBelow = LocalDensity.current.fontScale > 1.3f &&
+        (signal == SessionSignal.WAITING || signal == SessionSignal.PAUSED)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -2169,8 +2534,9 @@ private fun SessionRow(
                 },
             )
             .heightIn(min = 64.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
+            .clip(MaterialTheme.shapes.small)
+            .returnsFocus(sessionRowKey(session.id))
+            .clickable(role = Role.Button, onClickLabel = "Open session", onClick = onClick)
             .padding(start = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -2184,6 +2550,13 @@ private fun SessionRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (wordsBelow) Text(
+                    signal.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = signal.color(),
+                    maxLines = 1,
+                )
                 Text(
                     subtitle ?: "${session.chatIds.size} chat${if (session.chatIds.size == 1) "" else "s"}",
                     style = MaterialTheme.typography.labelMedium,
@@ -2205,12 +2578,17 @@ private fun SessionRow(
         // Folded, it says how many sessions it hides and which of them need a
         // look, the way a closed project does.
         if (fold?.folded == true) {
-            Text("${fold.workers}", fontSize = 12.sp, color = signals.faint)
+            Text(
+                "${fold.workers}",
+                modifier = Modifier.semantics { contentDescription = counted(fold.workers, "agent session") },
+                style = MaterialTheme.typography.labelMedium,
+                color = signals.faint,
+            )
             SignalDots(fold.hidden)
         }
-        SignalMark(signal, backgroundTasks = session.backgroundTasks)
+        SignalMark(signal, backgroundTasks = session.backgroundTasks, wordless = wordsBelow)
         if (fold != null) {
-            IconButton(onClick = fold.toggle, modifier = Modifier.size(40.dp)) {
+            IconButton(onClick = fold.toggle, modifier = Modifier.size(48.dp)) {
                 Icon(
                     painterResource(if (fold.folded) R.drawable.ic_chevron_right else R.drawable.ic_chevron_down),
                     contentDescription = if (fold.folded) {
@@ -2301,22 +2679,20 @@ private class SessionActions(
  * recently settled first, each a tap from coming back.
  */
 @Composable
-private fun SettledShelf(
-    settled: List<SettledSession>,
+private fun SettledShelfHead(
+    count: Int,
     expanded: Boolean,
     toggle: () -> Unit,
-    open: (SettledSession) -> Unit,
-    actions: SessionActions,
 ) {
     val faint = LocalXdSignals.current.faint
-    Column(Modifier.fillMaxWidth().padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(DrawerGap)) {
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 48.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .clickable(onClick = toggle)
+                .clip(MaterialTheme.shapes.small)
+                .disclosure(expanded, onToggle = toggle)
                 .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2334,73 +2710,28 @@ private fun SettledShelf(
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text(settled.size.toString(), fontSize = 12.sp, color = faint)
-        }
-        if (expanded) {
-            settled.forEach { entry ->
-                key(entry.session.id) {
-                    SessionRow(
-                        session = entry.session,
-                        signal = SessionSignal.IDLE,
-                        onClick = { open(entry) },
-                        actions = actions,
-                        subtitle = entry.project.name,
-                    )
-                }
-            }
+            Text(
+                count.toString(),
+                modifier = Modifier.semantics { contentDescription = counted(count, "session") },
+                style = MaterialTheme.typography.labelMedium,
+                color = faint,
+            )
         }
     }
-}
-
-/** A small status label on a soft tint of its own colour. */
-@Composable
-internal fun StatusPill(label: String, color: Color, modifier: Modifier = Modifier) {
-    Text(
-        label,
-        modifier = modifier
-            .clip(RoundedCornerShape(50))
-            .background(color.copy(alpha = 0.14f))
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-        color = color,
-        style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.Medium,
-    )
-}
-
-/** A dot that breathes while something works. */
-@Composable
-internal fun PulseDot(color: Color, modifier: Modifier = Modifier, size: Dp = 7.dp) {
-    val transition = androidx.compose.animation.core.rememberInfiniteTransition(label = "pulse")
-    val alpha by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1f,
-        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-            androidx.compose.animation.core.tween(800),
-            androidx.compose.animation.core.RepeatMode.Reverse,
-        ),
-        label = "pulse-alpha",
-    )
-    Box(
-        modifier
-            .size(size)
-            .graphicsLayer { this.alpha = alpha }
-            .clip(CircleShape)
-            .background(color),
-    )
 }
 
 @Composable
 private fun AgentPill(agent: DirectAgent) {
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(50))
+            .clip(CircleShape)
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         BackendIcon(agent.wire, size = 15.dp)
-        Text(agent.wire, fontFamily = XdMonoFamily, fontSize = 11.sp)
+        Text(agent.wire, fontFamily = XdMonoFamily, style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -2414,8 +2745,8 @@ private fun EmptyCard(text: String) {
         text,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
+            .clip(MaterialTheme.shapes.medium)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium)
             .padding(20.dp),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -2446,6 +2777,7 @@ private fun NewProjectDialog(
                     label = { Text("Name") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
+                    colors = xdFieldColors(),
                 )
                 OutlinedTextField(
                     value = repository,
@@ -2462,6 +2794,7 @@ private fun NewProjectDialog(
                             )
                         }
                     },
+                    colors = xdFieldColors(),
                 )
             }
         },
@@ -2532,7 +2865,7 @@ internal fun ThemePicker(theme: MinimalThemePreset, choose: (MinimalThemePreset)
 @Composable
 private fun ThemeSwatch(preset: MinimalThemePreset, modifier: Modifier) {
     val glass = xdGlass(preset)
-    val shape = RoundedCornerShape(4.dp)
+    val shape = MaterialTheme.shapes.extraSmall
     Box(
         modifier
             .clip(shape)
@@ -2552,13 +2885,13 @@ private fun ThemeChoice(
     modifier: Modifier,
     choose: () -> Unit,
 ) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = MaterialTheme.shapes.small
     val frame = modifier
         .heightIn(min = 48.dp)
         .clip(shape)
         .border(
             if (chosen) 1.5.dp else 1.dp,
-            if (chosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+            if (chosen) MaterialTheme.colorScheme.primary else controlBorder(),
             shape,
         )
         .selectable(selected = chosen, role = Role.RadioButton, onClick = choose)
@@ -2615,6 +2948,7 @@ internal fun AutoSettleSettings(model: MainViewModel) {
     if (current == null) {
         Text(
             error ?: "Reading auto-settle rules…",
+            modifier = Modifier.announced(),
             color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -2639,27 +2973,7 @@ internal fun AutoSettleSettings(model: MainViewModel) {
         enabled = editable,
     )
     val setDays = { days: Int -> model.setAutoSettle(afterDays = Ops.AfterDays.Days(days)) }
-    current.afterDays?.let { days ->
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                Text("Days before settling", fontWeight = FontWeight.SemiBold)
-                Text(
-                    SETTLE_DAYS_DETAIL,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            IconButton(
-                onClick = { setDays(days - 1) },
-                enabled = editable && days > 1,
-            ) { Text("\u2212", style = MaterialTheme.typography.titleMedium) }
-            Text(days.toString(), fontWeight = FontWeight.SemiBold, modifier = Modifier.widthIn(min = 24.dp))
-            IconButton(
-                onClick = { setDays(days + 1) },
-                enabled = editable && days < 90,
-            ) { Text("+", style = MaterialTheme.typography.titleMedium) }
-        }
-    }
+    current.afterDays?.let { days -> SettleDaysStepper(days, editable, setDays) }
     SettingSwitch(
         title = "Keep sessions with a pull request",
         detail = SETTLE_KEEP_PR_DETAIL,
@@ -2672,7 +2986,7 @@ internal fun AutoSettleSettings(model: MainViewModel) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 error ?: "These rules changed on the host and could not be read again.",
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).announced(),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -2684,6 +2998,79 @@ internal fun AutoSettleSettings(model: MainViewModel) {
 /** The host's own default for the inactivity rule. */
 private const val DEFAULT_SETTLE_DAYS = 3
 
+/** The fewest and the most days the host takes for the inactivity rule. */
+internal const val MIN_SETTLE_DAYS = 1
+internal const val MAX_SETTLE_DAYS = 90
+
+/** A number of days as it is said: "1 day", "3 days". */
+internal fun daysLabel(days: Int): String = if (days == 1) "1 day" else "$days days"
+
+/**
+ * How many days a session sits before it settles. For TalkBack the row is one
+ * stop, "Days before settling, 3 days", adjusted by swiping up or down as a
+ * slider is, and the new number is said whenever it changes, from these
+ * buttons or from another device. At either end the button that would pass
+ * it turns off, and the row says why.
+ */
+@Composable
+private fun SettleDaysStepper(days: Int, editable: Boolean, setDays: (Int) -> Unit) {
+    val value = daysLabel(days)
+    val bound = when {
+        days <= MIN_SETTLE_DAYS -> "$value is the shortest."
+        days >= MAX_SETTLE_DAYS -> "$value is the longest."
+        else -> null
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .semantics(mergeDescendants = true) {
+                stateDescription = value
+                liveRegion = LiveRegionMode.Polite
+                progressBarRangeInfo = ProgressBarRangeInfo(
+                    current = days.toFloat(),
+                    range = MIN_SETTLE_DAYS.toFloat()..MAX_SETTLE_DAYS.toFloat(),
+                    steps = MAX_SETTLE_DAYS - MIN_SETTLE_DAYS - 1,
+                )
+                if (editable) {
+                    setProgress { target ->
+                        val next = target.roundToInt().coerceIn(MIN_SETTLE_DAYS, MAX_SETTLE_DAYS)
+                        if (next != days) setDays(next)
+                        true
+                    }
+                }
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(end = 8.dp)) {
+            Text("Days before settling", fontWeight = FontWeight.SemiBold)
+            Text(
+                listOfNotNull(SETTLE_DAYS_DETAIL, bound).joinToString(" "),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        IconButton(
+            onClick = { setDays(days - 1) },
+            enabled = editable && days > MIN_SETTLE_DAYS,
+            // A whole 48dp target, not 40 inside a larger touch area.
+            modifier = Modifier.size(48.dp).semantics { contentDescription = "Fewer days" },
+        ) { Text("\u2212", style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics {}) }
+        // The row says the number as its state, so the digits are not read twice.
+        Text(
+            days.toString(),
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.widthIn(min = 24.dp).clearAndSetSemantics {},
+        )
+        IconButton(
+            onClick = { setDays(days + 1) },
+            enabled = editable && days < MAX_SETTLE_DAYS,
+            modifier = Modifier.size(48.dp).semantics { contentDescription = "More days" },
+        ) { Text("+", style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics {}) }
+    }
+}
+
 @Composable
 internal fun SettingSwitch(
     title: String,
@@ -2692,7 +3079,14 @@ internal fun SettingSwitch(
     onCheckedChange: (Boolean) -> Unit,
     enabled: Boolean = true,
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    // One stop, named by its words: a tap anywhere on the row turns it.
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
             Text(title, fontWeight = FontWeight.SemiBold)
             Text(
@@ -2701,7 +3095,7 @@ internal fun SettingSwitch(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
     }
 }
 
@@ -2710,6 +3104,8 @@ internal fun SettingAction(
     title: String,
     detail: String,
     action: String,
+    /** The action removes something that cannot be brought back with a tap. */
+    destructive: Boolean = false,
     onClick: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2721,7 +3117,11 @@ internal fun SettingAction(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        TextButton(onClick = onClick) { Text(action) }
+        TextButton(
+            onClick = onClick,
+            colors = if (destructive) ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+            else ButtonDefaults.textButtonColors(),
+        ) { Text(action) }
     }
 }
 
@@ -2754,6 +3154,7 @@ private fun NameDialog(
                 isError = error != null,
                 supportingText = error?.let { { Text(it) } },
                 modifier = Modifier.fillMaxWidth(),
+                colors = xdFieldColors(),
             )
         },
         confirmButton = {

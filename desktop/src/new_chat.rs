@@ -1,4 +1,8 @@
 use super::*;
+use crate::metrics::{
+    CONTROL_HEIGHT, HIT_MIN, RADIUS_COMPOSER, RADIUS_PANEL, RADIUS_TAB, TEXT_BODY, TEXT_CAPTION,
+    TEXT_CONTROL, TEXT_LABEL,
+};
 use serde_json::json;
 
 /// Between the heading and the composer, as an empty chat has them.
@@ -37,7 +41,7 @@ impl StartingChat {
 /// A draft or starting chat's name: the one given, or its message's first line.
 pub(super) fn draft_label(title: &str, prompt: &str) -> String {
     let title = title.trim();
-    if !title.is_empty() && title != DEFAULT_CHAT_TITLE {
+    if !is_default_chat_title(title) {
         return title.to_owned();
     }
     prompt
@@ -49,6 +53,12 @@ pub(super) fn draft_label(title: &str, prompt: &str) -> String {
 }
 
 /// Whether a saved new-chat draft holds anything to send.
+/// How a pull request a new chat can start from is named, as Android names
+/// it: its number and title.
+fn pull_request_choice_label(pull: &NewSessionPullRequest) -> String {
+    format!("#{} {}", pull.number, pull.title)
+}
+
 pub(super) fn draft_has_content(draft: &Value) -> bool {
     draft["text"]
         .as_str()
@@ -78,7 +88,11 @@ impl XdDesktop {
         let shared = self.creating_chat_session.is_some();
         let new_worktree = matches!(
             self.chat_create_worktree,
-            Some(NewSessionWorktree::New | NewSessionWorktree::Branch { .. })
+            Some(
+                NewSessionWorktree::New
+                    | NewSessionWorktree::Branch { .. }
+                    | NewSessionWorktree::PullRequest { .. }
+            )
         );
         let branch_label = match &self.chat_create_worktree {
             Some(NewSessionWorktree::Branch { reference, .. }) => reference
@@ -86,6 +100,11 @@ impl XdDesktop {
                 .or_else(|| reference.strip_prefix("refs/remotes/"))
                 .unwrap_or(reference)
                 .to_owned(),
+            Some(NewSessionWorktree::PullRequest { number, .. }) => self
+                .chat_create_pull_requests
+                .iter()
+                .find(|pull| pull.number == *number)
+                .map_or_else(|| format!("#{number}"), pull_request_choice_label),
             Some(NewSessionWorktree::Existing(path)) => self
                 .chat_create_worktrees
                 .iter()
@@ -114,6 +133,7 @@ impl XdDesktop {
             && (shared
                 || (!self.chat_create_worktrees_loading && self.chat_create_worktree.is_some()));
         let menu = self.new_chat_menu;
+        let keys = self.key_targets.clone();
         let mut rows = Vec::new();
         match menu {
             Some(option @ ("effort" | "access" | "mode" | "account")) => {
@@ -140,34 +160,49 @@ impl XdDesktop {
                         ("true".into(), "Plan".into()),
                     ],
                 };
+                let current = match option {
+                    "effort" => self.new_chat_remembered.effort.clone(),
+                    "access" => self.new_chat_remembered.access.clone(),
+                    // The first choice, with no id, lets the host choose.
+                    "account" => Some(self.new_chat_account().unwrap_or_default()),
+                    _ => Some(self.new_chat_remembered.plan.unwrap_or(false).to_string()),
+                };
                 for (index, (value, label)) in choices.into_iter().enumerate() {
                     if !label.to_lowercase().contains(&self.new_chat_query) {
                         continue;
                     }
                     rows.push(
-                        ui_button(("draft-option-choice", index), ButtonKind::Ghost, colors)
-                            .w_full()
-                            .justify_start()
-                            .child(label)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                match option {
-                                    "effort" => {
-                                        this.new_chat_remembered.effort = Some(value.clone())
+                        menu_row(("draft-option-choice", index), colors)
+                            // An account's label can be longer than the picker.
+                            .child(truncating_label(label).flex_1())
+                            .child(menu_check(current.as_deref() == Some(&value), colors))
+                            .key_row(
+                                &keys,
+                                KeyLayer::Menu,
+                                "draft-picker",
+                                colors.surface_high,
+                                cx,
+                                move |this, window, cx| {
+                                    match option {
+                                        "effort" => {
+                                            this.new_chat_remembered.effort = Some(value.clone())
+                                        }
+                                        "access" => {
+                                            this.new_chat_remembered.access = Some(value.clone())
+                                        }
+                                        "account" => {
+                                            this.new_chat_remembered.account =
+                                                (!value.is_empty()).then(|| value.clone())
+                                        }
+                                        _ => this.new_chat_remembered.plan = Some(value == "true"),
                                     }
-                                    "access" => {
-                                        this.new_chat_remembered.access = Some(value.clone())
-                                    }
-                                    "account" => {
-                                        this.new_chat_remembered.account =
-                                            (!value.is_empty()).then(|| value.clone())
-                                    }
-                                    _ => this.new_chat_remembered.plan = Some(value == "true"),
-                                }
-                                this.new_chat_menu = None;
-                                this.remember_new_chat_choices();
-                                window.focus(&this.new_chat_input.read(cx).focus_handle(cx));
-                                cx.notify();
-                            }))
+                                    this.new_chat_menu = None;
+                                    this.remember_new_chat_choices();
+                                    window.focus(&this.new_chat_input.read(cx).focus_handle(cx));
+                                    cx.notify();
+                                },
+                            )
+                            .key_child(&keys, rows.len())
                             .into_any_element(),
                     );
                 }
@@ -179,23 +214,22 @@ impl XdDesktop {
                     }
                     if !self.new_chat_query.is_empty() {
                         rows.push(
-                            div()
-                                .px_3()
-                                .py_2()
-                                .text_xs()
-                                .text_color(rgb(colors.muted))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(assistant_icon(
-                                    agent_icon(agent),
-                                    14.0,
-                                    colors.muted,
-                                    colors,
-                                ))
-                                .child(agent.label())
-                                .into_any_element(),
+                            menu_note(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(assistant_icon(
+                                        agent_icon(agent),
+                                        14.0,
+                                        colors.muted,
+                                        colors,
+                                    ))
+                                    .child(agent.label()),
+                                colors,
+                            )
+                            .into_any_element(),
                         );
                     }
                     let catalog = self
@@ -213,8 +247,10 @@ impl XdDesktop {
                         if !name.to_lowercase().contains(&self.new_chat_query) {
                             continue;
                         }
+                        let chosen =
+                            self.minimal_new_session_agent == agent && self.new_chat_model == id;
                         rows.push(
-                            ui_button(
+                            menu_row(
                                 (
                                     if agent == AgentCli::Codex {
                                         "draft-codex-model"
@@ -223,46 +259,38 @@ impl XdDesktop {
                                     },
                                     index,
                                 ),
-                                ButtonKind::Ghost,
                                 colors,
                             )
-                            .w_full()
-                            .h(px(34.0))
-                            .rounded(px(6.0))
-                            .text_size(px(13.0))
-                            .text_color(rgb(colors.text))
-                            .justify_start()
-                            .when(
-                                self.minimal_new_session_agent == agent
-                                    && self.new_chat_model == id,
-                                |row| row.bg(rgb(colors.surface_high)),
+                            .key_row(
+                                &keys,
+                                KeyLayer::Menu,
+                                "draft-picker",
+                                colors.surface_high,
+                                cx,
+                                move |this, window, cx| {
+                                    window.focus(&this.new_chat_input.read(cx).focus_handle(cx));
+                                    // Effort and accounts belong to one assistant.
+                                    if this.minimal_new_session_agent != agent {
+                                        this.new_chat_remembered.effort = None;
+                                        this.new_chat_remembered.account = None;
+                                    }
+                                    this.minimal_new_session_agent = agent;
+                                    this.new_chat_model = id.clone();
+                                    this.new_chat_menu = None;
+                                    this.remember_new_chat_choices();
+                                    cx.notify();
+                                },
                             )
-                            .child(div().size(px(14.0)).when(
-                                self.minimal_new_session_agent == agent
-                                    && self.new_chat_model == id,
-                                |mark| mark.child(icon(CHECK_ICON, 13.0, colors.text)),
-                            ))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                window.focus(&this.new_chat_input.read(cx).focus_handle(cx));
-                                // Effort and accounts belong to one assistant.
-                                if this.minimal_new_session_agent != agent {
-                                    this.new_chat_remembered.effort = None;
-                                    this.new_chat_remembered.account = None;
-                                }
-                                this.minimal_new_session_agent = agent;
-                                this.new_chat_model = id.clone();
-                                this.new_chat_menu = None;
-                                this.remember_new_chat_choices();
-                                cx.notify();
-                            }))
-                            .child(name)
+                            .key_child(&keys, rows.len())
+                            .child(truncating_label(name).flex_1())
+                            .child(menu_check(chosen, colors))
                             .into_any_element(),
                         );
                     }
                 }
             }
             Some("workspace") => {
-                for (index, (label, new)) in [("Current Worktree", false), ("New Worktree", true)]
+                for (index, (label, new)) in [("Current worktree", false), ("New worktree", true)]
                     .into_iter()
                     .enumerate()
                 {
@@ -270,32 +298,36 @@ impl XdDesktop {
                         continue;
                     }
                     rows.push(
-                        ui_button(("draft-workspace-choice", index), ButtonKind::Ghost, colors)
-                            .w_full()
+                        menu_row(("draft-workspace-choice", index), colors)
                             .h(px(58.0))
-                            .rounded(px(6.0))
-                            .text_color(rgb(colors.text))
-                            .justify_start()
                             .child(icon(
                                 if new { GIT_BRANCH_ICON } else { FOLDER_ICON },
                                 16.0,
                                 colors.muted,
                             ))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.new_chat_worktree_picked = Some(new);
-                                this.chat_create_worktree = if new {
-                                    this.default_new_chat_base()
-                                } else {
-                                    this.chat_create_worktrees
-                                        .iter()
-                                        .find(|w| w.current)
-                                        .or_else(|| this.chat_create_worktrees.first())
-                                        .map(|w| NewSessionWorktree::Existing(w.path.clone()))
-                                };
-                                this.new_chat_menu = None;
-                                this.remember_new_chat_choices();
-                                cx.notify();
-                            }))
+                            .key_row(
+                                &keys,
+                                KeyLayer::Menu,
+                                "draft-picker",
+                                colors.surface_high,
+                                cx,
+                                move |this, _, cx| {
+                                    this.new_chat_worktree_picked = Some(new);
+                                    this.chat_create_worktree = if new {
+                                        this.default_new_chat_base()
+                                    } else {
+                                        this.chat_create_worktrees
+                                            .iter()
+                                            .find(|w| w.current)
+                                            .or_else(|| this.chat_create_worktrees.first())
+                                            .map(|w| NewSessionWorktree::Existing(w.path.clone()))
+                                    };
+                                    this.new_chat_menu = None;
+                                    this.remember_new_chat_choices();
+                                    cx.notify();
+                                },
+                            )
+                            .key_child(&keys, rows.len())
                             .child(
                                 div()
                                     .flex_1()
@@ -303,10 +335,10 @@ impl XdDesktop {
                                     .flex_col()
                                     .items_start()
                                     .gap_1()
-                                    .child(div().text_size(px(13.0)).child(label))
+                                    .child(label)
                                     .child(
                                         div()
-                                            .text_size(px(11.0))
+                                            .text_size(text_px(TEXT_CAPTION))
                                             .text_color(rgb(colors.muted))
                                             .child(if new {
                                                 "Create an isolated branch and checkout"
@@ -315,9 +347,7 @@ impl XdDesktop {
                                             }),
                                     ),
                             )
-                            .child(div().size(px(14.0)).when(new == new_worktree, |mark| {
-                                mark.child(icon(CHECK_ICON, 13.0, colors.text))
-                            }))
+                            .child(menu_check(new == new_worktree, colors))
                             .into_any_element(),
                     );
                 }
@@ -325,53 +355,76 @@ impl XdDesktop {
             Some("branch") => {
                 if new_worktree {
                     rows.push(
-                        ui_button("draft-remote", ButtonKind::Ghost, colors)
-                            .w_full()
-                            .h(px(34.0))
-                            .rounded(px(6.0))
-                            .text_size(px(13.0))
-                            .text_color(rgb(colors.text))
-                            .justify_start()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.new_chat_remote = !this.new_chat_remote;
-                                this.remember_new_chat_choices();
-                                cx.notify();
-                            }))
-                            .child(div().flex_1().child("Start from remote"))
-                            .child(
-                                div()
-                                    .w(px(28.0))
-                                    .h(px(16.0))
-                                    .p(px(2.0))
-                                    .rounded_full()
-                                    .bg(rgb(if self.new_chat_remote {
-                                        colors.accent
-                                    } else {
-                                        colors.surface_high
-                                    }))
-                                    .child(
-                                        div()
-                                            .size(px(12.0))
-                                            .rounded_full()
-                                            .when(self.new_chat_remote, |knob| knob.ml(px(12.0)))
-                                            .bg(rgb(if self.new_chat_remote {
-                                                colors.accent_text
-                                            } else {
-                                                colors.muted
-                                            })),
-                                    ),
+                        menu_row("draft-remote", colors)
+                            .key_row(
+                                &keys,
+                                KeyLayer::Menu,
+                                "draft-picker",
+                                colors.surface_high,
+                                cx,
+                                |this, _, cx| {
+                                    this.new_chat_remote = !this.new_chat_remote;
+                                    this.remember_new_chat_choices();
+                                    cx.notify();
+                                },
                             )
+                            .key_child(&keys, rows.len())
+                            .key_not_a_choice(&keys)
+                            .key_stays(&keys)
+                            .child(div().flex_1().child("Start from remote"))
+                            .child(settings_switch(colors, self.new_chat_remote))
                             .into_any_element(),
                     );
-                    rows.push(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .text_xs()
-                            .text_color(rgb(colors.muted))
-                            .child("Base branch")
-                            .into_any_element(),
-                    );
+                    // A pull request's branch, checked out in a worktree of
+                    // its own, as Android's new session offers.
+                    let query = self.new_chat_query.as_str();
+                    let pulls = self
+                        .chat_create_pull_requests
+                        .iter()
+                        .filter(|pull| {
+                            pull.title.to_lowercase().contains(query)
+                                || format!("#{}", pull.number).contains(query)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !pulls.is_empty() {
+                        rows.push(menu_note("Pull requests", colors).into_any_element());
+                    }
+                    for pull in pulls {
+                        let selected = matches!(
+                            &self.chat_create_worktree,
+                            Some(NewSessionWorktree::PullRequest { number, .. }) if *number == pull.number
+                        );
+                        let label = pull_request_choice_label(&pull);
+                        let number = pull.number;
+                        rows.push(
+                            menu_row(("draft-pull-request", number as usize), colors)
+                                .debug_selector(move || format!("draft-pull-request-{number}"))
+                                .key_row(
+                                    &keys,
+                                    KeyLayer::Menu,
+                                    "draft-picker",
+                                    colors.surface_high,
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.chat_create_worktree =
+                                            Some(NewSessionWorktree::PullRequest {
+                                                number: pull.number,
+                                                oid: pull.oid.clone(),
+                                            });
+                                        this.new_chat_menu = None;
+                                        this.remember_new_chat_choices();
+                                        cx.notify();
+                                    },
+                                )
+                                .key_child(&keys, rows.len())
+                                .child(icon(GIT_PULL_REQUEST_ICON, 13.0, colors.muted))
+                                .child(truncating_label(label).flex_1())
+                                .child(menu_check(selected, colors))
+                                .into_any_element(),
+                        );
+                    }
+                    rows.push(menu_note("Base branch", colors).into_any_element());
                     for (index, branch) in self.chat_create_branches.iter().enumerate() {
                         let branch = branch.clone();
                         let name = branch.name.clone();
@@ -380,64 +433,79 @@ impl XdDesktop {
                             continue;
                         }
                         rows.push(
-                            ui_button(("draft-base", index), ButtonKind::Ghost, colors)
-                                .w_full()
-                                .h(px(34.0))
-                                .rounded(px(6.0))
-                                .text_size(px(13.0))
-                                .text_color(rgb(colors.text))
-                                .justify_start()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.chat_create_worktree = Some(NewSessionWorktree::Branch {
-                                        reference: branch.reference.clone(),
-                                        oid: branch.oid.clone(),
-                                    });
-                                    this.new_chat_menu = None;
-                                    this.remember_new_chat_choices();
-                                    cx.notify();
-                                }))
+                            menu_row(("draft-base", index), colors)
+                                .key_row(
+                                    &keys,
+                                    KeyLayer::Menu,
+                                    "draft-picker",
+                                    colors.surface_high,
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.chat_create_worktree =
+                                            Some(NewSessionWorktree::Branch {
+                                                reference: branch.reference.clone(),
+                                                oid: branch.oid.clone(),
+                                            });
+                                        this.new_chat_menu = None;
+                                        this.remember_new_chat_choices();
+                                        cx.notify();
+                                    },
+                                )
+                                .key_child(&keys, rows.len())
                                 .child(icon(GIT_BRANCH_ICON, 13.0, colors.muted))
-                                .child(div().flex_1().truncate().child(name))
-                                .child(div().size(px(14.0)).when(selected, |mark| {
-                                    mark.child(icon(CHECK_ICON, 13.0, colors.text))
-                                }))
+                                .child(truncating_label(name).flex_1())
+                                .child(menu_check(selected, colors))
                                 .into_any_element(),
                         );
                     }
                 } else {
                     for (index, worktree) in self.chat_create_worktrees.iter().enumerate() {
                         let path = worktree.path.clone();
+                        let chosen = matches!(
+                            &self.chat_create_worktree,
+                            Some(NewSessionWorktree::Existing(existing)) if existing == &path
+                        );
                         rows.push(
-                            ui_button(("draft-checkout", index), ButtonKind::Ghost, colors)
-                                .w_full()
-                                .h(px(34.0))
-                                .rounded(px(6.0))
-                                .text_size(px(13.0))
-                                .text_color(rgb(colors.text))
-                                .justify_start()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.chat_create_worktree =
-                                        Some(NewSessionWorktree::Existing(path.clone()));
-                                    this.new_chat_menu = None;
-                                    this.remember_new_chat_choices();
-                                    cx.notify();
-                                }))
-                                .child(
-                                    worktree
-                                        .branch
-                                        .clone()
-                                        .unwrap_or_else(|| worktree.path.clone()),
+                            menu_row(("draft-checkout", index), colors)
+                                .key_row(
+                                    &keys,
+                                    KeyLayer::Menu,
+                                    "draft-picker",
+                                    colors.surface_high,
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.chat_create_worktree =
+                                            Some(NewSessionWorktree::Existing(path.clone()));
+                                        this.new_chat_menu = None;
+                                        this.remember_new_chat_choices();
+                                        cx.notify();
+                                    },
                                 )
+                                .key_child(&keys, rows.len())
+                                .child(
+                                    truncating_label(
+                                        worktree
+                                            .branch
+                                            .clone()
+                                            .unwrap_or_else(|| worktree.path.clone()),
+                                    )
+                                    .flex_1(),
+                                )
+                                .child(menu_check(chosen, colors))
                                 .into_any_element(),
                         );
                     }
                 }
                 if self.chat_create_sources_loading {
                     rows.push(
-                        div()
-                            .p_3()
-                            .text_sm()
-                            .child("Loading branches…")
+                        menu_note("Loading branches and pull requests…", colors).into_any_element(),
+                    );
+                } else if let Some(error) = &self.chat_create_sources_error {
+                    // Why the pull requests are missing: the branches came.
+                    rows.push(
+                        menu_note(format!("Pull requests did not load. {error}"), colors)
+                            .debug_selector(|| "draft-sources-error".into())
+                            .text_color(rgb(colors.danger))
                             .into_any_element(),
                     );
                 }
@@ -445,108 +513,117 @@ impl XdDesktop {
             _ => {}
         }
         if menu.is_some() && rows.is_empty() {
-            rows.push(
-                div()
-                    .p_3()
-                    .text_sm()
-                    .text_color(rgb(colors.muted))
-                    .child("No matches")
-                    .into_any_element(),
-            );
+            rows.push(menu_note("No matches", colors).into_any_element());
         }
         let mut popup = menu.map(|kind| {
-            gpui::deferred(
-                div()
-                    .id("draft-picker")
-                    .occlude()
-                    .absolute()
-                    .bottom(px(38.0))
-                    .left_0()
-                    .w(px(if kind == "workspace" { 280.0 } else { 320.0 }))
-                    .flex()
-                    .flex_col()
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .bg(rgb(colors.surface))
-                    .shadow_lg()
-                    .when(kind != "workspace", |picker| {
-                        picker.child(
+            // Above its chip, and moved down over it where the window is too
+            // short for that.
+            div()
+                .absolute()
+                .bottom(px(38.0))
+                .left_0()
+                .child(menu_popover(
+                    gpui::Corner::BottomLeft,
+                    menu_shell(colors)
+                        .id("draft-picker")
+                        .debug_selector(|| "draft-picker".into())
+                        .w(px(if kind == "workspace" { 280.0 } else { 320.0 }))
+                        // No taller than the window has room for: its
+                        // options scroll inside what is left.
+                        .max_h(px(popover_max_height()))
+                        // Its search field's hairline runs edge to edge.
+                        .p_0()
+                        .when(kind != "workspace", |picker| {
+                            picker.child(
+                                div()
+                                    .flex_none()
+                                    .px_3()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .border_b_1()
+                                    .border_color(self.field_frame(&self.new_chat_search, cx))
+                                    .child(icon(SEARCH_ICON, 14.0, colors.muted))
+                                    .child(div().flex_1().child(self.new_chat_search.clone()))
+                                    // Tab goes round the field and the
+                                    // provider tabs under it.
+                                    .child(keys.mark(
+                                        KeyLayer::Menu,
+                                        KeyStop::Field(
+                                            self.new_chat_search.read(cx).focus_handle(cx),
+                                        ),
+                                    )),
+                            )
+                        })
+                        .when(kind == "model", |picker| {
+                            picker.child(
+                                div().flex_none().p_1().flex().gap_1().children(
+                                    [AgentCli::Codex, AgentCli::Claude]
+                                        .into_iter()
+                                        .map(|agent| {
+                                            let id = draft_provider_stop(agent);
+                                            ui_button(id, ButtonKind::Ghost, colors)
+                                                .debug_selector(move || id.into())
+                                                .relative()
+                                                .flex_1()
+                                                .h(px(CONTROL_HEIGHT))
+                                                .text_color(rgb(colors.text))
+                                                .when(
+                                                    agent == self.minimal_new_session_agent,
+                                                    |tab| {
+                                                        tab.bg(rgb(colors.surface_high)).child(
+                                                            selection_marker(
+                                                                MarkerEdge::Foot,
+                                                                colors,
+                                                            ),
+                                                        )
+                                                    },
+                                                )
+                                                // Left and Right switch too, from
+                                                // the list or from a tab.
+                                                .key_stop(
+                                                    &keys,
+                                                    KeyLayer::Menu,
+                                                    id,
+                                                    colors,
+                                                    cx,
+                                                    move |this, _, cx| {
+                                                        this.pick_draft_provider(agent, cx)
+                                                    },
+                                                )
+                                                .child(assistant_icon(
+                                                    agent_icon(agent),
+                                                    14.0,
+                                                    colors.muted,
+                                                    colors,
+                                                ))
+                                                .child(agent.label())
+                                        }),
+                                ),
+                            )
+                        })
+                        .child(
                             div()
-                                .px_3()
-                                .py_2()
+                                .id("draft-picker-options")
+                                .max_h(px(280.0))
+                                .flex_shrink()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.key_scroll)
+                                .p_1()
                                 .flex()
-                                .items_center()
-                                .gap_2()
-                                .border_b_1()
-                                .border_color(rgb(colors.border))
-                                .child(icon(SEARCH_ICON, 14.0, colors.muted))
-                                .child(div().flex_1().child(self.new_chat_search.clone())),
+                                .flex_col()
+                                .gap(px(2.0))
+                                .children(rows)
+                                // After the rows, which the keys scroll to by
+                                // their place.
+                                .child(scroll_thumb(self.key_scroll.clone(), colors)),
                         )
-                    })
-                    .when(kind == "model", |picker| {
-                        picker.child(
-                            div().p_1().flex().gap_1().children(
-                                [AgentCli::Codex, AgentCli::Claude]
-                                    .into_iter()
-                                    .map(|agent| {
-                                        ui_button(
-                                            if agent == AgentCli::Codex {
-                                                "draft-provider-codex"
-                                            } else {
-                                                "draft-provider-claude"
-                                            },
-                                            ButtonKind::Ghost,
-                                            colors,
-                                        )
-                                        .flex_1()
-                                        .h(px(30.0))
-                                        .text_color(rgb(colors.text))
-                                        .when(agent == self.minimal_new_session_agent, |tab| {
-                                            tab.bg(rgb(colors.surface_high))
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if this.minimal_new_session_agent != agent {
-                                                this.new_chat_remembered.effort = None;
-                                                this.new_chat_remembered.account = None;
-                                                this.minimal_new_session_agent = agent;
-                                                this.new_chat_model = None;
-                                            }
-                                            this.remember_new_chat_choices();
-                                            this.new_chat_query.clear();
-                                            this.new_chat_search.update(cx, |input, cx| {
-                                                input.set_text(String::new(), cx)
-                                            });
-                                            cx.notify();
-                                        }))
-                                        .child(assistant_icon(
-                                            agent_icon(agent),
-                                            14.0,
-                                            colors.muted,
-                                            colors,
-                                        ))
-                                        .child(agent.label())
-                                    }),
-                            ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id("draft-picker-options")
-                            .max_h(px(280.0))
-                            .overflow_y_scroll()
-                            .p_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .children(rows),
-                    )
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    // The model picker opens inside the composer, which would
-                    // take the focus from the search field to the editor.
-                    .on_click(|_, _, cx| cx.stop_propagation()),
-            )
-            .with_priority(1)
+                        // The model picker opens inside the composer, which would
+                        // take the focus from the search field to the editor.
+                        .on_click(|_, _, cx| cx.stop_propagation()),
+                ))
         });
         let project = self
             .creating_chat_folder
@@ -559,7 +636,7 @@ impl XdDesktop {
             // The message went up into the conversation above.
             div()
                 .text_color(rgb(colors.faint))
-                .child("Message xd...")
+                .child(editor::MESSAGE_PLACEHOLDER)
                 .into_any_element()
         } else {
             self.new_chat_input.clone().into_any_element()
@@ -626,22 +703,24 @@ impl XdDesktop {
             if option == "account" && !offers_accounts {
                 continue;
             }
-            let label = if option == "access" && plan {
-                "Read only".to_owned()
-            } else {
-                label
-            };
-            let chip = composer::composer_option(
-                SharedString::from(format!("draft-{option}")),
-                None,
-                label,
-                if option == "account" { 220.0 } else { 160.0 },
-                colors,
-            );
+            let id = SharedString::from(format!("draft-{option}"));
+            let max_width = if option == "account" { 220.0 } else { 160.0 };
+            // Plan mode only reads: its access is settled, not a choice.
             let chip = if option == "access" && plan {
-                chip
+                composer::composer_option_locked(
+                    id,
+                    "Read only".to_owned(),
+                    "Plan mode only reads. Build sets the access.",
+                    max_width,
+                    colors,
+                )
+                .debug_selector(|| "draft-access-locked".into())
             } else {
-                self.draft_picker_toggle(option, chip, cx)
+                self.draft_picker_toggle(
+                    option,
+                    composer::composer_option(id, None, label, max_width, colors),
+                    cx,
+                )
             };
             controls.push(
                 div()
@@ -655,13 +734,20 @@ impl XdDesktop {
                     .into_any_element(),
             );
         }
-        let send = composer::composer_send_button("draft-send", ready, SEND_ICON, colors)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if ready {
-                    this.save_minimal_chat_create(cx);
-                }
-            }))
-            .into_any_element();
+        let send =
+            composer::composer_send_button("draft-send", "Send (Enter)", ready, SEND_ICON, colors)
+                .when(ready, |send| {
+                    send.key_stop_round(
+                        &self.key_targets,
+                        KeyLayer::Page,
+                        "draft-send",
+                        "Send (Enter)",
+                        colors,
+                        cx,
+                        |this, _, cx| this.save_minimal_chat_create(cx),
+                    )
+                })
+                .into_any_element();
         // Starting, it takes the open chat's width and place, which is
         // where the chat will show when it opens.
         let width = px(if starting { 736.0 } else { 660.0 });
@@ -674,6 +760,7 @@ impl XdDesktop {
                 actions: vec![send],
                 show_attachments: !starting,
                 ask: None,
+                compact: false,
             },
             colors,
             window,
@@ -686,9 +773,9 @@ impl XdDesktop {
                     "draft-workspace",
                     FOLDER_ICON,
                     if new_worktree {
-                        "New Worktree"
+                        "New worktree"
                     } else {
-                        "Current Worktree"
+                        "Current worktree"
                     }
                     .into(),
                     true,
@@ -753,6 +840,7 @@ impl XdDesktop {
             .when(starting, |view| {
                 view.child(self.render_new_chat_starting(width, colors, window))
             })
+            .child(composer::composer_room(self.composer_room.clone()))
             .child(composer.mb_2())
             .child(
                 context
@@ -785,7 +873,7 @@ impl XdDesktop {
                 div()
                     .size(px(64.0))
                     .flex_none()
-                    .rounded(px(8.0))
+                    .rounded(px(RADIUS_PANEL))
                     .overflow_hidden()
                     .bg(rgb(colors.surface_high))
                     .children(thumbnail.map(|image| {
@@ -804,7 +892,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(12.0))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(icon(FILE_ICON, 13.0, colors.muted))
                     .child(attachment.name.clone())
@@ -821,6 +909,7 @@ impl XdDesktop {
             .flex_col()
             .gap(px(14.0))
             .overflow_y_scroll()
+            .thumbed("new-chat-starting", colors)
             .child(
                 div()
                     .w_full()
@@ -845,12 +934,12 @@ impl XdDesktop {
                                 .max_w(px(600.0))
                                 .px(px(14.0))
                                 .py(px(9.0))
-                                .rounded(px(18.0))
+                                .rounded(px(RADIUS_COMPOSER))
                                 .bg(rgb(colors.surface_high))
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .text_size(px(14.0))
+                                .text_size(text_px(TEXT_BODY))
                                 .text_color(rgb(colors.text))
                                 .when(!prompt.trim().is_empty(), |bubble| bubble.child(prompt))
                                 .children(files),
@@ -864,15 +953,9 @@ impl XdDesktop {
                     .items_center()
                     .gap(px(8.0))
                     .px(px(2.0))
-                    .text_size(px(12.5))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
-                    .child(
-                        div()
-                            .size(px(7.0))
-                            .rounded_full()
-                            .bg(rgb(colors.working))
-                            .opacity(pulse_opacity()),
-                    )
+                    .child(pulse_dot(7.0, colors.working, true))
                     .child(self.new_chat_status())
                     .child(working_dots(0, colors.muted)),
             )
@@ -1039,28 +1122,42 @@ impl XdDesktop {
         chip: gpui::Stateful<gpui::Div>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        chip.on_click(cx.listener(move |this, _, window, cx| {
-            // The composer behind it would take the focus back to the editor.
-            cx.stop_propagation();
-            if !this.chat_create_submitting {
-                this.new_chat_query.clear();
-                this.new_chat_search
-                    .update(cx, |input, cx| input.set_text(String::new(), cx));
-                if menu != "workspace" {
-                    let focus = this.new_chat_search.read(cx).focus_handle(cx);
-                    window.focus(&focus);
+        let colors = self.settings.theme.colors();
+        chip.key_stop(
+            &self.key_targets,
+            KeyLayer::Page,
+            format!("draft-{menu}"),
+            colors,
+            cx,
+            move |this, window, cx| {
+                // The composer behind it would take the focus back to the editor.
+                cx.stop_propagation();
+                if !this.chat_create_submitting {
+                    this.new_chat_query.clear();
+                    this.new_chat_search
+                        .update(cx, |input, cx| input.set_text(String::new(), cx));
+                    if menu != "workspace" {
+                        let focus = this.new_chat_search.read(cx).focus_handle(cx);
+                        window.focus(&focus);
+                    }
+                    let hint = match menu {
+                        "branch" => "Find a branch or pull request…",
+                        _ => "Search…",
+                    };
+                    this.new_chat_search
+                        .update(cx, |input, cx| input.set_placeholder(hint, cx));
+                    this.new_chat_menu = if this.new_chat_menu == Some(menu) {
+                        None
+                    } else {
+                        Some(menu)
+                    };
+                    cx.notify();
                 }
-                this.new_chat_menu = if this.new_chat_menu == Some(menu) {
-                    None
-                } else {
-                    Some(menu)
-                };
-                cx.notify();
-            }
-        }))
+            },
+        )
     }
 
-    fn new_chat_draft_key(&self) -> Option<String> {
+    pub(super) fn new_chat_draft_key(&self) -> Option<String> {
         let folder = self.creating_chat_folder.as_ref()?;
         Some(format!(
             "{}/{}",
@@ -1290,9 +1387,14 @@ impl XdDesktop {
                     choices.new_worktree = false;
                     choices.checkout = Some(path.clone());
                 }
+                // A pull request is checked out in a worktree of its own;
+                // the next chat starts from the base branch again.
+                Some(NewSessionWorktree::PullRequest { .. }) => {
+                    choices.new_worktree = true;
+                }
                 // The worktrees have not arrived yet to pick a checkout or
                 // base from, but the mode was picked.
-                Some(NewSessionWorktree::PullRequest { .. }) | None => {
+                None => {
                     if let Some(new_worktree) = self.new_chat_worktree_picked {
                         choices.new_worktree = new_worktree;
                         if !new_worktree {
@@ -1359,6 +1461,73 @@ impl XdDesktop {
                 oid: b.oid.clone(),
             })
             .or(Some(NewSessionWorktree::New))
+    }
+}
+
+impl XdDesktop {
+    /// Starts the new chat on `agent`, from the model picker's tabs: its
+    /// models are the ones listed, and a choice made for the other one goes.
+    fn pick_draft_provider(&mut self, agent: AgentCli, cx: &mut Context<Self>) {
+        if self.minimal_new_session_agent != agent {
+            self.new_chat_remembered.effort = None;
+            self.new_chat_remembered.account = None;
+            self.minimal_new_session_agent = agent;
+            self.new_chat_model = None;
+        }
+        self.remember_new_chat_choices();
+        self.new_chat_query.clear();
+        self.new_chat_search
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
+    }
+
+    /// Left and Right in the new chat's model picker: Codex and Claude Code,
+    /// while the arrow keys are in its list or the Tab ring is on one of its
+    /// provider tabs. The keys stay where they were, on the new list's first
+    /// row or on the tab picked. Says whether they did this.
+    pub(super) fn step_draft_provider(&mut self, right: bool, cx: &mut Context<Self>) -> bool {
+        if self.new_chat_menu != Some("model") {
+            return false;
+        }
+        let on_list = self
+            .key_rows()
+            .is_some_and(|(layer, owner, _)| layer == KeyLayer::Menu && owner == DRAFT_PICKER)
+            && self.key_row_at().is_some();
+        let on_tab = self
+            .key_stop
+            .as_ref()
+            .is_some_and(|id| id.starts_with(DRAFT_PROVIDER_STOP));
+        if !on_list && !on_tab {
+            return false;
+        }
+        let agent = if right {
+            AgentCli::Claude
+        } else {
+            AgentCli::Codex
+        };
+        if agent != self.minimal_new_session_agent {
+            self.pick_draft_provider(agent, cx);
+            if on_tab {
+                self.key_stop = Some(draft_provider_stop(agent).into());
+            } else {
+                self.key_cursor = Some((DRAFT_PICKER, 0));
+            }
+        }
+        true
+    }
+}
+
+/// The new chat's pickers, as the owner of the rows the arrow keys move in.
+const DRAFT_PICKER: &str = "draft-picker";
+/// How the model picker's provider tabs are named as Tab stops.
+const DRAFT_PROVIDER_STOP: &str = "draft-provider-";
+
+/// The Tab stop of the model picker's tab for `agent`.
+fn draft_provider_stop(agent: AgentCli) -> &'static str {
+    if agent == AgentCli::Codex {
+        "draft-provider-codex"
+    } else {
+        "draft-provider-claude"
     }
 }
 
@@ -1707,26 +1876,84 @@ impl XdDesktop {
         Some(draft_label("", text))
     }
 
-    /// Throws a project's new-chat draft away.
+    /// Throws a project's new-chat draft away, and offers to bring it back.
     pub(super) fn discard_project_draft(&mut self, folder_id: &str, cx: &mut Context<Self>) {
         let key = format!("{}/new", self.new_chat_choices_key(folder_id));
-        if self.new_chat_draft_key().as_deref() == Some(key.as_str())
-            && !self.chat_create_submitting
-        {
+        let open = self.new_chat_draft_key().as_deref() == Some(key.as_str())
+            && !self.chat_create_submitting;
+        // What the view holds is newer than what was last saved.
+        let (text, attachments) = if open {
+            (
+                self.new_chat_prompt.clone(),
+                self.new_chat_attachments.clone(),
+            )
+        } else {
+            let saved = self.read_new_chat_draft(&key).unwrap_or_default();
+            (
+                saved["text"].as_str().unwrap_or_default().to_owned(),
+                saved["attachments"]
+                    .as_array()
+                    .map(|saved| saved.iter().filter_map(Attachment::from_value).collect())
+                    .unwrap_or_default(),
+            )
+        };
+        if open {
             self.new_chat_save_generation += 1;
             self.new_chat_prompt.clear();
             self.new_chat_attachments.clear();
             self.new_chat_input
                 .update(cx, |input, cx| input.set_text(String::new(), cx));
         }
-        let choices = self
+        let choices: settings::NewChatChoices = self
             .settings
             .new_chat_drafts
             .get(&key)
             .and_then(|draft| draft.get("choices"))
             .and_then(|choices| serde_json::from_value(choices.clone()).ok())
             .unwrap_or_default();
-        self.write_new_chat_draft(key, "", &[], &choices);
+        self.write_new_chat_draft(key.clone(), "", &[], &choices);
+        if !text.trim().is_empty() || !attachments.is_empty() {
+            self.offer_discard_undo(
+                super::Discarded::Draft {
+                    key,
+                    text,
+                    attachments,
+                    choices,
+                },
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Undo for [`Self::discard_project_draft`]: the draft is saved again as
+    /// it was, and shown again if its new chat is the one open and still empty.
+    pub(super) fn restore_discarded_draft(
+        &mut self,
+        key: String,
+        text: String,
+        attachments: Vec<Attachment>,
+        choices: settings::NewChatChoices,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.new_chat_draft_key().as_deref() == Some(key.as_str())
+            && !self.chat_create_submitting;
+        if open {
+            if !self.new_chat_prompt.trim().is_empty() || !self.new_chat_attachments.is_empty() {
+                // Something was written there since: both are kept.
+                self.new_chat_prompt = join_drafts(&self.new_chat_prompt, &text);
+                merge_attachments(&mut self.new_chat_attachments, attachments);
+            } else {
+                self.new_chat_prompt = text;
+                self.new_chat_attachments = attachments;
+            }
+            let text = self.new_chat_prompt.clone();
+            self.new_chat_input
+                .update(cx, |input, cx| input.set_text(text, cx));
+            self.persist_new_chat_draft();
+        } else {
+            self.write_new_chat_draft(key, &text, &attachments, &choices);
+        }
         cx.notify();
     }
 }
@@ -1783,7 +2010,7 @@ impl XdDesktop {
         let agent = self.minimal_new_session_agent;
         let chip = || {
             div()
-                .h(px(22.0))
+                .h(hit_px(HIT_MIN))
                 .px(px(8.0))
                 .min_w_0()
                 .flex_shrink()
@@ -1792,7 +2019,7 @@ impl XdDesktop {
                 .gap(px(6.0))
                 .rounded_full()
                 .bg(rgb(colors.surface_high))
-                .text_size(px(11.5))
+                .text_size(text_px(TEXT_LABEL))
                 .text_color(rgb(colors.muted))
         };
         div()
@@ -1806,15 +2033,14 @@ impl XdDesktop {
             .items_center()
             .gap(px(10.0))
             .bg(rgb(colors.chrome))
+            .children(self.sidebar_button(colors, cx))
             .child(
-                div()
+                truncating_label(title)
                     .min_w_0()
                     .flex_shrink()
-                    .truncate()
-                    .text_size(px(14.0))
+                    .text_size(text_px(TEXT_BODY))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(colors.text))
-                    .child(title),
+                    .text_color(rgb(colors.text)),
             )
             .child(
                 chip()
@@ -1837,27 +2063,31 @@ impl XdDesktop {
                                 .flex_none()
                                 .text_color(rgb(colors.muted)),
                         )
-                        .child(div().min_w_0().truncate().child(place)),
+                        .child(truncating_label(place).min_w_0()),
                 )
             })
             .child(div().flex_1())
             .child(if starting {
-                stamp("Starting", colors.working)
+                stamp("Starting", colors.working, colors)
             } else {
-                stamp("Draft", colors.muted)
+                stamp("Draft", colors.muted, colors)
             })
-            .child(
-                div().ml_2().flex_none().child(
-                    pane_icon_button(
+            .child(div().ml_2().flex_none().child({
+                let label = format!("Show or hide the side pane ({MOD_KEY}+B)");
+                icon_button("toggle-side-pane", label.clone(), SIDE_LAYOUT_ICON, colors)
+                    .active(self.browser_is_open())
+                    .build()
+                    .debug_selector(|| "toggle-side-pane".into())
+                    .key_stop_named(
+                        &self.key_targets,
+                        KeyLayer::Page,
                         "toggle-side-pane",
-                        "Toggle side pane",
-                        SIDE_LAYOUT_ICON,
-                        self.browser_is_open(),
+                        label,
                         colors,
+                        cx,
+                        |this, _, cx| this.toggle_browser(cx),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
-                ),
-            )
+            }))
             .into_any_element()
     }
 
@@ -1868,6 +2098,7 @@ impl XdDesktop {
         colors: ThemeColors,
         project_id: &str,
         project_index: usize,
+        depth: usize,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let mut rows = Vec::new();
@@ -1883,6 +2114,8 @@ impl XdDesktop {
             rows.push(self.render_starting_row(
                 colors,
                 ("starting-chat-open", project_index),
+                format!("{SIDEBAR_ROW_STOP}t:open:{project_id}").into(),
+                depth,
                 label,
                 self.minimal_new_session_agent,
                 true,
@@ -1900,6 +2133,8 @@ impl XdDesktop {
             rows.push(self.render_starting_row(
                 colors,
                 ("starting-chat", token as usize),
+                format!("{SIDEBAR_ROW_STOP}t:{token}").into(),
+                depth,
                 label,
                 agent,
                 false,
@@ -1912,8 +2147,28 @@ impl XdDesktop {
                 && self.creating_chat_session.is_none()
                 && !self.chat_create_submitting
                 && self.new_chat_started.is_none();
-            let open_project = project_id.to_owned();
+            let open: KeyRun = {
+                let project = project_id.to_owned();
+                Rc::new(move |this, window, cx| {
+                    if this.creating_chat_folder.as_deref() != Some(project.as_str())
+                        || this.creating_chat_session.is_some()
+                        || this.chat_create_submitting
+                        || this.new_chat_started.is_some()
+                    {
+                        this.begin_chat_create(project.clone(), window, cx);
+                    }
+                })
+            };
+            // A row of the sidebar's tree, which the arrow keys reach, with
+            // its Discard draft a Tab stop after it.
+            let stop = self.tree_row(TreeKeyRow::new(
+                format!("{SIDEBAR_ROW_STOP}d:{project_id}").into(),
+                depth,
+                PROJECT_LIST,
+            ));
+            let tree_marks = self.tree_marks(&stop, open.clone());
             let discard_project = project_id.to_owned();
+            let key_discard = project_id.to_owned();
             let agent = if selected {
                 self.minimal_new_session_agent
             } else {
@@ -1938,21 +2193,19 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .rounded(px(7.0))
-                    .when(selected, |row| row.bg(rgb(colors.selected_surface)))
+                    .rounded(px(RADIUS_TAB))
+                    .when(selected, |row| {
+                        row.bg(rgb(colors.selected_surface)).child(
+                            selection_marker(MarkerEdge::Leading, colors)
+                                .left(px(-SIDEBAR_MARKER_GUTTER)),
+                        )
+                    })
                     .cursor_pointer()
                     .when(!selected, |row| {
                         row.hover(|style| style.bg(rgb(colors.surface_high)))
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.creating_chat_folder.as_deref() != Some(open_project.as_str())
-                            || this.creating_chat_session.is_some()
-                            || this.chat_create_submitting
-                            || this.new_chat_started.is_some()
-                        {
-                            this.begin_chat_create(open_project.clone(), window, cx);
-                        }
-                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
+                    .children(tree_marks)
                     .child(assistant_icon(
                         agent_icon(agent),
                         13.0,
@@ -1962,30 +2215,43 @@ impl XdDesktop {
                     .child(
                         truncating_label(label)
                             .flex_1()
-                            .text_size(px(13.0))
+                            .text_size(text_px(TEXT_CONTROL))
                             .text_color(rgb(if selected { colors.text } else { colors.muted }))
                             .when(selected, |title| title.font_weight(FontWeight::MEDIUM)),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(11.0))
+                            .text_size(text_px(TEXT_CAPTION))
                             .text_color(rgb(colors.faint))
                             .child("Draft"),
                     )
                     .child(
-                        session_row_action(
-                            ("discard-draft-chat", project_index),
+                        self.tree_action(
+                            session_row_action(
+                                ("discard-draft-chat", project_index),
+                                "Discard draft",
+                                TRASH_ICON,
+                                selected || stop.keyed,
+                                colors,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.discard_project_draft(&discard_project, cx);
+                                },
+                            )),
+                            &stop,
+                            "discard",
                             "Discard draft",
-                            TRASH_ICON,
-                            selected,
                             colors,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.discard_project_draft(&discard_project, cx);
-                        })),
+                            move |this, window, cx| {
+                                this.leave_key_stop(window);
+                                this.discard_project_draft(&key_discard, cx);
+                            },
+                        ),
                     )
+                    .when(stop.ringed, |row| row.child(tree_ring(colors)))
                     .into_any_element(),
             );
         }
@@ -1997,15 +2263,27 @@ impl XdDesktop {
         &mut self,
         colors: ThemeColors,
         id: impl Into<gpui::ElementId>,
+        key: SharedString,
+        depth: usize,
         label: String,
         agent: AgentCli,
         selected: bool,
         token: Option<u64>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // A row of the sidebar's tree, which the arrow keys reach: Enter
+        // opens the chat once it has started; the view's own is open.
+        let stop = self.tree_row(TreeKeyRow::new(key, depth, PROJECT_LIST));
+        let open: KeyRun = Rc::new(move |this, window, cx| {
+            if let Some(token) = token {
+                this.open_starting_chat(token, window, cx);
+            }
+        });
+        let tree_marks = self.tree_marks(&stop, open);
         div()
             .id(id)
             .debug_selector(|| "starting-chat-row".into())
+            .relative()
             .w_full()
             .h(px(CARD_HEIGHT))
             .flex_none()
@@ -2014,8 +2292,12 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .rounded(px(7.0))
-            .when(selected, |row| row.bg(rgb(colors.selected_surface)))
+            .rounded(px(RADIUS_TAB))
+            .when(selected, |row| {
+                row.bg(rgb(colors.selected_surface)).child(
+                    selection_marker(MarkerEdge::Leading, colors).left(px(-SIDEBAR_MARKER_GUTTER)),
+                )
+            })
             .cursor_pointer()
             .when(!selected, |row| {
                 row.hover(|style| style.bg(rgb(colors.surface_high)))
@@ -2025,6 +2307,7 @@ impl XdDesktop {
                     this.open_starting_chat(token, window, cx);
                 }))
             })
+            .children(tree_marks)
             .child(assistant_icon(
                 agent_icon(agent),
                 13.0,
@@ -2034,7 +2317,7 @@ impl XdDesktop {
             .child(
                 truncating_label(label)
                     .flex_1()
-                    .text_size(px(13.0))
+                    .text_size(text_px(TEXT_CONTROL))
                     .text_color(rgb(if selected { colors.text } else { colors.muted }))
                     .when(selected, |title| title.font_weight(FontWeight::MEDIUM)),
             )
@@ -2044,17 +2327,12 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .text_size(px(11.0))
+                    .text_size(text_px(TEXT_CAPTION))
                     .text_color(rgb(colors.working))
-                    .child(
-                        div()
-                            .size(px(7.0))
-                            .rounded_full()
-                            .bg(rgb(colors.working))
-                            .opacity(pulse_opacity()),
-                    )
+                    .child(pulse_dot(7.0, colors.working, true))
                     .child("Starting"),
             )
+            .when(stop.ringed, |row| row.child(tree_ring(colors)))
             .into_any_element()
     }
 }

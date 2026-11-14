@@ -1,1 +1,1 @@
-pub use xd_terminal::{TerminalScreen, TerminalText};
+pub use xd_terminal::{TerminalPalette, TerminalScreen, TerminalText};

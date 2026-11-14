@@ -891,6 +891,94 @@ pub struct AppModel {
     pub turn_epoch: String,
     pub turn_watermark_id: u64,
     pub turn_watermark_sequence: u64,
+    /// Where each chat, and each chat's session, is in the lists above.
+    pub lookup: ChatLookup,
+}
+
+/// Where each chat is in [`AppModel::chats`], and its session in
+/// [`AppModel::sessions`], by the chat's id: built once for each list the
+/// host sends, so the sidebar's rows find a chat without scanning them all
+/// for every row. A place found is checked against the list before it is
+/// used, and a chat the index does not know is looked for by a scan, so a
+/// list changed in place is never misread.
+#[derive(Debug, Default)]
+pub struct ChatLookup(std::cell::RefCell<Option<ChatIndex>>);
+
+#[derive(Debug)]
+struct ChatIndex {
+    /// The lists it was built for: where their items are, and how many.
+    chats: (usize, usize),
+    sessions: (usize, usize),
+    chat: HashMap<String, usize>,
+    session: HashMap<String, usize>,
+}
+
+impl ChatIndex {
+    fn new(chats: &[ChatSummary], sessions: &[SessionSummary]) -> Self {
+        let mut session = HashMap::new();
+        for (index, group) in sessions.iter().enumerate() {
+            for chat in &group.chats {
+                // The first session that lists a chat is its own, as a scan
+                // would find it.
+                session.entry(chat.clone()).or_insert(index);
+            }
+        }
+        let mut chat = HashMap::with_capacity(chats.len());
+        for (index, summary) in chats.iter().enumerate() {
+            chat.entry(summary.id.clone()).or_insert(index);
+        }
+        Self {
+            chats: (chats.as_ptr() as usize, chats.len()),
+            sessions: (sessions.as_ptr() as usize, sessions.len()),
+            chat,
+            session,
+        }
+    }
+
+    fn built_for(&self, chats: &[ChatSummary], sessions: &[SessionSummary]) -> bool {
+        self.chats == (chats.as_ptr() as usize, chats.len())
+            && self.sessions == (sessions.as_ptr() as usize, sessions.len())
+    }
+}
+
+impl ChatLookup {
+    /// The places of `chat_id`'s summary and session, from an index of the
+    /// lists as they are now.
+    fn places(
+        &self,
+        chats: &[ChatSummary],
+        sessions: &[SessionSummary],
+        chat_id: &str,
+    ) -> (Option<usize>, Option<usize>) {
+        let mut index = self.0.borrow_mut();
+        if !index
+            .as_ref()
+            .is_some_and(|index| index.built_for(chats, sessions))
+        {
+            *index = Some(ChatIndex::new(chats, sessions));
+        }
+        let index = index.as_ref().expect("built above");
+        (
+            index.chat.get(chat_id).copied(),
+            index.session.get(chat_id).copied(),
+        )
+    }
+}
+
+/// The index is a cache of the lists beside it: two models with the same
+/// lists are the same model, whatever either has looked up.
+impl PartialEq for ChatLookup {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ChatLookup {}
+
+impl Clone for ChatLookup {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -929,7 +1017,33 @@ struct TreeSnapshot {
     terminal_activity_revision: Option<u64>,
 }
 
+/// What a chat or session without a name of its own is called, everywhere.
+pub const DEFAULT_CHAT_TITLE: &str = "New chat";
+
+/// Whether a title is only a placeholder. Hosts store the one a client made
+/// the chat with, and clients have capitalized it differently over time.
+pub fn is_default_chat_title(title: &str) -> bool {
+    let title = title.trim();
+    title.is_empty()
+        || title.eq_ignore_ascii_case("new chat")
+        || title.eq_ignore_ascii_case("new session")
+}
+
 fn normalize_sessions(snapshot: &mut TreeSnapshot, body: &Value) {
+    // A stored placeholder reads the same whichever client made the chat.
+    for chat in &mut snapshot.chats {
+        if let Some(title) = &mut chat.title
+            && !title.trim().is_empty()
+            && is_default_chat_title(title)
+        {
+            *title = DEFAULT_CHAT_TITLE.into();
+        }
+    }
+    for session in &mut snapshot.sessions {
+        if is_default_chat_title(&session.title) {
+            session.title = DEFAULT_CHAT_TITLE.into();
+        }
+    }
     let known_chats = snapshot
         .chats
         .iter()
@@ -974,7 +1088,7 @@ fn normalize_sessions(snapshot: &mut TreeSnapshot, body: &Value) {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .or_else(|| chat.title.clone())
-                .unwrap_or_else(|| "New Session".into()),
+                .unwrap_or_else(|| DEFAULT_CHAT_TITLE.into()),
             chats: vec![chat.id.clone()],
             branch: chat.branch.clone(),
             working: chat.working,
@@ -1073,9 +1187,30 @@ impl AppModel {
     }
 
     pub fn session_for_chat(&self, chat_id: &str) -> Option<&SessionSummary> {
+        let (_, place) = self.lookup.places(&self.chats, &self.sessions, chat_id);
+        if let Some(session) = place.and_then(|place| self.sessions.get(place))
+            && session.chats.iter().any(|id| id == chat_id)
+        {
+            return Some(session);
+        }
+        // Not where the index says, or not in it: the list may have changed in
+        // place since the index was built, so a miss is never trusted.
         self.sessions
             .iter()
             .find(|session| session.chats.iter().any(|id| id == chat_id))
+    }
+
+    /// The summary of the chat `chat_id`, found through [`ChatLookup`].
+    pub fn chat(&self, chat_id: &str) -> Option<&ChatSummary> {
+        let (place, _) = self.lookup.places(&self.chats, &self.sessions, chat_id);
+        if let Some(chat) = place.and_then(|place| self.chats.get(place))
+            && chat.id == chat_id
+        {
+            return Some(chat);
+        }
+        // Not where the index says, or not in it: the list may have changed in
+        // place since the index was built, so a miss is never trusted.
+        self.chats.iter().find(|chat| chat.id == chat_id)
     }
 
     pub fn session_key_for_chat(&self, chat_id: &str) -> String {
@@ -1363,11 +1498,7 @@ impl AppModel {
     /// Whether the chat waits on the user: for an answer, an approval, or a
     /// new quota once it used its own.
     pub fn needs_user(&self, chat_id: &str) -> bool {
-        self.is_waiting(chat_id)
-            || self
-                .chats
-                .iter()
-                .any(|chat| chat.id == chat_id && chat.quota_reached)
+        self.is_waiting(chat_id) || self.chat(chat_id).is_some_and(|chat| chat.quota_reached)
     }
 
     pub fn is_waiting(&self, chat_id: &str) -> bool {
@@ -2282,6 +2413,7 @@ impl AppModel {
             turn_epoch: String::new(),
             turn_watermark_id: 0,
             turn_watermark_sequence: 0,
+            lookup: ChatLookup::default(),
         };
         model.sessions = model
             .chats
@@ -2289,7 +2421,10 @@ impl AppModel {
             .map(|chat| SessionSummary {
                 id: chat.id.clone(),
                 folder: chat.folder.clone(),
-                title: chat.title.clone().unwrap_or_else(|| "New Session".into()),
+                title: chat
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_CHAT_TITLE.into()),
                 chats: vec![chat.id.clone()],
                 branch: chat.branch.clone(),
                 working: chat.working,
@@ -2718,6 +2853,39 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_title_reads_new_chat_whichever_client_stored_it() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({"folders":[],"chats":[
+                {"id":"a","folder":"project","title":"New Chat","backend":"codex","session":"one"},
+                {"id":"b","folder":"project","title":"New Session","backend":"claude","session":"two"},
+                {"id":"c","folder":"project","title":"New chat about parsers","backend":"claude","session":"three"}
+            ],"sessions":[
+                {"id":"one","folder":"project","title":"New Chat","chats":["a"]},
+                {"id":"two","folder":"project","title":"New Session","chats":["b"]},
+                {"id":"three","folder":"project","title":"Parsers","chats":["c"]}
+            ]}))
+            .unwrap();
+        let titles = |model: &AppModel| {
+            model
+                .chats
+                .iter()
+                .map(|chat| chat.title.clone().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(&model),
+            ["New chat", "New chat", "New chat about parsers"]
+        );
+        assert_eq!(model.sessions[0].title, "New chat");
+        assert_eq!(model.sessions[1].title, "New chat");
+        assert_eq!(model.sessions[2].title, "Parsers");
+        assert!(is_default_chat_title("  NEW CHAT "));
+        assert!(is_default_chat_title(""));
+        assert!(!is_default_chat_title("New chat about parsers"));
+    }
+
+    #[test]
     fn legacy_trees_normalize_to_single_chat_sessions_with_legacy_terminal_owners() {
         let mut model = AppModel::default();
         model
@@ -2728,7 +2896,7 @@ mod tests {
             .unwrap();
         assert_eq!(model.sessions.len(), 2);
         assert_eq!(model.sessions[0].title, "Old task");
-        assert_eq!(model.sessions[1].title, "New Session");
+        assert_eq!(model.sessions[1].title, "New chat");
         assert_eq!(model.session_key_for_chat("legacy"), "legacy");
         assert_eq!(model.terminal_key_for_chat("legacy"), "legacy");
         assert_eq!(model.session_key_for_chat("unlisted"), "unlisted");
@@ -4416,5 +4584,72 @@ mod background_output_tests {
             missing.output_error.as_deref(),
             Some("Output file unavailable.")
         );
+    }
+    #[test]
+    fn a_chat_and_its_session_are_found_by_id_and_a_changed_list_is_never_misread() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&serde_json::json!({
+                "folders":[{"id":"atlas","name":"Atlas"}],
+                "chats":[
+                    {"id":"lead","folder":"atlas","title":"Lead","backend":"codex"},
+                    {"id":"tab","folder":"atlas","title":"Tab","backend":"codex"},
+                    {"id":"alone","folder":"atlas","title":"Alone","backend":"codex"}
+                ],
+                "sessions":[
+                    {"id":"work","folder":"atlas","title":"Work","chats":["lead","tab"]},
+                    {"id":"solo","folder":"atlas","title":"Solo","chats":["alone"]}
+                ]
+            }))
+            .unwrap();
+        assert_eq!(
+            model.chat("tab").map(|chat| chat.title.as_deref()),
+            Some(Some("Tab"))
+        );
+        assert_eq!(
+            model
+                .session_for_chat("tab")
+                .map(|session| session.id.as_str()),
+            Some("work")
+        );
+        assert_eq!(
+            model
+                .session_for_chat("alone")
+                .map(|session| session.id.as_str()),
+            Some("solo")
+        );
+        assert!(model.chat("gone").is_none());
+        // Reordered where it lies, the list is checked, not trusted.
+        model.chats.swap(0, 2);
+        assert_eq!(
+            model.chat("alone").map(|chat| chat.id.as_str()),
+            Some("alone")
+        );
+        assert_eq!(
+            model.chat("lead").map(|chat| chat.id.as_str()),
+            Some("lead")
+        );
+        // A chat replaced where it lies, under a new id, is found though the
+        // index never saw it; so is a chat moved into another session.
+        model.chats[1].id = "renamed".into();
+        assert_eq!(
+            model.chat("renamed").map(|chat| chat.id.as_str()),
+            Some("renamed")
+        );
+        model.sessions[1].chats.push("tab".into());
+        model.sessions[0].chats.retain(|id| id != "tab");
+        assert_eq!(
+            model
+                .session_for_chat("tab")
+                .map(|session| session.id.as_str()),
+            Some("solo")
+        );
+        model.chats[1].id = "tab".into();
+        // A new list is indexed afresh.
+        model.chats = vec![model.chats[1].clone()];
+        assert!(model.chat("lead").is_none());
+        assert_eq!(model.chat("tab").map(|chat| chat.id.as_str()), Some("tab"));
+        // A model that has looked chats up equals one that has not.
+        assert_eq!(model.clone(), model);
     }
 }

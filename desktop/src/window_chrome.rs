@@ -22,6 +22,9 @@ const CAPTION_FONTS: [&str; 2] = ["Segoe Fluent Icons", "Segoe MDL2 Assets"];
 
 /// Width of one Windows caption button, as the system draws its own.
 pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
+/// The size the Segoe caption glyphs are drawn at: an icon that scales with
+/// its button, like the app's other icons, so not text under the caption floor.
+pub const CAPTION_GLYPH_SIZE: f32 = 10.0;
 
 /// The red Windows puts behind a hovered close button, and behind a pressed one.
 pub const CAPTION_CLOSE_HOVER: u32 = 0xc42b1c;

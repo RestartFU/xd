@@ -1,5 +1,7 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -7,23 +9,21 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Button
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -76,6 +76,7 @@ internal fun ChatQuotaSection(model: MainViewModel) {
     if (current == null) {
         Text(
             error ?: "Reading the chat quota…",
+            modifier = Modifier.announced(),
             color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -83,7 +84,18 @@ internal fun ChatQuotaSection(model: MainViewModel) {
         return
     }
     val percent = current.percent
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    // One stop, named by its words: a tap anywhere on the row turns it.
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(
+                value = percent != null,
+                role = Role.Switch,
+                onValueChange = { on -> model.setChatQuota(if (on) ChatQuota.DEFAULT_PERCENT else null) },
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
             Text("Limit each chat's usage", fontWeight = FontWeight.SemiBold)
             Text(
@@ -92,10 +104,7 @@ internal fun ChatQuotaSection(model: MainViewModel) {
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Switch(
-            checked = percent != null,
-            onCheckedChange = { on -> model.setChatQuota(if (on) ChatQuota.DEFAULT_PERCENT else null) },
-        )
+        Switch(checked = percent != null, onCheckedChange = null)
     }
     if (percent != null) {
         // Keyed by the host's value, so a change made elsewhere replaces what is shown.
@@ -122,7 +131,7 @@ internal fun ChatQuotaSection(model: MainViewModel) {
     }
     error?.let {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(it, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(it, modifier = Modifier.weight(1f).announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = model::loadChatQuota) { Text("Try again") }
         }
     }
@@ -145,7 +154,7 @@ internal fun QuotaAsk(
     var typed by rememberSaveable(quota?.percent) { mutableStateOf(ChatQuota.nextPercent(quota?.percent).toString()) }
     val chosen = ChatQuota.typedPercent(typed)
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    val small = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, lineHeight = 19.sp)
+    val small = MaterialTheme.typography.bodyMedium
     AskFrame {
         AskHeader(QUOTA_REACHED_TITLE)
         if (quota != null) {
@@ -154,7 +163,6 @@ internal fun QuotaAsk(
                     "${quota.usedLabel}%",
                     modifier = Modifier.alignByBaseline(),
                     style = MaterialTheme.typography.titleLarge.copy(
-                        fontSize = 22.sp,
                         fontWeight = FontWeight.SemiBold,
                         fontFeatureSettings = "tnum",
                     ),
@@ -193,13 +201,13 @@ internal fun QuotaAsk(
         if (chosen == null) {
             Text(
                 "Enter a whole number from 1 to 100.",
-                modifier = Modifier.padding(horizontal = AskInset),
+                modifier = Modifier.padding(horizontal = AskInset).announced(),
                 color = MaterialTheme.colorScheme.error,
                 style = small,
             )
         }
         error?.let {
-            Text(it, modifier = Modifier.padding(horizontal = AskInset), color = MaterialTheme.colorScheme.error, style = small)
+            Text(it, modifier = Modifier.padding(horizontal = AskInset).announced(), color = MaterialTheme.colorScheme.error, style = small)
         }
     }
 }
@@ -225,8 +233,8 @@ private fun QuotaPercentField(
         modifier = modifier
             .minimumInteractiveComponentSize()
             .width(76.dp)
-            .height(40.dp)
-            .semantics { contentDescription = "$label, percent" },
+            // At least 40dp: enlarged text needs more.
+            .heightIn(min = 40.dp),
         enabled = enabled,
         singleLine = true,
         textStyle = MaterialTheme.typography.bodyMedium.copy(
@@ -239,17 +247,18 @@ private fun QuotaPercentField(
         decorationBox = { field ->
             Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(MaterialTheme.shapes.small)
                     .background(MaterialTheme.colorScheme.surfaceContainerLow)
                     .border(
                         1.dp,
-                        if (valid) MaterialTheme.colorScheme.outlineVariant else MaterialTheme.colorScheme.error,
-                        RoundedCornerShape(8.dp),
+                        if (valid) controlBorder() else MaterialTheme.colorScheme.error,
+                        MaterialTheme.shapes.small,
                     )
                     .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(Modifier.weight(1f)) { field() }
+                // The words beside it are not tied to it, so the field carries its own name.
+                Box(Modifier.weight(1f)) { FieldName("$label, percent", shown = true, field) }
                 Text("%", color = LocalXdSignals.current.faint, style = MaterialTheme.typography.bodyMedium)
             }
         },
@@ -266,12 +275,13 @@ private fun PercentField(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    OutlinedTextField(
+    NamedOutlinedField(
         value = text,
         onValueChange = { typed -> onText(typed.filter(Char::isDigit).take(3)) },
         // The visible words beside it are not tied to it, so screen readers
         // are told what the number is.
-        modifier = modifier.width(92.dp).semantics { contentDescription = "$label, percent" },
+        name = "$label, percent",
+        modifier = modifier.width(92.dp),
         enabled = enabled,
         singleLine = true,
         isError = ChatQuota.typedPercent(text) == null,
@@ -279,5 +289,6 @@ private fun PercentField(
         textStyle = MaterialTheme.typography.bodyMedium,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
         keyboardActions = KeyboardActions(onDone = { onDone() }),
+        colors = xdFieldColors(),
     )
 }

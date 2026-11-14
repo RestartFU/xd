@@ -94,6 +94,11 @@ public data class TreeSnapshot(
     val chats: List<ChatSummary> = emptyList(),
     val loading: Boolean = false,
     val error: String? = null,
+    /**
+     * The host's tree has arrived. Until then the lists are empty because
+     * nothing has been read yet, not because the host has nothing.
+     */
+    val loaded: Boolean = false,
     val sessions: List<WorkspaceSession> = emptyList(),
     /** The connected host can settle sessions. */
     val settlement: Boolean = false,

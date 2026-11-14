@@ -1,5 +1,7 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,7 +28,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -55,14 +56,15 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.restartfu.xd.mobile.R
 import com.restartfu.xd.model.Ask
 import com.restartfu.xd.model.AskBlock
@@ -120,21 +122,37 @@ internal val AskInset = 6.dp
 /**
  * The ask section's frame and the hairline under it. Never taller than about
  * half of what the keyboard leaves, so the message field stays in reach; a
- * taller ask scrolls inside itself.
+ * taller ask scrolls inside itself. A [footer], such as an approval's
+ * answers, stays put under the part that scrolls, so it is in reach however
+ * long that part is.
  */
 @Composable
-internal fun AskFrame(content: @Composable ColumnScope.() -> Unit) {
+internal fun AskFrame(
+    footer: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     val keyboard = WindowInsets.ime.asPaddingValues().calculateBottomPadding()
     val room = LocalConfiguration.current.screenHeightDp.dp - keyboard
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = (room * 0.5f).coerceAtLeast(160.dp))
-            .verticalScroll(rememberScrollState())
             .padding(start = 10.dp, end = 10.dp, top = 16.dp, bottom = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        content = content,
-    )
+    ) {
+        // Takes what the footer leaves, and no more than it needs.
+        Column(
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .testTag(ASK_SCROLL_TAG)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            content = content,
+        )
+        if (footer != null) {
+            Spacer(Modifier.height(12.dp))
+            footer()
+        }
+    }
     HorizontalDivider(
         modifier = Modifier.padding(horizontal = 16.dp),
         color = MaterialTheme.colorScheme.outlineVariant,
@@ -160,11 +178,13 @@ internal fun AskHeader(title: String, counter: String? = null) {
         )
         Text(
             title,
-            modifier = Modifier.weight(1f).semantics { heading() },
-            style = MaterialTheme.typography.titleMedium.copy(
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = (-0.08).sp,
-            ),
+            // Told to a screen reader as it arrives: an ask docks under the
+            // transcript, where nothing else would say the agent now waits.
+            modifier = Modifier.weight(1f).semantics {
+                heading()
+                liveRegion = LiveRegionMode.Polite
+            },
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
         )
         counter?.let {
             Text(
@@ -192,7 +212,7 @@ internal fun AskOptionRow(number: Int, label: String, enabled: Boolean, onPick: 
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 50.dp)
-            .clip(RoundedCornerShape(14.dp))
+            .clip(MaterialTheme.shapes.medium)
             .background(if (lit) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent)
             .clickable(
                 interactionSource = source,
@@ -209,13 +229,13 @@ internal fun AskOptionRow(number: Int, label: String, enabled: Boolean, onPick: 
             "$number",
             // The answer is what a screen reader reads; the number is only a mark.
             modifier = Modifier.widthIn(min = 10.dp).clearAndSetSemantics {},
-            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, fontFeatureSettings = "tnum"),
+            style = MaterialTheme.typography.bodyMedium.copy(fontFeatureSettings = "tnum"),
             color = faint,
         )
         Text(
             label,
             modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 21.sp),
+            style = MaterialTheme.typography.bodyLarge,
             color = if (enabled) MaterialTheme.colorScheme.onSurface else faint,
         )
         Icon(
@@ -302,6 +322,7 @@ private fun SecretAnswer(
                 Icon(painterResource(R.drawable.ic_send), "Send answer", modifier = Modifier.size(20.dp))
             }
         },
+        colors = xdFieldColors(),
     )
 }
 
@@ -335,7 +356,25 @@ internal fun ApprovalAsk(
     waiting: Int,
     onDecide: (decision: String) -> Unit,
 ) {
-    AskFrame {
+    AskFrame(
+        footer = {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = AskInset),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(onClick = { onDecide("accept") }, contentPadding = AskButtonPadding) { Text("Allow once") }
+                FilledTonalButton(
+                    onClick = { onDecide("acceptForSession") },
+                    contentPadding = AskButtonPadding,
+                    colors = askSecondaryButtonColors(),
+                ) { Text("Allow for session") }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = { onDecide("decline") }) {
+                    Text("Deny", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+    ) {
         AskHeader(approvalTitle(request), if (waiting > 1) "1 / $waiting" else null)
         Text(
             request.detail,
@@ -343,12 +382,12 @@ internal fun ApprovalAsk(
                 .padding(horizontal = AskInset)
                 .fillMaxWidth()
                 .heightIn(max = 140.dp)
-                .clip(RoundedCornerShape(8.dp))
+                .clip(MaterialTheme.shapes.small)
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             fontFamily = XdMonoFamily,
-            style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5.sp, lineHeight = 19.sp),
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface,
         )
         request.reason?.let {
@@ -356,27 +395,15 @@ internal fun ApprovalAsk(
                 it,
                 modifier = Modifier.padding(horizontal = AskInset),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, lineHeight = 19.sp),
+                style = MaterialTheme.typography.bodyMedium,
             )
         }
         request.patch?.let { patch -> Box(Modifier.padding(horizontal = AskInset)) { DiffText(patch) } }
-        FlowRow(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = AskInset),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Button(onClick = { onDecide("accept") }, contentPadding = AskButtonPadding) { Text("Allow once") }
-            FilledTonalButton(
-                onClick = { onDecide("acceptForSession") },
-                contentPadding = AskButtonPadding,
-                colors = askSecondaryButtonColors(),
-            ) { Text("Allow for session") }
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = { onDecide("decline") }) {
-                Text("Deny", color = MaterialTheme.colorScheme.error)
-            }
-        }
     }
 }
+
+/** The part of an ask that scrolls, for tests. */
+internal const val ASK_SCROLL_TAG = "ask-scroll"
 
 /** A quiet filled button: the composer's raised neutral, in either theme. */
 @Composable

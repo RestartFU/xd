@@ -2,6 +2,10 @@
 //! order turns use them in, signing in without a terminal, and the notice a
 //! chat shows when it moves to another account.
 use super::*;
+use crate::metrics::{
+    CONTROL_HEIGHT, LINE_LABEL, LINE_TITLE_MONO, RADIUS_CONTROL, RADIUS_PANEL, TEXT_CAPTION,
+    TEXT_CONTROL, TEXT_LABEL, TEXT_TITLE, line_px,
+};
 use serde_json::json;
 
 pub(super) const CHEVRON_UP_ICON: &str = "icons/chevron-up.svg";
@@ -131,8 +135,8 @@ pub(super) fn render_switch_notice(sentence: &str, colors: ThemeColors) -> gpui:
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(13.0))
-                .line_height(px(20.0))
+                .text_size(text_px(TEXT_CONTROL))
+                .line_height(line_px(LINE_CONTROL, TEXT_CONTROL))
                 .text_color(rgb(colors.muted))
                 .child(sentence.to_owned()),
         )
@@ -373,7 +377,7 @@ fn account_meters(account: &AuthAccount, colors: ThemeColors) -> Option<gpui::Di
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .text_size(px(11.0))
+                    .text_size(text_px(TEXT_CAPTION))
                     .child(
                         div()
                             .w(px(30.0))
@@ -397,32 +401,6 @@ fn account_meters(account: &AuthAccount, colors: ThemeColors) -> Option<gpui::Di
                     )
             })),
     )
-}
-
-/// A small square button holding one icon. Without `enabled` it is drawn
-/// faint and does nothing.
-fn icon_button(
-    id: impl Into<gpui::ElementId>,
-    path: &'static str,
-    enabled: bool,
-    colors: ThemeColors,
-) -> gpui::Stateful<gpui::Div> {
-    let button = div()
-        .id(id)
-        .size(px(26.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0));
-    if enabled {
-        button
-            .cursor_pointer()
-            .hover(|style| style.bg(rgb(colors.surface_high)))
-            .child(icon(path, 14.0, colors.muted))
-    } else {
-        button.child(icon(path, 14.0, colors.border))
-    }
 }
 
 /// What the accounts in Settings are for, shown above them and read by search.
@@ -510,15 +488,15 @@ impl XdDesktop {
             .gap(px(22.0))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
+                    .text_size(text_px(TEXT_LABEL))
+                    .line_height(line_px(LINE_LABEL_ROW, TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(ACCOUNTS_EXPLANATION),
             )
             .when(loading, |body| {
                 body.child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(text_px(TEXT_LABEL))
                         .text_color(rgb(colors.faint))
                         .child("Checking sign-ins…"),
                 )
@@ -528,8 +506,8 @@ impl XdDesktop {
                     div()
                         .flex()
                         .gap(px(8.0))
-                        .text_size(px(12.0))
-                        .line_height(px(18.0))
+                        .text_size(text_px(TEXT_LABEL))
+                        .line_height(line_px(LINE_LABEL_ROW, TEXT_LABEL))
                         .text_color(rgb(colors.danger))
                         .child(div().mt(px(2.0)).child(icon(
                             usage_view::ALERT_ICON,
@@ -550,6 +528,7 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let keys = self.key_targets.clone();
         let id = provider.provider.clone();
         let name = presentation::provider_name(&id).to_owned();
         let accounts = provider.account_list();
@@ -579,6 +558,15 @@ impl XdDesktop {
         let add_id = id.clone();
         let switch_id = id.clone();
         let auto_switch = provider.auto_switch;
+        let switch_stop: SharedString = format!("account-auto-switch-{provider_index}").into();
+        let flip: KeyRun = Rc::new(move |this, _, cx| {
+            this.account_action(
+                "agent-accounts-auto-switch",
+                &switch_id,
+                json!({"enabled": !auto_switch}),
+                cx,
+            );
+        });
         let mark = match id.as_str() {
             "claude" => CLAUDE_ICON,
             _ => CODEX_ICON,
@@ -598,29 +586,51 @@ impl XdDesktop {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(13.0))
+                            .text_size(text_px(TEXT_CONTROL))
                             .font_weight(FontWeight::MEDIUM)
                             .child(name.clone()),
                     )
                     .when(provider.holds_several(), |header| {
                         header.child(
-                            ui_button(("add-account", provider_index), ButtonKind::Ghost, colors)
-                                .when(!can_add, |button| {
-                                    button.opacity(0.45).cursor_default()
-                                })
-                                .when(can_add, |button| {
-                                    button.on_click(cx.listener(move |this, _, _, cx| {
-                                        this.account_action("agent-auth-add", &add_id, json!({}), cx);
-                                    }))
-                                })
-                                .child(icon(usage_view::PLUS_ICON, 14.0, colors.muted))
-                                .child("Add account"),
+                            ui_button_when(
+                                can_add,
+                                ("add-account", provider_index),
+                                ButtonKind::Ghost,
+                                colors,
+                            )
+                            .when(can_add, |button| {
+                                button.key_stop(
+                                    &keys,
+                                    KeyLayer::Overlay,
+                                    format!("add-account-{provider_index}"),
+                                    colors,
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.account_action(
+                                            "agent-auth-add",
+                                            &add_id,
+                                            json!({}),
+                                            cx,
+                                        );
+                                    },
+                                )
+                            })
+                            .child(icon(
+                                usage_view::PLUS_ICON,
+                                14.0,
+                                if can_add {
+                                    colors.muted
+                                } else {
+                                    disabled_ink(colors)
+                                },
+                            ))
+                            .child("Add account"),
                         )
                     }),
             )
             .child(
                 div()
-                    .rounded(px(8.0))
+                    .rounded(px(RADIUS_PANEL))
                     .border_1()
                     .border_color(rgb(colors.border))
                     .bg(rgb(colors.surface))
@@ -633,43 +643,34 @@ impl XdDesktop {
             .when_some(provider.notice.clone(), |block, notice| {
                 block.child(
                     div()
-                        .text_size(px(12.0))
-                        .line_height(px(18.0))
+                        .text_size(text_px(TEXT_LABEL))
+                        .line_height(line_px(LINE_LABEL_ROW, TEXT_LABEL))
                         .text_color(rgb(colors.muted))
                         .child(notice),
                 )
             })
             .when(several, |block| {
-                block.child(
+                block.child(workspace_settings::key_switch(
                     div()
                         .id(("account-auto-switch", provider_index))
                         .mt(px(2.0))
                         .flex()
                         .items_center()
                         .gap_4()
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.account_action(
-                                "agent-accounts-auto-switch",
-                                &switch_id,
-                                json!({"enabled": !auto_switch}),
-                                cx,
-                            );
-                        }))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .child(
                                     div()
-                                        .text_size(px(13.0))
+                                        .text_size(text_px(TEXT_CONTROL))
                                         .child("Switch accounts when one runs out"),
                                 )
                                 .child(
                                     div()
                                         .mt(px(4.0))
-                                        .text_size(px(12.0))
-                                        .line_height(px(18.0))
+                                        .text_size(text_px(TEXT_LABEL))
+                                        .line_height(line_px(LINE_LABEL_ROW, TEXT_LABEL))
                                         .text_color(rgb(colors.muted))
                                         .child(if id == "codex" {
                                             "At a 5-hour, weekly, or monthly limit, the chat continues on the next account with room. Codex starts a new session there, given the chat's messages."
@@ -677,9 +678,14 @@ impl XdDesktop {
                                             "At a 5-hour or weekly limit, the chat continues on the next account with room, in the same session."
                                         }),
                                 ),
-                        )
-                        .child(settings_switch(colors, auto_switch)),
-                )
+                        ),
+                    &keys,
+                    switch_stop.clone(),
+                    auto_switch,
+                    colors,
+                    cx,
+                    move |this, window, cx| flip(this, window, cx),
+                ))
             })
             .into_any_element()
     }
@@ -697,6 +703,7 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let keys = self.key_targets.clone();
         let several = ranked > 1;
         let (status, tone, dot) = account_status(account, now, colors);
         let confirming_removal =
@@ -735,29 +742,49 @@ impl XdDesktop {
         if several && !confirming {
             let up_provider = provider_owned.clone();
             let down_provider = provider_owned.clone();
-            actions =
-                actions
-                    .child(
-                        icon_button(("account-up", element), CHEVRON_UP_ICON, index > 0, colors)
-                            .when(index > 0, |button| {
-                                button.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.move_account(&up_provider, index, true, cx);
-                                }))
-                            }),
+            actions = actions
+                .child(
+                    icon_button(
+                        ("account-up", element),
+                        "Use before the one above",
+                        CHEVRON_UP_ICON,
+                        colors,
                     )
-                    .child(
-                        icon_button(
-                            ("account-down", element),
-                            CHEVRON_DOWN_ICON,
-                            index + 1 < ranked,
+                    .size(26.0)
+                    .enabled(index > 0)
+                    .build()
+                    .when(index > 0, |button| {
+                        button.key_stop(
+                            &keys,
+                            KeyLayer::Overlay,
+                            format!("account-up-{element}"),
                             colors,
+                            cx,
+                            move |this, _, cx| this.move_account(&up_provider, index, true, cx),
                         )
-                        .when(index + 1 < ranked, |button| {
-                            button.on_click(cx.listener(move |this, _, _, cx| {
-                                this.move_account(&down_provider, index, false, cx);
-                            }))
-                        }),
-                    );
+                    }),
+                )
+                .child(
+                    icon_button(
+                        ("account-down", element),
+                        "Use after the one below",
+                        CHEVRON_DOWN_ICON,
+                        colors,
+                    )
+                    .size(26.0)
+                    .enabled(index + 1 < ranked)
+                    .build()
+                    .when(index + 1 < ranked, |button| {
+                        button.key_stop(
+                            &keys,
+                            KeyLayer::Overlay,
+                            format!("account-down-{element}"),
+                            colors,
+                            cx,
+                            move |this, _, cx| this.move_account(&down_provider, index, false, cx),
+                        )
+                    }),
+                );
         }
         if confirming {
             let remove_provider = provider_owned.clone();
@@ -765,10 +792,17 @@ impl XdDesktop {
             actions = actions
                 .child(
                     ui_button(("account-keep", element), ButtonKind::Ghost, colors)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.account_remove_confirm = None;
-                            cx.notify();
-                        }))
+                        .key_stop(
+                            &keys,
+                            KeyLayer::Overlay,
+                            format!("account-keep-{element}"),
+                            colors,
+                            cx,
+                            |this, _, cx| {
+                                this.account_remove_confirm = None;
+                                cx.notify();
+                            },
+                        )
                         .child("Keep"),
                 )
                 .child(
@@ -777,15 +811,22 @@ impl XdDesktop {
                         ButtonKind::Danger,
                         colors,
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.account_remove_confirm = None;
-                        this.account_action(
-                            "agent-auth-logout",
-                            &remove_provider,
-                            json!({"account": remove_id}),
-                            cx,
-                        );
-                    }))
+                    .key_stop(
+                        &keys,
+                        KeyLayer::Overlay,
+                        format!("account-remove-confirm-{element}"),
+                        colors,
+                        cx,
+                        move |this, _, cx| {
+                            this.account_remove_confirm = None;
+                            this.account_action(
+                                "agent-auth-logout",
+                                &remove_provider,
+                                json!({"account": remove_id}),
+                                cx,
+                            );
+                        },
+                    )
                     .child("Remove"),
                 );
         } else if !in_flight && !busy {
@@ -794,14 +835,21 @@ impl XdDesktop {
                 let sign_in_id = account_id.clone();
                 actions = actions.child(
                     ui_button(("account-sign-in", element), ButtonKind::Secondary, colors)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.account_action(
-                                "agent-auth-start",
-                                &sign_in_provider,
-                                json!({"account": sign_in_id}),
-                                cx,
-                            );
-                        }))
+                        .key_stop(
+                            &keys,
+                            KeyLayer::Overlay,
+                            format!("account-sign-in-{element}"),
+                            colors,
+                            cx,
+                            move |this, _, cx| {
+                                this.account_action(
+                                    "agent-auth-start",
+                                    &sign_in_provider,
+                                    json!({"account": sign_in_id}),
+                                    cx,
+                                );
+                            },
+                        )
                         .child(if account.default {
                             "Sign in"
                         } else {
@@ -814,14 +862,21 @@ impl XdDesktop {
                     let sign_out_provider = provider_owned.clone();
                     actions = actions.child(
                         ui_button(("account-sign-out", element), ButtonKind::Ghost, colors)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.account_action(
-                                    "agent-auth-logout",
-                                    &sign_out_provider,
-                                    json!({}),
-                                    cx,
-                                );
-                            }))
+                            .key_stop(
+                                &keys,
+                                KeyLayer::Overlay,
+                                format!("account-sign-out-{element}"),
+                                colors,
+                                cx,
+                                move |this, _, cx| {
+                                    this.account_action(
+                                        "agent-auth-logout",
+                                        &sign_out_provider,
+                                        json!({}),
+                                        cx,
+                                    );
+                                },
+                            )
                             .child("Sign out"),
                     );
                 }
@@ -830,11 +885,18 @@ impl XdDesktop {
                 let confirm_id = account_id.clone();
                 actions = actions.child(
                     ui_button(("account-remove", element), ButtonKind::Ghost, colors)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.account_remove_confirm =
-                                Some((confirm_provider.clone(), confirm_id.clone()));
-                            cx.notify();
-                        }))
+                        .key_stop(
+                            &keys,
+                            KeyLayer::Overlay,
+                            format!("account-remove-{element}"),
+                            colors,
+                            cx,
+                            move |this, _, cx| {
+                                this.account_remove_confirm =
+                                    Some((confirm_provider.clone(), confirm_id.clone()));
+                                cx.notify();
+                            },
+                        )
                         .child("Remove"),
                 );
             }
@@ -855,7 +917,7 @@ impl XdDesktop {
                     div()
                         .w(px(12.0))
                         .flex_none()
-                        .text_size(px(12.0))
+                        .text_size(text_px(TEXT_LABEL))
                         .text_color(rgb(colors.faint))
                         .child((index + 1).to_string()),
                 )
@@ -874,18 +936,16 @@ impl XdDesktop {
                             .items_baseline()
                             .gap(px(8.0))
                             .child(
-                                div()
+                                truncating_label(account.label.clone())
                                     .min_w_0()
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(colors.text))
-                                    .truncate()
-                                    .child(account.label.clone()),
+                                    .text_size(text_px(TEXT_CONTROL))
+                                    .text_color(rgb(colors.text)),
                             )
                             .when(!facts.is_empty(), |line| {
                                 line.child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(12.0))
+                                        .text_size(text_px(TEXT_LABEL))
                                         .text_color(rgb(colors.faint))
                                         .child(facts.join(" · ")),
                                 )
@@ -897,25 +957,23 @@ impl XdDesktop {
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .text_size(px(12.0))
-                            .line_height(px(17.0))
+                            .text_size(text_px(TEXT_LABEL))
+                            .line_height(line_px(LINE_LABEL, TEXT_LABEL))
                             .when(dot, |line| {
                                 line.child(
                                     div().flex_none().size(px(6.0)).rounded_full().bg(rgb(tone)),
                                 )
                             })
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(rgb(tone))
-                                    .child(if confirming {
-                                        "Signs it out and deletes its saved sign-in from this host."
-                                            .to_owned()
-                                    } else {
-                                        status
-                                    }),
+                                truncating_label(if confirming {
+                                    "Signs it out and deletes its saved sign-in from this host."
+                                        .to_owned()
+                                } else {
+                                    status
+                                })
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(rgb(tone)),
                             ),
                     ),
             )
@@ -936,6 +994,7 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let keys = self.key_targets.clone();
         let name = presentation::provider_name(provider);
         let title = if account.pending {
             format!("Add a {name} account")
@@ -962,15 +1021,15 @@ impl XdDesktop {
                     .gap(px(4.0))
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(text_px(TEXT_CONTROL))
                             .font_weight(FontWeight::MEDIUM)
                             .child(title),
                     )
                     .when(account.pending, |heading| {
                         heading.child(
                             div()
-                                .text_size(px(12.0))
-                                .line_height(px(18.0))
+                                .text_size(text_px(TEXT_LABEL))
+                                .line_height(line_px(LINE_LABEL_ROW, TEXT_LABEL))
                                 .text_color(rgb(colors.muted))
                                 .child(
                                     "Sign in with the account you want to add. If your browser is already \
@@ -982,7 +1041,7 @@ impl XdDesktop {
             .when(waiting, |steps| {
                 steps.child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(text_px(TEXT_LABEL))
                         .text_color(rgb(colors.faint))
                         .child(account.detail.clone().unwrap_or_else(|| "Starting sign-in…".into())),
                 )
@@ -998,21 +1057,21 @@ impl XdDesktop {
                             div()
                                 .px(px(14.0))
                                 .py(px(8.0))
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_CONTROL))
                                 .border_1()
                                 .border_color(rgb(colors.border))
                                 .bg(rgb(colors.surface))
                                 .font_family(MONO)
-                                .text_size(px(20.0))
-                                .line_height(px(26.0))
+                                .text_size(text_px(TEXT_TITLE))
+                                .line_height(line_px(LINE_TITLE_MONO, TEXT_TITLE))
                                 .text_color(rgb(colors.text))
                                 .child(code),
                         )
                         .child(
                             ui_button(("account-copy-code", provider_index), ButtonKind::Ghost, colors)
-                                .on_click(cx.listener(move |_, _, _, cx| {
+                                .key_stop(&keys, KeyLayer::Overlay, format!("account-copy-code-{provider_index}"), colors, cx, move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                                }))
+                                })
                                 .child(icon(COPY_ICON, 14.0, colors.muted))
                                 .child("Copy code"),
                         ),
@@ -1029,20 +1088,20 @@ impl XdDesktop {
                         .gap(px(8.0))
                         .child(
                             ui_button(("account-open-page", provider_index), ButtonKind::Primary, colors)
-                                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&opened)))
+                                .key_stop(&keys, KeyLayer::Overlay, format!("account-open-page-{provider_index}"), colors, cx, move |_, _, cx| cx.open_url(&opened))
                                 .child(icon(EXTERNAL_LINK_ICON, 14.0, colors.accent_text))
                                 .child("Open sign-in page"),
                         )
                         .child(
                             ui_button(("account-copy-link", provider_index), ButtonKind::Ghost, colors)
-                                .on_click(cx.listener(move |_, _, _, cx| {
+                                .key_stop(&keys, KeyLayer::Overlay, format!("account-copy-link-{provider_index}"), colors, cx, move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                                }))
+                                })
                                 .child("Copy link"),
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(text_px(TEXT_LABEL))
                                 .text_color(rgb(colors.faint))
                                 .child(if account.device_code.is_some() {
                                     "Enter the code on that page."
@@ -1064,19 +1123,24 @@ impl XdDesktop {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .h(px(34.0))
+                                .h(px(CONTROL_HEIGHT))
                                 .px(px(10.0))
                                 .flex()
                                 .items_center()
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_CONTROL))
                                 .border_1()
-                                .border_color(rgb(colors.border))
+                                .border_color(self.field_frame(&self.auth_input, cx))
                                 .bg(rgb(colors.surface))
-                                .child(self.auth_input.clone()),
+                                .relative()
+                                .child(self.auth_input.clone())
+                                .child(keys.mark(
+                                    KeyLayer::Overlay,
+                                    KeyStop::Field(self.auth_input.read(cx).focus_handle(cx)),
+                                )),
                         )
                         .child(
                             ui_button(("account-submit-code", provider_index), ButtonKind::Secondary, colors)
-                                .on_click(cx.listener(|this, _, _, cx| this.submit_auth_input(cx)))
+                                .key_stop(&keys, KeyLayer::Overlay, format!("account-submit-code-{provider_index}"), colors, cx, |this, _, cx| this.submit_auth_input(cx))
                                 .child("Submit code"),
                         ),
                 )
@@ -1084,9 +1148,9 @@ impl XdDesktop {
             .child(
                 div().flex().child(
                     ui_button(("account-cancel-sign-in", provider_index), ButtonKind::Ghost, colors)
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .key_stop(&keys, KeyLayer::Overlay, format!("account-cancel-sign-in-{provider_index}"), colors, cx, move |this, _, cx| {
                             this.account_action("agent-auth-cancel", &cancel_provider, json!({}), cx);
-                        }))
+                        })
                         .child("Cancel"),
                 ),
             )

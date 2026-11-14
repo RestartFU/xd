@@ -1,4 +1,5 @@
 use super::*;
+use crate::metrics::{TEXT_CONTROL, TEXT_LABEL, line_px};
 
 /// One thing the popup says will change, or has just changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -330,7 +331,7 @@ impl XdDesktop {
                         .child(
                             div()
                                 .min_w_0()
-                                .text_size(px(13.0))
+                                .text_size(text_px(TEXT_CONTROL))
                                 .text_color(rgb(colors.text))
                                 .child(row.name),
                         )
@@ -339,7 +340,7 @@ impl XdDesktop {
                                 div()
                                     .flex_none()
                                     .font_family(MONO)
-                                    .text_size(px(12.0))
+                                    .text_size(text_px(TEXT_LABEL))
                                     .text_color(rgb(colors.muted))
                                     .child(change),
                             )
@@ -348,8 +349,8 @@ impl XdDesktop {
                 .when_some(row.status, |body, status| {
                     body.child(
                         div()
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
+                            .text_size(text_px(TEXT_LABEL))
+                            .line_height(line_px(LINE_LABEL_ROW, TEXT_LABEL))
                             .text_color(rgb(if row.failed {
                                 colors.danger
                             } else {
@@ -359,40 +360,28 @@ impl XdDesktop {
                     )
                 })
         });
-        div()
-            .occlude()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(colors.backdrop))
+        let keys = self.key_targets.clone();
+        dialog_layer(colors)
             .track_focus(&self.minimal_popup_focus)
             .child(
-                div()
+                dialog_shell(DIALOG_WIDTH, colors)
                     .id("update-popup")
-                    .w(px(440.0))
-                    .max_w_full()
-                    .p_5()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .rounded_xl()
-                    .bg(rgb(colors.surface))
-                    .text_color(rgb(colors.text))
-                    .child(div().text_size(px(16.0)).child("Updates"))
+                    .child(dialog_title("Updates", colors))
                     .child(
                         div()
-                            .text_size(px(12.5))
-                            .line_height(px(19.0))
+                            .flex_none()
+                            .text_size(text_px(TEXT_LABEL))
+                            .line_height(line_px(LINE_LABEL_LOOSE, TEXT_LABEL))
                             .text_color(rgb(colors.muted))
                             .child(panel.update_summary()),
                     )
                     .child(
                         div()
                             .id("update-popup-items")
+                            .min_h_0()
                             .max_h(px(300.0))
                             .overflow_y_scroll()
+                            .thumbed("update-popup-items", colors)
                             .children(rows)
                             .when_some(
                                 panel.error.clone().or_else(|| panel.source_error.clone()),
@@ -400,8 +389,8 @@ impl XdDesktop {
                                     body.child(
                                         div()
                                             .mt_3()
-                                            .text_size(px(12.0))
-                                            .line_height(px(18.0))
+                                            .text_size(text_px(TEXT_LABEL))
+                                            .line_height(line_px(LINE_LABEL_ROW, TEXT_LABEL))
                                             .text_color(rgb(colors.danger))
                                             .child(error),
                                     )
@@ -409,50 +398,48 @@ impl XdDesktop {
                             ),
                     )
                     .child(
-                        div()
-                            .mt_1()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                ui_button("close-update-popup", ButtonKind::Ghost, colors)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.close_update_popup(window, cx)
-                                    }))
-                                    .child("Close"),
-                            )
-                            .child(div().flex_1())
+                        dialog_actions()
+                            .child(dialog_button(
+                                &keys,
+                                "close-update-popup",
+                                "Close",
+                                ButtonKind::Ghost,
+                                true,
+                                colors,
+                                cx,
+                                |this, window, cx| this.close_update_popup(window, cx),
+                            ))
                             .when(installed, |actions| {
-                                actions.child(
-                                    ui_button(
-                                        "restart-update-popup",
-                                        if pending {
-                                            ButtonKind::Secondary
-                                        } else {
-                                            ButtonKind::Primary
-                                        },
-                                        colors,
-                                    )
-                                    .when(!can_restart, |button| button.opacity(0.5))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if can_restart && this.flush_draft_before_navigation() {
+                                actions.child(dialog_button(
+                                    &keys,
+                                    "restart-update-popup",
+                                    "Restart to update",
+                                    if pending {
+                                        ButtonKind::Secondary
+                                    } else {
+                                        ButtonKind::Primary
+                                    },
+                                    can_restart,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| {
+                                        if this.flush_draft_before_navigation() {
                                             this.request_app_update("restart", cx);
                                         }
-                                    }))
-                                    .child("Restart to update"),
-                                )
+                                    },
+                                ))
                             })
                             .when(pending || (in_progress && !installed), |actions| {
-                                actions.child(
-                                    ui_button("confirm-update-popup", ButtonKind::Primary, colors)
-                                        .when(!can_update, |button| button.opacity(0.5))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if can_update {
-                                                this.confirm_updates(cx);
-                                            }
-                                        }))
-                                        .child(if pending { "Update" } else { "Updating…" }),
-                                )
+                                actions.child(dialog_button(
+                                    &keys,
+                                    "confirm-update-popup",
+                                    if pending { "Update" } else { "Updating…" },
+                                    ButtonKind::Primary,
+                                    can_update,
+                                    colors,
+                                    cx,
+                                    |this, _, cx| this.confirm_updates(cx),
+                                ))
                             }),
                     ),
             )

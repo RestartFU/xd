@@ -5,10 +5,12 @@ use gpui::{
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
-    fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
+    fill, point, prelude::*, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
-use xd_desktop::theme::ThemeColors;
+
+use crate::metrics::{CONTROL_HEIGHT, TEXT_BODY, TEXT_CONTROL, px, text_px};
+use xd_desktop::theme::{ThemeColors, ThemePreset};
 
 use crate::{
     editor::{
@@ -52,6 +54,9 @@ actions!(
     [
         Up,
         Down,
+        AltUp,
+        AltDown,
+        AltShiftDown,
         PageUp,
         PageDown,
         Interrupt,
@@ -85,7 +90,8 @@ actions!(
     ]
 );
 
-const CARET_WIDTH: Pixels = px(2.);
+/// The caret is a hairline: two of the window's pixels at any Interface size.
+const CARET_WIDTH: Pixels = gpui::px(2.);
 
 /// How far to scroll a single-line box so the caret stays inside it: never past
 /// what the text overflows by, and only when the caret would otherwise leave.
@@ -274,6 +280,13 @@ impl ComposerInput {
     /// appends to a word the user never chose.
     pub fn set_text_selected(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.set_text(text, cx);
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
+    /// Selects everything the field holds, so the next keypress replaces it.
+    pub fn select_everything(&mut self, cx: &mut Context<Self>) {
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
         cx.notify();
@@ -500,6 +513,17 @@ impl ComposerInput {
     }
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal_bytes(b"\x1b[B".to_vec(), cx);
+    }
+    // Alt with an arrow, as xterm sends it: the window's session keys give
+    // these up while the terminal has the keyboard.
+    fn alt_up(&mut self, _: &AltUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[1;3A".to_vec(), cx);
+    }
+    fn alt_down(&mut self, _: &AltDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[1;3B".to_vec(), cx);
+    }
+    fn alt_shift_down(&mut self, _: &AltShiftDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[1;4B".to_vec(), cx);
     }
     fn page_up(&mut self, _: &PageUp, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal_bytes(b"\x1b[5~".to_vec(), cx);
@@ -1021,13 +1045,22 @@ impl Element for TextElement {
                 input.placeholder.clone(),
                 input
                     .colors
-                    .map(|colors| rgb(colors.muted).into())
-                    .unwrap_or_else(|| hsla(0., 0., 0.65, 1.)),
+                    .map_or(rgb(ThemePreset::Dark.colors().muted).into(), |colors| {
+                        rgb(colors.muted).into()
+                    }),
             )
         } else {
             (content, style.color)
         };
-        let caret_color = input.colors.map_or(0x6b8cff, |colors| colors.accent_ink);
+        let caret_color = input
+            .colors
+            .unwrap_or(ThemePreset::Dark.colors())
+            .accent_ink;
+        let selection_color = input
+            .colors
+            .map_or(ThemePreset::Dark.colors().selection, |colors| {
+                colors.selection
+            });
         let run = TextRun {
             len: display_text.len(),
             font: style.font(),
@@ -1089,7 +1122,7 @@ impl Element for TextElement {
                         point(left + line.x_for_index(selected_range.start), bounds.top()),
                         point(left + line.x_for_index(selected_range.end), bounds.bottom()),
                     ),
-                    rgba((caret_color << 8) | 0x55),
+                    rgba(selection_color),
                 )),
                 None,
             )
@@ -1186,6 +1219,9 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::alt_up))
+            .on_action(cx.listener(Self::alt_down))
+            .on_action(cx.listener(Self::alt_shift_down))
             .on_action(cx.listener(Self::page_up))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::interrupt))
@@ -1221,11 +1257,15 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .line_height(px(if self.compact { 18. } else { 22. }))
-            .text_size(px(if self.compact { 12.5 } else { 14. }))
-            .text_color(rgb(self.colors.map_or(0xe8eaf0, |colors| colors.text)))
+            .text_size(text_px(if self.compact {
+                TEXT_CONTROL
+            } else {
+                TEXT_BODY
+            }))
+            .text_color(rgb(self.colors.unwrap_or(ThemePreset::Dark.colors()).text))
             .child(
                 div()
-                    .when(!self.compact, |line| line.h(px(30.)).py_1())
+                    .when(!self.compact, |line| line.h(px(CONTROL_HEIGHT)).py_1())
                     .w_full()
                     .child(TextElement { input: cx.entity() }),
             )

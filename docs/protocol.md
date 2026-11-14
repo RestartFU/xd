@@ -602,6 +602,19 @@ sequence and must not duplicate output. Agent, approval, file, and Git requests
 continue to use an actual chat id; file and Git operations resolve its shared
 session workspace.
 
+A terminal answers a program's foreground and background colour queries (OSC 10
+and 11) with the `foreground` and `background` given to `terminal-open`, as
+`0xRRGGBB` integers. A client that changes theme sends the new pair for each
+terminal it draws, so programs started afterwards pick colours for the ground
+they are shown on:
+
+```json
+{"op":"terminal-colors","terminal":"terminal-1","foreground":1777196,"background":15659257}
+{"ok":true}
+```
+
+Hosts without this operation reply with an error, which clients ignore.
+
 ### `set-shortcuts`
 
 ```json

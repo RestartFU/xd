@@ -87,6 +87,7 @@ internal fun RepositoryPickerDialog(
                 error?.let {
                     Text(
                         it,
+                        modifier = Modifier.announced(),
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall,
                     )

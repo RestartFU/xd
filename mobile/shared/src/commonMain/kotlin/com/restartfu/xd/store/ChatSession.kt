@@ -155,6 +155,9 @@ public class ChatSession internal constructor(
 
     public suspend fun loadOlder(): Unit = core.loadOlder()
 
+    /** Reads the chat and its messages again, as after a load that failed. */
+    public fun reload(): Unit = core.requestReload()
+
     /** The whole patch for [read], one of `working-all` or `branch-all`. */
     public suspend fun diff(read: String, base: String? = null): String =
         core.read(Ops.diffRead(core.chatId, read, base)) {
@@ -272,7 +275,7 @@ internal class ChatSessionCore(
                 if (invalidated) return@withLock false
                 reloadInProgress = true
                 inputsDuringReload.clear()
-                _state.value = _state.value.copy(loading = true, error = null)
+                _state.value = _state.value.copy(loading = true, error = null, loadFailed = false)
                 true
             }
             if (!shouldReload) return@withLock
@@ -324,6 +327,7 @@ internal class ChatSessionCore(
                     _state.value = _state.value.copy(
                         loading = false,
                         error = error.message ?: "Could not load the chat",
+                        loadFailed = true,
                     )
                 }
             }

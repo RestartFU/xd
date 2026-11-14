@@ -68,22 +68,43 @@ class PullRequestLinksScreenshotTest {
         screen.close()
     }
 
-    @Test fun moreMenuOpensTheListAndPlusOpensItToo() {
+    /**
+     * In a phone header the links are a line of small text inside the title's
+     * button, so they are read there and opened from More, which also opens
+     * the full list.
+     */
+    @Test fun moreMenuOpensEachLinkAndTheList() {
         val screen = open(LINKED)
+        // Nothing in the header's line of links takes a tap of its own.
+        for (label in listOf("Pull request #205, merged", "Pull request #212, open", "3 more pull requests")) {
+            check(opens(label) == "Switch chat") { "\"$label\" is a button of its own in the header" }
+        }
         click("More")
         // The first menu a test opens is never painted, so it opens twice.
         back()
         click("More")
         check(shows("Pull requests")) { "The menu offers Pull requests" }
+        check(shows("Open pull request #205") && shows("Open pull request #212")) { "The menu opens the links the header names" }
+        check(!shows("Open pull request #219")) { "The menu opens only the links the header names" }
         capture("android-after-menu")
+        click("Open pull request #212")
+        val opened = org.robolectric.Shadows.shadowOf(compose.activity.application).nextStartedActivity
+        check(opened?.dataString == "https://github.com/restartfu/xd/pull/212") { "Opened ${opened?.dataString}" }
+        click("More")
         click("Pull requests")
         check(!shows("No pull requests linked yet.") && shows("restartfu/xd") && shows("Merged") && shows("Closed"))
+        check(shows("Paste a pull request link") && shows("acme/web")) { "The list holds every link" }
+        capture("android-after-dialog")
         click("Close")
         check(!shows("Paste a pull request link")) { "Close dismisses the list" }
-        click("3 more pull requests")
-        check(shows("Paste a pull request link") && shows("acme/web")) { "+3 opens the same list" }
-        capture("android-after-dialog")
         screen.close()
+    }
+
+    /** The label of the click action that a tap on what says [text] reaches. */
+    private fun opens(text: String): String? {
+        var found: SemanticsNode? = nodes().lastOrNull { it.says(text) } ?: error("Nothing shows \"$text\"")
+        while (found != null && found.config.getOrNull(SemanticsActions.OnClick) == null) found = found.parent
+        return found?.config?.get(SemanticsActions.OnClick)?.label
     }
 
     @Test fun anEmptyListSaysSo() {
@@ -131,6 +152,7 @@ class PullRequestLinksScreenshotTest {
         back()
         click("More")
         check(shows("Rename chat") && !shows("Pull requests")) { "No Pull requests item on an older host" }
+        check(shows("Open pull request #212")) { "The menu opens the branch's pull request" }
         screen.close()
     }
 

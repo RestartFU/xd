@@ -3,7 +3,9 @@ package com.restartfu.xd.mobile.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -27,6 +29,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.model.LinkedPullRequest
+import com.restartfu.xd.model.pullRequestNumber
 
 /** Shown when the host refuses what was pasted as not a pull request. */
 internal const val NOT_A_PULL_REQUEST_LINK = "That is not a pull request link."
@@ -59,33 +62,38 @@ private fun pullRequestColor(pullRequest: LinkedPullRequest): Color =
 private fun pullRequestDecoration(pullRequest: LinkedPullRequest): TextDecoration =
     if (pullRequest.closed) TextDecoration.LineThrough else TextDecoration.Underline
 
+/** What a screen reader says for one linked pull request: its number and how it stands. */
+internal fun pullRequestDescription(pullRequest: LinkedPullRequest): String =
+    listOfNotNull("Pull request ${pullRequestLabel(pullRequest.url)}", pullRequestStateLabel(pullRequest)?.lowercase())
+        .joinToString(", ")
+
+/** "Open pull request #12", the menu entry that opens one. */
+internal fun openPullRequestLabel(url: String): String =
+    pullRequestNumber(url)?.let { "Open pull request #$it" } ?: "Open pull request"
+
 /**
- * A chat's linked pull requests as `#N` chips, the first few and then `+N`,
- * which opens the full list. Tapping a chip opens that pull request.
+ * A chat's linked pull requests as `#N` labels, the first few and then `+N`,
+ * for a phone header. They are read, not tapped: the row is a line of small
+ * text inside the title's own button, with no room for a touch target each,
+ * so More opens them.
  */
 @Composable
-internal fun LinkedPullRequestChips(
+internal fun LinkedPullRequestLabels(
     pullRequests: List<LinkedPullRequest>,
     limit: Int,
     style: TextStyle,
-    open: (String) -> Unit,
-    showAll: () -> Unit,
 ) {
     val (shown, more) = shownPullRequests(pullRequests, limit)
     shown.forEach { pull ->
         key(pull.url) {
-            val label = pullRequestLabel(pull.url)
             Text(
-                label,
-                modifier = Modifier
-                    .semantics {
-                        contentDescription = listOfNotNull("Pull request $label", pullRequestStateLabel(pull)?.lowercase())
-                            .joinToString(", ")
-                    }
-                    .clickable(role = Role.Button) { open(pull.url) },
+                pullRequestLabel(pull.url),
+                modifier = Modifier.semantics { contentDescription = pullRequestDescription(pull) },
                 style = style,
-                color = pullRequestColor(pull),
-                textDecoration = pullRequestDecoration(pull),
+                // Not the link colour: nothing here is tapped.
+                color = if (pull.merged || pull.closed) LocalXdSignals.current.faint
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                textDecoration = TextDecoration.LineThrough.takeIf { pull.closed },
                 maxLines = 1,
             )
         }
@@ -93,13 +101,66 @@ internal fun LinkedPullRequestChips(
     if (more > 0) {
         Text(
             "+$more",
-            modifier = Modifier
-                .semantics { contentDescription = "$more more pull requests" }
-                .clickable(role = Role.Button, onClick = showAll),
+            modifier = Modifier.semantics { contentDescription = "$more more pull requests" },
             style = style,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
         )
+    }
+}
+
+/**
+ * A chat's linked pull requests as buttons with a full touch target each, for
+ * a header with room: the first few open their pull request, and `+N` opens
+ * the full list.
+ */
+@Composable
+internal fun LinkedPullRequestButtons(
+    pullRequests: List<LinkedPullRequest>,
+    limit: Int,
+    open: (String) -> Unit,
+    showAll: () -> Unit,
+) {
+    val (shown, more) = shownPullRequests(pullRequests, limit)
+    shown.forEach { pull ->
+        key(pull.url) {
+            PullRequestButton(
+                label = pullRequestLabel(pull.url),
+                description = pullRequestDescription(pull),
+                color = pullRequestColor(pull),
+                decoration = pullRequestDecoration(pull),
+                onClick = { open(pull.url) },
+            )
+        }
+    }
+    if (more > 0) {
+        PullRequestButton(
+            label = "+$more",
+            description = "$more more pull requests",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            decoration = null,
+            onClick = showAll,
+        )
+    }
+}
+
+/** One pull request link in a header, 48dp square at the least. */
+@Composable
+internal fun PullRequestButton(
+    label: String,
+    description: String,
+    color: Color,
+    decoration: TextDecoration?,
+    onClick: () -> Unit,
+) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .semantics { contentDescription = description },
+        contentPadding = PaddingValues(horizontal = 8.dp),
+    ) {
+        Text(label, style = MaterialTheme.typography.labelLarge, color = color, textDecoration = decoration, maxLines = 1)
     }
 }
 
@@ -146,6 +207,7 @@ internal fun PullRequestsDialog(
                                         modifier = Modifier
                                             .weight(1f)
                                             .clickable(role = Role.Button, onClickLabel = "Open") { open(pull.url) }
+                                            .heightIn(min = 48.dp)
                                             .padding(vertical = 8.dp),
                                     ) {
                                         Row(
@@ -187,12 +249,13 @@ internal fun PullRequestsDialog(
                         singleLine = true,
                         enabled = !linking,
                         isError = error != null,
+                        colors = xdFieldColors(),
                     )
                     TextButton(onClick = link, enabled = !linking && draft.isNotBlank()) {
                         Text(if (linking) "Linking…" else "Link")
                     }
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                error?.let { Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },

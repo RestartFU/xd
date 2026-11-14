@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.selection.selectableGroup
 import com.restartfu.xd.protocol.GitStatusReply
 import com.restartfu.xd.mobile.DiffPane
 import androidx.compose.ui.platform.LocalUriHandler
@@ -11,7 +12,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
@@ -26,7 +26,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Button
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,7 +40,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -45,7 +49,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -68,7 +71,7 @@ internal fun DiffPaneContent(model: DiffViewModel) {
                 Text(
                     if (state.git == null) "Git status could not be read: $error"
                     else "This may be out of date: Git status could not be read again ($error)",
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -82,16 +85,19 @@ internal fun DiffPaneContent(model: DiffViewModel) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            FilterChip(
-                selected = !state.branch,
-                onClick = { model.showBranch(false) },
-                label = { Text("Working") },
-            )
-            FilterChip(
-                selected = state.branch,
-                onClick = { model.showBranch(true) },
-                label = { Text("Branch") },
-            )
+            // One of the two, never both.
+            Row(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ChoiceChip(
+                    selected = !state.branch,
+                    onClick = { model.showBranch(false) },
+                    label = { Text("Working") },
+                )
+                ChoiceChip(
+                    selected = state.branch,
+                    onClick = { model.showBranch(true) },
+                    label = { Text("Branch") },
+                )
+            }
             Box(Modifier.weight(1f))
             TextButton(onClick = model::refresh, enabled = !state.loading) {
                 Text("Refresh")
@@ -100,17 +106,11 @@ internal fun DiffPaneContent(model: DiffViewModel) {
 
         when {
             state.loading && state.patch.isEmpty() -> Centered { CircularProgressIndicator() }
-            state.error != null -> Centered {
-                Text(
-                    state.error.orEmpty(),
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(16.dp),
-                )
-            }
+            state.error != null -> PaneError(state.error.orEmpty(), retry = model::refresh)
             state.patch.isBlank() -> Centered {
                 Text(
-                    if (state.branch) "No branch changes" else "Nothing changed",
-                    color = MaterialTheme.colorScheme.outline,
+                    if (state.branch) "No branch changes." else "No changes.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             else -> PatchList(state.patch, state.collapsedFiles, model::toggleFile)
@@ -136,17 +136,18 @@ private fun PatchList(
     collapsedFiles: Set<String>,
     onToggle: (String) -> Unit,
 ) {
-    val fallback = LocalContentColor.current
+    val ink = codeInk()
     // Kept across a refresh, so the old patch stays up until the new one is ready.
     val parsed by produceState<PreparedDiff?>(null, patch) {
         val files = withContext(Dispatchers.Default) { CodeBlocks.diffFiles(patch) }
         value = PreparedDiff(patch, files.map { PreparedFile(it, it.lines.map(::plainDiffLine)) })
     }
     // Paired with the parse it colours, so a newer parse is never shown in older colours.
-    val coloured by produceState<Pair<PreparedDiff, PreparedDiff>?>(null, parsed, fallback) {
+    // Coloured again for a new theme as well as a new patch.
+    val coloured by produceState<Pair<PreparedDiff, PreparedDiff>?>(null, parsed, ink) {
         val plain = parsed ?: return@produceState
         value = plain to withContext(Dispatchers.Default) {
-            PreparedDiff(plain.patch, plain.files.map { PreparedFile(it.file, highlightDiff(it.file.lines, fallback)) })
+            PreparedDiff(plain.patch, plain.files.map { PreparedFile(it.file, highlightDiff(it.file.lines, ink)) })
         }
     }
     val diff = coloured?.takeIf { it.first === parsed }?.second ?: parsed
@@ -265,6 +266,7 @@ private fun GitSummary(git: GitStatusReply, state: DiffPane, model: DiffViewMode
                     placeholder = { Text("Commit message") },
                     singleLine = true,
                     enabled = !state.committing,
+                    colors = xdFieldColors(),
                 )
                 Button(
                     onClick = model::commit,
@@ -273,7 +275,7 @@ private fun GitSummary(git: GitStatusReply, state: DiffPane, model: DiffViewMode
             }
         }
         state.commitError?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -291,12 +293,13 @@ private fun DiffFileHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(role = Role.Button, onClick = onToggle)
+            .disclosure(expanded = !collapsed, onToggle = onToggle)
+            .heightIn(min = 48.dp)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(if (collapsed) "▸" else "▾", color = MaterialTheme.colorScheme.outline)
+        DisclosureChevron(expanded = !collapsed)
         Text(
             file.path,
             modifier = Modifier.weight(1f),
@@ -305,12 +308,43 @@ private fun DiffFileHeader(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        Text("+${file.additions}", color = LocalXdSignals.current.working)
-        Text("−${file.deletions}", color = MaterialTheme.colorScheme.error)
+        Text(
+            "+${file.additions}",
+            modifier = Modifier.semantics { contentDescription = "${file.additions} added" },
+            color = LocalXdSignals.current.working,
+        )
+        Text(
+            "−${file.deletions}",
+            modifier = Modifier.semantics { contentDescription = "${file.deletions} removed" },
+            color = MaterialTheme.colorScheme.error,
+        )
     }
 }
 
 @Composable
 internal fun Centered(content: @Composable () -> Unit) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { content() }
+}
+
+/**
+ * A pane that could not show what it holds: why, told to a screen reader as
+ * it appears, and Try again where another attempt can get past it.
+ */
+@Composable
+internal fun PaneError(message: String, retry: (() -> Unit)?) {
+    Centered {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                message,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center,
+            )
+            retry?.let { TextButton(onClick = it) { Text("Try again") } }
+        }
+    }
 }

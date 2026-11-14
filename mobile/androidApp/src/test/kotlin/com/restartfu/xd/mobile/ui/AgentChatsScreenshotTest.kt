@@ -8,6 +8,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -62,7 +65,11 @@ class AgentChatsScreenshotTest {
         compose.onNodeWithText("Waypoints e2e test finished").assertExists()
         // The report is a line, not the long message the lead's agent read.
         compose.onNodeWithText("Its reply:", substring = true).assertDoesNotExist()
-        compose.onNodeWithContentDescription("Open DoubleClick e2e test").performClick()
+        // The row is the button: its chevron has no name of its own to read out after the title.
+        compose.onNodeWithContentDescription("Open DoubleClick e2e test").assertDoesNotExist()
+        val row = compose.onNode(hasText("DoubleClick e2e test") and hasClickAction())
+        assertEquals("Open chat", row.fetchSemanticsNode().config[SemanticsActions.OnClick].label)
+        row.performClick()
         settle()
         assertEquals(listOf("double"), opened)
     }

@@ -504,6 +504,20 @@ public class XdClient(
         actor.goBackground()
     }
 
+    /**
+     * Connects again now: after a failure another attempt can get past (see
+     * [Link.Fatal.retryable]), or in place of the wait before the next
+     * attempt while the link is down.
+     */
+    public fun retryConnection() {
+        actor.retry()
+    }
+
+    /** Reads the project tree again, as after a read that failed. */
+    public fun refreshTree() {
+        requestTreeRefresh()
+    }
+
     public suspend fun connect(connection: SshConnection): ConnectResult =
         actor.connect(connection)
 
@@ -622,6 +636,16 @@ public class XdClient(
         // The host broadcasts a tree event, but refreshing here means the
         // row is gone by the time the confirmation dismisses.
         requestTreeRefresh()
+    }
+
+    /**
+     * Replaces [chatId]'s draft text on the host, its attachments left as they
+     * are, without opening the chat: for a draft typed while offline whose
+     * chat is no longer on screen when the connection comes back.
+     */
+    public suspend fun setDraft(chatId: String, text: String) {
+        require(chatId.isNotBlank()) { "Chat id must not be blank" }
+        actor.call(Ops.setDraft(chatId, text))
     }
 
     /**

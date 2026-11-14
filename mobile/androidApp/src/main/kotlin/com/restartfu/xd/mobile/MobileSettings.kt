@@ -1,7 +1,6 @@
 package com.restartfu.xd.mobile
 
 import android.content.Context
-import com.restartfu.xd.mobile.ui.AccentPreset
 import com.restartfu.xd.mobile.ui.MinimalThemePreset
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,9 +22,6 @@ public class MobileSettings(context: Context) {
         get() = preferences.getInt("usage_days", 30).takeIf { it in listOf(1, 7, 30, 90) } ?: 30
         set(value) { preferences.edit().putInt("usage_days", value).apply() }
 
-    private val _accent = MutableStateFlow(
-        AccentPreset.fromKey(preferences.getString(KEY_ACCENT, null)),
-    )
     private val _allowAllPermissions = MutableStateFlow(
         preferences.getBoolean(KEY_ALLOW_ALL_PERMISSIONS, false),
     )
@@ -115,14 +111,8 @@ public class MobileSettings(context: Context) {
         MinimalThemePreset.fromKey(preferences.getString(KEY_THEME, null)),
     )
 
-    public val accent: StateFlow<AccentPreset> = _accent.asStateFlow()
     public val allowAllPermissions: StateFlow<Boolean> = _allowAllPermissions.asStateFlow()
     public val theme: StateFlow<MinimalThemePreset> = _theme.asStateFlow()
-
-    public fun setAccent(preset: AccentPreset) {
-        preferences.edit().putString(KEY_ACCENT, preset.key).apply()
-        _accent.value = preset
-    }
 
     public fun setAllowAllPermissions(enabled: Boolean) {
         preferences.edit().putBoolean(KEY_ALLOW_ALL_PERMISSIONS, enabled).apply()
@@ -135,8 +125,9 @@ public class MobileSettings(context: Context) {
     }
 
     private companion object {
+        // Older versions also stored an "accent" here; nothing reads it now,
+        // so a phone that still has it loads as any other.
         const val PREFERENCES = "xd_mobile_settings"
-        const val KEY_ACCENT = "accent"
         const val KEY_ALLOW_ALL_PERMISSIONS = "allow_all_permissions"
         const val KEY_THEME = "minimal_theme"
         const val KEY_COLLAPSED_FOLDERS = "collapsed_folders"

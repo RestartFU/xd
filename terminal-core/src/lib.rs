@@ -66,11 +66,75 @@ fn codex_spinner_title(title: &[u8]) -> bool {
         .any(|frame| title.starts_with(frame.as_bytes()))
 }
 
+/// The 16 ANSI colours a screen is drawn with. They are picked for the ground
+/// the terminal sits on, so each theme has its own set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TerminalPalette {
+    /// For a dark ground.
+    #[default]
+    Dark,
+    /// For a light ground: every colour is dark enough to read on it.
+    Light,
+}
+
+impl TerminalPalette {
+    /// Black, red, green, yellow, blue, magenta, cyan, white, then the bright
+    /// eight, as `0xRRGGBB`.
+    pub const fn colors(self) -> &'static [u32; 16] {
+        match self {
+            Self::Dark => &[
+                0x1f2329, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xd7dae0,
+                0x828997, 0xff7a85, 0xb3e180, 0xffd68a, 0x7dbaff, 0xd99bff, 0x75d5e0, 0xffffff,
+            ],
+            Self::Light => &[
+                0x1b1e2c, 0xb3202f, 0x1a6b3c, 0x7a5200, 0x2a52be, 0x8a2da5, 0x0e6471, 0x4b5165,
+                0x5a6074, 0xc4283a, 0x1f7440, 0x855600, 0x3558d6, 0x9c36b5, 0x0b6f80, 0x1b1e2c,
+            ],
+        }
+    }
+
+    fn ansi(self, index: usize) -> u32 {
+        self.colors()[index.min(15)]
+    }
+
+    /// The ink of text that sets no colour, as `0xRRGGBB`: the theme's text
+    /// colour, which a cell in inverse video takes for its background.
+    pub const fn foreground(self) -> u32 {
+        match self {
+            Self::Dark => 0xf2f2f2,
+            Self::Light => 0x1b1e2c,
+        }
+    }
+
+    /// The ground the terminal is drawn on, as `0xRRGGBB`: the theme's
+    /// background, which a cell in inverse video takes for its ink.
+    pub const fn background(self) -> u32 {
+        match self {
+            Self::Dark => 0x0b0b0b,
+            Self::Light => 0xeef0f9,
+        }
+    }
+}
+
+/// How a run of cells is drawn. A colour left `None` is the theme's own:
+/// [`TerminalPalette::foreground`] for the ink and the ground for the
+/// background. Inverse video, dim and hidden text are already worked into
+/// the two colours, so they are drawn as they are.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TerminalStyle {
     pub foreground: Option<u32>,
     pub background: Option<u32>,
     pub bold: bool,
+    /// SGR 2: the ink is mixed toward the background, still 3:1 on it.
+    pub dim: bool,
+    /// SGR 3.
+    pub italic: bool,
+    /// SGR 4, and the other underlines.
+    pub underline: bool,
+    /// SGR 9.
+    pub strikethrough: bool,
+    /// SGR 8: drawn in the background's colour, and still copied.
+    pub hidden: bool,
     inverse: bool,
 }
 
@@ -339,14 +403,51 @@ impl TerminalScreen {
     }
 
     pub fn rendered(&self) -> TerminalText {
-        self.rendered_inner(false)
+        self.rendered_inner(false, TerminalPalette::Dark)
     }
 
     pub fn rendered_with_cursor(&self) -> TerminalText {
-        self.rendered_inner(true)
+        self.rendered_inner(true, TerminalPalette::Dark)
     }
 
-    fn rendered_inner(&self, include_cursor: bool) -> TerminalText {
+    /// [`Self::rendered_with_cursor`], coloured for the given ground.
+    pub fn rendered_with_cursor_in(&self, palette: TerminalPalette) -> TerminalText {
+        self.rendered_inner(true, palette)
+    }
+
+    fn rendered_inner(&self, include_cursor: bool, palette: TerminalPalette) -> TerminalText {
+        let shown = self.shown_lines(include_cursor);
+        let grid = self.term.grid();
+        let mut text = String::new();
+        let mut spans = Vec::new();
+        let mut links = Vec::new();
+        let mut cursor = None;
+        for line_index in 0..shown.count {
+            if line_index > 0 {
+                text.push('\n');
+            }
+            render_line(
+                &grid[Line(shown.top + line_index as i32)],
+                shown.cursor_column(line_index),
+                palette,
+                &mut text,
+                &mut spans,
+                &mut links,
+                &mut cursor,
+            );
+        }
+        TerminalText {
+            text,
+            spans,
+            links,
+            cursor,
+        }
+    }
+
+    /// Which lines [`Self::rendered_with_cursor_in`] draws: every line of the
+    /// scrollback and the screen, less the blank ones at the foot, and the
+    /// cursor's place when it is shown.
+    fn shown_lines(&self, include_cursor: bool) -> ShownLines {
         let grid = self.term.grid();
         let include_cursor = include_cursor
             && self.term.mode().contains(TermMode::SHOW_CURSOR)
@@ -355,112 +456,95 @@ impl TerminalScreen {
         let bottom = grid.bottommost_line().0;
         let cursor_line = grid.history_size() as i32 + grid.cursor.point.line.0;
         let cursor_column = grid.cursor.point.column.0.min(self.columns - 1);
-        let mut lines = (top..=bottom).map(Line).collect::<Vec<_>>();
-        while lines.len() > 1 {
-            let index = lines.len() - 1;
-            if !(&grid[lines[index]])
+        let mut count = (bottom - top + 1).max(1) as usize;
+        while count > 1 {
+            let index = count - 1;
+            if !(&grid[Line(top + index as i32)])
                 .into_iter()
                 .all(cell_is_visually_blank)
                 || (include_cursor && index as i32 == cursor_line)
             {
                 break;
             }
-            lines.pop();
+            count -= 1;
         }
+        ShownLines {
+            top,
+            count,
+            cursor: include_cursor
+                .then_some((cursor_line, cursor_column))
+                .filter(|(line, _)| *line >= 0)
+                .map(|(line, column)| (line as usize, column)),
+        }
+    }
 
-        let mut text = String::new();
-        let mut spans = Vec::new();
-        let mut links = Vec::new();
-        let mut cursor = None;
-        for (line_index, line) in lines.into_iter().enumerate() {
-            if line_index > 0 {
-                text.push('\n');
+    /// How many lines [`Self::rendered_with_cursor_in`] draws, one per row:
+    /// the scrollback and the screen, less the blank lines at the foot.
+    pub fn line_count(&self, include_cursor: bool) -> usize {
+        self.shown_lines(include_cursor).count
+    }
+
+    /// Line `index` of [`Self::rendered_with_cursor_in`] (or of
+    /// [`Self::rendered`] without the cursor) on its own, its ranges counted
+    /// from its own start. Drawing only the lines in view costs only them,
+    /// however long the scrollback is.
+    pub fn rendered_line_in(
+        &self,
+        index: usize,
+        include_cursor: bool,
+        palette: TerminalPalette,
+    ) -> Option<TerminalText> {
+        let shown = self.shown_lines(include_cursor);
+        if index >= shown.count {
+            return None;
+        }
+        let mut line = TerminalText {
+            text: String::new(),
+            spans: Vec::new(),
+            links: Vec::new(),
+            cursor: None,
+        };
+        render_line(
+            &self.term.grid()[Line(shown.top + index as i32)],
+            shown.cursor_column(index),
+            palette,
+            &mut line.text,
+            &mut line.spans,
+            &mut line.links,
+            &mut line.cursor,
+        );
+        Some(line)
+    }
+
+    /// A fingerprint of line `index` as [`Self::rendered_line_in`] draws it
+    /// in any palette: lines with the same fingerprint draw the same, so a
+    /// line drawn before need not be built again. It reads the line's cells
+    /// without building its text.
+    pub fn line_fingerprint(&self, index: usize, include_cursor: bool) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let shown = self.shown_lines(include_cursor);
+        if index >= shown.count {
+            return None;
+        }
+        let row = &self.term.grid()[Line(shown.top + index as i32)];
+        let cursor_column = shown.cursor_column(index);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        cursor_column.hash(&mut hasher);
+        let end = line_end(row, cursor_column);
+        for cell in row[..Column(end)].iter() {
+            cell.c.hash(&mut hasher);
+            cell.flags.bits().hash(&mut hasher);
+            hash_color(cell.fg, &mut hasher);
+            hash_color(cell.bg, &mut hasher);
+            if let Some(zerowidth) = cell.zerowidth() {
+                zerowidth.hash(&mut hasher);
             }
-            let row = &grid[line];
-            let content_end = row
-                .into_iter()
-                .rposition(cell_has_visible_content)
-                .map_or(0, |i| i + 1);
-            let end = if include_cursor && line_index as i32 == cursor_line {
-                content_end.max(cursor_column + 1)
-            } else {
-                content_end
-            };
-            let mut style_run: Option<(usize, TerminalStyle)> = None;
-            let mut link_run: Option<(usize, String)> = None;
-            let mut previous_cell_range = None;
-            for (column, cell) in row[..Column(end)].iter().enumerate() {
-                if cell
-                    .flags
-                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    if include_cursor && line_index as i32 == cursor_line && column == cursor_column
-                    {
-                        cursor = previous_cell_range.clone();
-                    }
-                    continue;
-                }
-                let link = cell
-                    .hyperlink()
-                    .and_then(|link| safe_link_url(link.uri()).map(str::to_owned));
-                if link_run.as_ref().map(|(_, url)| url) != link.as_ref() {
-                    if let Some((start, url)) = link_run.take() {
-                        links.push(TerminalLink {
-                            range: start..text.len(),
-                            url,
-                        });
-                    }
-                    link_run = link.map(|url| (text.len(), url));
-                }
-                let style = terminal_style(cell);
-                if style_run.is_some_and(|(_, current)| current != style) {
-                    let (start, current) = style_run.take().expect("terminal style run exists");
-                    if current != TerminalStyle::default() {
-                        spans.push(TerminalSpan {
-                            range: start..text.len(),
-                            style: current,
-                        });
-                    }
-                }
-                style_run.get_or_insert((text.len(), style));
-                let start = text.len();
-                text.push(if cell.flags.contains(Flags::HIDDEN) {
-                    ' '
-                } else {
-                    cell.c
-                });
-                if !cell.flags.contains(Flags::HIDDEN) {
-                    for character in cell.zerowidth().into_iter().flatten() {
-                        text.push(*character);
-                    }
-                }
-                let range = start..text.len();
-                if include_cursor && line_index as i32 == cursor_line && column == cursor_column {
-                    cursor = Some(range.clone());
-                }
-                previous_cell_range = Some(range);
-            }
-            if let Some((start, style)) = style_run
-                && style != TerminalStyle::default()
-            {
-                spans.push(TerminalSpan {
-                    range: start..text.len(),
-                    style,
-                });
-            }
-            if let Some((start, url)) = link_run {
-                links.push(TerminalLink {
-                    range: start..text.len(),
-                    url,
-                });
+            if let Some(link) = cell.hyperlink() {
+                link.uri().hash(&mut hasher);
             }
         }
-        TerminalText {
-            text,
-            spans,
-            links,
-            cursor,
-        }
+        end.hash(&mut hasher);
+        Some(hasher.finish())
     }
 
     fn total_history(&self) -> usize {
@@ -817,6 +901,122 @@ fn append_cell_character(bytes: &mut Vec<u8>, cell: &Cell) {
     }
 }
 
+/// The lines a screen draws: the first one's place in the grid, how many,
+/// and the cursor's line (counted from the first) and column when shown.
+struct ShownLines {
+    top: i32,
+    count: usize,
+    cursor: Option<(usize, usize)>,
+}
+
+impl ShownLines {
+    fn cursor_column(&self, line_index: usize) -> Option<usize> {
+        self.cursor
+            .filter(|(line, _)| *line == line_index)
+            .map(|(_, column)| column)
+    }
+}
+
+/// Where a drawn line ends: after its last visible cell, or after the cursor
+/// when the cursor is on it and further right.
+fn line_end(row: &alacritty_terminal::grid::Row<Cell>, cursor_column: Option<usize>) -> usize {
+    let content_end = row
+        .into_iter()
+        .rposition(cell_has_visible_content)
+        .map_or(0, |i| i + 1);
+    match cursor_column {
+        Some(column) => content_end.max(column + 1),
+        None => content_end,
+    }
+}
+
+/// Appends one line's text, colours, links and cursor, their ranges counted
+/// from where `text` stood, as [`TerminalScreen::rendered_with_cursor_in`]
+/// draws it. `cursor_column` is the cursor's column when it is on this line.
+fn render_line(
+    row: &alacritty_terminal::grid::Row<Cell>,
+    cursor_column: Option<usize>,
+    palette: TerminalPalette,
+    text: &mut String,
+    spans: &mut Vec<TerminalSpan>,
+    links: &mut Vec<TerminalLink>,
+    cursor: &mut Option<Range<usize>>,
+) {
+    let end = line_end(row, cursor_column);
+    let mut style_run: Option<(usize, TerminalStyle)> = None;
+    let mut link_run: Option<(usize, String)> = None;
+    let mut previous_cell_range = None;
+    for (column, cell) in row[..Column(end)].iter().enumerate() {
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            if cursor_column == Some(column) {
+                *cursor = previous_cell_range.clone();
+            }
+            continue;
+        }
+        let link = cell
+            .hyperlink()
+            .and_then(|link| safe_link_url(link.uri()).map(str::to_owned));
+        if link_run.as_ref().map(|(_, url)| url) != link.as_ref() {
+            if let Some((start, url)) = link_run.take() {
+                links.push(TerminalLink {
+                    range: start..text.len(),
+                    url,
+                });
+            }
+            link_run = link.map(|url| (text.len(), url));
+        }
+        let style = terminal_style(cell, palette);
+        if style_run.is_some_and(|(_, current)| current != style) {
+            let (start, current) = style_run.take().expect("terminal style run exists");
+            if current != TerminalStyle::default() {
+                spans.push(TerminalSpan {
+                    range: start..text.len(),
+                    style: current,
+                });
+            }
+        }
+        style_run.get_or_insert((text.len(), style));
+        let start = text.len();
+        // Hidden text is drawn in the background's colour, so a selection
+        // still copies it.
+        text.push(cell.c);
+        for character in cell.zerowidth().into_iter().flatten() {
+            text.push(*character);
+        }
+        let range = start..text.len();
+        if cursor_column == Some(column) {
+            *cursor = Some(range.clone());
+        }
+        previous_cell_range = Some(range);
+    }
+    if let Some((start, style)) = style_run
+        && style != TerminalStyle::default()
+    {
+        spans.push(TerminalSpan {
+            range: start..text.len(),
+            style,
+        });
+    }
+    if let Some((start, url)) = link_run {
+        links.push(TerminalLink {
+            range: start..text.len(),
+            url,
+        });
+    }
+}
+
+fn hash_color(color: Color, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    match color {
+        Color::Named(name) => (0u8, name as usize).hash(hasher),
+        Color::Spec(Rgb { r, g, b }) => (1u8, r, g, b).hash(hasher),
+        Color::Indexed(index) => (2u8, index).hash(hasher),
+    }
+}
+
 fn cell_has_visible_content(cell: &Cell) -> bool {
     !cell
         .flags
@@ -849,32 +1049,39 @@ fn cell_is_default_appearance(cell: &Cell) -> bool {
         )
 }
 
-fn terminal_style(cell: &Cell) -> TerminalStyle {
+fn terminal_style(cell: &Cell, palette: TerminalPalette) -> TerminalStyle {
     TerminalStyle {
-        foreground: color_rgb(cell.fg, true),
-        background: color_rgb(cell.bg, false),
+        foreground: color_rgb(cell.fg, true, palette),
+        background: color_rgb(cell.bg, false, palette),
         bold: cell.flags.contains(Flags::BOLD),
+        dim: cell.flags.contains(Flags::DIM),
+        italic: cell.flags.contains(Flags::ITALIC),
+        underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+        strikethrough: cell.flags.contains(Flags::STRIKEOUT),
+        hidden: cell.flags.contains(Flags::HIDDEN),
         inverse: cell.flags.contains(Flags::INVERSE),
     }
-    .resolved()
+    .resolved(palette)
 }
 
-fn color_rgb(color: Color, foreground: bool) -> Option<u32> {
+fn color_rgb(color: Color, foreground: bool, palette: TerminalPalette) -> Option<u32> {
     match color {
         Color::Spec(Rgb { r, g, b }) => {
             Some((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b))
         }
-        Color::Indexed(index) => Some(xterm_color(usize::from(index))),
-        Color::Named(named) => named_color_index(named).map(ansi_color).or_else(|| {
-            let is_default = matches!(
-                named,
-                NamedColor::Foreground
-                    | NamedColor::Background
-                    | NamedColor::BrightForeground
-                    | NamedColor::DimForeground
-            );
-            (!is_default).then_some(ansi_color(if foreground { 7 } else { 0 }))
-        }),
+        Color::Indexed(index) => Some(xterm_color(usize::from(index), palette)),
+        Color::Named(named) => named_color_index(named)
+            .map(|index| palette.ansi(index))
+            .or_else(|| {
+                let is_default = matches!(
+                    named,
+                    NamedColor::Foreground
+                        | NamedColor::Background
+                        | NamedColor::BrightForeground
+                        | NamedColor::DimForeground
+                );
+                (!is_default).then_some(palette.ansi(if foreground { 7 } else { 0 }))
+            }),
     }
 }
 
@@ -956,39 +1163,99 @@ fn read_u64(bytes: &[u8], offset: &mut usize) -> Option<u64> {
 }
 
 impl TerminalStyle {
-    fn resolved(mut self) -> Self {
+    fn resolved(mut self, palette: TerminalPalette) -> Self {
         if self.inverse {
-            std::mem::swap(&mut self.foreground, &mut self.background);
+            // A colour the program left to the theme swaps for the theme's
+            // other one, so a bar or a selection in inverse video shows even
+            // where neither colour was set.
+            let ink = self.foreground.unwrap_or(palette.foreground());
+            let ground = self.background.unwrap_or(palette.background());
+            self.foreground = Some(ground);
+            self.background = Some(ink);
             self.inverse = false;
         }
-        if self.foreground.is_none()
-            && let Some(background) = self.background
-        {
-            self.foreground = Some(readable_foreground(background));
+        if self.hidden {
+            self.foreground = Some(self.background.unwrap_or(palette.background()));
+            return self;
+        }
+        if let Some(background) = self.background {
+            // A program that sets both colours (black on white, white on
+            // blue) can ask for text too close to its own background, and
+            // the light set has no light colour at all: its white and bright
+            // white are dark, to read on the light ground. Text under 3:1 on
+            // its own background takes a readable colour, in either theme.
+            let unreadable = self.foreground.is_none_or(|foreground| {
+                contrast_ratio(foreground, background) < MIN_CELL_CONTRAST
+            });
+            if unreadable {
+                self.foreground = Some(readable_foreground(background, palette));
+            }
+        }
+        if self.dim {
+            let ground = self.background.unwrap_or(palette.background());
+            let ink = self.foreground.unwrap_or(palette.foreground());
+            self.foreground = Some(dimmed(ink, ground));
         }
         self
     }
 }
 
-fn readable_foreground(background: u32) -> u32 {
-    let red = (background >> 16) & 0xff;
-    let green = (background >> 8) & 0xff;
-    let blue = background & 0xff;
-    let luminance = red * 299 + green * 587 + blue * 114;
-    ansi_color(if luminance < 128_000 { 15 } else { 0 })
+/// Below this, text on its own cell background is replaced, and dim text
+/// is mixed no further toward its background.
+const MIN_CELL_CONTRAST: f32 = 3.0;
+
+/// How far dim text is mixed toward its background, at most.
+const DIM_MIX: f32 = 0.45;
+
+/// `ink` mixed toward `ground` for dim text: as far as [`DIM_MIX`], and no
+/// further than keeps it at 3:1 on the ground. Ink already under 3:1 stays.
+fn dimmed(ink: u32, ground: u32) -> u32 {
+    let mix = |amount: f32| {
+        let channel = |shift: u32| {
+            let from = ((ink >> shift) & 0xff) as f32;
+            let to = ((ground >> shift) & 0xff) as f32;
+            ((from + (to - from) * amount).round() as u32).min(0xff) << shift
+        };
+        channel(16) | channel(8) | channel(0)
+    };
+    (0..=9)
+        .rev()
+        .map(|step| mix(DIM_MIX * step as f32 / 9.0))
+        .find(|color| contrast_ratio(*color, ground) >= MIN_CELL_CONTRAST)
+        .unwrap_or(ink)
 }
 
-fn ansi_color(index: usize) -> u32 {
-    const COLORS: [u32; 16] = [
-        0x1f2329, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xd7dae0, 0x5c6370,
-        0xff7a85, 0xb3e180, 0xffd68a, 0x7dbaff, 0xd99bff, 0x75d5e0, 0xffffff,
-    ];
-    COLORS[index.min(15)]
+/// Whichever of white and the palette's darkest colour reads better on
+/// `background`. One of the two always clears 4:1, whatever the background.
+fn readable_foreground(background: u32, palette: TerminalPalette) -> u32 {
+    let dark = palette.ansi(0);
+    if contrast_ratio(0xffffff, background) >= contrast_ratio(dark, background) {
+        0xffffff
+    } else {
+        dark
+    }
 }
 
-fn xterm_color(index: usize) -> u32 {
+/// The WCAG contrast ratio between two `0xRRGGBB` colours, from 1 to 21.
+pub fn contrast_ratio(first: u32, second: u32) -> f32 {
+    fn luminance(color: u32) -> f32 {
+        let channel = |shift: u32| {
+            let value = ((color >> shift) & 0xff) as f32 / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+    let (first, second) = (luminance(first), luminance(second));
+    (first.max(second) + 0.05) / (first.min(second) + 0.05)
+}
+
+fn xterm_color(index: usize, palette: TerminalPalette) -> u32 {
     match index.min(255) {
-        0..=15 => ansi_color(index),
+        0..=15 => palette.ansi(index),
         16..=231 => {
             const LEVELS: [u32; 6] = [0, 95, 135, 175, 215, 255];
             let value = index - 16;
@@ -1055,13 +1322,206 @@ mod tests {
         assert!(rendered.text.contains("red X 界e\u{301} link"));
         assert!(rendered.spans.iter().any(|span| {
             &rendered.text[span.range.clone()] == "red"
-                && span.style.foreground == Some(ansi_color(1))
+                && span.style.foreground == Some(TerminalPalette::Dark.ansi(1))
         }));
         assert!(rendered.spans.iter().any(|span| {
             &rendered.text[span.range.clone()] == "X" && span.style.foreground == Some(0x010203)
         }));
         assert_eq!(rendered.links.len(), 1);
         assert_eq!(rendered.links[0].url, "https://example.com");
+    }
+
+    fn style_of(rendered: &TerminalText, text: &str) -> TerminalStyle {
+        rendered
+            .spans
+            .iter()
+            .find(|span| &rendered.text[span.range.clone()] == text)
+            .map(|span| span.style)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_light_palette_colours_the_same_cells_for_a_light_ground() {
+        let mut screen = TerminalScreen::new(40, 4);
+        screen.feed(b"\x1b[31mred\x1b[0m \x1b[92mgreen\x1b[0m \x1b[38;5;4mblue\x1b[0m");
+        let dark = screen.rendered_with_cursor_in(TerminalPalette::Dark);
+        let light = screen.rendered_with_cursor_in(TerminalPalette::Light);
+        assert_eq!(dark.text, light.text);
+        assert_eq!(style_of(&dark, "red").foreground, Some(0xe06c75));
+        assert_eq!(style_of(&light, "red").foreground, Some(0xb3202f));
+        assert_eq!(style_of(&dark, "green").foreground, Some(0xb3e180));
+        assert_eq!(style_of(&light, "green").foreground, Some(0x1f7440));
+        assert_eq!(style_of(&dark, "blue").foreground, Some(0x61afef));
+        assert_eq!(style_of(&light, "blue").foreground, Some(0x2a52be));
+        // The default rendering is the dark one, as before.
+        assert_eq!(screen.rendered_with_cursor().spans, dark.spans);
+    }
+
+    #[test]
+    fn light_cells_with_their_own_background_stay_readable() {
+        let mut screen = TerminalScreen::new(60, 4);
+        // Black on white, white on blue, a bare red background, and a pair
+        // that already reads: red on bright white is left alone.
+        screen.feed(b"\x1b[30;47mbar\x1b[0m \x1b[37;44mdir\x1b[0m \x1b[41mbad\x1b[0m");
+        screen.feed(b" \x1b[38;2;255;255;255;48;2;10;10;10mrgb\x1b[0m");
+        let light = screen.rendered_with_cursor_in(TerminalPalette::Light);
+        for text in ["bar", "dir", "bad", "rgb"] {
+            let style = style_of(&light, text);
+            let (foreground, background) = (style.foreground.unwrap(), style.background.unwrap());
+            assert!(
+                contrast_ratio(foreground, background) >= MIN_CELL_CONTRAST,
+                "{text}: {foreground:06x} on {background:06x}"
+            );
+        }
+        assert_eq!(style_of(&light, "bar").background, Some(0x4b5165));
+        assert_eq!(style_of(&light, "rgb").foreground, Some(0xffffff));
+
+        // The dark set follows the same rule: a pair that reads is left as
+        // the program asked, and one that does not takes a readable ink.
+        let dark = screen.rendered_with_cursor_in(TerminalPalette::Dark);
+        for text in ["bar", "dir", "bad", "rgb"] {
+            let style = style_of(&dark, text);
+            let (foreground, background) = (style.foreground.unwrap(), style.background.unwrap());
+            assert!(
+                contrast_ratio(foreground, background) >= MIN_CELL_CONTRAST,
+                "dark {text}: {foreground:06x} on {background:06x}"
+            );
+        }
+        // Black on white already reads, and keeps its colours.
+        assert_eq!(style_of(&dark, "bar").foreground, Some(0x1f2329));
+        assert_eq!(style_of(&dark, "bar").background, Some(0xd7dae0));
+        // White on blue was 1.69:1; it takes the palette's black.
+        assert_eq!(style_of(&dark, "dir").background, Some(0x61afef));
+        assert_eq!(style_of(&dark, "dir").foreground, Some(0x1f2329));
+        assert_eq!(style_of(&dark, "bad").foreground, Some(0x1f2329));
+        assert_eq!(style_of(&dark, "rgb").foreground, Some(0xffffff));
+    }
+
+    #[test]
+    fn every_dark_colour_but_black_reads_on_the_dark_ground() {
+        let ground = TerminalPalette::Dark.background();
+        // Black is a ground of its own, for text set on it.
+        for (index, color) in TerminalPalette::Dark.colors().iter().enumerate().skip(1) {
+            let ratio = contrast_ratio(*color, ground);
+            assert!(ratio >= 4.5, "colour {index} #{color:06x} is {ratio:.2}:1");
+        }
+        assert_eq!(TerminalPalette::Dark.colors()[8], 0x828997);
+    }
+
+    #[test]
+    fn inverse_with_the_default_colours_swaps_the_themes_two() {
+        let mut screen = TerminalScreen::new(40, 2);
+        screen.feed(b"\x1b[7minverse\x1b[27m plain \x1b[7;31mred\x1b[0m \x1b[7;44mblue\x1b[0m");
+        for palette in [TerminalPalette::Dark, TerminalPalette::Light] {
+            let rendered = screen.rendered_with_cursor_in(palette);
+            let inverse = style_of(&rendered, "inverse");
+            assert_eq!(inverse.foreground, Some(palette.background()), "{palette:?}");
+            assert_eq!(inverse.background, Some(palette.foreground()), "{palette:?}");
+            // SGR 27 ends it.
+            assert_eq!(style_of(&rendered, " plain "), TerminalStyle::default());
+            // A colour the program set swaps with the theme's other one.
+            let red = style_of(&rendered, "red");
+            assert_eq!(red.background, Some(palette.ansi(1)), "{palette:?}");
+            assert!(contrast_ratio(red.foreground.unwrap(), red.background.unwrap()) >= 3.0);
+            // The blue background becomes the ink, on the theme's text
+            // colour, and takes a readable ink where it does not read there.
+            let blue = style_of(&rendered, "blue");
+            assert_eq!(blue.background, Some(palette.foreground()), "{palette:?}");
+            assert!(contrast_ratio(blue.foreground.unwrap(), palette.foreground()) >= 3.0);
+        }
+    }
+
+    #[test]
+    fn the_text_attributes_are_drawn_and_reset() {
+        let mut screen = TerminalScreen::new(80, 2);
+        screen.feed(
+            b"\x1b[2mdim\x1b[22m \x1b[3mitalic\x1b[23m \x1b[4munder\x1b[24m \x1b[9mstrike\x1b[29m \x1b[8msecret\x1b[28m \x1b[1;2mboth\x1b[22m end",
+        );
+        for palette in [TerminalPalette::Dark, TerminalPalette::Light] {
+            let rendered = screen.rendered_with_cursor_in(palette);
+            // Hidden text is still there to select and copy.
+            assert_eq!(
+                rendered.text.trim_end(),
+                "dim italic under strike secret both end",
+                "{palette:?}"
+            );
+            let dim = style_of(&rendered, "dim");
+            assert!(dim.dim, "{palette:?}");
+            let ink = dim.foreground.unwrap();
+            assert_ne!(ink, palette.foreground());
+            let ratio = contrast_ratio(ink, palette.background());
+            assert!(ratio >= 3.0, "{palette:?} dim is {ratio:.2}:1");
+            assert!(ratio < contrast_ratio(palette.foreground(), palette.background()));
+            assert!(style_of(&rendered, "italic").italic);
+            assert!(style_of(&rendered, "under").underline);
+            assert!(style_of(&rendered, "strike").strikethrough);
+            let secret = style_of(&rendered, "secret");
+            assert!(secret.hidden);
+            assert_eq!(secret.foreground, Some(palette.background()));
+            let both = style_of(&rendered, "both");
+            assert!(both.bold && both.dim);
+            // 22, 23, 24, 29 and 28 end each: what follows is plain.
+            for plain in [" ", " end"] {
+                assert!(
+                    rendered.spans.iter().all(|span| {
+                        &rendered.text[span.range.clone()] != plain
+                            || span.style == TerminalStyle::default()
+                    }),
+                    "{palette:?} {plain:?}"
+                );
+            }
+            assert_eq!(
+                rendered
+                    .spans
+                    .iter()
+                    .map(|span| &rendered.text[span.range.clone()])
+                    .collect::<Vec<_>>(),
+                ["dim", "italic", "under", "strike", "secret", "both"],
+                "{palette:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dim_text_on_a_dark_ink_stops_at_three_to_one() {
+        // Grey on black reads at about 3.4:1; dim takes it no lower than 3:1.
+        assert!(contrast_ratio(dimmed(0x6e6e6e, 0x0b0b0b), 0x0b0b0b) >= 3.0);
+        // Ink already under 3:1 is left as it is.
+        assert_eq!(dimmed(0x333333, 0x0b0b0b), 0x333333);
+        // A light ink on a dark ground moves toward it.
+        assert!(dimmed(0xf2f2f2, 0x0b0b0b) < 0xf2f2f2);
+    }
+
+    #[test]
+    fn readable_ink_follows_the_real_contrast_on_mid_tones() {
+        // Grey text on a green the old brightness cut-off called dark, where
+        // white read under 3:1, and a bare mid blue.
+        let mut screen = TerminalScreen::new(40, 2);
+        screen.feed(b"\x1b[38;2;80;80;80;48;2;0;176;0mgreen\x1b[0m ");
+        screen.feed(b"\x1b[48;2;90;110;200mblue\x1b[0m");
+        for palette in [TerminalPalette::Light, TerminalPalette::Dark] {
+            let rendered = screen.rendered_with_cursor_in(palette);
+            for text in ["green", "blue"] {
+                let style = style_of(&rendered, text);
+                let (foreground, background) =
+                    (style.foreground.unwrap(), style.background.unwrap());
+                // Both themes take the readable ink now.
+                assert!(
+                    contrast_ratio(foreground, background) >= 4.0,
+                    "{palette:?} {text}: {foreground:06x} on {background:06x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contrast_ratio_matches_the_wcag_extremes() {
+        assert!((contrast_ratio(0x000000, 0xffffff) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(0x777777, 0x777777) - 1.0).abs() < 0.001);
+        assert_eq!(
+            contrast_ratio(0x1b1e2c, 0xeef0f9),
+            contrast_ratio(0xeef0f9, 0x1b1e2c)
+        );
     }
 
     #[test]
@@ -1161,5 +1621,134 @@ mod tests {
         assert!(screen.rendered_with_cursor().cursor.is_none());
         screen.feed(b"\x1b[?2026l");
         assert!(screen.text().contains("world"));
+    }
+
+    /// Every line of the whole rendering, on its own: its text, and its
+    /// spans, links and cursor moved to start at the line.
+    fn split_lines(whole: &TerminalText) -> Vec<TerminalText> {
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for text in whole.text.split('\n') {
+            let end = start + text.len();
+            let inside = |range: &Range<usize>| range.start >= start && range.end <= end;
+            let local = |range: &Range<usize>| range.start - start..range.end - start;
+            lines.push(TerminalText {
+                text: text.to_owned(),
+                spans: whole
+                    .spans
+                    .iter()
+                    .filter(|span| inside(&span.range))
+                    .map(|span| TerminalSpan {
+                        range: local(&span.range),
+                        style: span.style,
+                    })
+                    .collect(),
+                links: whole
+                    .links
+                    .iter()
+                    .filter(|link| inside(&link.range))
+                    .map(|link| TerminalLink {
+                        range: local(&link.range),
+                        url: link.url.clone(),
+                    })
+                    .collect(),
+                cursor: whole
+                    .cursor
+                    .as_ref()
+                    .filter(|cursor| inside(cursor))
+                    .map(local),
+            });
+            start = end + 1;
+        }
+        lines
+    }
+
+    #[test]
+    fn a_line_on_its_own_is_drawn_as_in_the_whole_screen() {
+        let mut screen = TerminalScreen::new(20, 4);
+        screen.feed(
+            b"plain\r\n\x1b[31mred\x1b[0m and \x1b[1mbold\x1b[0m\r\n\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ \xe4\xbd\xa0\xe5\xa5\xbd\r\nfour\r\nfive\r\nsix \x1b[7minverse\x1b[0m",
+        );
+        for palette in [TerminalPalette::Dark, TerminalPalette::Light] {
+            for with_cursor in [false, true] {
+                let whole = screen.rendered_inner(with_cursor, palette);
+                let expected = split_lines(&whole);
+                assert_eq!(screen.line_count(with_cursor), expected.len());
+                for (index, line) in expected.iter().enumerate() {
+                    assert_eq!(
+                        screen
+                            .rendered_line_in(index, with_cursor, palette)
+                            .as_ref(),
+                        Some(line),
+                        "line {index}"
+                    );
+                }
+                assert_eq!(
+                    screen.rendered_line_in(expected.len(), with_cursor, palette),
+                    None
+                );
+            }
+        }
+        // The cursor's line carries it, at its column past the text.
+        let cursor_line = screen.line_count(true) - 1;
+        let line = screen
+            .rendered_line_in(cursor_line, true, TerminalPalette::Dark)
+            .unwrap();
+        assert_eq!(line.cursor, Some(line.text.len() - 1..line.text.len()));
+    }
+
+    #[test]
+    fn a_lines_fingerprint_changes_only_with_what_it_draws() {
+        let mut screen = TerminalScreen::new(20, 4);
+        screen.feed(b"one\r\ntwo\r\n");
+        let one = screen.line_fingerprint(0, true).unwrap();
+        let two = screen.line_fingerprint(1, true).unwrap();
+        assert_ne!(one, two);
+        // More output below leaves the lines above as they were.
+        screen.feed(b"three");
+        assert_eq!(screen.line_fingerprint(0, true), Some(one));
+        assert_eq!(screen.line_fingerprint(1, true), Some(two));
+        // A colour is part of it, and so is the cursor standing on a line.
+        let mut coloured = TerminalScreen::new(20, 4);
+        coloured.feed(b"\x1b[31mone\x1b[0m\r\ntwo\r\n");
+        assert_ne!(coloured.line_fingerprint(0, true), Some(one));
+        let cursor_line = screen.line_count(true) - 1;
+        assert_ne!(
+            screen.line_fingerprint(cursor_line, true),
+            screen.line_fingerprint(cursor_line, false)
+        );
+        assert_eq!(screen.line_fingerprint(screen.line_count(true), true), None);
+    }
+
+    /// Prints how long the whole screen takes to draw against the lines in
+    /// view, with a full scrollback. Run with `--nocapture` to read it.
+    #[test]
+    fn drawing_the_lines_in_view_does_not_cost_the_scrollback() {
+        let mut screen = TerminalScreen::new(120, 40);
+        let mut output = Vec::new();
+        for line in 1..=6000 {
+            output.extend_from_slice(
+                format!("\x1b[32m{line:>6}\x1b[0m output line with some text\r\n").as_bytes(),
+            );
+        }
+        screen.feed(&output);
+        let count = screen.line_count(true);
+        assert!(count >= 5000, "{count}");
+        let rounds = 20;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            std::hint::black_box(screen.rendered_with_cursor_in(TerminalPalette::Dark));
+        }
+        let whole = started.elapsed() / rounds;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            for index in count - 40..count {
+                std::hint::black_box(screen.line_fingerprint(index, true));
+                std::hint::black_box(screen.rendered_line_in(index, true, TerminalPalette::Dark));
+            }
+        }
+        let in_view = started.elapsed() / rounds;
+        eprintln!("{count} lines: whole screen {whole:?}, the 40 in view {in_view:?}");
+        assert!(in_view < whole, "{in_view:?} against {whole:?}");
     }
 }

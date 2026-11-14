@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -11,19 +12,33 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.stateDescription
+import com.restartfu.xd.mobile.R
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -42,13 +57,36 @@ import com.restartfu.xd.files.FileTab
 import com.restartfu.xd.files.TreeRow
 import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.syntax.Syntax
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /** How far one level of nesting shifts a row. */
 private val INDENT = 12.dp
-private const val LARGE_FILE_CHARACTERS = 128 * 1024
-private const val LARGE_FILE_LINES = 4_000
+/**
+ * Past this size a file opens in the line-by-line view and is edited plain.
+ * The editing field lays out its whole text on every keystroke, and coloured
+ * text costs far more to lay out than plain: measured under Robolectric on a
+ * desktop CPU, a coloured field took about 10 ms at 8K characters, 19 ms at
+ * 16K, 46 ms at 32K, 160 ms at 64K and 600 ms at 128K, where plain text stayed
+ * near 8 to 16 ms throughout. A phone is slower still, so colouring stops at 16K.
+ */
+internal const val LARGE_FILE_CHARACTERS = 16 * 1024
+
+/** As many lines as 16K characters of ordinary code fill, give or take; many short lines cost as much. */
+internal const val LARGE_FILE_LINES = 600
+
+/** How long typing pauses before the file is coloured again: each keystroke would be wasted work. */
+private const val EDITOR_COLOUR_PAUSE_MILLIS = 150L
+
+/**
+ * [tree]'s rows, walked once per tree rather than on every recomposition of
+ * the pane, which an editor keystroke is.
+ */
+@Composable
+internal fun rememberFileRows(tree: com.restartfu.xd.files.FileTree): List<com.restartfu.xd.files.TreeRow> =
+    remember(tree) { tree.rows() }
 
 /**
  * The working directory as a folding tree, and the files opened out of it.
@@ -60,32 +98,53 @@ private const val LARGE_FILE_LINES = 4_000
 @Composable
 internal fun FilesPaneContent(model: FilesViewModel) {
     val state by model.state.collectAsStateWithLifecycle()
-    val rows = state.tree.rows()
+    val rows = rememberFileRows(state.tree)
+    // The file whose tab was asked to close with edits in it, kept through a rotation.
+    var closing by rememberSaveable { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxSize()) {
         FileTabs(
             open = state.open,
             onShow = model::show,
-            onClose = model::close,
+            // Edits that were never saved are asked about, not dropped.
+            onClose = { path ->
+                if (state.open.files.find { it.path == path }?.dirty == true) closing = path else model.close(path)
+            },
             trailing = {
                 TextButton(onClick = model::refresh, enabled = !state.loading) { Text("Refresh") }
             },
         )
 
         state.error?.let { message ->
-            Text(
-                message,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    message,
+                    // Told as it appears: the tree may look as it did before.
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 4.dp)
+                        .semantics { liveRegion = LiveRegionMode.Polite },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                // A folder that could not be listed is listed again; a file that
+                // could not be opened (binary, too large) would only fail again.
+                if (state.listFailed) TextButton(onClick = model::refresh) { Text("Try again") }
+            }
         }
 
         when (val tab = state.open.active) {
             FileTab.Tree -> when {
                 rows.isEmpty() && state.loading -> Centered { CircularProgressIndicator() }
                 rows.isEmpty() -> Centered {
-                    Text("Nothing here", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "This folder is empty.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 else -> LazyColumn(Modifier.fillMaxSize()) {
                     items(rows, key = { it.path }) { row ->
@@ -109,6 +168,7 @@ internal fun FilesPaneContent(model: FilesViewModel) {
                         dirty = file.dirty,
                         saving = file.saving,
                         error = file.error,
+                        unkept = file.path in state.unkept,
                         onChange = { model.edit(tab.path, it) },
                         onSave = { model.save(tab.path) },
                     )
@@ -116,6 +176,49 @@ internal fun FilesPaneContent(model: FilesViewModel) {
             }
         }
     }
+    val asked = closing?.let { path -> state.open.files.find { it.path == path } }
+    if (asked != null) {
+        DiscardChangesDialog(
+            name = asked.name,
+            onDiscard = {
+                closing = null
+                model.close(asked.path)
+            },
+            onSave = {
+                closing = null
+                model.saveAndClose(asked.path)
+            },
+            onDismiss = { closing = null },
+        )
+    } else if (closing != null) {
+        // Closed some other way meanwhile: nothing is left to ask about.
+        LaunchedEffect(Unit) { closing = null }
+    }
+}
+
+/**
+ * Asked before a tab with unsaved edits closes: Discard drops them, Save
+ * writes them and then closes (a failed save keeps the tab, with its reason).
+ */
+@Composable
+private fun DiscardChangesDialog(
+    name: String,
+    onDiscard: () -> Unit,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Discard changes to $name?") },
+        text = { Text("Your edits to this file are not saved.") },
+        confirmButton = { TextButton(onClick = onSave) { Text("Save") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                TextButton(onClick = onDiscard) { Text("Discard", color = MaterialTheme.colorScheme.error) }
+            }
+        },
+    )
 }
 
 /**
@@ -140,9 +243,9 @@ private fun FileTabs(
         Row(
             modifier = Modifier
                 .weight(1f)
+                .selectableGroup()
                 .horizontalScroll(rememberScrollState()),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             TabLabel(
                 text = "Files",
@@ -152,10 +255,12 @@ private fun FileTabs(
             open.files.forEach { file ->
                 TabLabel(
                     // A dot rather than a word: the tab is already as narrow as
-                    // it can be and still name the file.
+                    // it can be and still name the file. A screen reader hears the word.
                     text = if (file.dirty) "${file.name} •" else file.name,
                     selected = open.active == FileTab.File(file.path),
                     onClick = { onShow(FileTab.File(file.path)) },
+                    spoken = if (file.dirty) "${file.name}, unsaved changes" else file.name,
+                    closeLabel = "Close ${file.name}",
                     onClose = { onClose(file.path) },
                 )
             }
@@ -164,60 +269,78 @@ private fun FileTabs(
     }
 }
 
+/** One tab of the strip, 48dp tall, with a close button of its own beside it when it can close. */
 @Composable
 private fun TabLabel(
     text: String,
     selected: Boolean,
     onClick: () -> Unit,
+    spoken: String = text,
+    closeLabel: String? = null,
     onClose: (() -> Unit)? = null,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text,
+        Box(
             modifier = Modifier
-                .clickable(onClick = onClick)
-                .padding(vertical = 8.dp, horizontal = 4.dp),
-            maxLines = 1,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-            color = if (selected) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-        )
-        onClose?.let { close ->
+                .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                .selectable(selected = selected, role = Role.Tab, onClick = onClick)
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
             Text(
-                "✕",
-                modifier = Modifier
-                    .clickable(onClick = close)
-                    .padding(vertical = 8.dp, horizontal = 2.dp),
+                text,
+                modifier = Modifier.semantics { contentDescription = spoken },
+                maxLines = 1,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
             )
+        }
+        onClose?.let { close ->
+            IconButton(onClick = close, modifier = Modifier.size(48.dp)) {
+                Icon(
+                    painterResource(R.drawable.ic_close),
+                    contentDescription = closeLabel,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
         }
     }
 }
 
+/** One file or folder of the tree: a 48dp row that says, for a folder, whether it is open. */
 @Composable
 private fun TreeEntry(row: TreeRow, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(
+                role = Role.Button,
+                onClickLabel = when {
+                    !row.directory -> "Open file"
+                    row.expanded -> "Close folder"
+                    else -> "Open folder"
+                },
+                onClick = onClick,
+            )
+            .semantics {
+                if (row.directory) stateDescription = if (row.expanded) "Expanded" else "Collapsed"
+            }
+            .heightIn(min = 48.dp)
             .padding(start = 8.dp + INDENT * row.depth, end = 12.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // A caret only where there is something to fold, and a blank of the
+        // A chevron only where there is something to fold, and a blank of the
         // same width elsewhere so names line up down a level.
         Box(Modifier.width(16.dp), contentAlignment = Alignment.Center) {
             when {
                 row.loading -> CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.dp)
-                row.directory -> Text(
-                    if (row.expanded) "▾" else "▸",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline,
-                )
+                row.directory -> DisclosureChevron(row.expanded, size = 12.dp)
             }
         }
         Spacer(Modifier.width(4.dp))
@@ -243,24 +366,64 @@ private fun FileEditor(
     dirty: Boolean,
     saving: Boolean,
     error: String?,
+    /** Its edits are too large to keep if Android ends the app before they are saved. */
+    unkept: Boolean,
     onChange: (String) -> Unit,
     onSave: () -> Unit,
 ) {
     val language = remember(path) { Syntax.languageForPath(path) }
-    val fallback = LocalContentColor.current
-    val large = remember(text) { isLargeFile(text) }
+    val ink = codeInk()
+    // What a keystroke costs here is what it typed: the line count and the
+    // colour key follow each edit instead of reading the whole file again.
+    val editor = remember(path) { EditorText(text) }
+    editor.sync(text)
+    val large = isLargeFile(editor.value.text.length, editor.newlines)
     var editingLargeFile by rememberSaveable(path) { mutableStateOf(false) }
-    val syntaxColours = remember(language, fallback) {
-        SyntaxVisualTransformation(language, fallback)
+    // Typed past the limit: the field stays, plain, rather than turning into the read-only view.
+    var wasLarge by remember(path) { mutableStateOf(large) }
+    if (large != wasLarge) {
+        if (large && editor.edited) editingLargeFile = true
+        wasLarge = large
     }
+    // Coloured away from the main thread, once typing pauses; until then the
+    // last colouring is kept round what changed (see [EditorColouring]).
+    val key = remember(editor.revision, language, ink) { EditorKey(editor.value.text, editor.revision, language, ink) }
+    var coloured by remember(path, language, ink) { mutableStateOf(EditorColours.peek(key)) }
+    if (!large) {
+        LaunchedEffect(key) {
+            EditorColours.peek(key)?.let {
+                coloured = it
+                return@LaunchedEffect
+            }
+            if (coloured != null) delay(EDITOR_COLOUR_PAUSE_MILLIS)
+            coloured = try {
+                EditorColours.request(key).await()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                coloured
+            }
+        }
+    }
+    val syntaxColours = remember(coloured) { EditorColouring(coloured) }
 
-    Column(Modifier.fillMaxSize()) {
+    // Clear of the keyboard, so the caret and Save stay in sight while typing.
+    // The app draws edge to edge, so nothing else makes room for it.
+    Column(Modifier.fillMaxSize().imePadding()) {
         error?.let { message ->
             Text(
                 message,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp).announced(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (unkept && dirty) {
+            Text(
+                UNKEPT_EDIT_NOTICE,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp).announced(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         if (large) {
@@ -277,7 +440,7 @@ private fun FileEditor(
                         "Large file · optimized view"
                     },
                     modifier = Modifier.weight(1f),
-                    color = MaterialTheme.colorScheme.outline,
+                    color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.labelSmall,
                 )
                 TextButton(onClick = { editingLargeFile = !editingLargeFile }) {
@@ -292,17 +455,20 @@ private fun FileEditor(
                 modifier = Modifier.weight(1f),
             )
         } else {
-            OutlinedTextField(
-                value = text,
-                onValueChange = onChange,
+            NamedOutlinedField(
+                value = editor.value,
+                onValueChange = { next -> editor.edit(next)?.let(onChange) },
+                // The field shows no label: a screen reader reads this with its text.
+                name = "Contents of ${path.substringAfterLast('/')}",
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp),
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = XdMonoFamily),
-                // Re-transforming an 800 KiB document on every selection or
-                // keystroke defeats the explicit large-file edit escape hatch.
+                // A large file is edited plain: even moving its colours along
+                // as it is typed would cost each keystroke.
                 visualTransformation = if (large) VisualTransformation.None else syntaxColours,
+                colors = xdFieldColors(),
             )
         }
         Row(
@@ -326,16 +492,16 @@ private fun LargeFileView(
     modifier: Modifier = Modifier,
 ) {
     val language = remember(path) { Syntax.languageForPath(path) }
-    val fallback = LocalContentColor.current
+    val ink = codeInk()
     val lines = remember(text) { text.split('\n') }
     val highlighted by produceState<List<AnnotatedString>?>(
         initialValue = null,
         key1 = text,
         key2 = language,
-        key3 = fallback,
+        key3 = ink,
     ) {
         value = withContext(Dispatchers.Default) {
-            highlightLines(text, language, fallback)
+            highlightLines(text, language, ink)
         }
     }
     val horizontal = rememberScrollState()
@@ -359,5 +525,9 @@ private fun LargeFileView(
     }
 }
 
-private fun isLargeFile(text: String): Boolean =
-    text.length >= LARGE_FILE_CHARACTERS || text.count { it == '\n' } >= LARGE_FILE_LINES
+internal fun isLargeFile(characters: Int, newlines: Int): Boolean =
+    characters >= LARGE_FILE_CHARACTERS || newlines >= LARGE_FILE_LINES
+
+/** Said over an edit too large to keep if Android ends the app before it is saved. */
+internal const val UNKEPT_EDIT_NOTICE =
+    "These edits are too large to keep if Android closes xd in the background. Save them soon."

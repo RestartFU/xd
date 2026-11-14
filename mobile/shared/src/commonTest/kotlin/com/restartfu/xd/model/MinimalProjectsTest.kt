@@ -56,7 +56,7 @@ class MinimalProjectsTest {
                 ),
                 MinimalSession(
                     id = "two",
-                    title = "New Session",
+                    title = "New chat",
                     agent = DirectAgent.CLAUDE,
                     branch = "Project directory",
                     working = false,

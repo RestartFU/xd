@@ -5,9 +5,11 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, ImageFormat, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, Window, actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    UTF16Selection, Window, actions, div, fill, point, prelude::*, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::metrics::{TEXT_CONTROL, TEXT_LABEL, TEXT_MONO, px, text_px};
 
 use xd_desktop::markdown::{self, CodeKind, CodeSpan};
 
@@ -65,6 +67,10 @@ pub enum EditorEvent {
     /// Send this into whatever is running now, rather than after it.
     SubmitNow,
     Save,
+    /// Backspace with the caret at the very start of a composer and nothing
+    /// selected, where there is no text to delete: the composer's last
+    /// attachment goes instead.
+    BackspaceAtStart,
 }
 
 pub struct FileEditor {
@@ -118,6 +124,16 @@ impl EventEmitter<EditorEvent> for FileEditor {}
 
 impl FileEditor {
     const LINE_HEIGHT: f32 = 20.0;
+
+    /// A message is written in the size of a control's words, a file in the
+    /// monospace size.
+    fn font_size(&self) -> f32 {
+        if self.composer {
+            TEXT_CONTROL
+        } else {
+            TEXT_MONO
+        }
+    }
 
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
@@ -191,6 +207,13 @@ impl FileEditor {
         &self.content
     }
 
+    /// Whether the caret is inside a fenced code block of the text: past
+    /// a line that opens a fence of three backticks and before the line
+    /// that closes it.
+    pub fn caret_in_code_fence(&self) -> bool {
+        in_code_fence(&self.content, self.cursor_offset())
+    }
+
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
         self.content = text.into();
@@ -250,6 +273,14 @@ impl FileEditor {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.allow_images
+            && self.selected_range.is_empty()
+            && self.marked_range.is_none()
+            && self.cursor_offset() == 0
+        {
+            cx.emit(EditorEvent::BackspaceAtStart);
+            return;
+        }
         self.begin_delete(EditKind::Delete);
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
@@ -921,7 +952,7 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> PrepaintState {
         let input = self.input.read(cx);
-        let font_size = px(13.);
+        let font_size = px(input.font_size());
         let style = window.text_style();
         let text_width = input.text_width(bounds.size.width);
         let ranges = if input.composer {
@@ -979,9 +1010,10 @@ impl Element for EditorElement {
             let line_number = (!input.composer).then(|| {
                 let number: SharedString = (index + 1).to_string().into();
                 let runs = vec![text_run(number.len(), &style, input.colors.faint)];
-                let layout = window
-                    .text_system()
-                    .shape_line(number, px(12.0), &runs, None);
+                let layout =
+                    window
+                        .text_system()
+                        .shape_line(number, text_px(TEXT_LABEL), &runs, None);
                 PaintedLineNumber {
                     origin: point(
                         bounds.left() + gutter_width - px(10.0) - layout.width,
@@ -1156,7 +1188,6 @@ fn text_runs(
     } else {
         input.colors.text
     };
-    let light = input.colors.background > 0x808080;
     if placeholder || range.is_empty() || input.syntax_spans.is_empty() {
         return vec![text_run(
             display_run_len(range, placeholder.then_some(input.placeholder.len())),
@@ -1180,7 +1211,11 @@ fn text_runs(
             runs.push(text_run(start - cursor, style, default_color));
         }
         if start < end {
-            runs.push(text_run(end - start, style, syntax_color(span.kind, light)));
+            runs.push(text_run(
+                end - start,
+                style,
+                syntax_color(span.kind, input.colors),
+            ));
             cursor = end;
         }
     }
@@ -1199,6 +1234,19 @@ fn display_run_len(range: &Range<usize>, placeholder_len: Option<usize>) -> usiz
 
 /// Where a word-wise delete behind `offset` lands: the whitespace under the
 /// cursor, then the run of word characters — or of punctuation — behind it.
+/// Whether `offset` in `text` falls inside a fenced code block: after an
+/// odd number of lines that start, past any indent, with three backticks.
+/// A fence line counts from just past its backticks, so the opening line's
+/// language name is inside and the closing line's end is not.
+pub(crate) fn in_code_fence(text: &str, offset: usize) -> bool {
+    let before = text.get(..offset).unwrap_or(text);
+    let fences = before
+        .split('\n')
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count();
+    fences % 2 == 1
+}
+
 pub(crate) fn previous_word_boundary(content: &str, offset: usize) -> usize {
     let text = &content[..offset];
     let trimmed = text.trim_end_matches(char::is_whitespace);
@@ -1256,16 +1304,12 @@ fn text_run(len: usize, style: &gpui::TextStyle, color: u32) -> TextRun {
     }
 }
 
-fn syntax_color(kind: CodeKind, light: bool) -> u32 {
-    match (kind, light) {
-        (CodeKind::Keyword, false) => 0xc7a0e8,
-        (CodeKind::String, false) => 0xa9cf8f,
-        (CodeKind::Comment, false) => 0x8b8a85,
-        (CodeKind::Number, false) => 0xe9a07a,
-        (CodeKind::Keyword, true) => 0x7a3fa8,
-        (CodeKind::String, true) => 0x3d6d22,
-        (CodeKind::Comment, true) => 0x6e6d67,
-        (CodeKind::Number, true) => 0xa0461c,
+fn syntax_color(kind: CodeKind, colors: ThemeColors) -> u32 {
+    match kind {
+        CodeKind::Keyword => colors.syntax.keyword,
+        CodeKind::String => colors.syntax.string,
+        CodeKind::Comment => colors.syntax.comment,
+        CodeKind::Number => colors.syntax.number,
     }
 }
 
@@ -1358,7 +1402,13 @@ fn visual_line_ranges(
         let runs = text_runs(input, range, style, false);
         let wrapped = window
             .text_system()
-            .shape_text(text, px(13.), &runs, Some(width.max(px(1.))), None)
+            .shape_text(
+                text,
+                px(input.font_size()),
+                &runs,
+                Some(width.max(px(1.))),
+                None,
+            )
             .expect("shape message editor line");
         let offsets = wrapped
             .first()
@@ -1678,5 +1728,25 @@ mod tests {
         assert_eq!(editor_text(&editor, cx), "abX");
         cx.simulate_keystrokes("ctrl-z");
         assert_eq!(editor_text(&editor, cx), "ab");
+    }
+
+    #[test]
+    fn the_caret_is_in_a_code_fence_between_its_backtick_lines() {
+        let text = "Run this:\n```sh\nmake test\n```\nThen tell me.";
+        let at = |needle: &str| text.find(needle).unwrap();
+        assert!(!in_code_fence(text, 0));
+        assert!(
+            !in_code_fence(text, at("```sh")),
+            "before the opening fence"
+        );
+        assert!(in_code_fence(text, at("sh\n")), "on the opening line");
+        assert!(in_code_fence(text, at("test")));
+        assert!(!in_code_fence(text, at("\nThen")), "past the closing fence");
+        assert!(!in_code_fence(text, text.len()));
+        // An indented fence, and one left open, count too.
+        assert!(in_code_fence("- step\n  ```\n  code", 18));
+        assert!(in_code_fence("```\nstill open", 14));
+        // Inline backticks are no fence.
+        assert!(!in_code_fence("Use `make` here", 10));
     }
 }

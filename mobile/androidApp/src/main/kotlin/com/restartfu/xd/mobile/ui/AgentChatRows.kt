@@ -1,5 +1,10 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.runtime.remember
+import androidx.compose.material3.ripple
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,7 +20,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -25,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -42,7 +47,13 @@ import com.restartfu.xd.model.agentChatStatus
  * it in the chat and in the tray.
  */
 @Composable
-internal fun AgentAvatar(tone: Color, size: Dp = 28.dp, mark: @Composable () -> Unit) {
+internal fun AgentAvatar(
+    tone: Color,
+    size: Dp = 28.dp,
+    /** How it stands, drawn as the shared mark; a plain dot in [tone] when it has none. */
+    status: StatusMark? = null,
+    mark: @Composable () -> Unit,
+) {
     Box(Modifier.size(size)) {
         Box(
             Modifier
@@ -52,18 +63,32 @@ internal fun AgentAvatar(tone: Color, size: Dp = 28.dp, mark: @Composable () -> 
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh),
             contentAlignment = Alignment.Center,
         ) { mark() }
+        // The words beside the avatar say how it stands; the badge is its shape.
         Box(
             Modifier
                 .align(Alignment.BottomEnd)
-                .offset(x = 2.dp, y = 2.dp)
-                .size(11.dp)
+                .offset(x = 3.dp, y = 3.dp)
+                .size(13.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.background)
-                .padding(2.dp)
-                .clip(CircleShape)
-                .background(tone),
-        )
+                .background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (status != null) {
+                StatusMarkIcon(status, size = 9.dp, labelled = false, still = true)
+            } else {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(tone))
+            }
+        }
     }
+}
+
+/** The shared mark for an agent chat's status; failed and stopped ones keep a plain dot. */
+private fun AgentChatStatus.mark(): StatusMark? = when (this) {
+    AgentChatStatus.RUNNING -> StatusMark.WORKING
+    AgentChatStatus.NEEDS_YOU -> StatusMark.WAITING
+    AgentChatStatus.DONE -> StatusMark.DONE
+    AgentChatStatus.PAUSED -> StatusMark.PAUSED
+    AgentChatStatus.FAILED, AgentChatStatus.STOPPED -> null
 }
 
 /** The colour each status of an agent chat is told in, as on the desktop. */
@@ -89,7 +114,7 @@ internal fun AgentChatRow(run: SubagentRun, chat: ChatSummary?, onOpen: () -> Un
     val signals = LocalXdSignals.current
     val status = agentChatStatus(run, chat)
     val tone = status.tone()
-    val title = chat?.title?.takeIf { it.isNotBlank() && it != "New Chat" }
+    val title = chat?.title?.takeIf { it.isNotBlank() && !it.equals("New chat", ignoreCase = true) }
         ?: run.identity.takeIf { it.isNotBlank() && it != "Agent" }
         ?: firstLine(run.prompt)
     val detail = when (status) {
@@ -100,14 +125,14 @@ internal fun AgentChatRow(run: SubagentRun, chat: ChatSummary?, onOpen: () -> Un
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 2.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onOpen)
+            .clip(MaterialTheme.shapes.small)
+            .clickable(role = Role.Button, onClickLabel = "Open chat", onClick = onOpen)
             .heightIn(min = 56.dp)
             .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        AgentAvatar(tone) { BackendIcon(run.provider.lowercase(), size = 14.dp) }
+        AgentAvatar(tone, status = status.mark()) { BackendIcon(run.provider.lowercase(), size = 14.dp) }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
                 title,
@@ -127,7 +152,7 @@ internal fun AgentChatRow(run: SubagentRun, chat: ChatSummary?, onOpen: () -> Un
         Text(status.label, style = MaterialTheme.typography.labelMedium, color = tone)
         Icon(
             painterResource(R.drawable.ic_chevron_right),
-            contentDescription = "Open $title",
+            contentDescription = null,
             tint = signals.faint,
             modifier = Modifier.size(14.dp),
         )
@@ -148,16 +173,18 @@ internal fun AgentReportLine(report: AgentReport, chat: ChatSummary?, onOpen: ()
         AgentOutcome.FAILED -> "stopped with an error" to MaterialTheme.colorScheme.error
         AgentOutcome.WAITING -> "is asking a question" to signals.waiting
     }
+    // No padding of its own: the pill's 48dp target already spaces the line.
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Box(Modifier.weight(1f).height(1.dp).background(signals.rule))
+        val press = remember { MutableInteractionSource() }
         Row(
             modifier = Modifier
-                .clip(CircleShape)
-                .clickable(onClick = onOpen)
+                .pillTarget(press, onOpen)
+                .indication(press, ripple())
                 .heightIn(min = 32.dp)
                 .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -177,16 +204,28 @@ internal fun AgentReportLine(report: AgentReport, chat: ChatSummary?, onOpen: ()
     }
 }
 
+/**
+ * A small pill's touch target: a full 48dp, with the pill drawn at its own
+ * size in the middle and the press shown on the pill alone. Follow it with
+ * the pill's border and `indication(press, ripple())`.
+ */
+private fun Modifier.pillTarget(press: MutableInteractionSource, onOpen: () -> Unit): Modifier = this
+    .heightIn(min = 48.dp)
+    .clickable(press, indication = null, role = Role.Button, onClickLabel = "Open chat", onClick = onOpen)
+    .wrapContentHeight()
+    .clip(CircleShape)
+
 /** The one way back from an agent's chat to the chat that started it. */
 @Composable
 internal fun StartedByPill(parent: ChatSummary, onOpen: () -> Unit) {
     val signals = LocalXdSignals.current
-    Box(Modifier.fillMaxWidth().padding(bottom = 8.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        val press = remember { MutableInteractionSource() }
         Row(
             modifier = Modifier
-                .clip(CircleShape)
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
-                .clickable(onClick = onOpen)
+                .pillTarget(press, onOpen)
+                .border(1.dp, controlBorder(), CircleShape)
+                .indication(press, ripple())
                 .heightIn(min = 32.dp)
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -194,7 +233,7 @@ internal fun StartedByPill(parent: ChatSummary, onOpen: () -> Unit) {
         ) {
             Text("Started by", style = MaterialTheme.typography.labelMedium, color = signals.faint)
             Text(
-                parent.title.ifBlank { "New Chat" },
+                parent.title.ifBlank { "New chat" },
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,

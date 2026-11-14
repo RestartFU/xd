@@ -8,17 +8,11 @@ use std::io::Cursor;
 use gpui::{ClickEvent, ImageFormat, KeyDownEvent, MouseMoveEvent};
 
 use super::*;
+use crate::metrics::{LINE_CAPTION, LINE_LABEL_TIGHT, line_px};
 
 const TILE_SIZE: f32 = 64.0;
-const TILE_RADIUS: f32 = 8.0;
-const VIEWER_RADIUS: f32 = 8.0;
-const BACKDROP: u32 = 0x000000bf;
-const CLOSE_BACKGROUND: u32 = 0x000000a6;
-const CLOSE_HOVER_BACKGROUND: u32 = 0x000000cc;
-const CLOSE_RING: u32 = 0xffffff33;
-const NAVIGATION_HOVER_BACKGROUND: u32 = 0xffffff1a;
-const MEDIA_FOREGROUND: u32 = 0xffffff;
-const CAPTION_COLOR: u32 = 0xffffffcc;
+const TILE_RADIUS: f32 = RADIUS_PANEL;
+const VIEWER_RADIUS: f32 = RADIUS_PANEL;
 
 const MAX_ZOOM: f32 = 8.0;
 const CLICK_ZOOM: f32 = 2.0;
@@ -51,6 +45,27 @@ pub(super) enum ThumbnailState {
     Loading,
     Ready(Arc<Image>),
     Failed,
+}
+
+/// Two 1px lines in the viewer's dark, just outside and just inside the
+/// Tab ring of a button drawn over a picture, so the ring reads whatever
+/// the picture's colours.
+fn picture_ring_edges() -> [gpui::Div; 2] {
+    let edge = |inset: f32, radius: f32| {
+        div()
+            .absolute()
+            .top(px(-inset))
+            .bottom(px(-inset))
+            .left(px(-inset))
+            .right(px(-inset))
+            .rounded(px(radius))
+            .border_1()
+            .border_color(rgba(frame_colors().viewer.button))
+    };
+    [
+        edge(FOCUS_RING_GAP + 1.0, FOCUS_RING_RADIUS + 1.0),
+        edge(FOCUS_RING_GAP - 2.0, RADIUS_CONTROL + 1.0),
+    ]
 }
 
 /// Scale and center-crop a PNG to fill a square, as PNG bytes.
@@ -329,7 +344,7 @@ impl ImagePreview {
 }
 
 fn point_tuple(point: Point<Pixels>) -> (f32, f32) {
-    (f32::from(point.x), f32::from(point.y))
+    (logical(point.x), logical(point.y))
 }
 
 fn unavailable_image(colors: ThemeColors) -> gpui::AnyElement {
@@ -340,29 +355,27 @@ fn unavailable_image(colors: ThemeColors) -> gpui::AnyElement {
         .justify_center()
         .p(px(24.0))
         .text_center()
-        .text_size(px(14.0))
+        .text_size(text_px(TEXT_BODY))
         .text_color(rgb(colors.text))
         .child("Image unavailable.")
         .into_any_element()
 }
 
+/// A button over the image viewer. It is an icon alone, so `label` names it.
 fn viewer_button(
     id: &'static str,
+    label: &'static str,
     size: f32,
     icon_path: &'static str,
     icon_size: f32,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
+    icon_button(id, label, icon_path, frame_colors())
+        .size(size)
+        .glyph(icon_size)
+        .ink(frame_colors().viewer.ink)
+        .build()
         .debug_selector(move || id.into())
         .absolute()
-        .size(px(size))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(8.0))
-        .cursor_pointer()
-        .child(icon(icon_path, icon_size, MEDIA_FOREGROUND))
 }
 
 impl XdDesktop {
@@ -414,22 +427,121 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match (owner, self.draft_attachment_index(owner, key)) {
-            (DraftOwner::Chat, Some(index)) => {
-                self.model.draft_attachments.remove(index);
+        if let Some(index) = self.draft_attachment_index(owner, key) {
+            self.take_draft_attachment(owner, index, cx);
+        }
+        let focus = self.draft_editor_focus(owner, cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    /// Backspace at the very start of a composer: the last attachment shown
+    /// above it goes, the files after the pictures, and the undo notice
+    /// offers it back. Says whether there was one.
+    pub(super) fn remove_last_draft_attachment(
+        &mut self,
+        owner: DraftOwner,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let draft = self.draft(owner);
+        let last = draft
+            .iter()
+            .rposition(|attachment| attachment.preview.is_none())
+            .or_else(|| {
+                draft
+                    .iter()
+                    .rposition(|attachment| attachment.preview.is_some())
+            });
+        let Some(index) = last else {
+            return false;
+        };
+        self.take_draft_attachment(owner, index, cx)
+    }
+
+    /// Takes the attachment at `index` out of a composer's draft, with the
+    /// undo notice offering it back. A chat being created already has its
+    /// first message, so its attachments stay. Says whether one went.
+    fn take_draft_attachment(
+        &mut self,
+        owner: DraftOwner,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let from = match owner {
+            DraftOwner::Chat => match self.model.selected_chat.clone() {
+                Some(chat) if index < self.model.draft_attachments.len() => {
+                    AttachmentFrom::Chat(self.active_endpoint, chat)
+                }
+                _ => return false,
+            },
+            DraftOwner::NewChat => match self.new_chat_draft_key() {
+                Some(key)
+                    if !self.chat_create_submitting && index < self.new_chat_attachments.len() =>
+                {
+                    AttachmentFrom::NewChat(key)
+                }
+                _ => return false,
+            },
+        };
+        let attachment = match owner {
+            DraftOwner::Chat => {
+                let attachment = self.model.draft_attachments.remove(index);
+                self.attachments_dirty = true;
+                self.attachment_generation = self.attachment_generation.saturating_add(1);
+                self.schedule_draft_sync(cx);
+                attachment
+            }
+            DraftOwner::NewChat => {
+                let attachment = self.new_chat_attachments.remove(index);
+                self.persist_new_chat_draft();
+                attachment
+            }
+        };
+        self.offer_discard_undo(
+            Discarded::Attachment {
+                from,
+                index,
+                attachment,
+            },
+            cx,
+        );
+        cx.notify();
+        true
+    }
+
+    /// Puts a removed attachment back where it stood, if its composer is
+    /// still the one open.
+    pub(super) fn restore_attachment(
+        &mut self,
+        from: AttachmentFrom,
+        index: usize,
+        attachment: Attachment,
+        cx: &mut Context<Self>,
+    ) {
+        match from {
+            AttachmentFrom::Chat(endpoint, chat) => {
+                if endpoint != self.active_endpoint
+                    || self.model.selected_chat.as_deref() != Some(chat.as_str())
+                {
+                    return;
+                }
+                let index = index.min(self.model.draft_attachments.len());
+                self.model.draft_attachments.insert(index, attachment);
                 self.attachments_dirty = true;
                 self.attachment_generation = self.attachment_generation.saturating_add(1);
                 self.schedule_draft_sync(cx);
             }
-            // A chat being created already has its first message.
-            (DraftOwner::NewChat, Some(index)) if !self.chat_create_submitting => {
-                self.new_chat_attachments.remove(index);
+            AttachmentFrom::NewChat(key) => {
+                if self.new_chat_draft_key().as_deref() != Some(key.as_str())
+                    || self.chat_create_submitting
+                {
+                    return;
+                }
+                let index = index.min(self.new_chat_attachments.len());
+                self.new_chat_attachments.insert(index, attachment);
                 self.persist_new_chat_draft();
             }
-            _ => {}
         }
-        let focus = self.draft_editor_focus(owner, cx);
-        window.focus(&focus);
         cx.notify();
     }
 
@@ -505,6 +617,7 @@ impl XdDesktop {
             return None;
         }
         let keys = self.draft_keys(owner);
+        let targets = self.key_targets.clone();
         let tiles = self
             .draft(owner)
             .iter()
@@ -526,13 +639,14 @@ impl XdDesktop {
                         .justify_center()
                         .px_1()
                         .text_center()
-                        .text_size(px(10.0))
+                        .text_size(text_px(TEXT_CAPTION))
                         .text_color(rgb(colors.muted))
                         .overflow_hidden()
                         .child(attachment.name.clone())
                         .into_any_element(),
                     Some(ThumbnailState::Loading) | None => div().into_any_element(),
                 };
+                let name = attachment.name.clone();
                 div()
                     .relative()
                     .size(px(TILE_SIZE))
@@ -543,13 +657,24 @@ impl XdDesktop {
                         div()
                             .id(("draft-image", index))
                             .debug_selector(move || format!("draft-image-{index}"))
+                            .relative()
                             .size_full()
                             .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.open_image_preview(owner, image, window, cx);
-                            }))
-                            .child(content),
+                            .child(content)
+                            // A Tab stop: Enter opens it in the viewer, as a
+                            // click does.
+                            .key_stop_named(
+                                &targets,
+                                KeyLayer::Page,
+                                format!("draft-image-{index}"),
+                                format!("Open {name}"),
+                                colors,
+                                cx,
+                                move |this, window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_image_preview(owner, image, window, cx);
+                                },
+                            ),
                     )
                     .child(
                         div()
@@ -563,25 +688,40 @@ impl XdDesktop {
                         div()
                             .id(("remove-draft-image", index))
                             .debug_selector(move || format!("remove-draft-image-{index}"))
+                            .tooltip(pane_tooltip(format!("Remove {name}"), colors))
                             .absolute()
                             .top(px(4.0))
                             .right(px(4.0))
-                            .size(px(24.0))
+                            .size(hit_px(HIT_MIN))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(6.0))
+                            .rounded(px(RADIUS_CONTROL))
                             .border_1()
-                            .border_color(rgba(CLOSE_RING))
-                            .bg(rgba(CLOSE_BACKGROUND))
+                            .border_color(rgba(frame_colors().viewer.button_edge))
+                            .bg(rgba(frame_colors().viewer.button))
                             .shadow_sm()
                             .cursor_pointer()
-                            .hover(|style| style.bg(rgba(CLOSE_HOVER_BACKGROUND)))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.remove_draft_attachment(owner, image, window, cx);
-                            }))
-                            .child(icon(CLOSE_ICON, 14.0, MEDIA_FOREGROUND)),
+                            .hover(|style| style.bg(rgba(frame_colors().viewer.button_hover)))
+                            .child(icon(CLOSE_ICON, 14.0, frame_colors().viewer.ink))
+                            // Over a picture, whose colours can match the
+                            // ring's, the ring is edged in the viewer's dark.
+                            .when(
+                                targets.stop_on(&format!("remove-draft-image-{index}")),
+                                |button| button.children(picture_ring_edges()),
+                            )
+                            .key_stop_named(
+                                &targets,
+                                KeyLayer::Page,
+                                format!("remove-draft-image-{index}"),
+                                format!("Remove {name}"),
+                                colors,
+                                cx,
+                                move |this, window, cx| {
+                                    cx.stop_propagation();
+                                    this.remove_draft_attachment(owner, image, window, cx);
+                                },
+                            ),
                     )
             })
             .collect::<Vec<_>>();
@@ -642,39 +782,45 @@ impl XdDesktop {
                     .flex()
                     .flex_col()
                     .child(
-                        div()
-                            .truncate()
-                            .text_size(px(12.0))
-                            .line_height(px(15.0))
-                            .text_color(rgb(colors.text))
-                            .child(attachment.name.clone()),
+                        truncating_label(attachment.name.clone())
+                            .text_size(text_px(TEXT_LABEL))
+                            .line_height(line_px(LINE_LABEL_TIGHT, TEXT_LABEL))
+                            .text_color(rgb(colors.text)),
                     )
                     .child(
                         div()
-                            .text_size(px(10.5))
-                            .line_height(px(13.0))
+                            .text_size(text_px(TEXT_CAPTION))
+                            .line_height(line_px(LINE_CAPTION, TEXT_CAPTION))
                             .text_color(rgb(colors.faint))
                             .child(file_size_label(attachment.bytes)),
                     ),
             )
-            .child(
-                div()
-                    .id(("remove-draft-file", index))
-                    .debug_selector(move || format!("remove-draft-file-{index}"))
-                    .size(px(24.0))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+            .child({
+                let label = format!("Remove {}", attachment.name);
+                icon_button(
+                    ("remove-draft-file", index),
+                    label.clone(),
+                    CLOSE_ICON,
+                    colors,
+                )
+                .size(HIT_MIN)
+                .glyph(13.0)
+                .build()
+                .relative()
+                .debug_selector(move || format!("remove-draft-file-{index}"))
+                .key_stop_named(
+                    &self.key_targets,
+                    KeyLayer::Page,
+                    format!("remove-draft-file-{index}"),
+                    label,
+                    colors,
+                    cx,
+                    move |this, window, cx| {
                         cx.stop_propagation();
                         this.remove_draft_attachment(owner, id, window, cx);
-                    }))
-                    .child(icon(CLOSE_ICON, 13.0, colors.muted)),
-            )
+                    },
+                )
+            })
     }
 
     fn open_image_preview(
@@ -713,7 +859,7 @@ impl XdDesktop {
             return;
         };
         let viewport = window.viewport_size();
-        let window_size = (f32::from(viewport.width), f32::from(viewport.height));
+        let window_size = (logical(viewport.width), logical(viewport.height));
         self.image_preview = Some(ImagePreview::new(preview_owner, images, index, window_size));
         // Closing goes back to the editor the tile belongs to, whatever the click
         // on the tile did to the focus.
@@ -790,7 +936,7 @@ impl XdDesktop {
         }
         let focus = self.minimal_popup_focus.clone();
         let viewport = window.viewport_size();
-        let window_size = (f32::from(viewport.width), f32::from(viewport.height));
+        let window_size = (logical(viewport.width), logical(viewport.height));
         let preview = self.image_preview.as_mut()?;
         preview.fit_window(window_size);
         let layout = preview.layout();
@@ -849,7 +995,7 @@ impl XdDesktop {
                 let delta = event.delta.pixel_delta(px(WHEEL_LINE_HEIGHT)).y;
                 if let Some(preview) = &mut this.image_preview {
                     preview.wheel(
-                        f32::from(delta),
+                        logical(delta),
                         event.modifiers.control,
                         point_tuple(event.position),
                     );
@@ -888,37 +1034,46 @@ impl XdDesktop {
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(viewer)
             .child(
-                div()
+                truncating_label(caption)
                     .debug_selector(|| "image-preview-caption".into())
                     .mt(px(CAPTION_GAP))
                     .h(px(CAPTION_LINE_HEIGHT))
                     .max_w(px(ImagePreview::max_viewer_width(window_size.0)))
-                    .truncate()
-                    .text_size(px(12.0))
+                    .text_size(text_px(TEXT_LABEL))
                     .line_height(px(CAPTION_LINE_HEIGHT))
-                    .text_color(rgba(CAPTION_COLOR))
-                    .child(caption),
+                    .text_color(rgba(frame_colors().viewer.caption)),
             );
 
-        let close = viewer_button("image-preview-close", 28.0, CLOSE_ICON, 16.0)
-            .top(px(margin_y))
-            .right(px(margin_x))
-            .border_1()
-            .border_color(rgba(CLOSE_RING))
-            .bg(rgba(CLOSE_BACKGROUND))
-            .shadow_sm()
-            .hover(|style| style.bg(rgba(CLOSE_HOVER_BACKGROUND)))
-            .on_click(cx.listener(|this, _, window, cx| {
-                cx.stop_propagation();
-                this.close_image_preview(window, cx);
-            }));
+        let close = viewer_button(
+            "image-preview-close",
+            "Close (Escape)",
+            28.0,
+            CLOSE_ICON,
+            16.0,
+        )
+        .top(px(margin_y))
+        .right(px(margin_x))
+        .border_1()
+        .border_color(rgba(frame_colors().viewer.button_edge))
+        .bg(rgba(frame_colors().viewer.button))
+        .shadow_sm()
+        .hover(|style| style.bg(rgba(frame_colors().viewer.button_hover)))
+        .on_click(cx.listener(|this, _, window, cx| {
+            cx.stop_propagation();
+            this.close_image_preview(window, cx);
+        }));
 
         let navigation = |id: &'static str,
                           icon_path: &'static str,
                           direction: isize,
                           cx: &mut Context<Self>| {
-            let button = viewer_button(id, 32.0, icon_path, 20.0)
-                .hover(|style| style.bg(rgba(NAVIGATION_HOVER_BACKGROUND)))
+            let label = if direction < 0 {
+                "Previous image (Left)"
+            } else {
+                "Next image (Right)"
+            };
+            let button = viewer_button(id, label, 32.0, icon_path, 20.0)
+                .hover(|style| style.bg(rgba(frame_colors().viewer.hover)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     if let Some(preview) = &mut this.image_preview {
@@ -952,7 +1107,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(BACKDROP))
+                .bg(rgba(frame_colors().viewer.backdrop))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                     this.image_preview_key_down(event, cx);
                 }))

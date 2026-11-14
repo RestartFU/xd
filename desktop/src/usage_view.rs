@@ -2,11 +2,16 @@
 //! cost, and tokens, and a full page for cost and tokens in detail. The full page
 //! follows T3 Code (MIT, see `data/licenses/t3code-LICENSE`).
 
-use std::{cell::Cell, collections::BTreeMap, rc::Rc, time::Duration};
+use crate::metrics::{
+    CONTROL_HEIGHT_COMPACT, HIT_MIN, LINE_FIGURE, LINE_TITLE, RADIUS_COMPOSER, RADIUS_CONTROL,
+    RADIUS_PANEL, TEXT_CAPTION, TEXT_CONTROL, TEXT_FIGURE, TEXT_HEADING, TEXT_LABEL, TEXT_TITLE,
+    line_px,
+};
+use std::{cell::Cell, collections::BTreeMap, rc::Rc};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, MouseMoveEvent, PathBuilder, Rgba, Subscription,
-    Transformation, anchored, deferred, percentage, relative,
+    AnyElement, MouseMoveEvent, PathBuilder, Subscription, Transformation, anchored, deferred,
+    percentage, relative,
 };
 use serde_json::{Map, json};
 use xd_desktop::usage::{
@@ -45,7 +50,23 @@ const FLYOUT_WIDTH: f32 = 348.0;
 const FLYOUT_LEFT: f32 = 8.0;
 const FLYOUT_BOTTOM: f32 = 46.0;
 const FLYOUT_BARS_HEIGHT: f32 = 44.0;
-const CLAUDE_COLOR: u32 = 0xd97757;
+/// The scroll area of the Model prices dialog, which Tab scrolls to the
+/// field it moves to.
+pub(super) const PRICE_BODY_SCROLL: &str = "usage-price-body";
+
+/// The narrowest the prices table is with a column for each price: below
+/// it, a price field would be too narrow to read, and each row takes two
+/// lines.
+const PRICE_TABLE_ONE_LINE: f32 = 600.0;
+
+/// Whether the prices table is too narrow for one line a row in a window
+/// `width` wide: its room is the dialog at its widest, inside the window's
+/// margin, less the dialog's sides and the table's frame and padding.
+pub(super) fn price_table_narrow(width: f32) -> bool {
+    let dialog = (width - 2.0 * 24.0).min(DIALOG_TABLE_WIDTH);
+    dialog - 2.0 * 24.0 - 2.0 - 2.0 * 8.0 < PRICE_TABLE_ONE_LINE
+}
+
 const PRICE_FIELDS: [(&str, bool); 4] = [
     ("Input", false),
     ("Output", false),
@@ -82,9 +103,18 @@ fn environment_label(index: usize) -> &'static str {
     if index == 0 { "Local" } else { "Remote" }
 }
 
+/// Steps the refresh icon takes to come round to how it started. Its two
+/// arrows look the same after half a turn.
+const REFRESH_STEPS: usize = 4;
+
+/// How far round the refresh icon is on a pulse step, as a share of a turn.
+pub(super) fn refresh_turn(frame: usize) -> f32 {
+    (frame % REFRESH_STEPS) as f32 / (REFRESH_STEPS * 2) as f32
+}
+
 fn provider_color(provider: &str, colors: ThemeColors) -> u32 {
     if provider == "claude" {
-        CLAUDE_COLOR
+        colors.claude_icon
     } else {
         colors.text
     }
@@ -98,18 +128,13 @@ fn provider_icon(provider: &str) -> &'static str {
     }
 }
 
-/// `percent` of `over` on `base`, the page's only way of varying ink.
-fn ink(over: u32, base: u32, percent: u32) -> u32 {
-    let channel = |shift: u32| {
-        let top = (over >> shift) & 0xff;
-        let bottom = (base >> shift) & 0xff;
-        (top * percent + bottom * (100 - percent)) / 100
-    };
-    channel(16) << 16 | channel(8) << 8 | channel(0)
-}
-
-fn with_alpha(color: u32, alpha: f32) -> Rgba {
-    rgba((color << 8) | ((alpha.clamp(0.0, 1.0) * 255.0) as u32))
+/// The wash under a provider's line on a chart.
+fn provider_area(provider: &str, colors: ThemeColors) -> u32 {
+    if provider == "claude" {
+        colors.chart.claude_area
+    } else {
+        colors.chart.area
+    }
 }
 
 #[derive(Default)]
@@ -142,12 +167,27 @@ enum UsageMenu {
     Provider,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+/// The period of a chart the pointer is over. The chart draws again only
+/// when this changes, not on every move of the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ChartHover {
     chart: &'static str,
     index: usize,
-    x: f32,
-    y: f32,
+}
+
+/// The period of a chart `width` wide that a pointer `x` across it is over.
+fn chart_hover_index(x: f32, width: f32, periods: usize) -> usize {
+    if periods < 2 || width <= 0.0 {
+        return 0;
+    }
+    let x = x.clamp(0.0, width);
+    (((x / width) * (periods - 1) as f32).round() as usize).min(periods - 1)
+}
+
+/// Moves the pointer's hover to `next`, and says whether that changed what
+/// the chart shows, so only a change draws it again.
+fn set_chart_hover(hover: &mut Option<ChartHover>, next: ChartHover) -> bool {
+    hover.replace(next) != Some(next)
 }
 
 struct PriceRow {
@@ -244,9 +284,34 @@ pub(super) struct UsagePage {
     next_row: u64,
     overview_bounds: Rc<Cell<Bounds<Pixels>>>,
     model_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The flyout's or the full page's scroll, which the page keys move.
+    pub(super) scroll: ScrollHandle,
+    /// Counts the summaries that have arrived, which the merged figures are
+    /// worked out from.
+    summaries: u64,
+    /// The summaries merged for what the filters show, worked out once for
+    /// those summaries and filters and read by every part of a frame.
+    merged: RefCell<Option<(MergedKey, Rc<Merged>)>>,
+    /// How often the merged figures were worked out, for the tests.
+    #[cfg(test)]
+    merged_runs: Cell<usize>,
 }
 
+/// What the merged figures depend on: each shown environment's summary, by
+/// its request and window, the summaries that arrived, and the providers the
+/// filters hide.
+type MergedKey = (
+    Vec<(usize, u64, Option<(u32, i64)>, bool)>,
+    u64,
+    Vec<String>,
+);
+
 impl UsagePage {
+    /// Whether the Model prices dialog is open.
+    pub(super) fn price_dialog_open(&self) -> bool {
+        self.price.is_some()
+    }
+
     pub(super) fn new(focus: FocusHandle) -> Self {
         Self {
             environments: Default::default(),
@@ -268,57 +333,26 @@ impl UsagePage {
             next_row: 0,
             overview_bounds: Rc::new(Cell::new(Bounds::default())),
             model_bounds: Rc::new(Cell::new(Bounds::default())),
+            scroll: ScrollHandle::new(),
+            summaries: 0,
+            merged: RefCell::new(None),
+            #[cfg(test)]
+            merged_runs: Cell::new(0),
         }
     }
 }
 
-/// A tooltip with a headline and quieter detail lines.
-struct UsageTooltip {
-    lines: Vec<String>,
-    colors: ThemeColors,
-}
-
-impl Render for UsageTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.colors;
-        div()
-            .max_w(px(400.0))
-            .px_2()
-            .py_1()
-            .font_family(UI_FONT)
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(rgb(colors.border))
-            .bg(rgb(colors.surface_high))
-            .text_size(px(12.0))
-            .children(self.lines.iter().enumerate().map(|(index, line)| {
-                div()
-                    .text_color(rgb(if index == 0 {
-                        colors.text
-                    } else {
-                        colors.muted
-                    }))
-                    .child(line.clone())
-            }))
-    }
-}
-
+/// The shared tooltip, with a headline and quieter detail lines.
 fn usage_tooltip(
     lines: Vec<String>,
     colors: ThemeColors,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
-    move |_, cx| {
-        let lines = lines.clone();
-        cx.new(|_| UsageTooltip { lines, colors }).into()
-    }
+    pane_tooltip_lines(lines.into_iter().map(SharedString::from).collect(), colors)
 }
 
 fn section_title(label: impl Into<SharedString>, colors: ThemeColors) -> gpui::Div {
     div()
-        .text_size(px(13.5))
+        .text_size(text_px(TEXT_CONTROL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(colors.text))
         .child(label.into())
@@ -326,82 +360,69 @@ fn section_title(label: impl Into<SharedString>, colors: ThemeColors) -> gpui::D
 
 fn small_muted(label: impl Into<SharedString>, colors: ThemeColors) -> gpui::Div {
     div()
-        .text_size(px(12.0))
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(colors.muted))
         .child(label.into())
 }
 
-fn figures(element: gpui::Div, loading: bool) -> gpui::Div {
-    element.when(loading, |element| element.opacity(0.4))
+/// Figures a refresh is about to replace: drawn in the disabled ink, which
+/// stays readable, until the new ones arrive. Nothing is dimmed by opacity.
+fn figures(element: gpui::Div, loading: bool, colors: ThemeColors) -> gpui::Div {
+    element.when(loading, |element| {
+        element.text_color(rgb(disabled_ink(colors)))
+    })
 }
 
-fn segmented_shell() -> gpui::Div {
-    div().flex().flex_none().items_center().gap(px(2.0))
-}
-
-fn segment_button(
-    id: impl Into<gpui::ElementId>,
+/// A segment of one of the page's choices that Tab stops on.
+fn usage_segment(
+    keys: &KeyTargets,
+    id: String,
     label: &'static str,
     active: bool,
     colors: ThemeColors,
+    cx: &Context<XdDesktop>,
+    run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(26.0))
-        .px(px(9.0))
-        .flex()
-        .items_center()
-        .rounded(px(7.0))
-        .text_size(px(12.0))
-        .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
-        .text_color(rgb(if active { colors.text } else { colors.muted }))
-        .when(active, |button| {
-            button.bg(rgb(ink(colors.text, colors.chrome, 14)))
-        })
-        .when(!active, |button| {
-            button.hover(|style| style.bg(rgb(ink(colors.text, colors.chrome, 7))))
-        })
-        .child(label)
+    segment_button(SharedString::from(id.clone()), label, active, colors).key_stop_ring(
+        keys,
+        KeyLayer::Overlay,
+        id,
+        SEGMENT_RING_RADIUS,
+        colors,
+        cx,
+        run,
+    )
 }
 
-fn menu_row(
+/// The list the arrow keys are in while a Usage filter's menu is open.
+const USAGE_MENU: &str = "usage-menu";
+
+/// A row of a Usage filter's menu: a tick for what is shown, then the row.
+/// The keys reach it as the pointer does.
+fn usage_menu_row(
+    keys: &KeyTargets,
     id: impl Into<gpui::ElementId>,
     checked: bool,
     colors: ThemeColors,
+    cx: &Context<XdDesktop>,
+    run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(28.0))
-        .px_2()
-        .flex()
-        .items_center()
-        .gap_2()
-        .rounded(px(6.0))
-        .text_size(px(12.5))
-        .text_color(rgb(colors.text))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(colors.surface_high)))
-        .child(div().size(px(14.0)).flex_none().when(checked, |slot| {
-            slot.child(icon(CHECK_ICON, 14.0, colors.text))
-        }))
+    key_row(
+        keys,
+        KeyLayer::Menu,
+        USAGE_MENU,
+        menu_row(id, colors),
+        colors.surface_high,
+        cx,
+        run,
+    )
+    .child(menu_check(checked, colors))
 }
 
-fn menu_shell(colors: ThemeColors) -> gpui::Div {
-    div()
-        .occlude()
-        .absolute()
-        .top(px(30.0))
-        .left_0()
-        .min_w(px(220.0))
-        .p_1()
-        .flex()
-        .flex_col()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(rgb(colors.border))
-        .bg(rgb(colors.chrome))
-        .shadow_lg()
+/// A filter's menu, hung under the filter, or over it where the window ends
+/// too soon under it.
+fn usage_menu_under(menu: gpui::Div) -> gpui::Div {
+    menu_under(gpui::Corner::TopLeft, CONTROL_HEIGHT_COMPACT, menu)
 }
 
 fn metric_cell(
@@ -419,11 +440,12 @@ fn metric_cell(
         .child(small_muted(label, colors))
         .child(figures(
             div()
-                .text_size(px(16.0))
+                .text_size(text_px(TEXT_HEADING))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(colors.text))
                 .child(value),
             loading,
+            colors,
         ))
 }
 
@@ -450,7 +472,7 @@ fn limit_tone(remaining: i64, pace: Option<Pace>, colors: ThemeColors) -> u32 {
 }
 
 fn flyout_track(colors: ThemeColors) -> u32 {
-    ink(colors.text, colors.chrome, 14)
+    colors.chart.track
 }
 
 pub(super) fn flyout_bar(share: f64, tone: u32, height: f32, colors: ThemeColors) -> gpui::Div {
@@ -485,7 +507,7 @@ fn limit_measure(
             div()
                 .w(px(28.0))
                 .flex_none()
-                .text_size(px(11.5))
+                .text_size(text_px(TEXT_CAPTION))
                 .child(label),
         )
         .child(
@@ -514,8 +536,8 @@ fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
         .flex()
         .flex_col()
         .gap(px(2.0))
-        .rounded(px(6.0))
-        .text_size(px(12.0))
+        .rounded(px(RADIUS_CONTROL))
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(colors.muted))
         .child(
             div()
@@ -525,12 +547,10 @@ fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
                 .justify_between()
                 .gap_2()
                 .child(
-                    div()
+                    truncating_label(row.label)
                         .min_w_0()
-                        .truncate()
-                        .text_size(px(13.0))
-                        .text_color(rgb(colors.text))
-                        .child(row.label),
+                        .text_size(text_px(TEXT_CONTROL))
+                        .text_color(rgb(colors.text)),
                 )
                 .child(
                     div()
@@ -575,7 +595,7 @@ fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
                 "Time",
                 left,
                 clock.clone().unwrap_or_default(),
-                ink(colors.text, colors.chrome, 45),
+                colors.chart.shades[1],
                 colors.muted,
                 colors,
             ))
@@ -588,11 +608,7 @@ fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
 
 /// Providers in the flyout differ by shade, so color stays reserved for status.
 fn flyout_provider_shade(provider: &str, colors: ThemeColors) -> u32 {
-    ink(
-        colors.text,
-        colors.chrome,
-        if provider == "claude" { 78 } else { 42 },
-    )
+    colors.chart.shades[if provider == "claude" { 3 } else { 1 }]
 }
 
 fn metric_amount(metric: ChartMetric, cost: f64, tokens: u64) -> f64 {
@@ -665,15 +681,13 @@ fn flyout_period_bars(
                     column.child(
                         div()
                             .h(px(2.0))
-                            .rounded(px(1.0))
+                            .rounded(px(RADIUS_LINE))
                             .bg(rgb(flyout_track(colors))),
                     )
                 })
-                .children(
-                    segments
-                        .into_iter()
-                        .map(|(color, height)| div().h(px(height)).rounded(px(1.0)).bg(rgb(color))),
-                )
+                .children(segments.into_iter().map(|(color, height)| {
+                    div().h(px(height)).rounded(px(RADIUS_LINE)).bg(rgb(color))
+                }))
         }))
 }
 
@@ -688,7 +702,7 @@ fn flyout_heading(
         .flex()
         .items_center()
         .gap_2()
-        .text_size(px(12.0))
+        .text_size(text_px(TEXT_LABEL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(colors.muted))
         .children(icon_path.map(|path| assistant_icon(path, 14.0, colors.muted, colors)))
@@ -704,14 +718,12 @@ fn account_heading(name: String, plan: Option<String>, colors: ThemeColors) -> g
         .items_center()
         .justify_between()
         .gap_2()
-        .text_size(px(11.5))
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(colors.muted))
         .child(
-            div()
+            truncating_label(name)
                 .min_w_0()
-                .truncate()
-                .font_weight(FontWeight::MEDIUM)
-                .child(name),
+                .font_weight(FontWeight::MEDIUM),
         )
         .children(plan.map(|plan| div().flex_none().child(plan)))
 }
@@ -726,53 +738,53 @@ fn token_segments(
     tokens: &xd_desktop::usage::TokenTotals,
     colors: ThemeColors,
 ) -> Vec<ShareSegment> {
-    let shade = |percent| ink(colors.text, colors.background, percent);
+    let [faint, _, middle, strong] = colors.chart.shades;
     vec![
         ShareSegment {
             label: "Input",
             value: tokens.uncached_input as f64,
-            color: shade(60),
+            color: middle,
         },
         ShareSegment {
             label: "Cache read",
             value: tokens.cached_input as f64,
-            color: shade(30),
+            color: faint,
         },
         ShareSegment {
             label: "Cache write",
             value: tokens.cache_creation as f64,
-            color: shade(72),
+            color: strong,
         },
         ShareSegment {
             label: "Output",
             value: tokens.output as f64,
-            color: shade(100),
+            color: colors.text,
         },
     ]
 }
 
 fn cost_segments(cost: &xd_desktop::usage::CategoryCost, colors: ThemeColors) -> Vec<ShareSegment> {
-    let shade = |percent| ink(colors.text, colors.background, percent);
+    let [faint, quiet, middle, strong] = colors.chart.shades;
     vec![
         ShareSegment {
             label: "Input",
             value: cost.input,
-            color: shade(60),
+            color: middle,
         },
         ShareSegment {
             label: "Cache read",
             value: cost.cache_read,
-            color: shade(30),
+            color: faint,
         },
         ShareSegment {
             label: "Cache write",
             value: cost.cache_write,
-            color: shade(72),
+            color: strong,
         },
         ShareSegment {
             label: "Output",
             value: cost.output,
-            color: shade(100),
+            color: colors.text,
         },
         ShareSegment {
             label: "Other",
@@ -781,28 +793,28 @@ fn cost_segments(cost: &xd_desktop::usage::CategoryCost, colors: ThemeColors) ->
             } else {
                 0.0
             },
-            color: shade(44),
+            color: quiet,
         },
     ]
 }
 
 fn speed_segments(cost: &xd_desktop::usage::SpeedCost, colors: ThemeColors) -> Vec<ShareSegment> {
-    let shade = |percent| ink(colors.text, colors.background, percent);
+    let [faint, _, middle, _] = colors.chart.shades;
     vec![
         ShareSegment {
             label: "Standard",
             value: cost.standard,
-            color: shade(34),
+            color: faint,
         },
         ShareSegment {
             label: "Fast",
             value: cost.fast,
-            color: shade(66),
+            color: middle,
         },
         ShareSegment {
             label: "Ultrafast",
             value: cost.ultrafast,
-            color: shade(100),
+            color: colors.text,
         },
     ]
 }
@@ -830,7 +842,7 @@ fn share_bar(
             .min_w(px(4.0))
             .flex_basis(relative((segment.value / total) as f32))
             .flex_grow()
-            .rounded(px(2.0))
+            .rounded(px(RADIUS_MARK))
             .bg(rgb(segment.color))
             .tooltip(usage_tooltip(
                 vec![format!(
@@ -847,8 +859,13 @@ fn share_bar(
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(12.0))
-            .child(div().size(px(8.0)).rounded(px(2.0)).bg(rgb(segment.color)))
+            .text_size(text_px(TEXT_LABEL))
+            .child(
+                div()
+                    .size(px(8.0))
+                    .rounded(px(RADIUS_MARK))
+                    .bg(rgb(segment.color)),
+            )
             .child(div().text_color(rgb(colors.muted)).child(segment.label))
             .child(
                 div()
@@ -875,7 +892,7 @@ fn share_bar(
                             div()
                                 .flex()
                                 .gap_1()
-                                .text_size(px(12.0))
+                                .text_size(text_px(TEXT_LABEL))
                                 .text_color(rgb(colors.muted))
                                 .child("Premium")
                                 .child(
@@ -976,6 +993,16 @@ impl XdDesktop {
     }
 
     /// Escape closes the innermost layer first. `false` means Usage is not open.
+    /// Whether a menu, popover or dialog is open over the Usage page.
+    pub(super) fn usage_layer_open(&self) -> bool {
+        let page = &self.usage;
+        page.confirm_reset.is_some()
+            || page.segment.is_some()
+            || page.menu.is_some()
+            || page.price.is_some()
+            || page.model.is_some()
+    }
+
     pub(super) fn dismiss_usage_layer(
         &mut self,
         window: &mut Window,
@@ -1218,6 +1245,7 @@ impl XdDesktop {
                         );
                     } else {
                         environment.summary = summary;
+                        self.usage.summaries += 1;
                         environment.summary_window = environment.requested_window;
                         environment.summary_error = None;
                     }
@@ -1691,7 +1719,40 @@ impl XdDesktop {
         shown_environments(&held, self.settings.usage_window_days)
     }
 
+    /// Everything the filters show, merged. Worked out once for each set of
+    /// summaries and filters; the flyout, the page, its filters and the model
+    /// dialog all read the one result.
+    fn usage_merged_all(&self) -> Rc<Merged> {
+        let shown = self.usage_shown_environments();
+        let key: MergedKey = (
+            shown
+                .iter()
+                .map(|index| {
+                    let environment = &self.usage.environments[*index];
+                    (
+                        *index,
+                        environment.summary_generation,
+                        environment.summary_window,
+                        environment.summary.is_some(),
+                    )
+                })
+                .collect(),
+            self.usage.summaries,
+            self.settings.usage_hidden_providers.clone(),
+        );
+        if let Some((held, merged)) = &*self.usage.merged.borrow()
+            && *held == key
+        {
+            return merged.clone();
+        }
+        let merged = Rc::new(self.usage_merged(|_| true));
+        *self.usage.merged.borrow_mut() = Some((key, merged.clone()));
+        merged
+    }
+
     fn usage_merged(&self, keep: impl Fn(&Bucket) -> bool) -> Merged {
+        #[cfg(test)]
+        self.usage.merged_runs.set(self.usage.merged_runs.get() + 1);
         let environments: Vec<(&str, &Summary)> = self
             .usage_shown_environments()
             .iter()
@@ -1714,11 +1775,20 @@ impl XdDesktop {
 
     /// Limits, cost and tokens open as a flyout over the sidebar's chart icon.
     /// The full page holds what does not fit: filters, prices and breakdowns.
+    /// Gives the keyboard to the Usage page, whose keys need it there.
+    pub(super) fn focus_usage(&self, window: &mut Window) {
+        window.focus(&self.usage.focus);
+    }
+
+    pub(super) fn usage_menu_open(&self) -> bool {
+        self.usage_open && self.usage.menu.is_some()
+    }
+
     fn usage_flyout_open(&self) -> bool {
         self.usage_showing_limits() || !self.usage.full_page
     }
 
-    fn usage_busy(&self) -> bool {
+    pub(super) fn usage_busy(&self) -> bool {
         let showing_limits = self.usage_showing_limits();
         self.usage_selected().iter().any(|index| {
             let environment = &self.usage.environments[*index];
@@ -1742,42 +1812,45 @@ impl XdDesktop {
             .size(px(size / 2.0 + 1.0))
             .flex_none()
             .text_color(rgb(colors.muted));
-        let refresh_icon = if busy {
-            refresh_icon
-                .with_animation(
-                    "usage-refreshing",
-                    Animation::new(Duration::from_secs(1)).repeat(),
-                    |icon, delta| {
-                        icon.with_transformation(Transformation::rotate(percentage(delta)))
-                    },
-                )
-                .into_any_element()
+        // The icon turns a step with each shared pulse. A repeating animation
+        // would ask for a frame at display rate, and every frame redraws the
+        // whole window.
+        let refresh_icon = if busy && super::reduce_motion() {
+            // Held still: it dims while the refresh runs instead of turning.
+            refresh_icon.text_color(rgb(colors.faint))
+        } else if busy {
+            refresh_icon.with_transformation(Transformation::rotate(percentage(refresh_turn(
+                pulse_frame(),
+            ))))
         } else {
-            refresh_icon.into_any_element()
+            refresh_icon
+        };
+        let label = if self.usage_showing_limits() {
+            "Refresh limits"
+        } else {
+            "Refresh usage"
         };
         ui_button("usage-refresh", ButtonKind::Ghost, colors)
             .w(px(size))
             .h(px(size))
             .px_0()
             .when(busy, |button| button.cursor_default())
-            .tooltip(usage_tooltip(
-                vec![
-                    if self.usage_showing_limits() {
-                        "Refresh limits"
-                    } else {
-                        "Refresh usage"
-                    }
-                    .to_owned(),
-                ],
-                colors,
-            ))
+            .tooltip(pane_tooltip(label, colors))
             .child(refresh_icon)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if !busy {
-                    this.usage_read_current(true);
-                    cx.notify();
-                }
-            }))
+            .key_stop_named(
+                &self.key_targets,
+                KeyLayer::Overlay,
+                "usage-refresh",
+                label,
+                colors,
+                cx,
+                move |this, _, cx| {
+                    if !busy {
+                        this.usage_read_current(true);
+                        cx.notify();
+                    }
+                },
+            )
     }
 
     fn render_usage_no_environment(&self, colors: ThemeColors) -> gpui::Div {
@@ -1792,7 +1865,7 @@ impl XdDesktop {
             "Select"
         };
         div()
-            .text_size(px(13.5))
+            .text_size(text_px(TEXT_CONTROL))
             .text_color(rgb(colors.muted))
             .child(format!("{verb} an environment to see {noun}."))
     }
@@ -1825,39 +1898,45 @@ impl XdDesktop {
         } else {
             self.render_usage_flyout_summary(colors, cx)
         };
+        let keys = self.key_targets.clone();
         let windows = (!showing_limits).then(|| {
             div()
                 .px_1()
                 .pb_1()
                 .child(
-                    segmented_shell().children(WINDOW_OPTIONS.map(|(option, label)| {
-                        segment_button(
-                            ("usage-window", option as usize),
+                    segmented_control().children(WINDOW_OPTIONS.map(|(option, label)| {
+                        usage_segment(
+                            &keys,
+                            format!("usage-window-{option}"),
                             label,
                             option == days,
                             colors,
-                        )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.select_usage_window(option, cx)),
+                            cx,
+                            move |this, _, cx| this.select_usage_window(option, cx),
                         )
                     })),
                 )
         });
         let details = (!showing_limits).then(|| {
-            ui_button("usage-all-details", ButtonKind::Ghost, colors)
-                .w(px(26.0))
-                .h(px(26.0))
-                .px_0()
-                .tooltip(usage_tooltip(vec!["All details".to_owned()], colors))
-                .child(icon(MAXIMIZE_ICON, 13.0, colors.muted))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.usage.full_page = true;
-                    cx.notify();
-                }))
+            icon_button("usage-all-details", "All details", MAXIMIZE_ICON, colors)
+                .glyph(13.0)
+                .build()
+                .key_stop_named(
+                    &keys,
+                    KeyLayer::Overlay,
+                    "usage-all-details",
+                    "All details",
+                    colors,
+                    cx,
+                    |this, _, cx| {
+                        this.usage.full_page = true;
+                        cx.notify();
+                    },
+                )
         });
         let filtered = self.usage_filtered().then(|| {
             div()
-                .h(px(32.0))
+                .h(px(ROW_HEIGHT))
                 .flex_none()
                 .pl_3()
                 .pr_1()
@@ -1867,14 +1946,21 @@ impl XdDesktop {
                 .gap_2()
                 .border_t_1()
                 .border_color(rgb(colors.border))
-                .text_size(px(12.0))
+                .text_size(text_px(TEXT_LABEL))
                 .text_color(rgb(colors.muted))
                 .child("Filters are hiding some usage.")
                 .child(
                     ui_button("usage-show-everything", ButtonKind::Ghost, colors)
-                        .h(px(24.0))
+                        .h(hit_px(HIT_MIN))
                         .child("Show all")
-                        .on_click(cx.listener(|this, _, _, cx| this.usage_show_everything(cx))),
+                        .key_stop(
+                            &keys,
+                            KeyLayer::Overlay,
+                            "usage-show-everything",
+                            colors,
+                            cx,
+                            |this, _, cx| this.usage_show_everything(cx),
+                        ),
                 )
         });
         div()
@@ -1884,7 +1970,7 @@ impl XdDesktop {
             .min_h_0()
             .flex()
             .flex_col()
-            .rounded(px(8.0))
+            .rounded(px(RADIUS_PANEL))
             .border_1()
             .border_color(rgb(colors.border))
             .bg(rgb(colors.chrome))
@@ -1913,19 +1999,17 @@ impl XdDesktop {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .child(segmented_shell().children(FLYOUT_METRICS.map(
+                            .child(segmented_control().children(FLYOUT_METRICS.map(
                                 |(option, label)| {
-                                    segment_button(
-                                        gpui::ElementId::Name(
-                                            format!("usage-metric-{option}").into(),
-                                        ),
+                                    usage_segment(
+                                        &keys,
+                                        format!("usage-metric-{option}"),
                                         label,
                                         option == metric,
                                         colors,
+                                        cx,
+                                        move |this, _, cx| this.select_usage_metric(option, cx),
                                     )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| this.select_usage_metric(option, cx),
-                                    ))
                                 },
                             )))
                             .child(
@@ -1942,6 +2026,7 @@ impl XdDesktop {
             .child(
                 div()
                     .id("usage-scroll")
+                    .scroll_thumb(&self.usage.scroll, colors)
                     .min_h_0()
                     .overflow_y_scroll()
                     .p_1()
@@ -1956,6 +2041,7 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let keys = self.key_targets.clone();
         let selected = self.usage_selected();
         let errors: Vec<String> = selected
             .iter()
@@ -1978,7 +2064,7 @@ impl XdDesktop {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .text_size(px(13.0))
+                .text_size(text_px(TEXT_CONTROL))
                 .text_color(rgb(colors.muted))
                 .children(lines)
                 .into_any_element();
@@ -1992,7 +2078,7 @@ impl XdDesktop {
                 .flat_map(|summary| summary.sources.iter())
                 .filter(|source| !hidden.contains(&source.provider)),
         );
-        let merged = self.usage_merged(|_| true);
+        let merged = self.usage_merged_all();
         let loading = selected
             .iter()
             .any(|index| self.usage.environments[*index].summary_loading);
@@ -2048,7 +2134,7 @@ impl XdDesktop {
                     .flex()
                     .flex_col()
                     .gap(px(3.0))
-                    .rounded(px(6.0))
+                    .rounded(px(RADIUS_CONTROL))
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(colors.surface_high)))
                     .tooltip(usage_tooltip(
@@ -2066,19 +2152,26 @@ impl XdDesktop {
                         ],
                         colors,
                     ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.usage.full_page = true;
-                        this.usage.model = Some(key.clone());
-                        this.usage.hover = None;
-                        cx.notify();
-                    }))
+                    .key_stop(
+                        &keys,
+                        KeyLayer::Overlay,
+                        format!("usage-model-row-{index}"),
+                        colors,
+                        cx,
+                        move |this, _, cx| {
+                            this.usage.full_page = true;
+                            this.usage.model = Some(key.clone());
+                            this.usage.hover = None;
+                            cx.notify();
+                        },
+                    )
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .justify_between()
                             .gap_2()
-                            .text_size(px(13.0))
+                            .text_size(text_px(TEXT_CONTROL))
                             .text_color(rgb(colors.text))
                             .child(
                                 div()
@@ -2092,13 +2185,17 @@ impl XdDesktop {
                                         colors.muted,
                                         colors,
                                     ))
-                                    .child(div().min_w_0().truncate().child(model.model.clone())),
+                                    .child(truncating_label(model.model.clone()).min_w_0()),
                             )
-                            .child(div().flex_none().text_size(px(12.0)).child(match metric {
-                                ChartMetric::Cost if model.cost_unknown() => "Unpriced".to_owned(),
-                                ChartMetric::Cost => format_usd(model.cost_usd),
-                                ChartMetric::Tokens => format_tokens(model.total_tokens as f64),
-                            })),
+                            .child(div().flex_none().text_size(text_px(TEXT_LABEL)).child(
+                                match metric {
+                                    ChartMetric::Cost if model.cost_unknown() => {
+                                        "Unpriced".to_owned()
+                                    }
+                                    ChartMetric::Cost => format_usd(model.cost_usd),
+                                    ChartMetric::Tokens => format_tokens(model.total_tokens as f64),
+                                },
+                            )),
                     )
                     .child(flyout_bar(
                         share,
@@ -2109,11 +2206,11 @@ impl XdDesktop {
                     .into_any_element()
             })
             .collect();
-        figures(div().flex().flex_col().gap_1(), loading)
+        figures(div().flex().flex_col().gap_1(), loading, colors)
             .children(errors.into_iter().chain(messages).map(|message| {
                 div()
                     .px_2()
-                    .text_size(px(12.0))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(message)
             }))
@@ -2126,8 +2223,8 @@ impl XdDesktop {
                     .gap(px(1.0))
                     .child(
                         div()
-                            .text_size(px(22.0))
-                            .line_height(px(28.0))
+                            .text_size(text_px(TEXT_TITLE))
+                            .line_height(line_px(LINE_TITLE, TEXT_TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(colors.text))
                             .child(total),
@@ -2181,7 +2278,7 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .min_h_0()
-            .rounded(px(16.0))
+            .rounded(px(RADIUS_COMPOSER))
             .bg(rgb(colors.background))
             .shadow_lg()
             .on_mouse_down(
@@ -2197,6 +2294,7 @@ impl XdDesktop {
             .child(
                 div()
                     .id("usage-scroll")
+                    .scroll_thumb(&self.usage.scroll, colors)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -2228,7 +2326,7 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let viewport = f32::from(window.viewport_size().width);
+        let viewport = logical(window.viewport_size().width);
         let flyout = self.usage_flyout_open();
         let panel = if flyout {
             self.render_usage_flyout(colors, cx)
@@ -2289,6 +2387,7 @@ impl XdDesktop {
     ) -> AnyElement {
         let days = self.settings.usage_window_days;
         let metric = self.settings.usage_metric.clone();
+        let keys = self.key_targets.clone();
         let window_label = (viewport >= 1280.0)
             .then(|| {
                 self.usage_shown_summary()
@@ -2306,7 +2405,7 @@ impl XdDesktop {
             .items_center()
             .gap_x_3()
             .gap_y_2()
-            .rounded_t(px(16.0))
+            .rounded_t(px(RADIUS_COMPOSER))
             .bg(rgb(colors.chrome))
             .border_b_1()
             .border_color(rgb(colors.border))
@@ -2316,7 +2415,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(13.0))
+                    .text_size(text_px(TEXT_CONTROL))
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
@@ -2333,40 +2432,45 @@ impl XdDesktop {
             })
             .child(div().flex_1())
             .child(
-                segmented_shell().children(WINDOW_OPTIONS.map(|(option, label)| {
-                    segment_button(
-                        ("usage-window", option as usize),
+                segmented_control().children(WINDOW_OPTIONS.map(|(option, label)| {
+                    usage_segment(
+                        &keys,
+                        format!("usage-window-{option}"),
                         label,
                         option == days,
                         colors,
-                    )
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.select_usage_window(option, cx)),
+                        cx,
+                        move |this, _, cx| this.select_usage_window(option, cx),
                     )
                 })),
             )
             .child(
-                segmented_shell().children(METRIC_OPTIONS.map(|(option, label)| {
-                    segment_button(
-                        gpui::ElementId::Name(format!("usage-metric-{option}").into()),
+                segmented_control().children(METRIC_OPTIONS.map(|(option, label)| {
+                    usage_segment(
+                        &keys,
+                        format!("usage-metric-{option}"),
                         label,
                         option == metric,
                         colors,
-                    )
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.select_usage_metric(option, cx)),
+                        cx,
+                        move |this, _, cx| this.select_usage_metric(option, cx),
                     )
                 })),
             )
             .child(self.render_usage_refresh(28.0, colors, cx))
             .child(
-                ui_button("usage-close", ButtonKind::Ghost, colors)
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .px_0()
-                    .tooltip(usage_tooltip(vec!["Close".to_owned()], colors))
-                    .child(icon(CLOSE_ICON, 15.0, colors.muted))
-                    .on_click(cx.listener(|this, _, window, cx| this.close_usage(window, cx))),
+                icon_button("usage-close", "Close", CLOSE_ICON, colors)
+                    .glyph(15.0)
+                    .build()
+                    .key_stop_named(
+                        &keys,
+                        KeyLayer::Overlay,
+                        "usage-close",
+                        "Close",
+                        colors,
+                        cx,
+                        |this, window, cx| this.close_usage(window, cx),
+                    ),
             )
             .into_any_element()
     }
@@ -2386,13 +2490,14 @@ impl XdDesktop {
             format!("{} environments", selected.len())
         };
         let open = self.usage.menu == Some(UsageMenu::Environment);
+        let keys = self.key_targets.clone();
         let has_issue = selected
             .iter()
             .any(|index| self.usage.environments[*index].summary_error.is_some());
         let partial = selected
             .iter()
             .any(|index| self.usage.environments[*index].summary_loading);
-        let duplicates = self.usage_merged(|_| true).duplicate_sources;
+        let duplicates = self.usage_merged_all().duplicate_sources.clone();
         let menu = open.then(|| {
             let rows = connected.iter().map(|index| {
                 let index = *index;
@@ -2408,25 +2513,28 @@ impl XdDesktop {
                 } else {
                     "Ready"
                 };
-                menu_row(
+                usage_menu_row(
+                    &keys,
                     ("usage-environment", index),
                     selected.contains(&index),
                     colors,
+                    cx,
+                    move |this, _, cx| {
+                        let hidden = &mut this.usage.hidden_environments;
+                        if let Some(position) = hidden.iter().position(|held| *held == index) {
+                            hidden.remove(position);
+                            this.usage_read_current(false);
+                        } else {
+                            hidden.push(index);
+                        }
+                        cx.notify();
+                    },
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let hidden = &mut this.usage.hidden_environments;
-                    if let Some(position) = hidden.iter().position(|held| *held == index) {
-                        hidden.remove(position);
-                        this.usage_read_current(false);
-                    } else {
-                        hidden.push(index);
-                    }
-                    cx.notify();
-                }))
+                .key_stays(&keys)
                 .child(div().flex_1().child(environment_label(index)))
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(text_px(TEXT_LABEL))
                         .text_color(rgb(if environment.summary_error.is_some() {
                             colors.danger
                         } else {
@@ -2451,43 +2559,43 @@ impl XdDesktop {
                     )
                 }))
                 .collect();
+            // The rows are noted for the keys in the order they are drawn.
+            let all = usage_menu_row(
+                &keys,
+                "usage-environment-all",
+                selected.len() == connected.len(),
+                colors,
+                cx,
+                |this, _, cx| {
+                    if this.usage.hidden_environments.is_empty() {
+                        this.usage.hidden_environments = vec![0, 1];
+                    } else {
+                        this.usage.hidden_environments.clear();
+                        this.usage_read_current(false);
+                    }
+                    cx.notify();
+                },
+            )
+            .key_stays(&keys)
+            .child("All environments");
+            let rows = rows.collect::<Vec<_>>();
             menu_shell(colors)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    menu_row(
-                        "usage-environment-all",
-                        selected.len() == connected.len(),
-                        colors,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.usage.hidden_environments.is_empty() {
-                            this.usage.hidden_environments = vec![0, 1];
-                        } else {
-                            this.usage.hidden_environments.clear();
-                            this.usage_read_current(false);
-                        }
-                        cx.notify();
-                    }))
-                    .child("All environments"),
-                )
-                .child(div().h(px(1.0)).my_1().bg(rgb(colors.rule)))
+                .min_w(px(220.0))
+                .child(all)
+                .child(menu_rule(colors))
                 .children(rows)
                 .when(partial, |menu| {
-                    menu.child(
-                        small_muted(
-                            "Totals are partial while selected environments scan.",
-                            colors,
-                        )
-                        .px_2()
-                        .py_2(),
-                    )
+                    menu.child(menu_note(
+                        "Totals are partial while selected environments scan.",
+                        colors,
+                    ))
                 })
                 .when(!notices.is_empty(), |menu| {
                     menu.child(
                         div()
                             .max_w(px(320.0))
                             .mt_1()
-                            .px_2()
+                            .px(px(10.0))
                             .py_2()
                             .flex()
                             .flex_col()
@@ -2501,14 +2609,19 @@ impl XdDesktop {
                             ),
                     )
                 })
-                .child(div().h(px(1.0)).my_1().bg(rgb(colors.rule)))
+                .child(menu_rule(colors))
                 .child(
-                    menu_row("usage-model-prices", false, colors)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_usage_prices(None, window, cx)
-                        }))
-                        .child(icon(SLIDERS_ICON, 14.0, colors.muted))
-                        .child("Model prices"),
+                    key_row(
+                        &keys,
+                        KeyLayer::Menu,
+                        USAGE_MENU,
+                        menu_row("usage-model-prices", colors),
+                        colors.surface_high,
+                        cx,
+                        |this, window, cx| this.open_usage_prices(None, window, cx),
+                    )
+                    .child(icon(SLIDERS_ICON, 14.0, colors.muted))
+                    .child("Model prices"),
                 )
         });
         div()
@@ -2523,14 +2636,21 @@ impl XdDesktop {
                     .cursor_pointer()
                     .text_color(rgb(colors.text))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.usage.menu = if open {
-                            None
-                        } else {
-                            Some(UsageMenu::Environment)
-                        };
-                        cx.notify();
-                    }))
+                    .key_stop(
+                        &keys,
+                        KeyLayer::Overlay,
+                        "usage-environment-filter",
+                        colors,
+                        cx,
+                        move |this, _, cx| {
+                            this.usage.menu = if open {
+                                None
+                            } else {
+                                Some(UsageMenu::Environment)
+                            };
+                            cx.notify();
+                        },
+                    )
                     .child(label)
                     .child(if has_issue {
                         icon(ALERT_ICON, 14.0, colors.waiting)
@@ -2538,7 +2658,7 @@ impl XdDesktop {
                         icon(CHEVRON_DOWN_ICON, 14.0, colors.muted)
                     }),
             )
-            .children(menu.map(|menu| deferred(menu).with_priority(1)))
+            .children(menu.map(usage_menu_under))
             .into_any_element()
     }
 
@@ -2559,12 +2679,18 @@ impl XdDesktop {
             many => format!("{} providers", many.len()),
         };
         let open = self.usage.menu == Some(UsageMenu::Provider);
+        let keys = self.key_targets.clone();
         let menu = open.then(|| {
             menu_shell(colors)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .min_w(px(220.0))
                 .child(
-                    menu_row("usage-provider-all", hidden.is_empty(), colors)
-                        .on_click(cx.listener(|this, _, _, cx| {
+                    usage_menu_row(
+                        &keys,
+                        "usage-provider-all",
+                        hidden.is_empty(),
+                        colors,
+                        cx,
+                        |this, _, cx| {
                             this.settings.usage_hidden_providers =
                                 if this.settings.usage_hidden_providers.is_empty() {
                                     PROVIDER_ORDER.map(str::to_owned).to_vec()
@@ -2573,27 +2699,33 @@ impl XdDesktop {
                                 };
                             this.usage_save_preferences();
                             cx.notify();
-                        }))
-                        .child("All providers"),
+                        },
+                    )
+                    .key_stays(&keys)
+                    .child("All providers"),
                 )
-                .child(div().h(px(1.0)).my_1().bg(rgb(colors.rule)))
+                .child(menu_rule(colors))
                 .children(PROVIDER_ORDER.map(|provider| {
                     let checked = !hidden.iter().any(|held| held == provider);
-                    menu_row(
+                    usage_menu_row(
+                        &keys,
                         gpui::ElementId::Name(format!("usage-provider-{provider}").into()),
                         checked,
                         colors,
+                        cx,
+                        move |this, _, cx| {
+                            let hidden = &mut this.settings.usage_hidden_providers;
+                            if let Some(position) = hidden.iter().position(|held| held == provider)
+                            {
+                                hidden.remove(position);
+                            } else {
+                                hidden.push(provider.to_owned());
+                            }
+                            this.usage_save_preferences();
+                            cx.notify();
+                        },
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let hidden = &mut this.settings.usage_hidden_providers;
-                        if let Some(position) = hidden.iter().position(|held| held == provider) {
-                            hidden.remove(position);
-                        } else {
-                            hidden.push(provider.to_owned());
-                        }
-                        this.usage_save_preferences();
-                        cx.notify();
-                    }))
+                    .key_stays(&keys)
                     .child(assistant_icon(
                         provider_icon(provider),
                         14.0,
@@ -2615,18 +2747,25 @@ impl XdDesktop {
                     .cursor_pointer()
                     .text_color(rgb(colors.text))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.usage.menu = if open {
-                            None
-                        } else {
-                            Some(UsageMenu::Provider)
-                        };
-                        cx.notify();
-                    }))
+                    .key_stop(
+                        &keys,
+                        KeyLayer::Overlay,
+                        "usage-provider-filter",
+                        colors,
+                        cx,
+                        move |this, _, cx| {
+                            this.usage.menu = if open {
+                                None
+                            } else {
+                                Some(UsageMenu::Provider)
+                            };
+                            cx.notify();
+                        },
+                    )
                     .child(label)
                     .child(icon(CHEVRON_DOWN_ICON, 14.0, colors.muted)),
             )
-            .children(menu.map(|menu| deferred(menu).with_priority(1)))
+            .children(menu.map(usage_menu_under))
             .into_any_element()
     }
 
@@ -2648,7 +2787,7 @@ impl XdDesktop {
                 .flex_col()
                 .items_center()
                 .gap_2()
-                .text_size(px(13.5))
+                .text_size(text_px(TEXT_CONTROL))
                 .text_color(rgb(colors.muted))
                 .children(errors)
                 .into_any_element();
@@ -2657,7 +2796,7 @@ impl XdDesktop {
             div()
                 .w(px(width))
                 .h(px(height))
-                .rounded(px(4.0))
+                .rounded(px(RADIUS_CONTROL))
                 .bg(rgb(colors.surface))
         };
         div()
@@ -2684,7 +2823,7 @@ impl XdDesktop {
                         div()
                             .flex_1()
                             .h(px(PLOT_HEIGHT))
-                            .rounded(px(4.0))
+                            .rounded(px(RADIUS_CONTROL))
                             .bg(rgb(colors.surface)),
                     ),
             )
@@ -2695,7 +2834,7 @@ impl XdDesktop {
                 div()
                     .w_full()
                     .h(px(176.0))
-                    .rounded(px(4.0))
+                    .rounded(px(RADIUS_CONTROL))
                     .bg(rgb(colors.surface)),
             )
             .into_any_element()
@@ -2707,19 +2846,21 @@ impl XdDesktop {
         viewport: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let keys = self.key_targets.clone();
         let metric = self.usage_chart_metric();
         let selected = self.usage_selected();
         let hidden = self.settings.usage_hidden_providers.clone();
-        let merged = self.usage_merged(|_| true);
+        let merged = self.usage_merged_all();
         let loading = selected
             .iter()
             .any(|index| self.usage.environments[*index].summary_loading);
-        let summary = self.usage_shown_summary().cloned();
-        let periods = summary
-            .as_ref()
-            .map(|summary| summary.periods.clone())
+        // The figures come from the merge kept between frames; of the
+        // summary itself only its periods' labels and its kind are read,
+        // never a copy of its buckets and sessions.
+        let (periods, hourly) = self
+            .usage_shown_summary()
+            .map(|summary| (summary.periods.clone(), summary.hourly))
             .unwrap_or_default();
-        let hourly = summary.as_ref().is_some_and(|summary| summary.hourly);
         let messages = source_messages(
             self.usage_shown_environments()
                 .iter()
@@ -2753,8 +2894,8 @@ impl XdDesktop {
             .gap_1()
             .child(figures(
                 div()
-                    .text_size(px(36.0))
-                    .line_height(px(40.0))
+                    .text_size(text_px(TEXT_FIGURE))
+                    .line_height(line_px(LINE_FIGURE, TEXT_FIGURE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(colors.text))
                     .child(match metric {
@@ -2762,17 +2903,19 @@ impl XdDesktop {
                         ChartMetric::Tokens => format_tokens(merged.total_tokens as f64),
                     }),
                 loading,
+                colors,
             ))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_1()
-                    .text_size(px(12.0))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
                     .child(figures(
                         div().child(format!("{} sessions", format_count(merged.sessions))),
                         loading,
+                        colors,
                     ))
                     .when(metric == ChartMetric::Cost, |row| {
                         row.child("· API estimate")
@@ -2818,7 +2961,7 @@ impl XdDesktop {
                         .items_center()
                         .justify_between()
                         .gap_4()
-                        .text_size(px(13.5))
+                        .text_size(text_px(TEXT_CONTROL))
                         .child(
                             div()
                                 .min_w_0()
@@ -2839,12 +2982,12 @@ impl XdDesktop {
                                     colors.muted,
                                     colors,
                                 ))
-                                .child(div().truncate().child(provider_label(provider).to_owned()))
+                                .child(truncating_label(provider_label(provider).to_owned()))
                                 .when(!awaiting_data, |row| {
                                     row.child(figures(
                                         div()
                                             .flex_none()
-                                            .text_size(px(11.0))
+                                            .text_size(text_px(TEXT_CAPTION))
                                             .text_color(rgb(colors.muted))
                                             .child(format!(
                                                 "{} {}",
@@ -2852,6 +2995,7 @@ impl XdDesktop {
                                                 if sessions == 1 { "session" } else { "sessions" }
                                             )),
                                         loading,
+                                        colors,
                                     ))
                                 }),
                         )
@@ -2869,6 +3013,7 @@ impl XdDesktop {
                                     }
                                 }),
                             loading,
+                            colors,
                         )),
                 )
                 .when(!awaiting_data, |row| {
@@ -2889,6 +3034,7 @@ impl XdDesktop {
                             colors,
                         ),
                         loading,
+                        colors,
                     ))
                 })
         });
@@ -3024,28 +3170,31 @@ impl XdDesktop {
                     .gap_3()
                     .child(section_title("Breakdown", colors))
                     .child(
-                        segmented_shell()
-                            .child(
-                                segment_button("usage-breakdown-model", "Model", !by_time, colors)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.usage.breakdown_by_time = false;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                segment_button(
-                                    "usage-breakdown-time",
-                                    if hourly { "Hour" } else { "Day" },
-                                    by_time,
-                                    colors,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.usage.breakdown_by_time = true;
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
+                        segmented_control()
+                            .child(usage_segment(
+                                &keys,
+                                "usage-breakdown-model".into(),
+                                "Model",
+                                !by_time,
+                                colors,
+                                cx,
+                                |this, _, cx| {
+                                    this.usage.breakdown_by_time = false;
+                                    cx.notify();
+                                },
+                            ))
+                            .child(usage_segment(
+                                &keys,
+                                "usage-breakdown-time".into(),
+                                if hourly { "Hour" } else { "Day" },
+                                by_time,
+                                colors,
+                                cx,
+                                |this, _, cx| {
+                                    this.usage.breakdown_by_time = true;
+                                    cx.notify();
+                                },
+                            )),
                     ),
             )
             .child(if by_time {
@@ -3059,7 +3208,7 @@ impl XdDesktop {
             .gap_6()
             .children(errors.into_iter().chain(messages).map(|message| {
                 div()
-                    .text_size(px(13.5))
+                    .text_size(text_px(TEXT_CONTROL))
                     .text_color(rgb(colors.muted))
                     .child(message)
             }))
@@ -3067,7 +3216,12 @@ impl XdDesktop {
             .child(totals)
             .when(!bars.is_empty(), |page| {
                 page.child(
-                    figures(div().flex().flex_wrap().gap_x_12().gap_y_8(), loading).children(bars),
+                    figures(
+                        div().flex().flex_wrap().gap_x_12().gap_y_8(),
+                        loading,
+                        colors,
+                    )
+                    .children(bars),
                 )
             })
             .child(breakdown)
@@ -3083,6 +3237,7 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let keys = self.key_targets.clone();
         let models = match metric {
             ChartMetric::Tokens => sort_models_by_tokens(&merged.models),
             ChartMetric::Cost => merged.models.clone(),
@@ -3109,7 +3264,7 @@ impl XdDesktop {
             .px_2()
             .border_b_1()
             .border_color(rgb(colors.border))
-            .text_size(px(12.0))
+            .text_size(text_px(TEXT_LABEL))
             .text_color(rgb(colors.muted))
             .child(div().w(px(24.0)).flex_none().child("#"))
             .child(div().flex_1().child("Model"))
@@ -3134,6 +3289,7 @@ impl XdDesktop {
                             .rounded_full()
                             .bg(rgb(provider_color(&model.provider, colors))),
                         loading,
+                        colors,
                     )
                 });
                 let share = model.share(metric);
@@ -3144,21 +3300,28 @@ impl XdDesktop {
                     .px_2()
                     .py(px(10.0))
                     .border_b_1()
-                    .border_color(with_alpha(colors.border, 0.5))
-                    .text_size(px(13.5))
+                    .border_color(rgb(colors.rule))
+                    .text_size(text_px(TEXT_CONTROL))
                     .text_color(rgb(colors.muted))
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(colors.surface)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.usage.model = Some(key.clone());
-                        this.usage.hover = None;
-                        cx.notify();
-                    }))
+                    .key_stop(
+                        &keys,
+                        KeyLayer::Overlay,
+                        format!("usage-table-row-{index}"),
+                        colors,
+                        cx,
+                        move |this, _, cx| {
+                            this.usage.model = Some(key.clone());
+                            this.usage.hover = None;
+                            cx.notify();
+                        },
+                    )
                     .child(
                         div()
                             .w(px(24.0))
                             .flex_none()
-                            .text_size(px(12.0))
+                            .text_size(text_px(TEXT_LABEL))
                             .child((index + 1).to_string()),
                     )
                     .child(
@@ -3177,7 +3340,7 @@ impl XdDesktop {
                                         colors.muted,
                                         colors,
                                     ))
-                                    .child(div().truncate().child(model.model.clone())),
+                                    .child(truncating_label(model.model.clone())),
                             )
                             .children(bar),
                     )
@@ -3190,6 +3353,7 @@ impl XdDesktop {
                                 colors.text
                             })),
                             loading,
+                            colors,
                         )
                         .child(if model.cost_unknown() {
                             "Unpriced".to_owned()
@@ -3201,14 +3365,14 @@ impl XdDesktop {
                     .when(show_share, |row| {
                         row.child(column(
                             72.0,
-                            figures(div(), loading)
+                            figures(div(), loading, colors)
                                 .child(share.map_or_else(String::new, format_percent))
                                 .into_any_element(),
                         ))
                     })
                     .child(column(
                         88.0,
-                        figures(div(), loading)
+                        figures(div(), loading, colors)
                             .child(format_tokens(model.total_tokens as f64))
                             .into_any_element(),
                     ))
@@ -3227,7 +3391,7 @@ impl XdDesktop {
                         .py_6()
                         .flex()
                         .justify_center()
-                        .text_size(px(13.5))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child("No activity in this window."),
                 )
@@ -3253,6 +3417,7 @@ impl XdDesktop {
                     .justify_end()
                     .text_color(rgb(color)),
                 loading,
+                colors,
             )
             .child(value)
         };
@@ -3263,7 +3428,7 @@ impl XdDesktop {
             .px_2()
             .border_b_1()
             .border_color(rgb(colors.border))
-            .text_size(px(12.0))
+            .text_size(text_px(TEXT_LABEL))
             .text_color(rgb(colors.muted))
             .child(div().flex_1().child(if hourly { "Hour" } else { "Day" }))
             .children(providers.iter().map(|provider| {
@@ -3305,8 +3470,8 @@ impl XdDesktop {
                     .py_2()
                     .px_2()
                     .border_b_1()
-                    .border_color(with_alpha(colors.border, 0.5))
-                    .text_size(px(13.5))
+                    .border_color(rgb(colors.rule))
+                    .text_size(text_px(TEXT_CONTROL))
                     .child(div().flex_1().text_color(rgb(colors.text)).child(label))
                     .children(providers.iter().map(|provider| {
                         cell(
@@ -3339,7 +3504,7 @@ impl XdDesktop {
                         .py_6()
                         .flex()
                         .justify_center()
-                        .text_size(px(13.5))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child("No activity in this window."),
                 )
@@ -3378,19 +3543,14 @@ impl XdDesktop {
             Vec::new()
         };
         let ticks: Vec<f32> = chart.ticks.iter().map(|(_, y)| *y).collect();
-        let series: Vec<(
-            u32,
-            Vec<xd_desktop::usage::CurveSegment>,
-            Option<ChartPoint>,
-        )> = chart
+        let series: Vec<ChartSeries> = chart
             .series
             .iter()
-            .map(|series| {
-                (
-                    provider_color(&series.provider, colors),
-                    series.line.clone(),
-                    series.point,
-                )
+            .map(|series| ChartSeries {
+                line_color: provider_color(&series.provider, colors),
+                area_color: provider_area(&series.provider, colors),
+                line: series.line.clone(),
+                lone: series.point,
             })
             .collect();
         let step_x = chart.step_x;
@@ -3413,20 +3573,22 @@ impl XdDesktop {
             let column = chart.columns.get(hover.index)?;
             let height = 44.0 + providers.len() as f32 * 18.0;
             let width = 184.0;
-            let plot_width = f32::from(bounds_cell.get().size.width);
+            let plot_width = logical(bounds_cell.get().size.width);
             let gap = 12.0;
-            let left = if hover.x + gap + width <= plot_width {
-                hover.x + gap
+            // Beside the period's line, which stays put while the pointer
+            // moves within the period.
+            let x = if period_count > 1 {
+                hover.index as f32 / (period_count - 1) as f32 * plot_width
             } else {
-                hover.x - gap - width
+                0.0
+            };
+            let left = if x + gap + width <= plot_width {
+                x + gap
+            } else {
+                x - gap - width
             }
             .clamp(0.0, (plot_width - width).max(0.0));
-            let top = if hover.y + gap + height <= PLOT_HEIGHT {
-                hover.y + gap
-            } else {
-                hover.y - gap - height
-            }
-            .clamp(0.0, (PLOT_HEIGHT - height).max(0.0));
+            let top = gap.min((PLOT_HEIGHT - height).max(0.0));
             let row = |label: String, mark: Option<&str>, value: String| {
                 div()
                     .flex()
@@ -3459,12 +3621,12 @@ impl XdDesktop {
                     .w(px(width))
                     .px(px(10.0))
                     .py_2()
-                    .rounded(px(12.0))
+                    .rounded(px(RADIUS_PANEL))
                     .border_1()
-                    .border_color(with_alpha(colors.border, 0.5))
+                    .border_color(rgb(colors.rule))
                     .bg(rgb(colors.chrome))
                     .shadow_lg()
-                    .text_size(px(12.0))
+                    .text_size(text_px(TEXT_LABEL))
                     .child(
                         div()
                             .mb_1()
@@ -3522,7 +3684,7 @@ impl XdDesktop {
                                     .absolute()
                                     .right_0()
                                     .top(px(y - 7.0))
-                                    .text_size(px(10.0))
+                                    .text_size(text_px(TEXT_CAPTION))
                                     .text_color(rgb(colors.muted))
                                     .child(label)
                             })),
@@ -3537,23 +3699,18 @@ impl XdDesktop {
                             .on_mouse_move(cx.listener(
                                 move |this, event: &MouseMoveEvent, _, cx| {
                                     let bounds = move_bounds.get();
-                                    let width = f32::from(bounds.size.width);
+                                    let width = logical(bounds.size.width);
                                     if width <= 0.0 || period_count == 0 {
                                         return;
                                     }
-                                    let x = f32::from(event.position.x - bounds.left())
-                                        .clamp(0.0, width);
-                                    let y = f32::from(event.position.y - bounds.top())
-                                        .clamp(0.0, f32::from(bounds.size.height));
-                                    let index =
-                                        ((x / width) * (period_count - 1) as f32).round() as usize;
-                                    this.usage.hover = Some(ChartHover {
+                                    let x = logical(event.position.x - bounds.left());
+                                    let next = ChartHover {
                                         chart: id,
-                                        index: index.min(period_count - 1),
-                                        x,
-                                        y,
-                                    });
-                                    cx.notify();
+                                        index: chart_hover_index(x, width, period_count),
+                                    };
+                                    if set_chart_hover(&mut this.usage.hover, next) {
+                                        cx.notify();
+                                    }
                                 },
                             ))
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -3573,7 +3730,7 @@ impl XdDesktop {
                     .pl(px(64.0))
                     .flex()
                     .justify_between()
-                    .text_size(px(10.0))
+                    .text_size(text_px(TEXT_CAPTION))
                     .text_color(rgb(colors.muted))
                     .children(axis.map(|label| div().child(label))),
             )
@@ -3585,9 +3742,10 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let keys = self.key_targets.clone();
         let key = self.usage.model.clone()?;
         let metric = self.usage_chart_metric();
-        let merged = self.usage_merged(|_| true);
+        let merged = self.usage_merged_all();
         let model = merged
             .models
             .iter()
@@ -3670,7 +3828,7 @@ impl XdDesktop {
         };
         let model_name = model.model.clone();
         let unpriced_tokens = model.unpriced_tokens;
-        let panel = usage_dialog_panel(768.0, colors)
+        let panel = dialog_sheet(DIALOG_SHEET_WIDTH, colors)
             .child(
                 div()
                     .px_6()
@@ -3691,7 +3849,7 @@ impl XdDesktop {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .text_size(px(16.0))
+                                    .text_size(text_px(TEXT_HEADING))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text))
                                     .child(assistant_icon(
@@ -3700,20 +3858,26 @@ impl XdDesktop {
                                         colors.muted,
                                         colors,
                                     ))
-                                    .child(div().truncate().child(model.model.clone())),
+                                    .child(truncating_label(model.model.clone())),
                             )
                             .child(small_muted(description, colors)),
                     )
                     .child(
-                        ui_button("usage-model-close", ButtonKind::Ghost, colors)
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .px_0()
-                            .child(icon(CLOSE_ICON, 15.0, colors.muted))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.usage.model = None;
-                                cx.notify();
-                            })),
+                        icon_button("usage-model-close", "Close", CLOSE_ICON, colors)
+                            .glyph(15.0)
+                            .build()
+                            .key_stop_named(
+                                &keys,
+                                KeyLayer::Dialog,
+                                "usage-model-close",
+                                "Close",
+                                colors,
+                                cx,
+                                |this, _, cx| {
+                                    this.usage.model = None;
+                                    cx.notify();
+                                },
+                            ),
                     ),
             )
             .child(
@@ -3722,6 +3886,7 @@ impl XdDesktop {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .thumbed("usage-model-body", colors)
                     .px_6()
                     .pb_6()
                     .flex()
@@ -3738,7 +3903,7 @@ impl XdDesktop {
                                 .child(small_muted(label, colors))
                                 .child(
                                     div()
-                                        .text_size(px(24.0))
+                                        .text_size(text_px(TEXT_TITLE))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(colors.text))
                                         .child(value),
@@ -3769,9 +3934,16 @@ impl XdDesktop {
                         .child(
                             ui_button("usage-set-price", ButtonKind::Primary, colors)
                                 .child("Set price")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_usage_prices(Some(model_name.clone()), window, cx)
-                                })),
+                                .key_stop(
+                                    &keys,
+                                    KeyLayer::Dialog,
+                                    "usage-set-price",
+                                    colors,
+                                    cx,
+                                    move |this, window, cx| {
+                                        this.open_usage_prices(Some(model_name.clone()), window, cx)
+                                    },
+                                ),
                         ),
                 )
             });
@@ -3791,6 +3963,7 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let keys = self.key_targets.clone();
         // The set of hosts being waited for can shrink without any of them answering.
         self.usage_fill_price_dialog(cx);
         let dialog = self.usage.price.as_ref()?;
@@ -3805,23 +3978,49 @@ impl XdDesktop {
         let has_changes = dialog.rows.iter().any(PriceRow::changed);
         let saving = !dialog.saving.is_empty();
         let error = dialog.error.clone();
+        // Each field is a Tab stop, in the order the table reads.
         let field = |input: Entity<ComposerInput>| {
+            let focus = input.read(cx).focus_handle(cx);
             div()
-                .h(px(28.0))
+                .relative()
+                .h(px(CONTROL_HEIGHT_COMPACT))
                 .w_full()
                 .min_w_0()
                 .px_2()
                 .flex()
                 .items_center()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_CONTROL))
                 .border_1()
-                .border_color(rgb(colors.border))
+                .border_color(self.field_frame(&input, cx))
                 .bg(rgb(colors.background))
-                .text_size(px(12.5))
+                .text_size(text_px(TEXT_CONTROL))
                 .child(input)
+                .child(keys.mark(KeyLayer::Dialog, KeyStop::Field(focus)))
         };
+        // Too narrow for a column per price, as in a small window or at a
+        // large Interface size, a row takes two lines: its model and mapping,
+        // then its prices, each under its name.
+        let narrow = price_table_narrow(FRAME_VIEWPORT.with(Cell::get).0);
         let head =
             |label: &'static str, width: f32| div().w(relative(width)).min_w_0().child(label);
+        let price_cell = |label: &'static str, input: Entity<ComposerInput>| {
+            div()
+                .debug_selector(|| "usage-price-cell".into())
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .when(narrow, |cell| {
+                    cell.child(
+                        div()
+                            .text_size(text_px(TEXT_CAPTION))
+                            .text_color(rgb(colors.muted))
+                            .child(label),
+                    )
+                })
+                .child(field(input))
+        };
         let rows: Vec<AnyElement> = dialog
             .rows
             .iter()
@@ -3839,7 +4038,7 @@ impl XdDesktop {
                 let model_cell = match &row.model_input {
                     Some(input) => field(input.clone()).into_any_element(),
                     None => div()
-                        .text_size(px(12.5))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(if row.removed {
                             colors.muted
                         } else {
@@ -3858,6 +4057,88 @@ impl XdDesktop {
                 } else {
                     "Reset to automatic"
                 };
+                let note = |text: String| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(text_px(TEXT_LABEL))
+                        .text_color(rgb(colors.muted))
+                        .child(text)
+                };
+                // What follows the model and its mapping: a note, or the
+                // prices, beside them or on a line of their own.
+                let rest = if removed {
+                    vec![note("Automatic pricing after saving".into()).into_any_element()]
+                } else if !alias.is_empty() {
+                    vec![note(format!("Counted as {alias}")).into_any_element()]
+                } else {
+                    row.cell_inputs
+                        .iter()
+                        .zip(PRICE_FIELDS)
+                        .map(|(input, (label, _))| {
+                            price_cell(label, input.clone()).into_any_element()
+                        })
+                        .collect()
+                };
+                let reset = icon_button(
+                    ("usage-price-reset", id as usize),
+                    tooltip,
+                    if is_new { CLOSE_ICON } else { ROTATE_CCW_ICON },
+                    colors,
+                )
+                .size(HIT_MIN)
+                .build()
+                .key_stop_named(
+                    &keys,
+                    KeyLayer::Dialog,
+                    format!("usage-price-reset-{id}"),
+                    tooltip,
+                    colors,
+                    cx,
+                    move |this, _, cx| {
+                        if let Some(dialog) = &mut this.usage.price {
+                            if is_new {
+                                dialog.rows.retain(|row| row.id != id);
+                            } else if let Some(row) =
+                                dialog.rows.iter_mut().find(|row| row.id == id)
+                            {
+                                row.removed = !row.removed;
+                            }
+                            dialog.error = None;
+                        }
+                        cx.notify();
+                    },
+                );
+                let model_line = div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .when(narrow, |cell| cell.flex_1())
+                            .when(!narrow, |cell| cell.w(relative(0.22)))
+                            .min_w_0()
+                            .child(model_cell),
+                    )
+                    .when(!removed, |line| {
+                        line.child(
+                            div()
+                                .when(narrow, |cell| cell.flex_1())
+                                .when(!narrow, |cell| cell.w(relative(0.18)))
+                                .min_w_0()
+                                .child(field(row.alias_input.clone())),
+                        )
+                    });
+                let lines = if narrow {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(model_line.child(reset))
+                        .child(div().flex().items_end().gap_2().children(rest))
+                } else {
+                    div().child(model_line.children(rest).child(reset))
+                };
                 div()
                     .flex()
                     .flex_col()
@@ -3866,80 +4147,11 @@ impl XdDesktop {
                     .py_2()
                     .border_t_1()
                     .border_color(rgb(colors.border))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().w(relative(0.22)).min_w_0().child(model_cell))
-                            .when(removed, |line| {
-                                line.child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(12.5))
-                                        .text_color(rgb(colors.muted))
-                                        .child("Automatic pricing after saving"),
-                                )
-                            })
-                            .when(!removed, |line| {
-                                line.child(
-                                    div()
-                                        .w(relative(0.18))
-                                        .min_w_0()
-                                        .child(field(row.alias_input.clone())),
-                                )
-                                .when(!alias.is_empty(), |line| {
-                                    line.child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(px(12.5))
-                                            .text_color(rgb(colors.muted))
-                                            .child(format!("Counted as {alias}")),
-                                    )
-                                })
-                                .when(alias.is_empty(), |line| {
-                                    line.children(row.cell_inputs.iter().map(|input| {
-                                        div().flex_1().min_w_0().child(field(input.clone()))
-                                    }))
-                                })
-                            })
-                            .child(
-                                ui_button(
-                                    ("usage-price-reset", id as usize),
-                                    ButtonKind::Ghost,
-                                    colors,
-                                )
-                                .w(px(24.0))
-                                .h(px(24.0))
-                                .px_0()
-                                .tooltip(usage_tooltip(vec![tooltip.to_owned()], colors))
-                                .child(icon(
-                                    if is_new { CLOSE_ICON } else { ROTATE_CCW_ICON },
-                                    14.0,
-                                    colors.muted,
-                                ))
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        if let Some(dialog) = &mut this.usage.price {
-                                            if is_new {
-                                                dialog.rows.retain(|row| row.id != id);
-                                            } else if let Some(row) =
-                                                dialog.rows.iter_mut().find(|row| row.id == id)
-                                            {
-                                                row.removed = !row.removed;
-                                            }
-                                            dialog.error = None;
-                                        }
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
-                    )
+                    .child(lines)
                     .when_some(invalid, |line, message| {
                         line.child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(text_px(TEXT_LABEL))
                                 .text_color(rgb(colors.danger))
                                 .child(message),
                         )
@@ -3950,7 +4162,7 @@ impl XdDesktop {
         let empty = rows.is_empty();
         let table = div()
             .min_w_0()
-            .rounded(px(8.0))
+            .rounded(px(RADIUS_PANEL))
             .border_1()
             .border_color(rgb(colors.border))
             .child(
@@ -3960,39 +4172,55 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(12.0))
+                    .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
-                    .child(head("Model ID", 0.22))
-                    .child(head("Map to", 0.18))
-                    .children(PRICE_FIELDS.map(|(label, _)| div().flex_1().min_w_0().child(label)))
+                    .when(!narrow, |header| {
+                        header
+                            .child(head("Model ID", 0.22))
+                            .child(head("Map to", 0.18))
+                            .children(
+                                PRICE_FIELDS
+                                    .map(|(label, _)| div().flex_1().min_w_0().child(label)),
+                            )
+                    })
+                    .when(narrow, |header| {
+                        header
+                            .child(div().flex_1().min_w_0().child("Model ID"))
+                            .child(div().flex_1().min_w_0().child("Map to"))
+                    })
                     .child(
-                        ui_button("usage-price-add", ButtonKind::Ghost, colors)
-                            .w(px(24.0))
-                            .h(px(24.0))
-                            .px_0()
-                            .tooltip(usage_tooltip(vec!["Add model price".to_owned()], colors))
-                            .child(icon(PLUS_ICON, 14.0, colors.muted))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.usage_add_price_row(
-                                    "",
-                                    true,
-                                    "",
-                                    Default::default(),
-                                    colors,
-                                    cx,
-                                );
-                                let focus = this
-                                    .usage
-                                    .price
-                                    .as_ref()
-                                    .and_then(|dialog| dialog.rows.last())
-                                    .and_then(|row| row.model_input.as_ref())
-                                    .map(|input| input.read(cx).focus_handle(cx));
-                                if let Some(focus) = focus {
-                                    window.focus(&focus);
-                                }
-                                cx.notify();
-                            })),
+                        icon_button("usage-price-add", "Add model price", PLUS_ICON, colors)
+                            .size(HIT_MIN)
+                            .build()
+                            .key_stop_named(
+                                &keys,
+                                KeyLayer::Dialog,
+                                "usage-price-add",
+                                "Add model price",
+                                colors,
+                                cx,
+                                move |this, window, cx| {
+                                    this.usage_add_price_row(
+                                        "",
+                                        true,
+                                        "",
+                                        Default::default(),
+                                        colors,
+                                        cx,
+                                    );
+                                    let focus = this
+                                        .usage
+                                        .price
+                                        .as_ref()
+                                        .and_then(|dialog| dialog.rows.last())
+                                        .and_then(|row| row.model_input.as_ref())
+                                        .map(|input| input.read(cx).focus_handle(cx));
+                                    if let Some(focus) = focus {
+                                        window.focus(&focus);
+                                    }
+                                    cx.notify();
+                                },
+                            ),
                     ),
             )
             .children(rows)
@@ -4004,12 +4232,12 @@ impl XdDesktop {
                         .justify_center()
                         .border_t_1()
                         .border_color(rgb(colors.border))
-                        .text_size(px(13.5))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child("No custom prices or mappings. Add a row to set one."),
                 )
             });
-        let panel = usage_dialog_panel(880.0, colors)
+        let panel = dialog_sheet(DIALOG_TABLE_WIDTH, colors)
                 .child(
                     div()
                         .px_6()
@@ -4020,7 +4248,7 @@ impl XdDesktop {
                         .gap_1()
                         .child(
                             div()
-                                .text_size(px(16.0))
+                                .text_size(text_px(TEXT_HEADING))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(colors.text))
                                 .child("Model prices"),
@@ -4036,6 +4264,7 @@ impl XdDesktop {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
+                        .thumbed(PRICE_BODY_SCROLL, colors)
                         .px_6()
                         .pb_4()
                         .flex()
@@ -4053,17 +4282,20 @@ impl XdDesktop {
                         .when_some(error, |body, error| {
                             body.child(
                                 div()
-                                    .text_size(px(12.0))
+                                    .text_size(text_px(TEXT_LABEL))
                                     .text_color(rgb(colors.danger))
                                     .child(error),
                             )
                         }),
                 )
                 .child(
+                    // Where it is too narrow for both, the buttons go
+                    // under the note, still at the right.
                     div()
                         .px_6()
                         .py_3()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .justify_between()
                         .gap_3()
@@ -4079,37 +4311,33 @@ impl XdDesktop {
                         ))
                         .child(
                             div()
+                                .ml_auto()
                                 .flex()
                                 .gap_2()
-                                .child(
-                                    ui_button("usage-price-cancel", ButtonKind::Ghost, colors)
-                                        .child(if has_changes { "Discard changes" } else { "Close" })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.usage.price = None;
-                                            window.focus(&this.usage.focus);
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    ui_button(
-                                        "usage-price-save",
-                                        if has_changes && !saving {
-                                            ButtonKind::Primary
-                                        } else {
-                                            ButtonKind::Secondary
-                                        },
-                                        colors,
-                                    )
-                                    .when(!has_changes || saving, |button| {
-                                        button.opacity(0.6).cursor_default()
-                                    })
-                                    .child(if saving { "Saving…" } else { "Save changes" })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if has_changes && !saving {
-                                            this.save_usage_prices(window, cx);
-                                        }
-                                    })),
-                                ),
+                                .child(dialog_button(
+                                    &keys,
+                                    "usage-price-cancel",
+                                    if has_changes { "Discard changes" } else { "Close" },
+                                    ButtonKind::Ghost,
+                                    true,
+                                    colors,
+                                    cx,
+                                    |this, window, cx| {
+                                        this.usage.price = None;
+                                        window.focus(&this.usage.focus);
+                                        cx.notify();
+                                    },
+                                ))
+                                .child(dialog_button(
+                                    &keys,
+                                    "usage-price-save",
+                                    if saving { "Saving…" } else { "Save changes" },
+                                    ButtonKind::Primary,
+                                    has_changes && !saving,
+                                    colors,
+                                    cx,
+                                    |this, window, cx| this.save_usage_prices(window, cx),
+                                )),
                         ),
                 );
         let panel = panel.relative().when(saving, |panel| {
@@ -4133,59 +4361,46 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
-            .occlude()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(colors.backdrop))
+        let keys = self.key_targets.clone();
+        // Enter confirms, as the dialog's main button does.
+        keys.default_action(KeyLayer::Dialog, {
+            let confirm = confirm.clone();
+            Rc::new(move |this, _, cx| this.usage_use_reset_credit(confirm.clone(), cx))
+        });
+        dialog_layer(colors)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
-                div()
-                    .w(px(420.0))
-                    .p_5()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .rounded(px(12.0))
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .bg(rgb(colors.surface))
+                dialog_shell(DIALOG_WIDTH, colors)
+                    .child(dialog_title("Use a reset credit?", colors))
+                    .child(dialog_text(
+                        "This redeems one credit on your account and clears the current rate-limit windows. It cannot be undone.",
+                        colors,
+                    ))
                     .child(
-                        div()
-                            .text_size(px(16.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(colors.text))
-                            .child("Use a reset credit?"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.5))
-                            .text_color(rgb(colors.muted))
-                            .child("This redeems one credit on your account and clears the current rate-limit windows. It cannot be undone."),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                ui_button("usage-reset-cancel", ButtonKind::Secondary, colors)
-                                    .child("Cancel")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.usage.confirm_reset = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                ui_button("usage-reset-confirm", ButtonKind::Primary, colors)
-                                    .child("Use credit")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.usage_use_reset_credit(confirm.clone(), cx)
-                                    })),
-                            ),
+                        dialog_actions()
+                            .child(dialog_button(
+                                &keys,
+                                "usage-reset-cancel",
+                                "Cancel",
+                                ButtonKind::Ghost,
+                                true,
+                                colors,
+                                cx,
+                                |this, _, cx| {
+                                    this.usage.confirm_reset = None;
+                                    cx.notify();
+                                },
+                            ))
+                            .child(dialog_button(
+                                &keys,
+                                "usage-reset-confirm",
+                                "Use credit",
+                                ButtonKind::Primary,
+                                true,
+                                colors,
+                                cx,
+                                move |this, _, cx| this.usage_use_reset_credit(confirm.clone(), cx),
+                            )),
                     ),
             )
             .into_any_element()
@@ -4236,7 +4451,7 @@ impl XdDesktop {
                     div()
                         .px_2()
                         .py_1()
-                        .text_size(px(13.5))
+                        .text_size(text_px(TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child(if loading {
                             "Reading limits…"
@@ -4259,7 +4474,7 @@ impl XdDesktop {
                         .flex()
                         .items_start()
                         .gap_2()
-                        .text_size(px(12.0))
+                        .text_size(text_px(TEXT_LABEL))
                         .text_color(rgb(colors.waiting))
                         .child(div().flex_none().mt(px(1.0)).child(icon(
                             ALERT_ICON,
@@ -4312,7 +4527,7 @@ impl XdDesktop {
                                     .mt_1()
                                     .pt_1()
                                     .border_t_1()
-                                    .border_color(with_alpha(colors.border, 0.6))
+                                    .border_color(rgb(colors.rule))
                             })
                             .child(account_heading(name.clone(), account.plan.clone(), colors))
                     })
@@ -4398,16 +4613,23 @@ impl XdDesktop {
                             .tooltip(usage_tooltip(lines, colors))
                     })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.usage.menu = None;
-                        this.usage.segment =
-                            if this.usage.segment.as_deref() == Some(click_key.as_str()) {
-                                None
-                            } else {
-                                Some(click_key.clone())
-                            };
-                        cx.notify();
-                    })),
+                    .key_stop(
+                        &self.key_targets,
+                        KeyLayer::Overlay,
+                        format!("usage-limit-{key}"),
+                        colors,
+                        cx,
+                        move |this, _, cx| {
+                            this.usage.menu = None;
+                            this.usage.segment =
+                                if this.usage.segment.as_deref() == Some(click_key.as_str()) {
+                                    None
+                                } else {
+                                    Some(click_key.clone())
+                                };
+                            cx.notify();
+                        },
+                    ),
             )
             .children(popover)
             .into_any_element()
@@ -4456,27 +4678,18 @@ impl XdDesktop {
                 .anchor(gpui::Corner::BottomLeft)
                 .snap_to_window_with_margin(px(8.0))
                 .child(
-                    div()
-                        .occlude()
+                    menu_shell(colors)
                         .ml(px(FLYOUT_WIDTH - 1.0))
                         .w(px(288.0))
                         .p_3()
-                        .flex()
-                        .flex_col()
                         .gap(px(10.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .bg(rgb(colors.chrome))
-                        .shadow_lg()
-                        .text_size(px(12.0))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .text_size(text_px(TEXT_LABEL))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .text_size(px(13.5))
+                                .text_size(text_px(TEXT_CONTROL))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(rgb(colors.text))
                                 .child(assistant_icon(
@@ -4494,7 +4707,7 @@ impl XdDesktop {
                                 .flex_col()
                                 .gap_1()
                                 .border_t_1()
-                                .border_color(with_alpha(colors.border, 0.6))
+                                .border_color(rgb(colors.rule))
                                 .when_some(account.plan.clone(), |rows, plan| {
                                     rows.child(row("Plan", plan))
                                 })
@@ -4507,7 +4720,7 @@ impl XdDesktop {
                                 .flex_col()
                                 .gap_1()
                                 .border_t_1()
-                                .border_color(with_alpha(colors.border, 0.6))
+                                .border_color(rgb(colors.rule))
                                 .child(row("Left", format!("{remaining}%")))
                                 .when_some(window.resets_at_label.clone(), |rows, label| {
                                     let suffix =
@@ -4528,24 +4741,33 @@ impl XdDesktop {
                                     .items_center()
                                     .gap_3()
                                     .border_t_1()
-                                    .border_color(with_alpha(colors.border, 0.6))
+                                    .border_color(rgb(colors.rule))
                                     .text_color(rgb(colors.muted))
                                     .child(div().flex_1().min_w_0().child(credits.summary(now)))
                                     .child(
-                                        ui_button("usage-use-reset", ButtonKind::Secondary, colors)
-                                            .h(px(24.0))
-                                            .when(busy, |button| {
-                                                button.opacity(0.6).cursor_default()
-                                            })
-                                            .child(if busy { "Using…" } else { "Use reset" })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        ui_button_when(
+                                            !busy,
+                                            "usage-use-reset",
+                                            ButtonKind::Secondary,
+                                            colors,
+                                        )
+                                        .h(hit_px(HIT_MIN))
+                                        .child(if busy { "Using…" } else { "Use reset" })
+                                        .key_stop(
+                                            &self.key_targets,
+                                            KeyLayer::Menu,
+                                            "usage-use-reset",
+                                            colors,
+                                            cx,
+                                            move |this, _, cx| {
                                                 if this.usage.reset_busy.is_none() {
                                                     this.usage.segment = None;
                                                     this.usage.confirm_reset =
                                                         Some(confirm.clone());
                                                     cx.notify();
                                                 }
-                                            })),
+                                            },
+                                        ),
                                     ),
                             )
                         }),
@@ -4581,57 +4803,42 @@ fn shown_environments(held: &[(usize, (u32, i64), &str)], asked_days: u32) -> Ve
         .collect()
 }
 
-fn usage_dialog_panel(width: f32, colors: ThemeColors) -> gpui::Div {
-    div()
-        .w_full()
-        .max_w(px(width))
-        .max_h_full()
-        .min_h_0()
-        .flex()
-        .flex_col()
-        .rounded(px(12.0))
-        .border_1()
-        .border_color(rgb(colors.border))
-        .bg(rgb(colors.surface))
-}
-
-/// A dialog over the page. Presses on the panel stay in it, and a press on the
-/// backdrop is the caller's to interpret.
+/// A dialog over the page, in the shared layer with the corners of the page
+/// it covers. Presses on the panel stay in it, and a press on the backdrop is
+/// the caller's to interpret.
 fn usage_dialog_layer(
     panel: gpui::Div,
     colors: ThemeColors,
     on_backdrop: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    div()
-        .occlude()
-        .absolute()
-        .inset_0()
-        .p_6()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(12.0))
-        .bg(rgba(colors.backdrop))
+    dialog_layer(colors)
+        .rounded(px(RADIUS_COMPOSER))
         .on_mouse_down(MouseButton::Left, on_backdrop)
         .child(panel.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
         .into_any_element()
 }
 
+/// One provider's line on a chart, in its ink, over a wash of it.
+struct ChartSeries {
+    line_color: u32,
+    /// `0xRRGGBBAA`.
+    area_color: u32,
+    line: Vec<xd_desktop::usage::CurveSegment>,
+    /// The one point of a line with a single period.
+    lone: Option<ChartPoint>,
+}
+
 fn paint_usage_chart(
     bounds: Bounds<Pixels>,
     ticks: &[f32],
-    series: &[(
-        u32,
-        Vec<xd_desktop::usage::CurveSegment>,
-        Option<ChartPoint>,
-    )],
+    series: &[ChartSeries],
     crosshair: Option<f32>,
     border: u32,
     muted: u32,
     window: &mut Window,
 ) {
-    let width = f32::from(bounds.size.width);
-    let height = f32::from(bounds.size.height);
+    let width = logical(bounds.size.width);
+    let height = logical(bounds.size.height);
     let at = |x: f32, y: f32| {
         point(
             bounds.left() + px(x / VIEW_WIDTH * width),
@@ -4648,7 +4855,10 @@ fn paint_usage_chart(
             rgb(border),
         ));
     }
-    for (color, line, _) in series {
+    for ChartSeries {
+        area_color, line, ..
+    } in series
+    {
         let Some(first) = line.first() else {
             continue;
         };
@@ -4665,10 +4875,16 @@ fn paint_usage_chart(
         area.line_to(at(0.0, VIEW_HEIGHT));
         area.close();
         if let Ok(path) = area.build() {
-            window.paint_path(path, with_alpha(*color, 0.12));
+            window.paint_path(path, rgba(*area_color));
         }
     }
-    for (color, line, lone) in series {
+    for ChartSeries {
+        line_color: color,
+        line,
+        lone,
+        ..
+    } in series
+    {
         if let Some(lone) = lone {
             let mark = map(*lone);
             window.paint_quad(gpui::fill(
@@ -5142,6 +5358,183 @@ mod tests {
         });
     }
 
+    /// The full page with one host's summary, and xd's real keys.
+    #[cfg(unix)]
+    fn usage_page(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<XdDesktop>, &mut gpui::VisualTestContext) {
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (host, updates) = xd_desktop::host::HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            std::path::PathBuf::from("usage-keys-test"),
+        );
+        // The host end stays open for the test's length; nothing reads it.
+        std::mem::forget((server, updates));
+        crate::install_embedded_fonts(cx.text_system()).unwrap();
+        cx.update(|cx| {
+            cx.bind_keys(crate::base_key_bindings());
+            cx.bind_keys(crate::app_key_bindings());
+        });
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1180.0), px(780.0)));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.host = Some(host);
+            desktop.settings.usage_metric = "cost".into();
+            desktop.toggle_usage(window, cx);
+            desktop.usage.full_page = true;
+            desktop.usage.environments[0].summary =
+                summary_event(1).get("summary").and_then(Summary::parse);
+            desktop.usage.environments[0].summary_window =
+                Some((desktop.settings.usage_window_days, 1));
+        });
+        draw(cx);
+        (desktop, cx)
+    }
+
+    #[cfg(unix)]
+    fn draw(cx: &mut gpui::VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+
+    #[cfg(unix)]
+    fn ring(desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext) -> Option<String> {
+        cx.update_window_entity(desktop, |desktop, window, _| {
+            desktop
+                .key_stop
+                .as_ref()
+                .filter(|_| desktop.stop_focus.is_focused(window))
+                .map(|stop| stop.to_string())
+        })
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_usage_page_is_reached_with_tab(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = usage_page(cx);
+        let mut passed = Vec::new();
+        for _ in 0..40 {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+            let on = ring(&desktop, cx).unwrap_or_default();
+            if passed.contains(&on) {
+                break;
+            }
+            passed.push(on);
+        }
+        for id in [
+            "usage-environment-filter",
+            "usage-provider-filter",
+            "usage-window-30",
+            "usage-metric-tokens",
+            "usage-refresh",
+            "usage-close",
+            "usage-breakdown-time",
+            "usage-table-row-0",
+        ] {
+            assert!(
+                passed.iter().any(|on| on == id),
+                "Tab misses {id}: {passed:?}"
+            );
+        }
+        // Tab again to the 30 days segment, and Space picks it.
+        while ring(&desktop, cx).as_deref() != Some("usage-window-30") {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+        }
+        cx.simulate_keystrokes("space");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.settings.usage_window_days, 30)
+        });
+        // Close is an icon alone: its name shows while the ring is on it.
+        while ring(&desktop, cx).as_deref() != Some("usage-close") {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+        }
+        assert!(cx.debug_bounds("focus-tooltip").is_some());
+        // Enter on a filter opens its menu, which takes the arrow keys.
+        while ring(&desktop, cx).as_deref() != Some("usage-provider-filter") {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+        }
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.usage.menu == Some(UsageMenu::Provider));
+            assert!(desktop.menu_has_keys());
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_merged_figures_are_worked_out_once_per_summary_and_filters(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = usage_page(cx);
+        let runs = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| desktop.usage.merged_runs.get())
+        };
+        let first = runs(&desktop, cx);
+        assert!(first >= 1);
+        for _ in 0..3 {
+            draw(cx);
+        }
+        assert_eq!(runs(&desktop, cx), first, "frames reuse the figures");
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            desktop.settings.usage_hidden_providers = vec!["codex".into()];
+        });
+        draw(cx);
+        assert_eq!(
+            runs(&desktop, cx),
+            first + 1,
+            "a filter works them out again"
+        );
+        // A frame copies none of a summary: the overview reads the merge
+        // and the shown summary's periods in place.
+        let source = include_str!("usage_view.rs");
+        let production = source.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        let overview = production
+            .split_once("fn render_usage_overview(")
+            .unwrap()
+            .1
+            .split_once("\n    fn ")
+            .unwrap()
+            .0;
+        assert!(overview.contains("self.usage_merged_all()"));
+        assert!(!overview.contains("usage_shown_summary().cloned()"));
+        assert!(!overview.contains("usage_merged("));
+    }
+
+    #[test]
+    fn the_chart_redraws_only_when_the_hovered_period_changes() {
+        let mut hover = None;
+        let at = |x: f32| ChartHover {
+            chart: "chart",
+            index: chart_hover_index(x, 300.0, 7),
+        };
+        assert!(set_chart_hover(&mut hover, at(10.0)));
+        // Moving within the first period changes nothing on screen.
+        assert!(!set_chart_hover(&mut hover, at(12.0)));
+        assert!(!set_chart_hover(&mut hover, at(24.0)));
+        // The next period does.
+        assert!(set_chart_hover(&mut hover, at(50.0)));
+        assert_eq!(hover.map(|hover| hover.index), Some(1));
+        assert_eq!(chart_hover_index(-5.0, 300.0, 7), 0);
+        assert_eq!(chart_hover_index(900.0, 300.0, 7), 6);
+        assert_eq!(chart_hover_index(10.0, 300.0, 1), 0);
+        // And the chart's mouse handler goes through the gate.
+        let source = include_str!("usage_view.rs");
+        let production = source.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        assert!(production.contains(concat!(
+            "if set_chart_hover(",
+            "&mut this.usage.hover, next) {"
+        )));
+    }
+
     #[gpui::test]
     fn shortcuts_switch_views_only_outside_dialogs(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
@@ -5181,6 +5574,186 @@ mod tests {
                 "typing belongs to the dialog"
             );
         });
+    }
+
+    #[gpui::test]
+    fn a_filters_menu_takes_the_arrow_keys_enter_and_escape(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut bindings = base_key_bindings();
+            bindings.extend(app_key_bindings());
+            cx.bind_keys(bindings);
+        });
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.usage_metric = "cost".into();
+            desktop.settings.usage_hidden_providers.clear();
+            desktop.toggle_usage(window, cx);
+            desktop.usage.full_page = true;
+            desktop.usage.menu = Some(UsageMenu::Provider);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        desktop.read_with(cx, |desktop, _| {
+            // "All providers", then one row for each.
+            assert_eq!(
+                desktop.key_rows(),
+                Some((KeyLayer::Menu, USAGE_MENU, 1 + PROVIDER_ORDER.len()))
+            );
+        });
+        // Down then Enter ticks the first row, and the menu stays open with
+        // the keys still on that row.
+        cx.simulate_keystrokes("down enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(
+                desktop.settings.usage_hidden_providers.len(),
+                PROVIDER_ORDER.len()
+            );
+            assert!(desktop.usage.menu == Some(UsageMenu::Provider));
+            assert_eq!(desktop.key_row_at(), Some(0));
+        });
+        cx.simulate_keystrokes("enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.settings.usage_hidden_providers.is_empty());
+        });
+        // Escape closes the menu, and Usage stays.
+        cx.simulate_keystrokes("escape");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.usage.menu.is_none());
+            assert!(desktop.usage_open);
+        });
+    }
+
+    /// Which of the price dialog's Tab stops the keyboard is on.
+    #[cfg(unix)]
+    fn price_stop_at(
+        desktop: &Entity<XdDesktop>,
+        cx: &mut gpui::VisualTestContext,
+        fields: &[(String, FocusHandle)],
+    ) -> String {
+        if let Some(on) = ring(desktop, cx) {
+            return on;
+        }
+        cx.update_window_entity(desktop, |_, window, _| {
+            fields
+                .iter()
+                .find(|(_, focus)| focus.is_focused(window))
+                .map_or_else(String::new, |(name, _)| name.clone())
+        })
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_model_prices_dialog_is_worked_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = usage_page(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_usage_prices(Some("set-me".into()), window, cx);
+            desktop.usage.environments[0].prices = Some(serde_json::json!({
+                "prices": {"held": {"input": 1.5, "output": 3.0, "cache_read": null, "cache_write": null}},
+                "aliases": {},
+            }));
+            desktop.usage.hidden_environments.clear();
+            desktop.usage_fill_price_rows(&[0], cx);
+        });
+        draw(cx);
+        let mut fields = Vec::new();
+        let (held, set_me) = desktop.read_with(cx, |desktop, _| {
+            let rows = &desktop.usage.price.as_ref().unwrap().rows;
+            (rows[0].id, rows[1].id)
+        });
+        desktop.read_with(cx, |desktop, cx| {
+            for row in &desktop.usage.price.as_ref().unwrap().rows {
+                let focus = |input: &Entity<ComposerInput>| input.read(cx).focus_handle(cx);
+                if let Some(input) = &row.model_input {
+                    fields.push((format!("model:{}", row.model), focus(input)));
+                }
+                fields.push((format!("map:{}", row.model), focus(&row.alias_input)));
+                for (index, input) in row.cell_inputs.iter().enumerate() {
+                    fields.push((format!("price{index}:{}", row.model), focus(input)));
+                }
+            }
+        });
+        // Add first, then each row's fields in the order they read, then its
+        // Reset or Remove.
+        let mut order = Vec::new();
+        for _ in 0..16 {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+            order.push(price_stop_at(&desktop, cx, &fields));
+        }
+        assert_eq!(
+            order,
+            [
+                "usage-price-add".to_owned(),
+                "map:held".into(),
+                "price0:held".into(),
+                "price1:held".into(),
+                "price2:held".into(),
+                "price3:held".into(),
+                format!("usage-price-reset-{held}"),
+                "model:set-me".into(),
+                "map:set-me".into(),
+                "price0:set-me".into(),
+                "price1:set-me".into(),
+                "price2:set-me".into(),
+                "price3:set-me".into(),
+                format!("usage-price-reset-{set_me}"),
+                "usage-price-cancel".into(),
+                "usage-price-save".into(),
+            ]
+        );
+        // Enter on Reset marks the row for automatic pricing.
+        while price_stop_at(&desktop, cx, &fields) != format!("usage-price-reset-{held}") {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+        }
+        cx.simulate_keystrokes("enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.usage.price.as_ref().unwrap().rows[0].removed);
+        });
+        // Enter on Add adds a row and puts the keyboard in its model.
+        while price_stop_at(&desktop, cx, &fields) != "usage-price-add" {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+        }
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            let rows = &desktop.usage.price.as_ref().unwrap().rows;
+            assert_eq!(rows.len(), 3);
+            let model = rows[2].model_input.as_ref().unwrap();
+            assert!(model.read(cx).focus_handle(cx).is_focused(window));
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_model_prices_fields_stay_wide_enough_in_a_small_window(cx: &mut gpui::TestAppContext) {
+        assert!(!price_table_narrow(1180.0));
+        assert!(!price_table_narrow(760.0));
+        assert!(price_table_narrow(760.0 / 1.5));
+        let (desktop, cx) = usage_page(cx);
+        cx.simulate_resize(size(px(760.0), px(560.0)));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.set_interface_size(150, window, cx);
+            desktop.open_usage_prices(Some("set-me".into()), window, cx);
+            desktop.usage.environments[0].prices = Some(serde_json::json!({
+                "prices": {}, "aliases": {},
+            }));
+            desktop.usage.hidden_environments.clear();
+            desktop.usage_fill_price_rows(&[0], cx);
+        });
+        draw(cx);
+        let cell = cx
+            .debug_bounds("usage-price-cell")
+            .expect("a price field shows");
+        crate::metrics::set_interface_size(100);
+        // Each price on a line of its own under the model, at least 72 wide.
+        assert!(
+            cell.size.width >= gpui::px(72.0 * 1.5),
+            "a price field is {:?} wide",
+            cell.size.width
+        );
     }
 
     #[gpui::test]

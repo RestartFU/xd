@@ -1,11 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-      The window shows for the frame before Compose paints. It uses the Dark
-      theme's ground, which is the default; Compose takes over from there.
+      The window shows for the frames before Compose paints, so it wears a
+      theme's backdrop. The saved theme cannot be read that early, so night
+      mode picks which: Light's here, Dark's in values-night. From Android 12
+      the app sets its own night mode from the saved theme (MainActivity), so
+      this follows the theme; before that, the system's night mode picks.
+      The colours are the backdrops in ui/Theme.kt, and a test keeps them equal.
+      The status bar is clear over that ground, with icons that read on it.
     -->
     <style name="Theme.Xd" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/xd_ground</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">@bool/xd_ground_is_light</item>
     </style>
-    <color name="xd_ground">#121314</color>
+    <color name="xd_ground">#E4E7F4</color>
+    <bool name="xd_ground_is_light">true</bool>
 </resources>

@@ -6,15 +6,67 @@
 //! separately, so every selectable carries its range in one shared document.
 
 use std::ops::Range;
+use std::rc::Rc;
 
+use crate::metrics::px;
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, Global,
     GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, TextLayout, Window,
-    fill, point, px, rgba,
+    fill, point, rgba,
 };
 
-const SELECTION: u32 = 0x6f97d64d;
+/// The theme's selection fill, as `0xRRGGBBAA`: the one `ThemeColors::selection`
+/// the editors use, so every selection in the app is the same colour. The
+/// window sets it each time the theme changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionColor(u32);
+
+impl Global for SelectionColor {}
+
+impl SelectionColor {
+    pub fn set(color: u32, cx: &mut App) {
+        if cx.try_global::<Self>() != Some(&Self(color)) {
+            cx.set_global(Self(color));
+        }
+    }
+
+    /// Text painted before a window has set the theme uses the default one's.
+    fn current(cx: &App) -> u32 {
+        cx.try_global::<Self>().map_or_else(
+            || crate::settings::ThemePreset::default().colors().selection,
+            |color| color.0,
+        )
+    }
+}
+
+/// Reads the text a selection covers in a document drawn a line at a time:
+/// the range is in the document's offsets, where line `n` starts at
+/// `n * LINE_STRIDE`.
+pub type LineSource = Rc<dyn Fn(Range<usize>, &App) -> Option<String>>;
+
+/// How far apart two lines of a document drawn a line at a time start in its
+/// offsets: more than any line holds.
+pub const LINE_STRIDE: usize = 1 << 20;
+
+/// One row of a document drawn a line at a time, such as a terminal's
+/// scrollback, of which only the rows in view are drawn: whether it is the
+/// first or last of those, and where the selection reads its lines from.
+#[derive(Clone)]
+pub struct LineRow {
+    pub first: bool,
+    pub last: bool,
+    pub source: LineSource,
+}
+
+impl LineRow {
+    /// Whether this row places the selection's head for a pointer at height
+    /// `y`, kept inside the view: the row at that height, or the first or
+    /// last in view for a height past it.
+    fn owns(&self, y: Pixels, top: Pixels, bottom: Pixels) -> bool {
+        (self.first || y >= top) && (self.last || y < bottom)
+    }
+}
 
 /// The one selection in the window, keyed by the document that owns it.
 #[derive(Clone, Default)]
@@ -25,6 +77,8 @@ pub struct TextSelection {
     head: usize,
     dragging: bool,
     pressed_link: Option<(u64, usize)>,
+    /// For a document drawn a line at a time, where its text is read from.
+    lines: Option<LineSource>,
 }
 
 impl Global for TextSelection {}
@@ -41,6 +95,9 @@ impl TextSelection {
     /// The selected text, when a selection covers anything.
     pub fn selected(cx: &App) -> Option<String> {
         let selection = cx.try_global::<Self>()?;
+        if let Some(lines) = &selection.lines {
+            return lines(selection.range(), cx).filter(|text| !text.is_empty());
+        }
         selection
             .text
             .get(selection.range())
@@ -83,7 +140,72 @@ pub fn selectable_in_document(
         links: Vec::new(),
         link_listener: None,
         selection_scroll: None,
+        line: None,
     }
+}
+
+/// Makes line `index` of a document drawn a line at a time selectable: its
+/// offsets start at `index * LINE_STRIDE`, and a selection across lines
+/// reads them from the row's source when it is copied.
+#[allow(clippy::too_many_arguments)]
+pub fn selectable_line_in_document(
+    block: u64,
+    document: u64,
+    index: usize,
+    text: SharedString,
+    layout: TextLayout,
+    element: impl IntoElement,
+    links: Vec<Range<usize>>,
+    listener: impl Fn(usize, &mut Window, &mut App) + 'static,
+    row: LineRow,
+) -> Selectable {
+    let start = index * LINE_STRIDE;
+    Selectable {
+        block,
+        document,
+        document_range: Some(start..start + text.len()),
+        document_text: Some(text),
+        layout,
+        element: Some(element.into_any_element()),
+        links,
+        link_listener: Some(Box::new(listener)),
+        selection_scroll: None,
+        line: Some(row),
+    }
+}
+
+/// The text from `range` of a document drawn a line at a time, whose line
+/// `n` is `line(n)`: the lines joined by newlines, as a terminal copies them.
+pub fn lines_text(range: Range<usize>, mut line: impl FnMut(usize) -> Option<String>) -> String {
+    let (first, last) = (range.start / LINE_STRIDE, range.end / LINE_STRIDE);
+    let mut text = String::new();
+    for index in first..=last {
+        let Some(whole) = line(index) else {
+            break;
+        };
+        let clamp = |offset: usize| {
+            let mut offset = offset.min(whole.len());
+            while !whole.is_char_boundary(offset) {
+                offset -= 1;
+            }
+            offset
+        };
+        let start = if index == first {
+            clamp(range.start % LINE_STRIDE)
+        } else {
+            0
+        };
+        let end = if index == last {
+            clamp(range.end % LINE_STRIDE)
+        } else {
+            whole.len()
+        };
+        if index > first {
+            text.push('\n');
+        }
+        text.push_str(&whole[start..end.max(start)]);
+    }
+    text
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -107,6 +229,7 @@ pub fn selectable_links_in_document(
         links,
         link_listener: Some(Box::new(listener)),
         selection_scroll: None,
+        line: None,
     }
 }
 
@@ -122,6 +245,7 @@ pub struct Selectable {
     links: Vec<Range<usize>>,
     link_listener: Option<LinkListener>,
     selection_scroll: Option<ScrollHandle>,
+    line: Option<LineRow>,
 }
 
 impl Selectable {
@@ -132,6 +256,10 @@ impl Selectable {
 
     fn paint_selection(&self, window: &mut Window, cx: &App) {
         if !TextSelection::owns(cx, self.document) {
+            return;
+        }
+        if self.line.is_some() {
+            self.paint_line_selection(window, cx);
             return;
         }
         let document_range = self
@@ -155,22 +283,65 @@ impl Selectable {
         let height = self.layout.line_height();
         // Wrapped text selects as a first partial line, a full-width block, and
         // a last partial line — the shape a reader expects.
+        let color = SelectionColor::current(cx);
         if start.y == end.y {
-            paint_row(window, start, point(end.x, start.y + height));
+            paint_row(window, start, point(end.x, start.y + height), color);
             return;
         }
-        paint_row(window, start, point(bounds.right(), start.y + height));
+        paint_row(
+            window,
+            start,
+            point(bounds.right(), start.y + height),
+            color,
+        );
         if end.y > start.y + height {
             paint_row(
                 window,
                 point(bounds.left(), start.y + height),
                 point(bounds.right(), end.y),
+                color,
             );
         }
         paint_row(
             window,
             point(bounds.left(), end.y),
             point(end.x, end.y + height),
+            color,
+        );
+    }
+
+    /// A row of a document drawn a line at a time selects as a line of
+    /// the whole would: from the selection's start, and on to the row's
+    /// right edge when the selection goes on past its end, as the newline
+    /// that ends it would be selected.
+    fn paint_line_selection(&self, window: &mut Window, cx: &App) {
+        let Some(row) = self.document_range.clone() else {
+            return;
+        };
+        let Some(selection) = cx.try_global::<TextSelection>().map(TextSelection::range) else {
+            return;
+        };
+        if selection.is_empty() || selection.end <= row.start || selection.start > row.end {
+            return;
+        }
+        let start = selection.start.max(row.start) - row.start;
+        let Some(from) = self.layout.position_for_index(start) else {
+            return;
+        };
+        let bounds = self.layout.bounds();
+        let to = if selection.end > row.end {
+            bounds.right()
+        } else {
+            match self.layout.position_for_index(selection.end - row.start) {
+                Some(end) => end.x,
+                None => return,
+            }
+        };
+        paint_row(
+            window,
+            from,
+            point(to, from.y + self.layout.line_height()),
+            SelectionColor::current(cx),
         );
     }
 
@@ -191,6 +362,7 @@ impl Selectable {
             .unwrap_or_else(|| layout_text.clone().into());
         let document_range = self.document_range.clone().unwrap_or(0..layout_text.len());
         let links = self.links.clone();
+        let lines = self.line.as_ref().map(|line| line.source.clone());
         let pressed = hitbox.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble
@@ -214,6 +386,7 @@ impl Selectable {
                     .iter()
                     .position(|range| range.contains(&index))
                     .map(|link| (block, link)),
+                lines: lines.clone(),
             });
             window.refresh();
         });
@@ -225,6 +398,7 @@ impl Selectable {
         let layout = self.layout.clone();
         let moved = hitbox.clone();
         let selection_scroll = self.selection_scroll.clone();
+        let line = self.line.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || !event.dragging() {
                 return;
@@ -237,8 +411,19 @@ impl Selectable {
             }
 
             let mut scrolled = false;
+            let mut position = event.position;
             if let Some(scroll) = selection_scroll.as_ref() {
                 let bounds = scroll.bounds();
+                // The rows in view share the drag: only the one at the
+                // pointer's height, kept inside the view, scrolls and places
+                // the head.
+                if let Some(line) = &line {
+                    let y = clamp_into(event.position.y, bounds.top(), bounds.bottom());
+                    if !line.owns(y, moved.top(), moved.bottom()) {
+                        return;
+                    }
+                    position.y = y;
+                }
                 if let Some(y) = selection_edge_scroll(
                     scroll.offset().y,
                     scroll.max_offset().height,
@@ -262,7 +447,7 @@ impl Selectable {
             // leaves it: GPUI reports index 0 above the text and its end below,
             // so overshooting the block selects through to its edge.
 
-            let index = document_range.start + index_at(&layout, event.position);
+            let index = document_range.start + index_at(&layout, position);
             let selection = cx.global_mut::<TextSelection>();
             if selection.head == index {
                 if scrolled {
@@ -308,14 +493,22 @@ impl Selectable {
         });
 
         if let Some(scroll) = self.selection_scroll.clone() {
-            schedule_selection_auto_scroll(
-                document,
-                document_range,
-                self.layout.clone(),
-                scroll,
-                window,
-                cx,
-            );
+            let owner = self.line.as_ref().is_none_or(|line| {
+                let bounds = scroll.bounds();
+                let y = clamp_into(window.mouse_position().y, bounds.top(), bounds.bottom());
+                line.owns(y, hitbox.top(), hitbox.bottom())
+            });
+            if owner {
+                schedule_selection_auto_scroll(
+                    document,
+                    document_range,
+                    self.layout.clone(),
+                    scroll,
+                    self.line.is_some(),
+                    window,
+                    cx,
+                );
+            }
         }
     }
 }
@@ -325,6 +518,7 @@ fn schedule_selection_auto_scroll(
     document_range: Range<usize>,
     layout: TextLayout,
     scroll: ScrollHandle,
+    line: bool,
     window: &mut Window,
     cx: &App,
 ) {
@@ -369,10 +563,19 @@ fn schedule_selection_auto_scroll(
         let mut offset = scroll.offset();
         offset.y = y;
         scroll.set_offset(offset);
+        let mut pointer = pointer;
+        if line {
+            pointer.y = clamp_into(pointer.y, bounds.top(), bounds.bottom());
+        }
         let index = document_range.start + index_at(&layout, pointer);
         cx.global_mut::<TextSelection>().head = index;
         window.refresh();
     });
+}
+
+/// `y` kept inside the band from `top` to just above `bottom`.
+fn clamp_into(y: Pixels, top: Pixels, bottom: Pixels) -> Pixels {
+    y.max(top).min((bottom - px(1.)).max(top))
 }
 
 /// The selected portion painted by one block, translated back to local bytes.
@@ -385,11 +588,11 @@ fn selection_range_in_block(
     (start < end).then(|| start - block.start..end - block.start)
 }
 
-fn paint_row(window: &mut Window, start: Point<Pixels>, end: Point<Pixels>) {
+fn paint_row(window: &mut Window, start: Point<Pixels>, end: Point<Pixels>, color: u32) {
     if end.x <= start.x || end.y <= start.y {
         return;
     }
-    window.paint_quad(fill(Bounds::from_corners(start, end), rgba(SELECTION)));
+    window.paint_quad(fill(Bounds::from_corners(start, end), rgba(color)));
 }
 
 /// The byte offset a point lands on. Dragging past the text reports the nearest
@@ -599,6 +802,20 @@ mod tests {
         TestAppContext, div, list, prelude::*, px,
     };
 
+    #[gpui::test]
+    fn the_selection_fill_follows_the_theme(cx: &mut TestAppContext) {
+        use crate::settings::ThemePreset;
+        cx.update(|cx| {
+            assert_eq!(
+                SelectionColor::current(cx),
+                ThemePreset::Dark.colors().selection
+            );
+            let light = ThemePreset::Light.colors().selection;
+            SelectionColor::set(light, cx);
+            assert_eq!(SelectionColor::current(cx), light);
+        });
+    }
+
     #[test]
     fn hovering_a_link_uses_an_open_hand_cursor() {
         assert_eq!(cursor_for_hover(true), CursorStyle::OpenHand);
@@ -645,6 +862,7 @@ mod tests {
                 head: 9,
                 dragging: false,
                 pressed_link: None,
+                lines: None,
             });
         });
         let link = point(px(10.0), px(10.0));
@@ -747,6 +965,91 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_across_lines_drawn_one_at_a_time_reads_them_joined() {
+        let lines = ["first line", "", "third", "fourth line"];
+        let line = |index: usize| lines.get(index).map(|line| line.to_string());
+        let at = |line: usize, column: usize| line * LINE_STRIDE + column;
+        assert_eq!(lines_text(at(0, 6)..at(2, 3), line), "line\n\nthi");
+        assert_eq!(lines_text(at(3, 0)..at(3, 6), line), "fourth");
+        // Past a line's end, as a drag to the right of it reaches.
+        assert_eq!(lines_text(at(2, 2)..at(3, 99), line), "ird\nfourth line");
+        assert_eq!(lines_text(at(3, 7)..at(9, 0), line), "line");
+    }
+
+    /// The rows a list draws in view, each a line of one document: a drag
+    /// from one to another selects across them, and copies the lines.
+    #[gpui::test]
+    fn a_drag_across_rows_drawn_in_view_selects_the_lines_between(cx: &mut TestAppContext) {
+        struct Rows {
+            scroll: gpui::UniformListScrollHandle,
+        }
+
+        fn row_text(index: usize) -> String {
+            format!("row {index:03}")
+        }
+
+        impl Render for Rows {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let scroll = self.scroll.0.borrow().base_handle.clone();
+                gpui::uniform_list("rows", 500, move |range, _, _| {
+                    let (first, last) = (range.start, range.end.saturating_sub(1));
+                    range
+                        .map(|index| {
+                            let value: SharedString = row_text(index).into();
+                            let text = StyledText::new(value.clone());
+                            let layout = text.layout().clone();
+                            div().h(px(20.0)).child(
+                                selectable_line_in_document(
+                                    9_000 + index as u64,
+                                    9,
+                                    index,
+                                    value,
+                                    layout,
+                                    text,
+                                    Vec::new(),
+                                    |_, _, _| {},
+                                    LineRow {
+                                        first: index == first,
+                                        last: index == last,
+                                        source: Rc::new(|range, _| {
+                                            Some(lines_text(range, |index| {
+                                                (index < 500).then(|| row_text(index))
+                                            }))
+                                        }),
+                                    },
+                                )
+                                .with_selection_scroll(scroll.clone()),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .track_scroll(self.scroll.clone())
+                .w(px(240.0))
+                .h(px(200.0))
+            }
+        }
+
+        let scroll = gpui::UniformListScrollHandle::new();
+        let (_, cx) = cx.add_window_view({
+            let scroll = scroll.clone();
+            move |_, _| Rows { scroll }
+        });
+        cx.run_until_parked();
+        // From inside "row 001" to inside "row 003".
+        let start = point(px(12.0), px(30.0));
+        let end = point(px(20.0), px(70.0));
+        cx.simulate_mouse_move(start, None, Modifiers::default());
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let selected = cx.update(|_, cx| TextSelection::selected(cx)).unwrap();
+        assert!(selected.contains("001\nrow 002\nro"), "{selected:?}");
+        assert!(!selected.contains("000"), "{selected:?}");
+        assert!(!selected.contains("004"), "{selected:?}");
+    }
+
+    #[test]
     fn a_selection_reads_the_same_either_way_it_was_dragged() {
         let forward = TextSelection {
             block: Some(1),
@@ -755,6 +1058,7 @@ mod tests {
             head: 11,
             dragging: false,
             pressed_link: None,
+            lines: None,
         };
         let backward = TextSelection {
             anchor: 11,
@@ -784,6 +1088,7 @@ mod tests {
             head: 2,
             dragging: false,
             pressed_link: None,
+            lines: None,
         };
         assert_eq!(empty.range(), 2..2);
         assert!(empty.text.get(empty.range()).unwrap().is_empty());
