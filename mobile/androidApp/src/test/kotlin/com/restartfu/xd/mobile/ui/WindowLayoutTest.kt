@@ -77,4 +77,13 @@ class WindowLayoutTest {
         assertEquals("Fitted to the screen", fitted.label)
         assertEquals("Zoomed to 200%", zoomed.label)
     }
+
+    @Test fun aWidePictureZoomedInCanOnlyBeDraggedWhereItIsWiderThanTheScreen() {
+        // 2000 by 500 on a 1000 by 2000 screen is drawn 1000 by 250; at twice the size it is
+        // 2000 by 500, so it moves 500 either way across but stays centred down the screen.
+        val zoomed = ImageZoom().moved(2f, 0f, 0f, 1000, 2000, 2000, 500)
+        assertEquals(ImageZoom(2f, 500f, 0f), zoomed.moved(1f, 900f, -5000f, 1000, 2000, 2000, 500))
+        // A tall one is the other way round.
+        assertEquals(ImageZoom(3f, 0f, 2000f), ImageZoom().moved(3f, 400f, 4000f, 1000, 2000, 100, 1000))
+    }
 }

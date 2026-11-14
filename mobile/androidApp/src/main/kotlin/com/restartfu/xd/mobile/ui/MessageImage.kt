@@ -220,23 +220,29 @@ internal fun ImageViewerContent(bitmap: ImageBitmap, description: String, onClos
                         stateDescription = zoom.label
                         customActions = listOf(
                             CustomAccessibilityAction("Zoom in") {
-                                zoom = zoom.moved(1.5f, 0f, 0f, size.width, size.height)
+                                zoom = zoom.moved(1.5f, 0f, 0f, size.width, size.height, bitmap.width, bitmap.height)
                                 true
                             },
                             CustomAccessibilityAction("Zoom out") {
-                                zoom = zoom.moved(1 / 1.5f, 0f, 0f, size.width, size.height)
+                                zoom = zoom.moved(1 / 1.5f, 0f, 0f, size.width, size.height, bitmap.width, bitmap.height)
                                 true
                             },
                         )
                     }
                     .pointerInput(Unit) {
                         detectTransformGestures { _, pan, zoomBy, _ ->
-                            zoom = zoom.moved(zoomBy, pan.x, pan.y, size.width, size.height)
+                            zoom = zoom.moved(zoomBy, pan.x, pan.y, size.width, size.height, bitmap.width, bitmap.height)
                         }
                     }
                     .pointerInput(Unit) {
                         detectTapGestures(
-                            onDoubleTap = { zoom = if (zoom.scale > 1f) ImageZoom() else ImageZoom(DOUBLE_TAP_ZOOM) },
+                            onDoubleTap = {
+                                zoom = if (zoom.scale > 1f) {
+                                    ImageZoom()
+                                } else {
+                                    ImageZoom().moved(DOUBLE_TAP_ZOOM, 0f, 0f, size.width, size.height, bitmap.width, bitmap.height)
+                                }
+                            },
                         )
                     }
                     .graphicsLayer {
@@ -275,14 +281,32 @@ internal data class ImageZoom(val scale: Float = 1f, val x: Float = 0f, val y: F
 
     /**
      * This, zoomed by [zoomBy] and dragged by [panX] and [panY] on a screen
-     * [width] by [height]. Zoom stays between fitted and [MAX_SCALE], and the
-     * drag stops where the picture's edge would leave the screen's, so it can
-     * never be lost off to one side; fitted, it does not move at all.
+     * [width] by [height] showing a picture [imageWidth] by [imageHeight] fitted
+     * to it. Zoom stays between fitted and [MAX_SCALE]. Along each side the drag
+     * stops where the picture's edge would come inside the screen's, and where
+     * the zoomed picture is still narrower than the screen it stays centred, so
+     * it can never be lost off to one side; fitted, it does not move at all.
      */
-    fun moved(zoomBy: Float, panX: Float, panY: Float, width: Int, height: Int): ImageZoom {
+    fun moved(
+        zoomBy: Float,
+        panX: Float,
+        panY: Float,
+        width: Int,
+        height: Int,
+        imageWidth: Int = width,
+        imageHeight: Int = height,
+    ): ImageZoom {
         val next = (scale * zoomBy).coerceIn(1f, MAX_SCALE)
-        val reachX = width * (next - 1f) / 2f
-        val reachY = height * (next - 1f) / 2f
+        // The picture as ContentScale.Fit draws it, before the zoom.
+        val fit = if (imageWidth > 0 && imageHeight > 0) {
+            minOf(width.toFloat() / imageWidth, height.toFloat() / imageHeight)
+        } else {
+            1f
+        }
+        val shownWidth = if (imageWidth > 0) imageWidth * fit else width.toFloat()
+        val shownHeight = if (imageHeight > 0) imageHeight * fit else height.toFloat()
+        val reachX = (shownWidth * next - width) / 2f
+        val reachY = (shownHeight * next - height) / 2f
         return ImageZoom(next, within(x + panX, reachX), within(y + panY, reachY))
     }
 
