@@ -138,14 +138,17 @@ class TerminalViewModel(
                             cursorRow = fresh.cursorRow,
                             cursorColumn = fresh.cursorColumn,
                         )
+                        // Fitted to the phone only once there is a screen to fit.
+                        viewModelScope.launch { runCatching { session.resizeTerminal(id, columns, rows) } }
                     } catch (error: CancellationException) {
                         throw error
                     } catch (error: Throwable) {
-                        // A replay it cannot read leaves no screen to draw on.
+                        // A replay it cannot read leaves no screen to draw on, and
+                        // output for it is no longer taken: the failure stays shown.
                         _state.value = TerminalPane(error = error.message ?: "Could not open a terminal")
+                        viewModelScope.launch { if (liveId == id) liveId = null }
                     }
                 }
-                session.resizeTerminal(id, columns, rows)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -160,6 +163,8 @@ class TerminalViewModel(
     private fun onEvent(event: TerminalEvent) {
         if (event.chatId != chatId || event.terminalId != liveId) return
         viewModelScope.launch(emulation) {
+            // A terminal that failed to open keeps showing why, whatever arrives after.
+            if (_state.value.error != null) return@launch
             when (event) {
                 is TerminalEvent.Output -> {
                     screen.write(event.data)
