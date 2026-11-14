@@ -2972,12 +2972,14 @@ impl TurnRuntime {
                     }
                     AgentEvent::PromptCache {
                         ttl_ms,
+                        read,
                         requested_at_ms,
                     } => {
                         if let Err(error) = self.inner.store.set_prompt_cache(
                             &turn.chat_id,
                             &turn.session_backend,
                             ttl_ms,
+                            read,
                             requested_at_ms,
                         ) {
                             eprintln!(

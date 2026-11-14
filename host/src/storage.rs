@@ -3083,15 +3083,29 @@ impl StateStore {
     }
 
     /// Records the prompt cache of a session's latest request. `ttl_ms` is
-    /// None when that request wrote no cache: then when it expires is unknown.
+    /// None when that request wrote no cache. One served from cache (`read`)
+    /// restarts the lifetime of the cache already recorded, as Anthropic's
+    /// cache does on every hit. One that did neither has no cache, so when it
+    /// expires is unknown.
     pub fn set_prompt_cache(
         &self,
         chat_id: &str,
         backend: &str,
         ttl_ms: Option<i64>,
+        read: bool,
         requested_at_ms: i64,
     ) -> Result<(), StorageError> {
         let ttl = ttl_ms.filter(|ttl| *ttl > 0).unwrap_or(0);
+        if ttl == 0 && read {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            database.execute(
+                "UPDATE chat_sessions SET prompt_cache_expires_ms = CASE \
+                 WHEN prompt_cache_ttl_ms > 0 THEN ? + prompt_cache_ttl_ms ELSE 0 END \
+                 WHERE chat_id = ? AND backend = ?",
+                params![requested_at_ms, chat_id, backend],
+            )?;
+            return Ok(());
+        }
         let expires = if ttl > 0 {
             requested_at_ms.saturating_add(ttl)
         } else {
@@ -20848,7 +20862,7 @@ mod tests {
             .unwrap();
         drop(database);
         store
-            .set_prompt_cache("chat-1", "claude", Some(3_600_000), reported)
+            .set_prompt_cache("chat-1", "claude", Some(3_600_000), false, reported)
             .unwrap();
         (fixture, store)
     }
@@ -20991,8 +21005,16 @@ mod tests {
             .set_idle_compaction_mode(&json!({"mode": "beforeCacheExpires"}))
             .unwrap();
         assert!(store.idle_compaction_candidates(now).unwrap().is_empty());
+        // A request served from the cache restarts its lifetime.
         store
-            .set_prompt_cache("chat-1", "claude", None, now)
+            .set_prompt_cache("chat-1", "claude", None, true, now)
+            .unwrap();
+        let refreshed = store.idle_compaction_candidates(now).unwrap();
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].expires_ms, now + 3_600_000);
+        // One that neither wrote nor read a cache leaves it unknown.
+        store
+            .set_prompt_cache("chat-1", "claude", None, false, now)
             .unwrap();
         assert!(store.idle_compaction_candidates(now).unwrap().is_empty());
         drop(fixture);

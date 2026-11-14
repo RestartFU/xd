@@ -60,11 +60,13 @@ pub enum AgentEvent {
     /// A context compaction began, finished or failed. Each report replaces
     /// the last one for the same compaction.
     Compaction(Compaction),
-    /// The prompt cache of the assistant's latest request: how long it lives,
-    /// from when the request was made, in Unix milliseconds. `ttl_ms` is None
-    /// when the request wrote no cache, so its expiry is unknown.
+    /// The prompt cache of the assistant's latest request: how long what it
+    /// wrote lives, from when the request was made, in Unix milliseconds.
+    /// `ttl_ms` is None when it wrote nothing; `read` says whether it was
+    /// served from cache instead, which restarts the cache's lifetime.
     PromptCache {
         ttl_ms: Option<i64>,
+        read: bool,
         requested_at_ms: i64,
     },
     Completed,
@@ -978,6 +980,10 @@ impl ClaudeParser {
                 };
                 vec![AgentEvent::PromptCache {
                     ttl_ms: compaction::claude_prompt_cache_ttl_ms(usage),
+                    read: usage
+                        .get("cache_read_input_tokens")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|tokens| tokens > 0),
                     requested_at_ms: crate::accounts::now_ms(),
                 }]
             }
@@ -2505,6 +2511,7 @@ mod tests {
         let [
             AgentEvent::PromptCache {
                 ttl_ms,
+                read,
                 requested_at_ms,
             },
         ] = events.as_slice()
@@ -2512,13 +2519,18 @@ mod tests {
             panic!("{events:?}");
         };
         assert_eq!(*ttl_ms, Some(3_600_000));
+        assert!(!read);
         assert!(*requested_at_ms > 0);
         let read_only = parser.feed(
             r#"{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":3,"cache_read_input_tokens":90000}}}}"#,
         );
         assert!(matches!(
             read_only.as_slice(),
-            [AgentEvent::PromptCache { ttl_ms: None, .. }]
+            [AgentEvent::PromptCache {
+                ttl_ms: None,
+                read: true,
+                ..
+            }]
         ));
     }
 

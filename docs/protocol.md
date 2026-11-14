@@ -871,9 +871,11 @@ tokens in context, as T3 Code does:
   send that compacts carries `"compact_first":true`.
 - `beforeCacheExpires`: the host sends `/compact` to an idle chat two minutes
   before the prompt cache of its last request expires, while summarizing is
-  still a cached read. It does so once per idle spell, and not while the chat
-  is working, paused, settled, queued, waiting on an approval or question, has
-  background work or agents running, or its last turn failed or was itself a
+  still a cached read. The cache lives as long as the last request that wrote
+  it says (1 hour or 5 minutes), counted again from each request served from
+  it. The host does this once per idle spell, and not while the chat is
+  working, paused, settled, queued, waiting on an approval or question, or has
+  background work running, or when its last turn failed or was itself a
   compaction.
 - `off`: neither.
 
