@@ -23051,8 +23051,8 @@ impl XdDesktop {
                             .flex_1()
                             .truncate()
                             .font_family(MONO)
-                            .text_size(px(12.0))
-                            .line_height(px(20.0))
+                            .text_size(text_px(TEXT_LABEL))
+                            .line_height(line_px(LINE_MONO_ROW, TEXT_LABEL))
                             .text_color(rgb(if item.kind == ActivityKind::Failure {
                                 colors.danger
                             } else {
@@ -23063,7 +23063,7 @@ impl XdDesktop {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(11.5))
+                            .text_size(text_px(TEXT_CAPTION))
                             .text_color(rgb(tone(item.kind)))
                             .child(item.status),
                     )
@@ -23080,7 +23080,7 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .rounded(px(12.0))
+            .rounded(px(RADIUS_PANEL))
             .border_1()
             .border_color(rgb(if failed { colors.danger } else { colors.border }))
             .bg(rgb(colors.surface))
@@ -23107,7 +23107,7 @@ impl XdDesktop {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(12.0))
+                            .text_size(text_px(TEXT_LABEL))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(colors.text))
                             .child(card.title),
@@ -23117,7 +23117,7 @@ impl XdDesktop {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(12.0))
+                            .text_size(text_px(TEXT_LABEL))
                             .text_color(rgb(colors.muted))
                             .child(card.name),
                     )
@@ -23125,17 +23125,17 @@ impl XdDesktop {
                         head.child(
                             div()
                                 .flex_none()
-                                .text_size(px(11.5))
+                                .text_size(text_px(TEXT_CAPTION))
                                 .text_color(rgb(colors.faint))
                                 .child(elapsed),
                         )
                     })
                     .child(if failed {
-                        stamp(card.status, colors.danger)
+                        stamp(card.status, colors.danger, colors)
                     } else {
                         div()
                             .flex_none()
-                            .text_size(px(12.0))
+                            .text_size(text_px(TEXT_LABEL))
                             .text_color(rgb(tone(card.kind)))
                             .child(card.status)
                             .into_any_element()
@@ -23156,7 +23156,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(11.5))
+                    .text_size(text_px(TEXT_CAPTION))
                     .text_color(rgb(colors.faint))
                     .child(div().min_w_0().flex_1().truncate().child(card.detail))
                     .when_some(card.footer, |row, footer| {
@@ -23911,7 +23911,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .text_size(px(11.5))
+                    .text_size(text_px(TEXT_CAPTION))
                     .text_color(rgb(colors.faint))
                     .cursor_pointer()
                     .hover(|style| {
