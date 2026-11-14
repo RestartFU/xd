@@ -441,6 +441,16 @@ pub struct ChildAgent {
     pub error: Option<String>,
 }
 
+/// Any chat an agent may message, as [`StateStore::other_chats`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtherChat {
+    pub chat: ChildAgent,
+    pub parent: Option<String>,
+    /// The project folder it is in, relative to the workspace root.
+    pub project: String,
+    pub workdir: Option<String>,
+}
+
 pub struct TurnFinish {
     pub last_message_id: i64,
     pub next: Option<TurnSpec>,
@@ -3889,39 +3899,47 @@ impl StateStore {
     /// The chats `parent`'s agent started, oldest first.
     pub fn child_agents(&self, parent: &str) -> Result<Vec<ChildAgent>, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        let mut statement = database.prepare(
-            "SELECT id, COALESCE(title, ''), backend, model, host_working, paused, \
-             (SELECT content FROM messages WHERE chat_id = chats.id AND role = 'assistant' \
-              AND id > (SELECT COALESCE(MAX(id), 0) FROM messages \
-                WHERE chat_id = chats.id AND role = 'user') \
-              ORDER BY id DESC LIMIT 1), \
-             (SELECT role FROM messages WHERE chat_id = chats.id \
-              AND role IN ('assistant', 'error', 'user') ORDER BY id DESC LIMIT 1), \
-             (SELECT content FROM messages WHERE chat_id = chats.id AND role = 'error' \
-              ORDER BY id DESC LIMIT 1) \
-             FROM chats WHERE parent_chat_id = ? ORDER BY created_at, rowid",
-        )?;
+        let mut statement = database.prepare(&format!(
+            "SELECT {AGENT_STATE_COLUMNS} FROM chats WHERE parent_chat_id = ? \
+             ORDER BY created_at, rowid"
+        ))?;
         let children = statement
-            .query_map([parent], |row| {
-                let last_role = row.get::<_, Option<String>>(7)?;
-                Ok(ChildAgent {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    backend: row.get(2)?,
-                    model: row.get(3)?,
-                    working: row.get(4)?,
-                    paused: row.get(5)?,
-                    // Only what it said since it was last spoken to.
-                    reply: row.get(6)?,
-                    // An error after its last reply is how its last turn ended.
-                    error: (last_role.as_deref() == Some("error"))
-                        .then(|| row.get::<_, Option<String>>(8))
-                        .transpose()?
-                        .flatten(),
+            .query_map([parent], agent_state)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(children)
+    }
+
+    /// Every chat but `except`, or only `only` when given: those at work
+    /// first, then the most recently active, at most `limit` of them.
+    pub fn other_chats(
+        &self,
+        except: &str,
+        only: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OtherChat>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(&format!(
+            "SELECT {AGENT_STATE_COLUMNS}, chats.parent_chat_id, folders.relative_path, \
+             chats.workdir FROM chats JOIN workspace_folders AS folders \
+             ON folders.id = chats.folder_id \
+             WHERE chats.id != ?1 AND chats.session_mode = 'chat' \
+             AND (?2 IS NULL OR chats.id = ?2) \
+             ORDER BY chats.host_working DESC, \
+             MAX(chats.updated_at, chats.last_user_message_at) DESC, chats.rowid DESC \
+             LIMIT ?3"
+        ))?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let chats = statement
+            .query_map(params![except, only, limit], |row| {
+                Ok(OtherChat {
+                    chat: agent_state(row)?,
+                    parent: row.get(9)?,
+                    project: row.get(10)?,
+                    workdir: row.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(children)
+        Ok(chats)
     }
 
     pub fn chat_is_paused(&self, chat_id: &str) -> Result<bool, StorageError> {
@@ -9183,6 +9201,39 @@ fn meta(database: &Connection, key: &str) -> Result<Option<String>, StorageError
             row.get(0)
         })
         .optional()?)
+}
+
+/// The columns [`agent_state`] reads from `chats`, in its order.
+const AGENT_STATE_COLUMNS: &str = "chats.id, COALESCE(chats.title, ''), chats.backend, \
+     chats.model, chats.host_working, chats.paused, \
+     (SELECT content FROM messages WHERE chat_id = chats.id AND role = 'assistant' \
+      AND id > (SELECT COALESCE(MAX(id), 0) FROM messages \
+        WHERE chat_id = chats.id AND role = 'user') \
+      ORDER BY id DESC LIMIT 1), \
+     (SELECT role FROM messages WHERE chat_id = chats.id \
+      AND role IN ('assistant', 'error', 'user') ORDER BY id DESC LIMIT 1), \
+     (SELECT content FROM messages WHERE chat_id = chats.id AND role = 'error' \
+      ORDER BY id DESC LIMIT 1)";
+
+/// A chat's state as an agent sees it, from the row [`AGENT_STATE_COLUMNS`]
+/// begins.
+fn agent_state(row: &Row<'_>) -> rusqlite::Result<ChildAgent> {
+    let last_role = row.get::<_, Option<String>>(7)?;
+    Ok(ChildAgent {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        backend: row.get(2)?,
+        model: row.get(3)?,
+        working: row.get(4)?,
+        paused: row.get(5)?,
+        // Only what it said since it was last spoken to.
+        reply: row.get(6)?,
+        // An error after its last reply is how its last turn ended.
+        error: (last_role.as_deref() == Some("error"))
+            .then(|| row.get::<_, Option<String>>(8))
+            .transpose()?
+            .flatten(),
+    })
 }
 
 fn chat_titles_enabled(database: &Connection) -> Result<bool, StorageError> {

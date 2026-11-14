@@ -22,6 +22,7 @@ pub const TOOL: &str = "link_pull_requests";
 pub const START: &str = "start_agent";
 pub const LIST: &str = "list_agents";
 pub const MESSAGE: &str = "message_agent";
+pub const CHATS: &str = "list_chats";
 pub const STOP: &str = "stop_agent";
 /// The browser tools, each the action the desktop runs (see `browser_tools`).
 const BROWSER_TOOLS: [(&str, &str); 8] = [
@@ -34,12 +35,13 @@ const BROWSER_TOOLS: [(&str, &str); 8] = [
     ("browser_evaluate", "evaluate"),
     ("browser_screenshot", "screenshot"),
 ];
-const TOOLS: [&str; 13] = [
+const TOOLS: [&str; 14] = [
     TOOL,
     START,
     LIST,
     MESSAGE,
     STOP,
+    CHATS,
     BROWSER_TOOLS[0].0,
     BROWSER_TOOLS[1].0,
     BROWSER_TOOLS[2].0,
@@ -66,6 +68,8 @@ or a detached process: xd runs the agent on the user's preferred account, \
 shows it to them as a chat of its own, and sends you its reply here. Keep \
 the built-in tool for one short lookup that you wait for before doing \
 anything else. \
+To ask another of the user's xd chats something, or to steer it, find it with \
+xd's list_chats tool and send it a message with message_agent. \
 To open or use a web page, such as the app you are working on, use xd's \
 browser tools (browser_navigate, browser_snapshot, browser_click and the \
 rest): they drive the Chromium browser beside this chat, which the user sees.";
@@ -73,8 +77,9 @@ rest): they drive the Chromium browser beside this chat, which the user sees.";
 const STARTED_HINT: &str = "When you open, take over, or push to a pull request \
 other than by running gh pr create here, link it to this chat with xd's \
 link_pull_requests tool. Another agent started you through xd and reads \
-your final reply, so end each turn with what it needs to know. To open or use \
-a web page, use xd's browser tools (browser_navigate, browser_snapshot, \
+your final reply, so end each turn with what it needs to know. To ask another \
+of the user's xd chats something, or to steer it, find it with xd's list_chats \
+tool and send it a message with message_agent. To open or use a web page, use xd's browser tools (browser_navigate, browser_snapshot, \
 browser_click and the rest): they drive the Chromium browser beside this chat.";
 
 /// What the agent's instructions say about the tools. `started_by_agent` is
@@ -187,6 +192,9 @@ fn add_server(launch: &Launch, command: &mut Command, backend: &str, chat_id: &s
 
 fn tools() -> Value {
     let agent = json!({"type": "string", "description": "The agent's id, as start_agent or list_agents gave it."});
+    let any_chat = json!({"type": "string", "description": "The id of one of this chat's \
+        agents, as start_agent or list_agents gave it, or of any other xd chat, as list_chats \
+        gave it."});
     let mut tools = json!([
         {
             "name": TOOL,
@@ -276,18 +284,20 @@ fn tools() -> Value {
         {
             "name": MESSAGE,
             "title": "Message an agent",
-            "description": "Send one of this chat's agents a message, as the user would. It is \
-                queued behind the agent's turn when it is working, unless you steer: then the \
-                agent takes it now, in the turn it is taking, or that turn stops and the \
-                message starts the next one.",
+            "description": "Send one of this chat's agents, or any other of the user's xd chats, \
+                a message, as the user would. It is queued behind the chat's turn when it is \
+                working, unless you steer: then its agent takes it now, in the turn it is \
+                taking, or that turn stops and the message starts the next one. A chat this one \
+                did not start is told the message is from this chat, and can answer it with \
+                message_agent; its answer comes here as a message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent": agent,
+                    "agent": any_chat,
                     "text": {"type": "string", "description": "The message."},
-                    "steer": {"type": "boolean", "description": "Redirect a working agent now \
+                    "steer": {"type": "boolean", "description": "Redirect a working chat now \
                         instead of queueing the message behind its turn, as the user steering a \
-                        queued message would. Use it to stop, pause or correct an agent \
+                        queued message would. Use it to stop, pause or correct its agent \
                         mid-turn. Defaults to false."},
                 },
                 "required": ["agent", "text"],
@@ -317,6 +327,26 @@ fn tools() -> Value {
             "annotations": {
                 "readOnlyHint": false,
                 "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+            },
+        },
+        {
+            "name": CHATS,
+            "title": "List chats",
+            "description": "List the user's other xd chats, in every project, that you can \
+                message with message_agent: chats at work first, then the most recently active, \
+                with each one's project, folder, status and the start of its latest reply. \
+                Name one chat to read its whole latest reply.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"chat": {"type": "string", "description": "A chat's id, as \
+                    list_chats gave it."}},
+                "additionalProperties": false,
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
                 "idempotentHint": true,
                 "openWorldHint": false,
             },
@@ -492,6 +522,7 @@ pub fn answer_mcp(
                 Some(LIST) => reply(Ok(list(arguments, ask))),
                 Some(MESSAGE) => reply(Ok(message_agent(arguments, ask))),
                 Some(STOP) => reply(Ok(stop(arguments, ask))),
+                Some(CHATS) => reply(Ok(list_chats(arguments, ask))),
                 Some(name) => match BROWSER_TOOLS.iter().find(|(tool, _)| *tool == name) {
                     Some((_, action)) => reply(Ok(browser(action, arguments, ask))),
                     None => reply(Err((-32602, "No such tool."))),
@@ -635,9 +666,30 @@ fn list(arguments: &Value, ask: impl FnOnce(Value) -> Result<Value, String>) -> 
     })
 }
 
+/// Lists other chats. The chat named goes as `target`, since `chat` is the
+/// server's own, which the process that serves it sets.
+fn list_chats(arguments: &Value, ask: impl FnOnce(Value) -> Result<Value, String>) -> Value {
+    let mut request = json!({"op": "list-chats"});
+    if let Some(chat) = text(arguments, "chat") {
+        request["target"] = json!(chat);
+    }
+    ask_daemon(ask, request, |answer| {
+        match answer["chats"].as_array().filter(|chats| !chats.is_empty()) {
+            Some(chats) => tool_result(
+                &serde_json::to_string_pretty(chats).unwrap_or_default(),
+                false,
+            ),
+            None => tool_result("The user has no other xd chats.", false),
+        }
+    })
+}
+
 fn message_agent(arguments: &Value, ask: impl FnOnce(Value) -> Result<Value, String>) -> Value {
     let (Some(agent), Some(message)) = (text(arguments, "agent"), text(arguments, "text")) else {
-        return tool_result("Pass agent, the agent's id, and text, the message.", true);
+        return tool_result(
+            "Pass agent, the agent's or chat's id, and text, the message.",
+            true,
+        );
     };
     let mut request = json!({"op": "message-agent", "agent": agent, "text": message});
     if arguments.get("steer").and_then(Value::as_bool) == Some(true) {
@@ -859,7 +911,8 @@ mod tests {
             [
                 "--allowedTools",
                 "mcp__xd__link_pull_requests,mcp__xd__start_agent,mcp__xd__list_agents,\
-                 mcp__xd__message_agent,mcp__xd__stop_agent,mcp__xd__browser_navigate,\
+                 mcp__xd__message_agent,mcp__xd__stop_agent,mcp__xd__list_chats,\
+                 mcp__xd__browser_navigate,\
                  mcp__xd__browser_history,mcp__xd__browser_snapshot,mcp__xd__browser_click,\
                  mcp__xd__browser_type,mcp__xd__browser_press_key,mcp__xd__browser_evaluate,\
                  mcp__xd__browser_screenshot"
@@ -1015,6 +1068,48 @@ mod tests {
             json!({"op": "stop-agent", "agent": "child"})
         );
         assert_eq!(stopped["content"][0]["text"], "Threw the agent away.");
+    }
+
+    #[test]
+    fn other_chats_are_listed_by_id_without_overriding_the_servers_chat() {
+        let (asked, listed) = call(
+            CHATS,
+            json!({}),
+            json!({"ok": true, "chats": [{"id": "other", "status": "working"}]}),
+        );
+        assert_eq!(asked.unwrap(), json!({"op": "list-chats"}));
+        let chats: Value =
+            serde_json::from_str(listed["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(chats, json!([{"id": "other", "status": "working"}]));
+        // The chat asked about goes as the target: `chat` is the server's.
+        let (asked, _) = call(
+            CHATS,
+            json!({"chat": "other"}),
+            json!({"ok": true, "chats": [{"id": "other"}]}),
+        );
+        assert_eq!(
+            asked.unwrap(),
+            json!({"op": "list-chats", "target": "other"})
+        );
+        let (_, none) = call(CHATS, json!({}), json!({"ok": true, "chats": []}));
+        assert_eq!(
+            none["content"][0]["text"],
+            "The user has no other xd chats."
+        );
+        let (_, refused) = call(
+            CHATS,
+            json!({"chat": "gone"}),
+            json!({"ok": false, "error": "There is no chat with that id."}),
+        );
+        assert_eq!(refused["isError"], true);
+    }
+
+    #[test]
+    fn every_agent_is_told_it_can_message_other_chats() {
+        for started in [false, true] {
+            assert!(hint(started).contains("list_chats"));
+            assert!(hint(started).contains("message_agent"));
+        }
     }
 
     #[test]

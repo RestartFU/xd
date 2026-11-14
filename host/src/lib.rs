@@ -443,6 +443,7 @@ impl Engine {
             Some("unlink-pull-request") => self.unlink_pull_request(&request),
             Some("start-agent") => self.start_agent(&request),
             Some("list-agents") => self.list_agents(&request),
+            Some("list-chats") => self.list_chats(&request),
             Some("message-agent") => self.message_agent(&request),
             Some("stop-agent") => self.stop_agent(&request),
             // Only a chat's own tool server, on this machine, drives its browser.
@@ -4492,9 +4493,13 @@ done
 
         let nested = engine.dispatch(json!({"op": "start-agent", "chat": child, "prompt": "More"}));
         assert_eq!(nested["ok"], false);
-        let stranger = engine
-            .dispatch(json!({"op": "message-agent", "chat": child, "agent": parent, "text": "Hi"}));
+        let stranger = engine.dispatch(
+            json!({"op": "message-agent", "chat": child, "agent": "no-such-chat", "text": "Hi"}),
+        );
         assert_eq!(stranger["ok"], false);
+        // Only the chat that started an agent may throw it away.
+        let foreign = engine.dispatch(json!({"op": "stop-agent", "chat": child, "agent": parent}));
+        assert_eq!(foreign["ok"], false);
         // A message the user sends the worker that cannot start a turn is
         // reported too; the parent's own message_agent just gets the error.
         engine.runtime.as_ref().unwrap().discard_chat(&child);
@@ -4562,6 +4567,133 @@ done
         assert_eq!(again["ok"], false, "{again}");
 
         for chat in [&parent, &child] {
+            engine.runtime.as_ref().unwrap().discard_chat(chat);
+        }
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A chat's agent can find and message, or steer, a chat it did not
+    /// start, which is told who sent it; it cannot stop or delete that chat.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_messages_and_steers_a_chat_it_did_not_start() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("xd-other-chat-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = root.join("claude");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+case "$*" in *--strict-mcp-config*) exit 0;; esac
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Begun."}}}'
+read steer
+echo '{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}'
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Paused."}]}}'
+echo '{"type":"result","terminal_reason":"completed","result":"Paused."}'
+read next
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+        let (engine, sender) = steer_engine(&root);
+        let store = engine.store.as_ref().unwrap();
+        let folder = store.agent_origin(&sender).unwrap().folder;
+        let target = engine
+            .dispatch(json!({"op": "new-chat", "folder": folder, "backend": "claude"}))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let wait_for = |what: &str, ready: &dyn Fn() -> bool| {
+            for _ in 0..400 {
+                if ready() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            panic!("timed out waiting for {what}");
+        };
+
+        // The user's chat is at work on something of its own.
+        let sent = engine.dispatch(json!({"op": "send", "chat": target, "text": "Long job"}));
+        assert_eq!(sent["ok"], true, "{sent}");
+        wait_for("the chat to begin", &|| {
+            engine
+                .runtime
+                .as_ref()
+                .unwrap()
+                .live_turn(&target)
+                .is_some_and(|turn| turn.segment == "Begun.")
+        });
+
+        // Another chat's agent finds it, but never itself.
+        let listed = engine.dispatch(json!({"op": "list-chats", "chat": sender}));
+        assert_eq!(listed["ok"], true, "{listed}");
+        let chats = listed["chats"].as_array().unwrap();
+        assert_eq!(chats.len(), 1, "{listed}");
+        assert_eq!(chats[0]["id"], target);
+        assert_eq!(chats[0]["status"], "working");
+        assert_eq!(chats[0]["project"], "Project");
+        assert!(chats[0].get("yours").is_none());
+        let one = engine.dispatch(json!({"op": "list-chats", "chat": sender, "target": target}));
+        assert_eq!(one["chats"][0]["id"], target, "{one}");
+        let itself = engine.dispatch(json!({"op": "list-chats", "chat": sender, "target": sender}));
+        assert_eq!(itself["ok"], false);
+        let missing = engine.dispatch(json!({"op": "list-chats", "chat": sender, "target": "x"}));
+        assert_eq!(missing["ok"], false);
+        let to_itself = engine.dispatch(
+            json!({"op": "message-agent", "chat": sender, "agent": sender, "text": "Hi"}),
+        );
+        assert_eq!(to_itself["ok"], false);
+
+        // It steers that chat, which is told who sent the message.
+        let reply = engine.dispatch(json!({"op": "message-agent", "chat": sender,
+            "agent": target, "text": "Pause now", "steer": true}));
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["steered"], true, "{reply}");
+        wait_for("the turn to end", &|| {
+            store.chat(&target).unwrap()["working"] == false
+        });
+        let messages = store.messages(&json!({"chat": target})).unwrap();
+        let rows = messages["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["role"] != "duration")
+            .map(|row| row["content"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert_eq!(rows[0], "Long job");
+        assert!(
+            rows[2].starts_with(&format!(
+                "[xd] A message from the agent in chat \"New Chat\" ({sender}), another xd chat:\n\nPause now\n\n"
+            )),
+            "{}",
+            rows[2]
+        );
+        assert!(rows[2].contains(&format!("agent \"{sender}\"")));
+        assert_eq!(rows[3], "Paused.");
+        // A chat the user paused does not wake for another chat's message.
+        assert!(store.pause_chat(&target, true).unwrap());
+        let paused = engine.dispatch(json!({"op": "message-agent", "chat": sender,
+            "agent": target, "text": "Go on"}));
+        assert_eq!(paused["ok"], false, "{paused}");
+        assert!(store.chat_is_paused(&target).unwrap());
+        assert_eq!(store.chat(&target).unwrap()["queue"], json!([]));
+        // The sender did not start it, so it cannot throw it away.
+        let stopped = engine.dispatch(json!({"op": "stop-agent", "chat": sender, "agent": target}));
+        assert_eq!(stopped["ok"], false);
+        assert!(store.chat(&target).is_ok());
+
+        for chat in [&sender, &target] {
             engine.runtime.as_ref().unwrap().discard_chat(chat);
         }
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
