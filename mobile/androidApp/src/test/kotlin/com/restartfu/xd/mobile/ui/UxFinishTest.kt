@@ -429,10 +429,10 @@ class UxFinishTest {
 
     @Test fun fieldsKeepTheirNamesWithTextInThem() {
         chat {
-            compose.onNode(hasSetTextAction() and hasContentDescription("Message"), useUnmergedTree = true)
+            compose.onAllNodes(hasSetTextAction(), useUnmergedTree = true).onLast()
                 .performSemanticsAction(SemanticsActions.SetText) { it(AnnotatedString("Look at the backoff")) }
             idle()
-            assertTrue(exists(hasSetTextAction() and hasContentDescription("Message") and hasText("Look at the backoff")))
+            assertTrue(namedField("Message", "Look at the backoff"))
         }
     }
 
@@ -442,13 +442,13 @@ class UxFinishTest {
         compose.onAllNodes(hasSetTextAction(), useUnmergedTree = true).onFirst()
             .performSemanticsAction(SemanticsActions.SetText) { it(AnnotatedString("theme")) }
         idle()
-        assertTrue(exists(hasSetTextAction() and hasContentDescription("Search settings") and hasText("theme")))
+        assertTrue(namedField("Search settings", "theme"))
     }
 
     @Test fun theEditorIsNamedForItsFile() = files { files ->
         openReadme(files)
         type("# xd\n\nEdited.\n")
-        assertTrue(exists(hasSetTextAction() and hasContentDescription("Contents of README.md")))
+        assertTrue(namedField("Contents of README.md", "# xd\n\nEdited.\n"))
     }
 
     // --- Reply finished ---
@@ -540,6 +540,16 @@ class UxFinishTest {
         hasText(label) or hasContentDescription(label),
         useUnmergedTree = true,
     ).fetchSemanticsNodes().isNotEmpty()
+
+    /**
+     * A field that reads [typed] as its text, with [name] in it as a label is,
+     * and no content description to be read in the text's place.
+     */
+    private fun namedField(name: String, typed: String): Boolean =
+        compose.onAllNodes(hasSetTextAction() and hasText(name)).fetchSemanticsNodes().any { node ->
+            node.config.getOrNull(SemanticsProperties.EditableText)?.text == typed &&
+                node.config.getOrNull(SemanticsProperties.ContentDescription).isNullOrEmpty()
+        }
 
     private fun exists(matcher: SemanticsMatcher): Boolean =
         compose.onAllNodes(matcher, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
