@@ -255,7 +255,7 @@ private fun MinimalMobileWorkspace(
     // How each of the open session's chats stands, for its tab and menu row.
     val chatStatusOf = { chat: ChatSummary -> chatStatus(chat, chat.id in waitingChats, chat.id in unreadChats) }
     val created by model.createdDirectSession.collectAsStateWithLifecycle()
-    val operationError by model.error.collectAsStateWithLifecycle()
+    val operationErrors by model.operationErrors.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
@@ -373,8 +373,13 @@ private fun MinimalMobileWorkspace(
         MobileDestination.PROJECTS -> true
     }
 
-    LaunchedEffect(operationError) {
-        operationError?.let { snackbar.showSnackbar(it) }
+    // Each failure once: taken off the queue only when its snackbar has gone,
+    // so a rotation while it shows shows it again, and one after does not.
+    val nextError = operationErrors.firstOrNull()
+    LaunchedEffect(nextError) {
+        val error = nextError ?: return@LaunchedEffect
+        snackbar.showSnackbar(error.message)
+        model.consumeError(error)
     }
     // A session settled by hand can come straight back, as on the desktop.
     LaunchedEffect(settledNotice) {
@@ -789,7 +794,6 @@ private fun MinimalProjectsHome(
     val settled = remember(tree, actions.settlement) {
         if (actions.settlement) tree.settledSessions() else emptyList()
     }
-    val operationError by model.error.collectAsStateWithLifecycle()
     // What the New menu or a folder's menu is making ("project" or "folder"), and in which folder.
     var creating by rememberSaveable { mutableStateOf<String?>(null) }
     var createParentId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -933,7 +937,9 @@ private fun MinimalProjectsHome(
                         }
                     }
                 }
-                (treeError ?: operationError)?.let { error ->
+                // A tree that did not load stays said here until it does; an
+                // operation's failure is said once, on the snackbar.
+                treeError?.let { error ->
                     row("error", "error", ListGap) {
                         Row(
                             Modifier.fillMaxWidth().padding(start = 6.dp),
@@ -949,9 +955,7 @@ private fun MinimalProjectsHome(
                                 color = MaterialTheme.colorScheme.error,
                             )
                             // A tree that did not load is read again from here.
-                            if (treeError != null) {
-                                TextButton(onClick = model.client::refreshTree, enabled = !loading) { Text("Try again") }
-                            }
+                            TextButton(onClick = model.client::refreshTree, enabled = !loading) { Text("Try again") }
                         }
                     }
                 }

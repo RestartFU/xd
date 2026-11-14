@@ -378,11 +378,11 @@ class UxFifthTest {
         idle()
     }
 
-    /** The notice an unreadable pairing code gives, on the app's snackbar. */
+    /** An operation's failure, on the app's snackbar. */
     private fun notice() {
-        compose.runOnUiThread { model.connectPairing("", "") }
+        compose.runOnUiThread { model.reportError("The host could not rename the chat.") }
         idle()
-        await { exists(hasText("Tailscale address", substring = true)) }
+        await { exists(hasText("The host could not rename the chat.")) }
     }
 
     private fun cleanup(days: String = "3 days") {

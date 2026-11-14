@@ -121,6 +121,15 @@ data class CreatedDirectSession(
     val place: Any? = null,
 )
 
+/**
+ * An operation the host refused or could not be asked for, said once on the
+ * app's snackbar. [id] tells two failures with the same words apart.
+ */
+data class OperationError(val id: Long, val message: String)
+
+/** The most failures waiting to be said; past it the oldest go unsaid. */
+internal const val MAX_PENDING_ERRORS = 3
+
 data class PendingHostKeyConfirmation(
     val hostKey: SshHostKey,
     val host: String,
@@ -155,7 +164,9 @@ class MainViewModel @JvmOverloads constructor(
     private val _deletingChat = MutableStateFlow(false)
     private val _renamingChat = MutableStateFlow(false)
     private val _pausingAll = MutableStateFlow(false)
-    private val _error = MutableStateFlow<String?>(null)
+    private val _connectError = MutableStateFlow<String?>(null)
+    private val _operationErrors = MutableStateFlow<List<OperationError>>(emptyList())
+    private var operationErrorIds = 0L
     private val _shortcutEditor = MutableStateFlow<ShortcutEditorState?>(null)
 
     val connecting: StateFlow<Boolean> = _connecting.asStateFlow()
@@ -164,7 +175,35 @@ class MainViewModel @JvmOverloads constructor(
     val createdDirectSession: StateFlow<CreatedDirectSession?> =
         _createdDirectSession.asStateFlow()
     val startingSessions: StateFlow<List<StartingSession>> = _startingSessions.asStateFlow()
-    val error: StateFlow<String?> = _error.asStateFlow()
+    /**
+     * Why pairing or connecting failed, or forgetting the host: said on the
+     * pairing form and the fatal screen, and nowhere else.
+     */
+    val connectError: StateFlow<String?> = _connectError.asStateFlow()
+
+    /**
+     * Operations that failed, oldest first, each to be said once: the app's
+     * snackbar shows the first and calls [consumeError] once it has gone, by
+     * timing out or being dismissed. They wait here while no snackbar is on
+     * screen (the app in the background, a dialog's own window over it), so
+     * none is lost, and they live only as long as this view model: a
+     * rotation keeps them, the end of the process does not. A host that
+     * refuses the device (the fatal screen), or a host forgotten or changed,
+     * drops them, as they were about a connection that is gone.
+     */
+    val operationErrors: StateFlow<List<OperationError>> = _operationErrors.asStateFlow()
+
+    /** Queues [message] to be said once; see [operationErrors]. */
+    internal fun reportError(message: String) {
+        // Said about a host that has refused the device, it would only be read after pairing again.
+        if (client.link.value is Link.Fatal) return
+        _operationErrors.update { (it + OperationError(++operationErrorIds, message)).takeLast(MAX_PENDING_ERRORS) }
+    }
+
+    /** [error] has been shown, and is not shown again. */
+    fun consumeError(error: OperationError) {
+        _operationErrors.update { it - error }
+    }
     val creatingWorkspace: StateFlow<Boolean> = _creatingWorkspace.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
     val renamingChat: StateFlow<Boolean> = _renamingChat.asStateFlow()
@@ -235,6 +274,10 @@ class MainViewModel @JvmOverloads constructor(
             var wasUp = false
             client.link.collect { link ->
                 val up = link is Link.Up
+                // What failed before the host refused the device is not said on the fatal screen, nor after it.
+                if (link is Link.Fatal) _operationErrors.value = emptyList()
+                // Connected: an earlier pairing or connection failure no longer stands.
+                if (up) _connectError.value = null
                 // A change made elsewhere while this phone was away was not broadcast to it.
                 if (up && !wasUp && chatTitlesWanted) loadChatTitles()
                 if (up && !wasUp && (application as XdApplication).settings.resumeChats.value) {
@@ -262,6 +305,7 @@ class MainViewModel @JvmOverloads constructor(
         // Per-host state belongs to the host it came from.
         viewModelScope.launch {
             client.sessionGeneration.collect {
+                _operationErrors.value = emptyList()
                 _accountsError.value = null
                 _signInDrafts.value = emptyMap()
                 _chatTitles.value = null
@@ -542,7 +586,7 @@ class MainViewModel @JvmOverloads constructor(
                 authentication = SshAuthentication.Paired(fingerprint = fingerprint, code = invitation.code),
                 hostKey = SshHostKey("TLS-SHA256", pin, fingerprint),
             ))
-        } catch (error: Throwable) { _error.value = error.message ?: "Invalid pairing code" }
+        } catch (error: Throwable) { _connectError.value = error.message ?: "Invalid pairing code" }
     }
 
     fun connect(
@@ -556,7 +600,7 @@ class MainViewModel @JvmOverloads constructor(
         val authentication = if (usePrivateKey) {
             val key = privateKeyBytes
             if (key == null) {
-                _error.value = "Choose an SSH private key"
+                _connectError.value = "Choose an SSH private key"
                 return
             }
             SshAuthentication.PrivateKey(key.copyOf(), passphrase.ifEmpty { null })
@@ -578,11 +622,11 @@ class MainViewModel @JvmOverloads constructor(
                 clearPrivateKey()
                 privateKeyBytes = bytes
                 _privateKeyName.value = displayName ?: "Imported private key"
-                _error.value = null
+                _connectError.value = null
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not import the private key"
+                _connectError.value = error.message ?: "Could not import the private key"
             }
         }
     }
@@ -608,7 +652,7 @@ class MainViewModel @JvmOverloads constructor(
         if (_connecting.value) return
         clearPendingConnection()
         _connecting.value = true
-        _error.value = null
+        _connectError.value = null
         viewModelScope.launch {
             try {
                 when (val result = client.connect(connection)) {
@@ -622,12 +666,12 @@ class MainViewModel @JvmOverloads constructor(
                             username = connection.username,
                         )
                     }
-                    is ConnectResult.Failure -> _error.value = result.message
+                    is ConnectResult.Failure -> _connectError.value = result.message
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not connect over SSH"
+                _connectError.value = error.message ?: "Could not connect over SSH"
             } finally {
                 _connecting.value = false
             }
@@ -647,7 +691,7 @@ class MainViewModel @JvmOverloads constructor(
     fun forget() {
         if (_forgetting.value) return
         _forgetting.value = true
-        _error.value = null
+        _connectError.value = null
         viewModelScope.launch {
             try {
                 val host = client.host.value
@@ -656,7 +700,9 @@ class MainViewModel @JvmOverloads constructor(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not forget the remote"
+                // Said where Forget was pressed: the fatal screen, or Settings' snackbar.
+                val failure = error.message ?: "Could not forget the remote"
+                if (client.link.value is Link.Fatal) _connectError.value = failure else reportError(failure)
             } finally {
                 _forgetting.value = false
             }
@@ -675,7 +721,6 @@ class MainViewModel @JvmOverloads constructor(
         plan: Boolean? = null,
         account: String? = null,
     ) {
-        _error.value = null
         val named = title.takeIf(String::isNotBlank) ?: "New chat"
         val starting = StartingSession(++startingIds, folderId, sessionId, named, agent)
         _startingSessions.update { it + starting }
@@ -717,7 +762,7 @@ class MainViewModel @JvmOverloads constructor(
                 if (sentDraft != null && drafts.getString(draftKey, null) == null) {
                     drafts.edit().putString(draftKey, sentDraft).apply()
                 }
-                _error.value = "Could not create “$named”: ${error.message ?: "the host refused it."}"
+                reportError("Could not create “$named”: ${error.message ?: "the host refused it."}")
             } finally {
                 openWhenMade -= starting.id
                 _startingSessions.update { it - starting }
@@ -753,14 +798,13 @@ class MainViewModel @JvmOverloads constructor(
     private fun createInTree(failure: String, create: suspend () -> Unit) {
         if (_creatingWorkspace.value) return
         _creatingWorkspace.value = true
-        _error.value = null
         viewModelScope.launch {
             try {
                 create()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: failure
+                reportError(error.message ?: failure)
             } finally {
                 _creatingWorkspace.value = false
             }
@@ -770,14 +814,13 @@ class MainViewModel @JvmOverloads constructor(
     fun deleteChat(chatId: String) {
         if (_deletingChat.value) return
         _deletingChat.value = true
-        _error.value = null
         viewModelScope.launch {
             try {
                 client.deleteChat(chatId)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not delete the chat"
+                reportError(error.message ?: "Could not delete the chat")
             } finally {
                 _deletingChat.value = false
             }
@@ -787,14 +830,13 @@ class MainViewModel @JvmOverloads constructor(
     fun renameChat(chatId: String, title: String) {
         if (_renamingChat.value) return
         _renamingChat.value = true
-        _error.value = null
         viewModelScope.launch {
             try {
                 client.renameChat(chatId, title)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not rename the chat"
+                reportError(error.message ?: "Could not rename the chat")
             } finally {
                 _renamingChat.value = false
             }
@@ -803,14 +845,13 @@ class MainViewModel @JvmOverloads constructor(
 
     /** Runs one tree change on the host, reporting a refusal where the app shows errors. */
     private fun treeAction(failure: String, action: suspend () -> Unit) {
-        _error.value = null
         viewModelScope.launch {
             try {
                 action()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: failure
+                reportError(error.message ?: failure)
             }
         }
     }
@@ -865,14 +906,13 @@ class MainViewModel @JvmOverloads constructor(
     private fun pauseOrResumeAll(failure: String, action: suspend () -> Unit) {
         if (_pausingAll.value) return
         _pausingAll.value = true
-        _error.value = null
         viewModelScope.launch {
             try {
                 action()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: failure
+                reportError(error.message ?: failure)
             } finally {
                 _pausingAll.value = false
             }

@@ -271,7 +271,11 @@ class ProjectsScreenshotTest {
         check(model.startingSessions.value.isEmpty()) { "still starting: ${model.startingSessions.value}" }
         val draft = drafts.getString("xd/new", null)
         check(draft?.contains("Fix the footer (refused)") == true) { "draft is $draft" }
-        check(model.error.value?.contains("Fix the footer (refused)") == true) { "error is ${model.error.value}" }
+        // Said once, on the snackbar: still waiting to be said, or on it now.
+        val said = model.operationErrors.value.any { "Fix the footer (refused)" in it.message } ||
+            this@ProjectsScreenshotTest.compose.onAllNodes(hasText("Could not create “Fix the footer (refused)”", substring = true), useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        check(said) { "errors are ${model.operationErrors.value}" }
     }
 
     @Test fun openingAnotherFormKeepsAStartingSessionFromOpening() = shoot("starting-form-dark", MinimalThemePreset.DARK) {

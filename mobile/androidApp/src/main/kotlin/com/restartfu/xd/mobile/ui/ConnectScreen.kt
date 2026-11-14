@@ -63,7 +63,7 @@ internal fun ConnectScreen(model: MainViewModel) {
     var address by rememberSaveable { mutableStateOf("") }
     var pairingCode by rememberSaveable { mutableStateOf("") }
     val connecting by model.connecting.collectAsStateWithLifecycle()
-    val error by model.error.collectAsStateWithLifecycle()
+    val error by model.connectError.collectAsStateWithLifecycle()
     val ready = !connecting && address.isNotBlank() && pairingCode.isNotBlank()
     val pair = { if (ready) model.connectPairing(address, pairingCode) }
     StandalonePage {
@@ -165,7 +165,8 @@ private val FormMeasure = 480.dp
 @Composable
 internal fun FatalScreen(
     fatal: Link.Fatal,
-    operationError: String?,
+    /** Why forgetting the host failed, if it did: a connection's error, never an operation's. */
+    connectError: String?,
     retry: () -> Unit,
     forget: () -> Unit,
 ) {
@@ -185,7 +186,7 @@ internal fun FatalScreen(
                 fatal.message
             },
         )
-        operationError?.let {
+        connectError?.let {
             Spacer(Modifier.height(12.dp))
             Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error)
         }

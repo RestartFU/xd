@@ -268,7 +268,7 @@ class UxAccessibilityTest {
         content {
             FatalScreen(
                 Link.Fatal(FatalReason.PROTOCOL, "Host sent invalid protocol data"),
-                operationError = null,
+                connectError = null,
                 retry = { retried++ },
                 forget = { forgotten++ },
             )
@@ -290,7 +290,7 @@ class UxAccessibilityTest {
         content {
             FatalScreen(
                 Link.Fatal(FatalReason.HOST_KEY_MISMATCH, "host key changed"),
-                operationError = null,
+                connectError = null,
                 retry = {},
                 forget = { forgotten++ },
             )

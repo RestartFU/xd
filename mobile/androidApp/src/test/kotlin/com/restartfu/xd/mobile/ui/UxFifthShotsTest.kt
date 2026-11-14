@@ -29,8 +29,9 @@ import org.robolectric.shadows.ShadowLooper
  *
  * It asserts nothing about what the app says, and uses only what the app had
  * before those fixes, so the same file run on the commit before them gives
- * the matching "before" captures. A pairing code that cannot be read is the
- * notice in each: the app has said that on its snackbar all along.
+ * the matching "before" captures. Those used a pairing code that could not be
+ * read as the notice; pairing errors now stay on the pairing form, so an
+ * operation's failure stands in for it.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -80,7 +81,7 @@ class UxFifthShotsTest {
     }
 
     private fun ProjectsScreenshotTest.Screen.notice() {
-        compose.runOnUiThread { model.connectPairing("", "") }
+        compose.runOnUiThread { model.reportError("The host could not rename the chat.") }
         ShadowLooper.idleMainLooper()
         repeat(2) { settle() }
     }

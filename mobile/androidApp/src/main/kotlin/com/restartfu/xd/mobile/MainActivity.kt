@@ -83,7 +83,7 @@ internal fun launchNightMode(theme: MinimalThemePreset): Int =
     if (theme.isLight) UiModeManager.MODE_NIGHT_NO else UiModeManager.MODE_NIGHT_YES
 
 @Composable
-private fun XdMobileApp(
+internal fun XdMobileApp(
     model: MainViewModel,
     settings: MobileSettings,
 ) {
@@ -92,7 +92,7 @@ private fun XdMobileApp(
     val hasCredentials by model.client.hasCredentials.collectAsStateWithLifecycle()
     val credentialsReady by model.client.credentialsReady.collectAsStateWithLifecycle()
     val link by model.client.link.collectAsStateWithLifecycle()
-    val operationError by model.error.collectAsStateWithLifecycle()
+    val connectError by model.connectError.collectAsStateWithLifecycle()
 
     // No foreground service: leaving closes the socket, returning reconnects
     // and re-snapshots. The host keeps no resumable event log, so there is
@@ -131,7 +131,7 @@ private fun XdMobileApp(
     } else if (!hasCredentials) {
         ConnectScreen(model)
     } else if (link is Link.Fatal) {
-        FatalScreen(link as Link.Fatal, operationError, retry = model.client::retryConnection, forget = model::forget)
+        FatalScreen(link as Link.Fatal, connectError, retry = model.client::retryConnection, forget = model::forget)
     } else {
         MinimalMobileApp(model, link, settings)
     }
