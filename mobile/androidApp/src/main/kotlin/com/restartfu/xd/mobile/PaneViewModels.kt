@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.restartfu.xd.files.FileTab
+import com.restartfu.xd.files.OpenFile
 import com.restartfu.xd.files.FileTree
 import com.restartfu.xd.files.OpenFiles
 import com.restartfu.xd.store.ChatSession
@@ -12,6 +13,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 public data class DiffPane(
@@ -206,7 +209,21 @@ public data class FilesPane(
     val error: String? = null,
     /** [error] is a folder that could not be listed, which reading the tree again can fix. */
     val listFailed: Boolean = false,
+    /** Open files whose edits are too large to keep if Android ends the app before they are saved. */
+    val unkept: Set<String> = emptySet(),
 )
+
+/**
+ * Where a session's unsaved file edits are kept while Android may end the
+ * app in the background: they come back, still unsaved, with the app.
+ */
+public interface UnsavedFiles {
+    /** The edits kept from before, each still unsaved. */
+    public fun restore(): List<OpenFile>
+
+    /** Keeps [files]' edits in place of any kept before; returns the paths too large to keep. */
+    public fun keep(files: List<OpenFile>): Set<String>
+}
 
 /**
  * The working directory as a tree, and the files opened out of it.
@@ -216,13 +233,30 @@ public data class FilesPane(
  * whole, and most of it is never looked at.
  */
 class FilesViewModel(
+    /** Keeps unsaved edits through the end of the app's process; null keeps them only in memory. */
+    private val unsaved: UnsavedFiles? = null,
     private val session: () -> ChatSession,
 ) : ViewModel() {
     private val _state = MutableStateFlow(FilesPane())
     val state: StateFlow<FilesPane> = _state.asStateFlow()
 
     init {
+        // Edits Android's ending of the app cut off come back as they were,
+        // unsaved, with the first of them in front.
+        unsaved?.restore()?.takeIf { it.isNotEmpty() }?.let { files ->
+            _state.value = FilesPane(open = OpenFiles(files, FileTab.File(files.first().path)))
+        }
         list("")
+        unsaved?.let { store ->
+            viewModelScope.launch {
+                _state.map { pane -> pane.open.files.filter { it.dirty } }
+                    .distinctUntilChanged()
+                    .collect { dirty ->
+                        val tooLarge = store.keep(dirty)
+                        if (_state.value.unkept != tooLarge) _state.value = _state.value.copy(unkept = tooLarge)
+                    }
+            }
+        }
     }
 
     /** Opens or closes a folder, fetching its entries the first time. */
@@ -362,9 +396,12 @@ class FilesViewModel(
         }
     }
 
-    class Factory(private val session: () -> ChatSession) : ViewModelProvider.Factory {
+    class Factory(
+        private val unsaved: UnsavedFiles? = null,
+        private val session: () -> ChatSession,
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            FilesViewModel(session) as T
+            FilesViewModel(unsaved, session) as T
     }
 }

@@ -183,6 +183,8 @@ internal fun ChatScreen(
     workspaceId: String = model.state.value.chatId,
     terminalChatId: String = model.state.value.chatId,
     workspaceOwner: ViewModelStoreOwner? = null,
+    /** Keeps the session's unsaved file edits if Android ends the app; null keeps them in memory only. */
+    unsavedFiles: com.restartfu.xd.mobile.UnsavedFiles? = null,
     productHeader: @Composable () -> Unit = {},
     /**
      * The tablet's chat tabs, given the open chat's agent tabs to show after
@@ -711,7 +713,7 @@ internal fun ChatScreen(
                         viewModel(
                             key = "files-$workspaceId",
                             viewModelStoreOwner = workspaceOwner ?: checkNotNull(androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner.current),
-                            factory = FilesViewModel.Factory { workspacePane.chat },
+                            factory = FilesViewModel.Factory(unsavedFiles) { workspacePane.chat },
                         ),
                     )
                     Pane.TERMINAL -> {

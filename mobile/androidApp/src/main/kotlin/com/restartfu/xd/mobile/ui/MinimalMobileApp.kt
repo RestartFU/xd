@@ -19,6 +19,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import kotlin.math.roundToInt
+import androidx.lifecycle.SavedStateHandle
+import com.restartfu.xd.mobile.UnsavedFileStore
+import com.restartfu.xd.mobile.UnsavedFiles
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -193,14 +196,22 @@ private val ChatSelectionsSaver = listSaver<Map<String, String>, String>(
 )
 
 /** Retains chat drafts and shared workspace panes when a tab leaves composition. */
-internal class MobileWorkspaceModels : ViewModel() {
+internal class MobileWorkspaceModels(saved: SavedStateHandle) : ViewModel() {
     private val chats = mutableMapOf<String, SessionViewModelOwner>()
     private val workspaces = mutableMapOf<String, SessionViewModelOwner>()
     private var generation: Long? = null
 
+    /** Unsaved file edits by session, which outlive Android ending the app. */
+    private val unsavedFiles = UnsavedFileStore(saved)
+
+    fun unsavedFiles(sessionId: String): UnsavedFiles = unsavedFiles.session(sessionId)
+
     fun bindGeneration(value: Long) {
         if (generation == value) return
         clearStores()
+        // The host was forgotten: its edits go with it. Not on the first
+        // binding, which is the app starting again with edits to bring back.
+        if (generation != null) unsavedFiles.clear()
         generation = value
     }
 
@@ -213,6 +224,9 @@ internal class MobileWorkspaceModels : ViewModel() {
         // Panes can reference a chat connection, so release them first.
         workspaces.keys.filterNot { it in sessionIds }.forEach { workspaces.remove(it)?.viewModelStore?.clear() }
         chats.keys.filterNot { it in chatIds }.forEach { chats.remove(it)?.viewModelStore?.clear() }
+        // Only once the host has listed sessions: the tree is empty while the
+        // app starts, and that must not drop the edits it is about to bring back.
+        if (sessionIds.isNotEmpty()) unsavedFiles.retain(sessionIds)
     }
 
     private fun clearStores() {
@@ -510,6 +524,7 @@ private fun MinimalMobileWorkspace(
                                     workspaceId = activeSession.id,
                                     terminalChatId = activeSession.terminalChatId,
                                     workspaceOwner = stores.workspace(activeSession.id),
+                                    unsavedFiles = stores.unsavedFiles(activeSession.id),
                                     sessionTabs = tabStrip,
                                     // A phone keeps one header row and moves the
                                     // tabs into it, upright or on its side; a
@@ -2910,34 +2925,6 @@ internal fun AutoSettleSettings(model: MainViewModel) {
 /** The host's own default for the inactivity rule. */
 private const val DEFAULT_SETTLE_DAYS = 3
 
-@Composable
-internal fun SettingSwitch(
-    title: String,
-    detail: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    enabled: Boolean = true,
-) {
-    // One stop, named by its words: a tap anywhere on the row turns it.
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .heightIn(min = 48.dp)
-            .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(title, fontWeight = FontWeight.SemiBold)
-            Text(
-                detail,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
-    }
-}
-
 /** The fewest and the most days the host takes for the inactivity rule. */
 internal const val MIN_SETTLE_DAYS = 1
 internal const val MAX_SETTLE_DAYS = 90
@@ -3008,6 +2995,34 @@ private fun SettleDaysStepper(days: Int, editable: Boolean, setDays: (Int) -> Un
             enabled = editable && days < MAX_SETTLE_DAYS,
             modifier = Modifier.size(48.dp).semantics { contentDescription = "More days" },
         ) { Text("+", style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics {}) }
+    }
+}
+
+@Composable
+internal fun SettingSwitch(
+    title: String,
+    detail: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true,
+) {
+    // One stop, named by its words: a tap anywhere on the row turns it.
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(
+                detail,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
     }
 }
 

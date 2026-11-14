@@ -151,6 +151,7 @@ internal fun FilesPaneContent(model: FilesViewModel) {
                         dirty = file.dirty,
                         saving = file.saving,
                         error = file.error,
+                        unkept = file.path in state.unkept,
                         onChange = { model.edit(tab.path, it) },
                         onSave = { model.save(tab.path) },
                     )
@@ -348,6 +349,8 @@ private fun FileEditor(
     dirty: Boolean,
     saving: Boolean,
     error: String?,
+    /** Its edits are too large to keep if Android ends the app before they are saved. */
+    unkept: Boolean,
     onChange: (String) -> Unit,
     onSave: () -> Unit,
 ) {
@@ -386,6 +389,14 @@ private fun FileEditor(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp).announced(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (unkept && dirty) {
+            Text(
+                UNKEPT_EDIT_NOTICE,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp).announced(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         if (large) {
@@ -489,3 +500,7 @@ private fun LargeFileView(
 
 private fun isLargeFile(text: String): Boolean =
     text.length >= LARGE_FILE_CHARACTERS || text.count { it == '\n' } >= LARGE_FILE_LINES
+
+/** Said over an edit too large to keep if Android ends the app before it is saved. */
+internal const val UNKEPT_EDIT_NOTICE =
+    "These edits are too large to keep if Android closes xd in the background. Save them soon."
