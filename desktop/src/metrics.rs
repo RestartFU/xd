@@ -85,6 +85,18 @@ pub(crate) fn text_px(size: f32) -> Pixels {
     gpui::px((size * interface_scale()).max(TEXT_CAPTION))
 }
 
+/// A line height in the window's pixels, for text of `size` set `line`
+/// high at 100 %: it follows the text, floor and all, so a caption floored
+/// at 90 % keeps the room between its lines that it has at 100 %.
+pub(crate) fn line_px(line: f32, size: f32) -> Pixels {
+    let scale = interface_scale();
+    if size * scale >= TEXT_CAPTION {
+        gpui::px(line * scale)
+    } else {
+        gpui::px(line * TEXT_CAPTION / size)
+    }
+}
+
 /// The side of a pointer target in the window's pixels: `size` at the
 /// Interface size, and never under [`HIT_MIN`] window pixels.
 pub(crate) fn hit_px(size: f32) -> Pixels {

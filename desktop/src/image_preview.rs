@@ -8,7 +8,7 @@ use std::io::Cursor;
 use gpui::{ClickEvent, ImageFormat, KeyDownEvent, MouseMoveEvent};
 
 use super::*;
-use crate::metrics::{LINE_CAPTION, LINE_LABEL_TIGHT};
+use crate::metrics::{LINE_CAPTION, LINE_LABEL_TIGHT, line_px};
 
 const TILE_SIZE: f32 = 64.0;
 const TILE_RADIUS: f32 = RADIUS_PANEL;
@@ -784,13 +784,13 @@ impl XdDesktop {
                     .child(
                         truncating_label(attachment.name.clone())
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(LINE_LABEL_TIGHT))
+                            .line_height(line_px(LINE_LABEL_TIGHT, TEXT_LABEL))
                             .text_color(rgb(colors.text)),
                     )
                     .child(
                         div()
                             .text_size(text_px(TEXT_CAPTION))
-                            .line_height(px(LINE_CAPTION))
+                            .line_height(line_px(LINE_CAPTION, TEXT_CAPTION))
                             .text_color(rgb(colors.faint))
                             .child(file_size_label(attachment.bytes)),
                     ),

@@ -5,6 +5,7 @@
 use crate::metrics::{
     CONTROL_HEIGHT_COMPACT, HIT_MIN, LINE_FIGURE, LINE_TITLE, RADIUS_COMPOSER, RADIUS_CONTROL,
     RADIUS_PANEL, TEXT_CAPTION, TEXT_CONTROL, TEXT_FIGURE, TEXT_HEADING, TEXT_LABEL, TEXT_TITLE,
+    line_px,
 };
 use std::{cell::Cell, collections::BTreeMap, rc::Rc};
 
@@ -2223,7 +2224,7 @@ impl XdDesktop {
                     .child(
                         div()
                             .text_size(text_px(TEXT_TITLE))
-                            .line_height(px(LINE_TITLE))
+                            .line_height(line_px(LINE_TITLE, TEXT_TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(colors.text))
                             .child(total),
@@ -2853,12 +2854,13 @@ impl XdDesktop {
         let loading = selected
             .iter()
             .any(|index| self.usage.environments[*index].summary_loading);
-        let summary = self.usage_shown_summary().cloned();
-        let periods = summary
-            .as_ref()
-            .map(|summary| summary.periods.clone())
+        // The figures come from the merge kept between frames; of the
+        // summary itself only its periods' labels and its kind are read,
+        // never a copy of its buckets and sessions.
+        let (periods, hourly) = self
+            .usage_shown_summary()
+            .map(|summary| (summary.periods.clone(), summary.hourly))
             .unwrap_or_default();
-        let hourly = summary.as_ref().is_some_and(|summary| summary.hourly);
         let messages = source_messages(
             self.usage_shown_environments()
                 .iter()
@@ -2893,7 +2895,7 @@ impl XdDesktop {
             .child(figures(
                 div()
                     .text_size(text_px(TEXT_FIGURE))
-                    .line_height(px(LINE_FIGURE))
+                    .line_height(line_px(LINE_FIGURE, TEXT_FIGURE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(colors.text))
                     .child(match metric {
@@ -5491,6 +5493,20 @@ mod tests {
             first + 1,
             "a filter works them out again"
         );
+        // A frame copies none of a summary: the overview reads the merge
+        // and the shown summary's periods in place.
+        let source = include_str!("usage_view.rs");
+        let production = source.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        let overview = production
+            .split_once("fn render_usage_overview(")
+            .unwrap()
+            .1
+            .split_once("\n    fn ")
+            .unwrap()
+            .0;
+        assert!(overview.contains("self.usage_merged_all()"));
+        assert!(!overview.contains("usage_shown_summary().cloned()"));
+        assert!(!overview.contains("usage_merged("));
     }
 
     #[test]

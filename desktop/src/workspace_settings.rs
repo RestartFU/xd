@@ -1,7 +1,7 @@
 use super::*;
 use crate::metrics::{
     CONTROL_HEIGHT, LINE_LABEL, RADIUS_CONTROL, RADIUS_PANEL, RADIUS_TAB, TEXT_CAPTION,
-    TEXT_CONTROL, TEXT_DISPLAY, TEXT_LABEL, TEXT_TITLE,
+    TEXT_CONTROL, TEXT_DISPLAY, TEXT_LABEL, TEXT_TITLE, line_px,
 };
 
 /// Room for a theme name and the chosen dot.
@@ -440,7 +440,7 @@ fn setting_failure_line(error: SharedString, colors: ThemeColors) -> gpui::Div {
         .items_start()
         .gap(px(6.0))
         .text_size(text_px(TEXT_LABEL))
-        .line_height(px(LINE_LABEL))
+        .line_height(line_px(LINE_LABEL, TEXT_LABEL))
         .text_color(rgb(colors.danger))
         .child(
             div()
@@ -493,7 +493,7 @@ fn settings_row(
                         div()
                             .mt(px(3.0))
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(LINE_LABEL))
+                            .line_height(line_px(LINE_LABEL, TEXT_LABEL))
                             .text_color(rgb(colors.muted))
                             .child(description),
                     )
@@ -1631,7 +1631,7 @@ impl XdDesktop {
                             div()
                                 .mt(px(3.0))
                                 .text_size(text_px(TEXT_LABEL))
-                                .line_height(px(LINE_LABEL))
+                                .line_height(line_px(LINE_LABEL, TEXT_LABEL))
                                 .text_color(rgb(colors.muted))
                                 .child(description),
                         ),
@@ -1721,7 +1721,7 @@ impl XdDesktop {
                     body.child(
                         div()
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(LINE_LABEL))
+                            .line_height(line_px(LINE_LABEL, TEXT_LABEL))
                             .text_color(rgb(colors.muted))
                             .child(message),
                     )
@@ -1738,7 +1738,7 @@ impl XdDesktop {
                             .bg(rgb(colors.surface))
                             .font_family(MONO)
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(LINE_LABEL))
+                            .line_height(line_px(LINE_LABEL, TEXT_LABEL))
                             .child(
                                 self.source_build_panel
                                     .output
@@ -2435,7 +2435,7 @@ impl XdDesktop {
                     div()
                         .mt(px(6.0))
                         .text_size(text_px(TEXT_CONTROL))
-                        .line_height(px(LINE_CONTROL))
+                        .line_height(line_px(LINE_CONTROL, TEXT_CONTROL))
                         .text_color(rgb(colors.muted))
                         .child(entry.summary),
                 );

@@ -7,7 +7,7 @@
 use super::*;
 use crate::metrics::{
     CONTROL_HEIGHT, CONTROL_HEIGHT_COMPACT, RADIUS_COMPOSER, RADIUS_PANEL, TEXT_BODY, TEXT_CONTROL,
-    TEXT_DISPLAY, TEXT_HEADING, TEXT_LABEL,
+    TEXT_DISPLAY, TEXT_HEADING, TEXT_LABEL, line_px,
 };
 use image_preview::DraftOwner;
 
@@ -111,7 +111,7 @@ pub(super) fn ask_header(
                 .line_height(px(if short_window() { 19.0 } else { 22.0 }))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(colors.text))
-                .child(title.into()),
+                .child(super::wrapped_heading(title)),
         )
         .when_some(counter, |row, counter| {
             row.child(
@@ -160,7 +160,7 @@ pub(super) fn ask_choice(
         .gap(px(14.0))
         .rounded(px(RADIUS_PANEL))
         .text_size(text_px(TEXT_BODY))
-        .line_height(px(LINE_CONTROL))
+        .line_height(line_px(LINE_CONTROL, TEXT_BODY))
         // Waiting on the host, a choice reads as one that cannot be picked.
         .text_color(rgb(if enabled {
             colors.text

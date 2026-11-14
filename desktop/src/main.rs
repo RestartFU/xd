@@ -129,8 +129,8 @@ use metrics::{
     LINE_CONTROL, LINE_LABEL_LOOSE, LINE_LABEL_ROW, LINE_MONO, LINE_MONO_ROW, LINE_MONO_TIGHT,
     LINE_PROSE, RADIUS_COMPOSER, RADIUS_CONTROL, RADIUS_LINE, RADIUS_MARK, RADIUS_PANEL,
     RADIUS_TAB, REM, ROW_HEIGHT, ROW_HEIGHT_COMPACT, TEXT_BODY, TEXT_CAPTION, TEXT_CONTROL,
-    TEXT_HEADING, TEXT_LABEL, TEXT_MONO, TEXT_PROSE_H2, TEXT_TITLE, hit_px, logical, px, text_px,
-    window_px,
+    TEXT_HEADING, TEXT_LABEL, TEXT_MONO, TEXT_PROSE_H2, TEXT_TITLE, hit_px, line_px, logical, px,
+    text_px, window_px,
 };
 use minimal::{
     AgentCli, MinimalRoute, ProjectCard, SessionCard, SettledCard, age_label, folder_tree,
@@ -1607,6 +1607,22 @@ fn session_row_action(
         .child(icon(path, 13.0, colors.muted))
 }
 
+/// What the marks of [`drawer_tabs`] say, each once.
+fn drawer_names(signals: &[SessionSignal]) -> Vec<String> {
+    let mut names = Vec::new();
+    for signal in signals
+        .iter()
+        .filter(|signal| **signal != SessionSignal::Idle)
+        .take(5)
+    {
+        let name = signal.label().to_string();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// The marks a collapsed project shows for its sessions that need a look.
 fn drawer_tabs(signals: &[SessionSignal], colors: ThemeColors) -> gpui::AnyElement {
     div()
@@ -2097,7 +2113,84 @@ fn dialog_title(title: impl Into<SharedString>, colors: ThemeColors) -> gpui::Di
         .text_size(text_px(TEXT_HEADING))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(colors.text))
-        .child(title.into())
+        .child(wrapped_heading(title))
+}
+
+/// How many headings [`wrapped_heading`] keeps the breaks of.
+const HEADING_BREAKS_KEPT: usize = 64;
+
+thread_local! {
+    /// The headings drawn with their last word moved down to the mark that
+    /// ends it, as last laid out: the text as written, and as drawn.
+    static HEADING_BREAKS: RefCell<HashMap<SharedString, SharedString>> =
+        RefCell::new(HashMap::new());
+}
+
+/// A heading that wraps, whose last line is never only the mark that ends
+/// it. GPUI may break a line before any mark that is not part of a word, so
+/// "rejected?" could wrap with its "?" alone on a line, and no joiner or
+/// no-break space stops it: GPUI breaks before those too. Where the heading,
+/// laid out at its width, would end that way, its last word goes down with
+/// the mark, from the next frame on.
+fn wrapped_heading(text: impl Into<SharedString>) -> gpui::Div {
+    let text: SharedString = text.into();
+    let shown = HEADING_BREAKS
+        .with(|breaks| breaks.borrow().get(&text).cloned())
+        .unwrap_or_else(|| text.clone());
+    let drawn = shown.clone();
+    div().relative().child(shown).child(
+        canvas(
+            move |bounds, window, _| {
+                let look = TextLook::here(window);
+                let broken = keep_last_word_with_its_mark(&text, bounds.size.width, &look, window);
+                let wanted = broken.clone().unwrap_or_else(|| text.clone());
+                HEADING_BREAKS.with(|breaks| {
+                    let mut breaks = breaks.borrow_mut();
+                    if breaks.len() >= HEADING_BREAKS_KEPT && !breaks.contains_key(&text) {
+                        breaks.clear();
+                    }
+                    match broken {
+                        Some(broken) => breaks.insert(text.clone(), broken),
+                        None => breaks.remove(&text),
+                    };
+                });
+                if wanted != drawn {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0(),
+    )
+}
+
+/// `text` with the space before its last word made a line break, when
+/// laid out `width` wide its last line would hold nothing but the marks
+/// that end it; `None` when it already ends well.
+fn keep_last_word_with_its_mark(
+    text: &str,
+    width: Pixels,
+    look: &TextLook,
+    window: &Window,
+) -> Option<SharedString> {
+    let start = text.rfind('\n').map_or(0, |at| at + 1);
+    let paragraph = &text[start..];
+    let mut wrapper = window
+        .text_system()
+        .line_wrapper(look.font.clone(), look.size);
+    let last = wrapper
+        .wrap_line(&[gpui::LineFragment::text(paragraph)], width)
+        .map(|boundary| boundary.ix)
+        .last()?;
+    let tail = paragraph.get(last..)?.trim();
+    if tail.is_empty() || tail.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    let space = paragraph[..last].trim_end().rfind(' ')?;
+    let mut broken = text.to_owned();
+    broken.replace_range(start + space..start + space + 1, "\n");
+    Some(broken.into())
 }
 
 /// What a dialog says under its title.
@@ -18134,7 +18227,7 @@ impl XdDesktop {
             .min_h_0()
             .font_family(MONO)
             .text_size(text_px(TEXT_MONO))
-            .line_height(px(LINE_MONO))
+            .line_height(line_px(LINE_MONO, TEXT_MONO))
             .text_color(rgb(colors.text))
             .child(measurement_canvas.absolute().inset_0())
             .child(output_scroller)
@@ -19923,6 +20016,20 @@ impl XdDesktop {
         }
         let stop = self.tree_row(tree_row);
         let tree_marks = self.tree_marks(&stop, open.clone());
+        // What its marks say, under the ring.
+        let mut mark_names = Vec::new();
+        if signal != SessionSignal::Idle {
+            mark_names.push(signal.label().to_string());
+        }
+        if let Some(fold) = fold.as_ref().filter(|fold| fold.folded) {
+            mark_names.push(counted(
+                fold.workers,
+                "session its agents started",
+                "sessions its agents started",
+            ));
+            mark_names.extend(drawer_names(&fold.hidden));
+        }
+        let marks_named = self.tree_marks_named(&stop, mark_names, colors);
         let context_chat_id = session.id.clone();
         let context_target = self
             .model
@@ -20111,11 +20218,12 @@ impl XdDesktop {
                     div()
                         .id(("minimal-session-fold", instance))
                         .absolute()
-                        // 24 wide around the chevron, which stays where it was.
+                        // 24 wide around the chevron, which stays where it was,
+                        // and never narrower than 24 window pixels.
                         .left(px(-10.0))
                         .top_0()
                         .bottom_0()
-                        .w(px(HIT_MIN))
+                        .w(hit_px(HIT_MIN))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -20171,6 +20279,7 @@ impl XdDesktop {
             )
         })
         .when(stop.ringed, |row| row.child(tree_ring(colors)))
+        .children(marks_named)
         .into_any_element()
     }
 
@@ -20753,6 +20862,19 @@ impl XdDesktop {
                 )
             })
             .when(stop.ringed, |header| header.child(tree_ring(colors)))
+            .children(
+                self.tree_marks_named(
+                    &stop,
+                    std::iter::once(counted(held, "project or folder", "projects and folders"))
+                        .chain(if open {
+                            Vec::new()
+                        } else {
+                            drawer_names(signals)
+                        })
+                        .collect(),
+                    colors,
+                ),
+            )
             .children(drop_zones);
         div()
             .id(("catalog-folder", index))
@@ -21290,7 +21412,20 @@ impl XdDesktop {
                         },
                     )
                 })
-                .when(stop.ringed, |header| header.child(tree_ring(colors)));
+                .when(stop.ringed, |header| header.child(tree_ring(colors)))
+                .children(
+                    self.tree_marks_named(
+                        &stop,
+                        std::iter::once(counted(project.counted, "session", "sessions"))
+                            .chain(if open {
+                                Vec::new()
+                            } else {
+                                drawer_names(&signals)
+                            })
+                            .collect(),
+                        colors,
+                    ),
+                );
 
             drawers.push(
                 div()
@@ -21521,7 +21656,7 @@ impl XdDesktop {
                                 .px_3()
                                 .py_3()
                                 .text_size(text_px(TEXT_LABEL))
-                                .line_height(px(LINE_LABEL_LOOSE))
+                                .line_height(line_px(LINE_LABEL_LOOSE, TEXT_LABEL))
                                 .text_color(rgb(colors.muted))
                                 .child(
                                     "No projects yet. Add one with +, then start a session in it.",
@@ -21534,7 +21669,7 @@ impl XdDesktop {
                                 .px_3()
                                 .py_3()
                                 .text_size(text_px(TEXT_LABEL))
-                                .line_height(px(LINE_LABEL_LOOSE))
+                                .line_height(line_px(LINE_LABEL_LOOSE, TEXT_LABEL))
                                 .text_color(rgb(colors.muted))
                                 .child(format!(
                                     "Nothing matches \u{201c}{query}\u{201d}. Press Esc to clear."
@@ -21860,7 +21995,7 @@ impl XdDesktop {
                 .mt(px(10.0))
                 .max_w(px(460.0))
                 .text_size(text_px(TEXT_BODY))
-                .line_height(px(LINE_BODY))
+                .line_height(line_px(LINE_BODY, TEXT_BODY))
                 .text_color(rgb(colors.muted))
                 .child(text)
         };
@@ -22311,7 +22446,7 @@ impl XdDesktop {
                 .border_l_2()
                 .border_color(rgb(colors.border))
                 .text_size(text_px(TEXT_BODY))
-                .line_height(px(LINE_PROSE))
+                .line_height(line_px(LINE_PROSE, TEXT_BODY))
                 .text_color(rgb(colors.muted))
                 .child(Self::render_native_inline(content, colors, index))
                 .into_any_element(),
@@ -22326,7 +22461,7 @@ impl XdDesktop {
                 .items_start()
                 .gap_2()
                 .text_size(text_px(TEXT_BODY))
-                .line_height(px(LINE_PROSE))
+                .line_height(line_px(LINE_PROSE, TEXT_BODY))
                 .text_color(rgb(colors.text))
                 .child(number.map_or_else(|| "•".into(), |number| format!("{number}.")))
                 .child(
@@ -22354,7 +22489,7 @@ impl XdDesktop {
                 .bg(rgb(colors.surface))
                 .font_family(MONO)
                 .text_size(text_px(TEXT_MONO))
-                .line_height(px(LINE_MONO))
+                .line_height(line_px(LINE_MONO, TEXT_MONO))
                 .text_color(rgb(colors.text))
                 .child(Self::render_native_code_text(&code.code, index))
                 .into_any_element(),
@@ -22400,7 +22535,7 @@ impl XdDesktop {
                     .border_color(rgb(colors.border))
                     .bg(rgb(colors.surface))
                     .text_size(text_px(TEXT_CONTROL))
-                    .line_height(px(LINE_CONTROL))
+                    .line_height(line_px(LINE_CONTROL, TEXT_CONTROL))
                     .text_color(rgb(colors.text))
                     .overflow_x_scroll()
                     .child(
@@ -22497,7 +22632,7 @@ impl XdDesktop {
                     .pl(px(20.0))
                     .font_family(MONO)
                     .text_size(text_px(TEXT_LABEL))
-                    .line_height(px(LINE_MONO_ROW))
+                    .line_height(line_px(LINE_MONO_ROW, TEXT_LABEL))
                     .text_color(rgb(colors.text))
                     .child(div().min_w_0().flex_1().child(item.name))
                     .child(
@@ -22597,7 +22732,7 @@ impl XdDesktop {
                         .bg(rgb(colors.background))
                         .font_family(MONO)
                         .text_size(text_px(TEXT_MONO))
-                        .line_height(px(LINE_MONO))
+                        .line_height(line_px(LINE_MONO, TEXT_MONO))
                         .text_color(rgb(colors.muted))
                         .child(detail),
                 )
@@ -23004,7 +23139,7 @@ impl XdDesktop {
                         .min_w_0()
                         .font_family(MONO)
                         .text_size(text_px(TEXT_LABEL))
-                        .line_height(px(LINE_MONO_ROW))
+                        .line_height(line_px(LINE_MONO_ROW, TEXT_LABEL))
                         .text_color(rgb(if failed { colors.danger } else { colors.muted })),
                 )
                 .when(run.repeats > 1, |row| {
@@ -23013,7 +23148,7 @@ impl XdDesktop {
                             .flex_none()
                             .font_family(MONO)
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(LINE_MONO_ROW))
+                            .line_height(line_px(LINE_MONO_ROW, TEXT_LABEL))
                             .text_color(rgb(mark))
                             .child(format!("×{}", run.repeats)),
                     )
@@ -23063,7 +23198,7 @@ impl XdDesktop {
                                 .bg(rgb(colors.background))
                                 .font_family(MONO)
                                 .text_size(text_px(TEXT_MONO))
-                                .line_height(px(LINE_MONO))
+                                .line_height(line_px(LINE_MONO, TEXT_MONO))
                                 .text_color(rgb(colors.muted))
                                 .child(detail),
                         )
@@ -23079,7 +23214,7 @@ impl XdDesktop {
                                     .gap_2()
                                     .font_family(MONO)
                                     .text_size(text_px(TEXT_LABEL))
-                                    .line_height(px(LINE_MONO_ROW))
+                                    .line_height(line_px(LINE_MONO_ROW, TEXT_LABEL))
                                     .child(
                                         div()
                                             .min_w_0()
@@ -23433,7 +23568,7 @@ impl XdDesktop {
                 .gap_2()
                 .font_family(MONO)
                 .text_size(text_px(TEXT_LABEL))
-                .line_height(px(LINE_MONO_TIGHT))
+                .line_height(line_px(LINE_MONO_TIGHT, TEXT_LABEL))
                 .child(
                     truncating_label(tool)
                         .w(px(52.0))
@@ -23651,7 +23786,7 @@ impl XdDesktop {
                         .overflow_y_scroll()
                         .thumbed(format!("native-subagent-prompt-{index}"), colors)
                         .text_size(text_px(TEXT_LABEL))
-                        .line_height(px(LINE_LABEL_ROW))
+                        .line_height(line_px(LINE_LABEL_ROW, TEXT_LABEL))
                         .text_color(rgb(colors.muted))
                         .child(view.prompt.clone())
                         .into_any_element(),
@@ -24349,7 +24484,7 @@ impl XdDesktop {
                 .rounded(px(RADIUS_COMPOSER))
                 .bg(rgb(colors.surface_high))
                 .text_size(text_px(TEXT_BODY))
-                .line_height(px(LINE_BODY))
+                .line_height(line_px(LINE_BODY, TEXT_BODY))
                 .text_color(rgb(colors.text))
                 .child(text)
         };
@@ -24486,7 +24621,7 @@ impl XdDesktop {
                                     .gap_2()
                                     .font_family(MONO)
                                     .text_size(text_px(TEXT_MONO))
-                                    .line_height(px(LINE_MONO))
+                                    .line_height(line_px(LINE_MONO, TEXT_MONO))
                                     .child(
                                         truncating_label(step.tool.clone())
                                             .w(px(52.0))
@@ -25214,7 +25349,7 @@ impl XdDesktop {
                         .bg(rgb(colors.background))
                         .font_family(MONO)
                         .text_size(text_px(TEXT_MONO))
-                        .line_height(px(LINE_MONO))
+                        .line_height(line_px(LINE_MONO, TEXT_MONO))
                         .child(detail.to_owned()),
                 )
                 .when_some(reason.filter(|_| command.is_some()), |card, reason| {
@@ -25245,7 +25380,7 @@ impl XdDesktop {
                             .bg(rgb(colors.background))
                             .font_family(MONO)
                             .text_size(text_px(TEXT_MONO))
-                            .line_height(px(LINE_MONO_TIGHT))
+                            .line_height(line_px(LINE_MONO_TIGHT, TEXT_MONO))
                             .children(lines),
                     )
                 });
@@ -30552,6 +30687,25 @@ impl XdDesktop {
         marks
     }
 
+    /// What a tree row's status marks and counts say, under its ring while
+    /// the ring is on it, as the pointer reads each: in one box with the
+    /// whole of a title cut short.
+    fn tree_marks_named(
+        &self,
+        stop: &TreeStop,
+        names: Vec<String>,
+        colors: ThemeColors,
+    ) -> Option<gpui::AnyElement> {
+        if !stop.ringed || names.is_empty() {
+            return None;
+        }
+        self.key_targets.note_named(&stop.key);
+        Some(
+            focus_tooltip(names.join(" · ").into(), self.key_targets.detail(), colors)
+                .into_any_element(),
+        )
+    }
+
     /// A button of a tree row, a Tab stop after the row while the row is the
     /// one Tab reaches. It keeps its own click; Enter and Space run `run`.
     #[allow(clippy::too_many_arguments)]
@@ -30788,8 +30942,16 @@ impl XdDesktop {
         let keyed = (self.key_stop.is_some() || self.key_cursor.is_some())
             .then(|| self.key_targets.keyed_bounds())
             .flatten()?;
+        // The label lies inside the control: one of the page's, under a menu
+        // row the keys are on, is not that row's own.
+        let slack = window_px(1.0);
         cut.into_iter()
-            .find(|(label, _)| keyed.contains(&label.center()))
+            .find(|(label, _)| {
+                label.left() >= keyed.left() - slack
+                    && label.right() <= keyed.right() + slack
+                    && label.top() >= keyed.top() - slack
+                    && label.bottom() <= keyed.bottom() + slack
+            })
             .map(|(_, text)| (keyed, text))
     }
 
@@ -41214,8 +41376,23 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert_eq!(text_px(TEXT_LABEL), window_px(11.0));
         assert_eq!(text_px(TEXT_BODY), window_px(TEXT_BODY * 0.9));
         assert_eq!(hit_px(HIT_MIN), window_px(HIT_MIN));
+        // A wrapped caption's lines keep their room under the floored text:
+        // 13 for 11, as at 100 %, not 11.7.
+        assert_eq!(
+            line_px(metrics::LINE_CAPTION, TEXT_CAPTION),
+            window_px(metrics::LINE_CAPTION)
+        );
+        assert_eq!(
+            line_px(metrics::LINE_LABEL, TEXT_LABEL),
+            window_px(metrics::LINE_LABEL * 11.0 / TEXT_LABEL)
+        );
+        assert_eq!(line_px(LINE_BODY, TEXT_BODY), px(LINE_BODY));
         metrics::set_interface_size(150);
         assert_eq!(text_px(TEXT_CAPTION), window_px(TEXT_CAPTION * 1.5));
+        assert_eq!(
+            line_px(metrics::LINE_CAPTION, TEXT_CAPTION),
+            px(metrics::LINE_CAPTION)
+        );
         assert_eq!(hit_px(HIT_MIN), window_px(HIT_MIN * 1.5));
         metrics::set_interface_size(100);
         // In the window: the smallest icon buttons keep 24 of its pixels.
@@ -41229,11 +41406,113 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         redraw(cx);
         let close = cx.debug_bounds("error-banner-close").unwrap();
         assert!(close.size.width >= window_px(HIT_MIN), "{close:?}");
-        // Every text size is drawn through the floor.
+        // Every text size is drawn through the floor, and every pointer
+        // target sized to the least one through its own, such as the fold
+        // chevron of a session whose agents started others.
         for source in [include_str!("main.rs"), include_str!("usage_view.rs")] {
             assert!(!source.contains(&[".text_size(", "px("].concat()));
+            for side in [".w(", ".h(", ".size("] {
+                assert!(!source.contains(&[side, "px(HIT_MIN)"].concat()), "{side}");
+            }
         }
         metrics::set_interface_size(100);
+    }
+
+    #[gpui::test]
+    fn a_session_rows_marks_are_named_under_the_ring(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        desktop.update(cx, |desktop, cx| {
+            let chat = desktop
+                .model
+                .chats
+                .iter_mut()
+                .find(|chat| chat.id == "pricing")
+                .unwrap();
+            chat.working = true;
+            cx.notify();
+        });
+        redraw(cx);
+        let row = |key: &str| format!("{SIDEBAR_ROW_STOP}{key}");
+        tab_to(&desktop, cx, &row("f:atlas"));
+        // A project names its count.
+        assert!(named_under_ring(&desktop, cx));
+        for _ in 0..4 {
+            cx.simulate_keystrokes("down");
+            redraw(cx);
+            if ring(&desktop, cx) == Some(row("s:pricing")) {
+                break;
+            }
+        }
+        assert_eq!(ring(&desktop, cx), Some(row("s:pricing")));
+        // The working session says so under the ring, as under the pointer.
+        assert!(named_under_ring(&desktop, cx));
+        desktop.read_with(cx, |desktop, _| {
+            assert!(
+                desktop
+                    .key_targets
+                    .0
+                    .borrow()
+                    .named
+                    .contains(row("s:pricing").as_str())
+            );
+        });
+        // A quiet session has no mark, and shows nothing under the ring.
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), Some(row("s:nightly")));
+        desktop.read_with(cx, |desktop, _| {
+            let frame = desktop.key_targets.0.borrow();
+            assert!(!frame.named.contains(row("s:nightly").as_str()));
+            assert!(!frame.named.contains(row("s:pricing").as_str()));
+        });
+    }
+
+    #[gpui::test]
+    fn a_headings_last_word_goes_down_with_the_mark_that_ends_it(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (_, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update(|window, _| {
+            let look = TextLook {
+                font: gpui::Font {
+                    weight: FontWeight::SEMIBOLD,
+                    ..gpui::font(UI_FONT)
+                },
+                size: window_px(16.0),
+                line_height: window_px(22.0),
+            };
+            let text = "Should old schematics be migrated on load or rejected?";
+            let shaped = |text: &str| {
+                let run = TextRun {
+                    len: text.len(),
+                    font: look.font.clone(),
+                    color: gpui::black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                window
+                    .text_system()
+                    .shape_line(text.to_owned().into(), look.size, &[run], None)
+                    .width
+            };
+            // Room for all but the question mark: GPUI would leave it alone
+            // on the last line.
+            let width = shaped(&text[..text.len() - 1]) + window_px(0.5);
+            assert_eq!(
+                keep_last_word_with_its_mark(text, width, &look, window),
+                Some("Should old schematics be migrated on load or\nrejected?".into())
+            );
+            // With room for it all, or a break elsewhere, it is left alone.
+            assert_eq!(
+                keep_last_word_with_its_mark(text, shaped(text) + window_px(2.0), &look, window),
+                None
+            );
+            let earlier = shaped("Should old schematics be migrated") + window_px(0.5);
+            assert_eq!(
+                keep_last_word_with_its_mark(text, earlier, &look, window),
+                None
+            );
+        });
     }
 
     #[test]
@@ -42920,6 +43199,63 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert_eq!(red(&light), Some(rgb(0xb3202f).into()));
     }
 
+    #[test]
+    fn the_terminal_draws_its_text_attributes_and_inverse_video() {
+        let mut screen = TerminalScreen::new(60, 3);
+        screen.feed(
+            b"\x1b[2mdim\x1b[22m \x1b[4munder\x1b[24m \x1b[9mstrike\x1b[29m \x1b[8mpw\x1b[28m \x1b[7msel",
+        );
+        for theme in ThemePreset::ALL {
+            let colors = theme.colors();
+            let palette = theme.terminal_palette();
+            let row = TerminalRow::new(screen.rendered_line_in(0, true, palette).unwrap());
+            let style = |text: &str| {
+                let start = row.text.find(text).unwrap();
+                row.highlights
+                    .iter()
+                    .find(|(range, _)| range.start == start)
+                    .map(|(_, style)| *style)
+                    .unwrap_or_default()
+            };
+            assert!(style("under").underline.is_some(), "{theme:?}");
+            assert!(style("strike").strikethrough.is_some(), "{theme:?}");
+            assert!(style("dim").color.is_some(), "{theme:?}");
+            assert_ne!(style("dim").color, Some(rgb(colors.text).into()));
+            // Hidden text is still in the row, for a selection to copy, and
+            // drawn in the ground's colour.
+            assert!(row.text.contains("pw"));
+            assert_eq!(style("pw").color, Some(rgb(colors.background).into()));
+            // Inverse video with no colours set: the theme's text colour
+            // behind the ground's.
+            assert_eq!(
+                style("sel").background_color,
+                Some(rgb(colors.text).into()),
+                "{theme:?}"
+            );
+            assert_eq!(style("sel").color, Some(rgb(colors.background).into()));
+            // The cursor sits on the selection's last cell, after "sel": it
+            // takes the cell's colours the other way round to show there.
+            let mut on_selection = TerminalScreen::new(60, 3);
+            on_selection.feed(b"\x1b[7msel\x1b[D");
+            let row = TerminalRow::new(on_selection.rendered_line_in(0, true, palette).unwrap());
+            assert_eq!(row.cursor, Some(2..3));
+            assert_eq!(
+                row.cursor_colors,
+                Some((colors.background, colors.text)),
+                "{theme:?}"
+            );
+        }
+        // The plain cursor keeps the theme's colours.
+        let mut plain = TerminalScreen::new(60, 3);
+        plain.feed(b"$ ");
+        let row = TerminalRow::new(
+            plain
+                .rendered_line_in(0, true, TerminalPalette::Dark)
+                .unwrap(),
+        );
+        assert_eq!(row.cursor_colors, None);
+    }
+
     #[cfg(unix)]
     #[gpui::test]
     fn a_theme_change_tells_each_terminal_its_new_colours(cx: &mut gpui::TestAppContext) {
@@ -43768,63 +44104,6 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             assert!(desktop.browser_panes.contains_key(&remote_key));
             assert!(desktop.settings.browser_sessions.contains_key(&remote_key));
         });
-    }
-
-    #[test]
-    fn the_terminal_draws_its_text_attributes_and_inverse_video() {
-        let mut screen = TerminalScreen::new(60, 3);
-        screen.feed(
-            b"\x1b[2mdim\x1b[22m \x1b[4munder\x1b[24m \x1b[9mstrike\x1b[29m \x1b[8mpw\x1b[28m \x1b[7msel",
-        );
-        for theme in ThemePreset::ALL {
-            let colors = theme.colors();
-            let palette = theme.terminal_palette();
-            let row = TerminalRow::new(screen.rendered_line_in(0, true, palette).unwrap());
-            let style = |text: &str| {
-                let start = row.text.find(text).unwrap();
-                row.highlights
-                    .iter()
-                    .find(|(range, _)| range.start == start)
-                    .map(|(_, style)| *style)
-                    .unwrap_or_default()
-            };
-            assert!(style("under").underline.is_some(), "{theme:?}");
-            assert!(style("strike").strikethrough.is_some(), "{theme:?}");
-            assert!(style("dim").color.is_some(), "{theme:?}");
-            assert_ne!(style("dim").color, Some(rgb(colors.text).into()));
-            // Hidden text is still in the row, for a selection to copy, and
-            // drawn in the ground's colour.
-            assert!(row.text.contains("pw"));
-            assert_eq!(style("pw").color, Some(rgb(colors.background).into()));
-            // Inverse video with no colours set: the theme's text colour
-            // behind the ground's.
-            assert_eq!(
-                style("sel").background_color,
-                Some(rgb(colors.text).into()),
-                "{theme:?}"
-            );
-            assert_eq!(style("sel").color, Some(rgb(colors.background).into()));
-            // The cursor sits on the selection's last cell, after "sel": it
-            // takes the cell's colours the other way round to show there.
-            let mut on_selection = TerminalScreen::new(60, 3);
-            on_selection.feed(b"\x1b[7msel\x1b[D");
-            let row = TerminalRow::new(on_selection.rendered_line_in(0, true, palette).unwrap());
-            assert_eq!(row.cursor, Some(2..3));
-            assert_eq!(
-                row.cursor_colors,
-                Some((colors.background, colors.text)),
-                "{theme:?}"
-            );
-        }
-        // The plain cursor keeps the theme's colours.
-        let mut plain = TerminalScreen::new(60, 3);
-        plain.feed(b"$ ");
-        let row = TerminalRow::new(
-            plain
-                .rendered_line_in(0, true, TerminalPalette::Dark)
-                .unwrap(),
-        );
-        assert_eq!(row.cursor_colors, None);
     }
 
     #[cfg(unix)]

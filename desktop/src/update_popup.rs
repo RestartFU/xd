@@ -1,5 +1,5 @@
 use super::*;
-use crate::metrics::{TEXT_CONTROL, TEXT_LABEL};
+use crate::metrics::{TEXT_CONTROL, TEXT_LABEL, line_px};
 
 /// One thing the popup says will change, or has just changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -350,7 +350,7 @@ impl XdDesktop {
                     body.child(
                         div()
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(LINE_LABEL_ROW))
+                            .line_height(line_px(LINE_LABEL_ROW, TEXT_LABEL))
                             .text_color(rgb(if row.failed {
                                 colors.danger
                             } else {
@@ -371,7 +371,7 @@ impl XdDesktop {
                         div()
                             .flex_none()
                             .text_size(text_px(TEXT_LABEL))
-                            .line_height(px(LINE_LABEL_LOOSE))
+                            .line_height(line_px(LINE_LABEL_LOOSE, TEXT_LABEL))
                             .text_color(rgb(colors.muted))
                             .child(panel.update_summary()),
                     )
@@ -390,7 +390,7 @@ impl XdDesktop {
                                         div()
                                             .mt_3()
                                             .text_size(text_px(TEXT_LABEL))
-                                            .line_height(px(LINE_LABEL_ROW))
+                                            .line_height(line_px(LINE_LABEL_ROW, TEXT_LABEL))
                                             .text_color(rgb(colors.danger))
                                             .child(error),
                                     )
