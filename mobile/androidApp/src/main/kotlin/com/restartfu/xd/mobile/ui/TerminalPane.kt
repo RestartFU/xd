@@ -59,6 +59,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -360,8 +361,9 @@ private fun typed(
 internal fun Cell.drawsOnBlank(): Boolean =
     char != ' ' || background != null || inverse || underline || strikethrough
 
-/** A row's characters, without the blank cells after the last one. */
-private fun List<Cell>.lineText(): String = buildString { this@lineText.forEach { append(it.char) } }.trimEnd()
+/** A row's characters, without the blank cells after the last one; concealed ones read as blanks. */
+private fun List<Cell>.lineText(): String =
+    buildString { this@lineText.forEach { append(if (it.hidden) ' ' else it.char) } }.trimEnd()
 
 /** Every row with something on it, top to bottom. */
 private fun List<List<Cell>>.screenText(): String =
@@ -389,9 +391,12 @@ internal fun List<Cell>.render(
         val cell = getOrNull(column) ?: Cell()
         val (ink, ground) = cell.colours(column == caret, defaultForeground, defaultBackground, palette, light)
         val style = SpanStyle(
-            color = ink,
+            // Concealed text is drawn in its own background, so it takes no room
+            // apart from the cells it fills.
+            color = if (cell.hidden) ground ?: defaultBackground else ink,
             background = ground ?: Color.Unspecified,
             fontWeight = if (cell.bold) FontWeight.Bold else null,
+            fontStyle = if (cell.italic) FontStyle.Italic else null,
             textDecoration = when {
                 cell.underline && cell.strikethrough -> TextDecoration.combine(listOf(TextDecoration.Underline, TextDecoration.LineThrough))
                 cell.underline -> TextDecoration.Underline

@@ -188,6 +188,15 @@ class TerminalScreenTest {
         assertEquals(0, screen.cursorRow)
     }
 
+    @Test
+    fun italicAndConcealedAttributesAreKeptAndCleared() {
+        val screen = TerminalScreen(columns = 12, rows = 1)
+        screen.write("\u001B[3mi\u001B[23mn\u001B[8mpw\u001B[28mo\u001B[3;8mx\u001B[0my")
+        val cells = screen.snapshot()[0]
+        assertEquals(listOf(true, false, false, false, false, true, false), cells.take(7).map { it.italic })
+        assertEquals(listOf(false, false, true, true, false, true, false), cells.take(7).map { it.hidden })
+    }
+
     private fun TerminalScreen.row(index: Int): String =
         snapshot()[index].joinToString("") { it.char.toString() }
 }

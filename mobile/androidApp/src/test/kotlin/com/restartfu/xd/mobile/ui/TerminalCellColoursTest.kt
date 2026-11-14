@@ -99,6 +99,17 @@ class TerminalCellColoursTest {
         assertEquals(Color(0xFF555555), terminalFaintInk(Color(0xFF555555), Color(0xFF333333)))
     }
 
+    @Test fun italicCellsSlantAndConcealedOnesDrawInTheirOwnBackground() {
+        val row = listOf(Cell('i', italic = true), Cell('p', hidden = true), Cell('w', hidden = true, background = 4))
+        val drawn = row.render(caret = -1, darkInk, darkGround, dark, light = false)
+        val styles = drawn.spanStyles.sortedBy { it.start }.map { it.item }
+        assertEquals(androidx.compose.ui.text.font.FontStyle.Italic, styles[0].fontStyle)
+        // Concealed: the text takes its own ground's colour, so nothing shows.
+        assertEquals(darkGround, styles[1].color)
+        assertEquals(dark[4], styles[2].color)
+        assertEquals(dark[4], styles[2].background)
+    }
+
     @Test fun underlinedAndCrossedOutCellsAreDrawnSo() {
         val row = listOf(Cell('u', underline = true), Cell('s', strikethrough = true), Cell('b', underline = true, strikethrough = true), Cell(' ', underline = true))
         val drawn = row.render(caret = -1, darkInk, darkGround, dark, light = false)

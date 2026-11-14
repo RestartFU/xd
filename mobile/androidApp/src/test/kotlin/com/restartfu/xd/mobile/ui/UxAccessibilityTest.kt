@@ -455,6 +455,19 @@ class UxAccessibilityTest {
         }
     }
 
+    @Test fun concealedTerminalTextIsNeverReadAloud() {
+        val scripted = AuditHost().connect().also { host = it }
+        val terminal = TerminalViewModel.ShellFactory(scripted.client, "global:mobile").create(TerminalViewModel::class.java)
+        content { TerminalPaneContent(terminal, showSessionBar = false) }
+        await { terminal.state.value.id != null && terminal.state.value.rows.isNotEmpty() }
+        val output = Base64.encodeToString("\r\npassword: \u001B[8mhunter2\u001B[28m done".encodeToByteArray(), Base64.NO_WRAP)
+        scripted.push("""{"event":"terminal-output","chat":"global:mobile","terminal":"t1","data":"$output"}""")
+        fun screen() = compose.onNode(hasTestTag(TERMINAL_SCREEN_TAG), useUnmergedTree = true).fetchSemanticsNode().texts().single()
+        await { "done" in screen() }
+        val read = screen()
+        assertTrue(read, "password:" in read && "hunter2" !in read)
+    }
+
     @Test fun outputRightAfterTheReplayIsKept() {
         // The host answers the terminal list and, in the same read, sends output
         // the replay did not hold. It lands after the replay, not nowhere.
