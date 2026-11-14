@@ -1,6 +1,8 @@
 package com.restartfu.xd.mobile
 
 import android.app.Activity
+import android.app.UiModeManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -20,6 +22,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import com.restartfu.xd.mobile.ui.FatalScreen
 import com.restartfu.xd.mobile.ui.MinimalThemePreset
 import com.restartfu.xd.mobile.ui.navigationBarStyle
@@ -40,6 +44,9 @@ class MainActivity : ComponentActivity() {
         // Android version, as Android 15 already makes it, in the saved theme.
         enableEdgeToEdge(settings.theme.value)
         super.onCreate(savedInstanceState)
+        // The window the system shows while the app starts wears the saved
+        // theme's ground from the next launch on, not the system's night mode.
+        lifecycleScope.launch { settings.theme.collect(::launchInTheme) }
         setContent {
             val theme by settings.theme.collectAsStateWithLifecycle()
             // The bars' icons follow the app's theme, not the system setting.
@@ -53,10 +60,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Tells Android which night mode the app is in, so the launch window
+     * (`res/values-night`) matches [theme] next time. Android 12 and later
+     * keep this per app; before it, the system's own night mode still picks.
+     * The activity takes the change itself (`configChanges="uiMode"`), so
+     * changing the theme does not restart it.
+     */
+    private fun launchInTheme(theme: MinimalThemePreset) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val modes = getSystemService(UiModeManager::class.java) ?: return
+        modes.setApplicationNightMode(launchNightMode(theme))
+    }
+
     private fun enableEdgeToEdge(theme: MinimalThemePreset) {
         enableEdgeToEdge(statusBarStyle = theme.systemBarStyle(), navigationBarStyle = theme.navigationBarStyle())
     }
 }
+
+/** The night mode whose launch window wears [theme]'s ground. */
+internal fun launchNightMode(theme: MinimalThemePreset): Int =
+    if (theme.isLight) UiModeManager.MODE_NIGHT_NO else UiModeManager.MODE_NIGHT_YES
 
 @Composable
 private fun XdMobileApp(

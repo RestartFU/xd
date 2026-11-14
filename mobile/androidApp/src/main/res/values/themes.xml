@@ -2,8 +2,10 @@
 <resources>
     <!--
       The window shows for the frames before Compose paints, so it wears a
-      theme's backdrop. The saved theme cannot be read that early, so the
-      system's night mode picks which: Light's here, Dark's in values-night.
+      theme's backdrop. The saved theme cannot be read that early, so night
+      mode picks which: Light's here, Dark's in values-night. From Android 12
+      the app sets its own night mode from the saved theme (MainActivity), so
+      this follows the theme; before that, the system's night mode picks.
       The colours are the backdrops in ui/Theme.kt, and a test keeps them equal.
       The status bar is clear over that ground, with icons that read on it.
     -->
