@@ -34376,7 +34376,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
     }
 
     /// Draws the window again, so its debug bounds follow the latest state.
-    #[cfg(unix)]
+    /// Not Unix-only: the keyboard tests use it on every platform.
     fn redraw(cx: &mut gpui::VisualTestContext) {
         cx.run_until_parked();
         cx.update(|window, cx| {
