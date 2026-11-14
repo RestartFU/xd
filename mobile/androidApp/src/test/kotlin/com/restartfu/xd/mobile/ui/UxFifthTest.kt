@@ -214,8 +214,8 @@ class UxFifthTest {
         val scripted = AuditHost().connect().also { host = it }
         val session = scripted.client.openChat("c1")
         val first = Robolectric.buildActivity(ComponentActivity::class.java).setup()
-        val before = ViewModelProvider(first.get())[MobileWorkspaceModels::class.java]
-        val files = FilesViewModel(before.unsavedFiles("s1")) { session }
+        val before = ViewModelProvider(first.get())[UnsavedFileStore::class.java]
+        val files = FilesViewModel(before.session("s1")) { session }
         files.open("README.md")
         await { files.state.value.open.current != null }
         val original = files.state.value.open.current!!.saved
@@ -227,9 +227,9 @@ class UxFifthTest {
         first.saveInstanceState(saved).pause().stop().destroy()
         val restored = parcelled(saved)
         val second = Robolectric.buildActivity(ComponentActivity::class.java).setup(restored)
-        val after = ViewModelProvider(second.get())[MobileWorkspaceModels::class.java]
+        val after = ViewModelProvider(second.get())[UnsavedFileStore::class.java]
         assertTrue("the view models were made again", after !== before)
-        val back = FilesViewModel(after.unsavedFiles("s1")) { session }
+        val back = FilesViewModel(after.session("s1")) { session }
         val file = back.state.value.open.files.single()
         assertEquals("README.md", file.path)
         assertEquals("# xd\n\nKept through the end.\n", file.text)
@@ -253,6 +253,11 @@ class UxFifthTest {
         // The limit is shared by every session.
         assertEquals(setOf("c.txt"), store.session("s2").keep(listOf(OpenFile("c.txt", saved = "", text = "z".repeat(95)))))
         assertEquals(512L * 1024, UNSAVED_LIMIT_BYTES)
+        // Forgetting the host lets them go; the first binding, a restart, does not.
+        store.bindGeneration(0)
+        assertEquals(listOf(small), store.session("s1").restore())
+        store.bindGeneration(1)
+        assertTrue(store.session("s1").restore().isEmpty())
 
         val scripted = AuditHost(override = { op, request ->
             if (op == "file-browse" && request.text("action") == "read") """{"ok":true,"content":"short"}""" else null

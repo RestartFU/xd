@@ -2,23 +2,25 @@ package com.restartfu.xd.mobile
 
 import android.os.Bundle
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModel
 import com.restartfu.xd.files.OpenFile
 
 /**
- * Unsaved file edits by session, kept in the activity's saved state, so they
- * outlive Android ending the app while it is in the background and come back
- * still unsaved. For each file it keeps the path, what is on screen, and what
+ * Unsaved file edits by session, kept in the activity's saved state through
+ * this view model's SavedStateHandle, so they outlive Android ending the app
+ * while it is in the background and come back still unsaved. For each file it keeps the path, what is on screen, and what
  * the host last handed over, which a save is still checked against.
  *
  * Android holds saved state in a buffer the whole app shares, so this keeps
  * at most [limitBytes]; an edit past that is not kept, and the Files pane
  * says so.
  */
-internal class UnsavedFileStore(
+internal class UnsavedFileStore @JvmOverloads constructor(
     handle: SavedStateHandle,
     private val limitBytes: Long = UNSAVED_LIMIT_BYTES,
-) {
+) : ViewModel() {
     private val kept = LinkedHashMap<String, List<OpenFile>>()
+    private var generation: Long? = null
 
     init {
         handle.get<Bundle>(KEY)?.let { saved ->
@@ -41,7 +43,7 @@ internal class UnsavedFileStore(
     }
 
     /** The store for one session's Files pane. */
-    fun session(id: String): com.restartfu.xd.mobile.UnsavedFiles = object : com.restartfu.xd.mobile.UnsavedFiles {
+    fun session(id: String): UnsavedFiles = object : UnsavedFiles {
         override fun restore(): List<OpenFile> = kept[id].orEmpty()
 
         override fun keep(files: List<OpenFile>): Set<String> {
@@ -67,8 +69,15 @@ internal class UnsavedFileStore(
         kept.keys.retainAll(sessionIds)
     }
 
-    /** Lets go of everything, as forgetting the host does. */
-    fun clear() = kept.clear()
+    /**
+     * Follows the host's session generation: forgetting the host lets its
+     * edits go. Not the first binding, which is the app starting again with
+     * edits to bring back.
+     */
+    fun bindGeneration(value: Long) {
+        if (generation != null && generation != value) kept.clear()
+        generation = value
+    }
 
     private companion object {
         const val KEY = "unsaved-files"

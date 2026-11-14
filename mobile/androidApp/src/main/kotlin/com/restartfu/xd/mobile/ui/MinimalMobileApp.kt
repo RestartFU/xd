@@ -19,9 +19,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import kotlin.math.roundToInt
-import androidx.lifecycle.SavedStateHandle
 import com.restartfu.xd.mobile.UnsavedFileStore
-import com.restartfu.xd.mobile.UnsavedFiles
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -196,22 +194,14 @@ private val ChatSelectionsSaver = listSaver<Map<String, String>, String>(
 )
 
 /** Retains chat drafts and shared workspace panes when a tab leaves composition. */
-internal class MobileWorkspaceModels(saved: SavedStateHandle) : ViewModel() {
+internal class MobileWorkspaceModels : ViewModel() {
     private val chats = mutableMapOf<String, SessionViewModelOwner>()
     private val workspaces = mutableMapOf<String, SessionViewModelOwner>()
     private var generation: Long? = null
 
-    /** Unsaved file edits by session, which outlive Android ending the app. */
-    private val unsavedFiles = UnsavedFileStore(saved)
-
-    fun unsavedFiles(sessionId: String): UnsavedFiles = unsavedFiles.session(sessionId)
-
     fun bindGeneration(value: Long) {
         if (generation == value) return
         clearStores()
-        // The host was forgotten: its edits go with it. Not on the first
-        // binding, which is the app starting again with edits to bring back.
-        if (generation != null) unsavedFiles.clear()
         generation = value
     }
 
@@ -224,9 +214,6 @@ internal class MobileWorkspaceModels(saved: SavedStateHandle) : ViewModel() {
         // Panes can reference a chat connection, so release them first.
         workspaces.keys.filterNot { it in sessionIds }.forEach { workspaces.remove(it)?.viewModelStore?.clear() }
         chats.keys.filterNot { it in chatIds }.forEach { chats.remove(it)?.viewModelStore?.clear() }
-        // Only once the host has listed sessions: the tree is empty while the
-        // app starts, and that must not drop the edits it is about to bring back.
-        if (sessionIds.isNotEmpty()) unsavedFiles.retain(sessionIds)
     }
 
     private fun clearStores() {
@@ -275,6 +262,9 @@ private fun MinimalMobileWorkspace(
     val stores: MobileWorkspaceModels = viewModel()
     val sessionGeneration by model.client.sessionGeneration.collectAsStateWithLifecycle()
     remember(stores, sessionGeneration) { stores.bindGeneration(sessionGeneration) }
+    // Unsaved file edits by session, kept through Android ending the app.
+    val unsavedFiles: UnsavedFileStore = viewModel()
+    remember(unsavedFiles, sessionGeneration) { unsavedFiles.bindGeneration(sessionGeneration) }
     val savedChatState = rememberSaveableStateHolder()
     var activeSessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var chatSelections by rememberSaveable(stateSaver = ChatSelectionsSaver) { mutableStateOf(emptyMap()) }
@@ -322,6 +312,9 @@ private fun MinimalMobileWorkspace(
     LaunchedEffect(tree.chats, tree.loading, tree.error) {
         if (!tree.loading && tree.error == null) {
             stores.retain(tree.chats.map { it.id }.toSet(), sessions.map { it.id }.toSet())
+            // Only once the host has listed sessions: the tree is empty while the
+            // app starts, and that must not drop the edits it is about to bring back.
+            if (sessions.isNotEmpty()) unsavedFiles.retain(sessions.map { it.id }.toSet())
         }
     }
     val place = listOf(mobileDestination, activeSessionId, chatSelections, hiddenChatIds)
@@ -524,7 +517,7 @@ private fun MinimalMobileWorkspace(
                                     workspaceId = activeSession.id,
                                     terminalChatId = activeSession.terminalChatId,
                                     workspaceOwner = stores.workspace(activeSession.id),
-                                    unsavedFiles = stores.unsavedFiles(activeSession.id),
+                                    unsavedFiles = unsavedFiles.session(activeSession.id),
                                     sessionTabs = tabStrip,
                                     // A phone keeps one header row and moves the
                                     // tabs into it, upright or on its side; a
