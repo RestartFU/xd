@@ -2,7 +2,6 @@ package com.restartfu.xd.mobile.ui
 
 import androidx.compose.foundation.selection.toggleable
 import android.content.Context
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -135,10 +134,12 @@ internal fun NewSessionFlow(
 ) {
     FullScreenSheet(onDismiss) {
         // Forward into the form, back out to the list, as a stack of pages moves.
-        AnimatedContent(
-            targetState = projectId,
-            transitionSpec = { pageTransition(forward = targetState != null) },
-            label = "new-session-step",
+        // Held as a gesture, Back from the form brings the list in as it is dragged.
+        val still = reducedMotion()
+        val steps = rememberPageTransition(projectId, "new-session-step")
+        PredictiveBack(steps, enabled = returnsToList && projectId != null, back = null) { onChoose(null) }
+        steps.transition.AnimatedContent(
+            transitionSpec = { pageMotion(still, pageTransition(forward = targetState != null)) },
         ) { id ->
             val chosen = choices.firstOrNull { it.project.id == id }
             if (id == null || chosen == null) {
@@ -463,7 +464,6 @@ private fun SessionForm(
             }
         }
     }
-    if (navigation is Navigation.Back) BackHandler(onBack = navigation.action)
 
     val efforts = backends.firstOrNull { it.id == agent.wire }?.efforts.orEmpty()
     val accountChoices = accounts?.get(agent.wire).orEmpty()
@@ -502,10 +502,12 @@ private fun SessionForm(
         )
     }
 
-    AnimatedContent(
-        targetState = page,
-        transitionSpec = { pageTransition(forward = targetState == FormPage.BASE) },
-        label = "new-session-page",
+    // Back from the branch list returns to the form; held as a gesture, the form comes in as it is dragged.
+    val still = reducedMotion()
+    val pages = rememberPageTransition(page, "new-session-page")
+    PredictiveBack(pages, enabled = page == FormPage.BASE, back = FormPage.FORM) { page = FormPage.FORM }
+    pages.transition.AnimatedContent(
+        transitionSpec = { pageMotion(still, pageTransition(forward = targetState == FormPage.BASE)) },
     ) { shown ->
         when (shown) {
             FormPage.BASE -> BasePicker(
@@ -557,7 +559,7 @@ private fun SessionForm(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     catalogError,
-                                    modifier = Modifier.weight(1f).padding(start = 4.dp),
+                                    modifier = Modifier.weight(1f).padding(start = 4.dp).announced(),
                                     color = MaterialTheme.colorScheme.error,
                                     style = MaterialTheme.typography.bodySmall,
                                 )
@@ -854,7 +856,7 @@ private fun WorkspaceSection(
             places.sourcesError?.let {
                 Text(
                     "Branches and pull requests could not be listed: $it",
-                    modifier = Modifier.padding(start = 4.dp),
+                    modifier = Modifier.padding(start = 4.dp).announced(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -1190,7 +1192,6 @@ private fun BasePicker(
     onBack: () -> Unit,
     onPick: (Ops.NewSessionWorktree) -> Unit,
 ) {
-    BackHandler(onBack = onBack)
     var filter by rememberSaveable { mutableStateOf("") }
     val query = filter.trim()
     val pulls = places?.pullRequests.orEmpty()
