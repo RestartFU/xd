@@ -1415,8 +1415,16 @@ mod tests {
         for palette in [TerminalPalette::Dark, TerminalPalette::Light] {
             let rendered = screen.rendered_with_cursor_in(palette);
             let inverse = style_of(&rendered, "inverse");
-            assert_eq!(inverse.foreground, Some(palette.background()), "{palette:?}");
-            assert_eq!(inverse.background, Some(palette.foreground()), "{palette:?}");
+            assert_eq!(
+                inverse.foreground,
+                Some(palette.background()),
+                "{palette:?}"
+            );
+            assert_eq!(
+                inverse.background,
+                Some(palette.foreground()),
+                "{palette:?}"
+            );
             // SGR 27 ends it.
             assert_eq!(style_of(&rendered, " plain "), TerminalStyle::default());
             // A colour the program set swaps with the theme's other one.
