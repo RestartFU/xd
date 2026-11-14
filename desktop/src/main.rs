@@ -1213,6 +1213,19 @@ fn frame_colors() -> ThemeColors {
         .unwrap_or(ThemePreset::Dark.colors())
 }
 
+/// `text` on one line. GPUI shapes no line break, so a title that has one,
+/// such as a chat named from a pasted message, reads on with a space instead.
+fn one_line(text: SharedString) -> SharedString {
+    if !text.contains(['\n', '\r']) {
+        return text;
+    }
+    text.split(['\n', '\r'])
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .into()
+}
+
 /// One line of text as wide as it needs, down to whatever room its row leaves,
 /// ending in an ellipsis when that is too little. Size it from the outside.
 /// While it is cut short, the pointer over it shows the whole of it.
@@ -1226,18 +1239,7 @@ fn frame_colors() -> ThemeColors {
 /// over that once the label has its place, cut to the room it really has.
 #[track_caller]
 fn truncating_label(text: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
-    let text: SharedString = text.into();
-    // One line: GPUI shapes no line break, so a title that has one, such as
-    // a chat named from a pasted message, reads on with a space instead.
-    let text: SharedString = if text.contains(['\n', '\r']) {
-        text.split(['\n', '\r'])
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-            .into()
-    } else {
-        text
-    };
+    let text = one_line(text.into());
     let site = std::panic::Location::caller();
     let mut hasher = DefaultHasher::new();
     (text.as_ref(), site.file(), site.line(), site.column()).hash(&mut hasher);
@@ -1344,6 +1346,7 @@ fn line_width(
     size: f32,
     window: &Window,
 ) -> f32 {
+    let text = one_line(text.to_owned().into());
     if text.is_empty() {
         return 0.0;
     }
@@ -1360,7 +1363,7 @@ fn line_width(
     };
     let line = window
         .text_system()
-        .shape_line(text.to_owned().into(), px(size), &[run], None);
+        .shape_line(text, px(size), &[run], None);
     logical(line.width).ceil()
 }
 
@@ -33253,6 +33256,29 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             assert!(width(0) < 210.0, "a short title keeps a narrow tab");
             assert_eq!(width(1), 210.0);
         });
+    }
+
+    #[gpui::test]
+    fn a_header_title_with_a_line_break_is_measured_on_one_line(cx: &mut gpui::TestAppContext) {
+        // The header measures its session's title before drawing it, and
+        // GPUI shapes no line break: both read it on one line.
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model.apply_tree(&serde_json::json!({
+                "folders":[{"id":"atlas","name":"Atlas"}],
+                "chats":[{"id":"broken","folder":"atlas","title":"First line\nsecond line","backend":"codex"}],
+                "sessions":[{"id":"workspace","folder":"atlas","title":"Pasted\r\ntitle","chats":["broken"],"terminal_chat":"session:workspace"}]
+            })).unwrap();
+            desktop.model.select_chat("broken");
+            desktop.minimal_route = MinimalRoute::Cli { project_id:"atlas".into(), chat_id:"broken".into(), agent:AgentCli::Codex };
+        });
+        cx.simulate_resize(size(px(1180.0), px(560.0)));
+        redraw(cx);
+        assert_eq!(one_line("Pasted\r\ntitle".into()).as_ref(), "Pasted title");
+        assert!(
+            DRAWN_LABELS.with(|labels| labels.borrow().iter().any(|label| label == "Pasted title")),
+            "the header draws the title on one line"
+        );
     }
 
     #[test]
