@@ -37775,7 +37775,13 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert_eq!(section(cx), 0);
         redraw(cx);
 
-        // Tab: the search field, the theme cards, then the switch.
+        // Tab: Back, the search field, the section open, the theme cards,
+        // then the switch.
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("workspace-settings-close")
+        );
         cx.simulate_keystrokes("tab");
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             assert!(
@@ -37786,6 +37792,11 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                     .is_focused(window)
             );
         });
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("workspace-settings-section-0")
+        );
         cx.simulate_keystrokes("tab tab");
         assert_eq!(
             ring(&desktop, cx).as_deref(),
@@ -37810,7 +37821,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         cx.update_window_entity(&desktop, |desktop, window, _| {
             assert!(desktop.minimal_popup_focus.is_focused(window));
         });
-        cx.simulate_keystrokes("tab tab");
+        // Back, the search field and the section open come first.
+        cx.simulate_keystrokes("tab tab tab tab");
         assert_eq!(
             ring(&desktop, cx).as_deref(),
             Some("workspace-settings-chat-titles")
