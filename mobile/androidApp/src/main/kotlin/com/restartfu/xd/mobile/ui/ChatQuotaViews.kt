@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -235,8 +234,7 @@ private fun QuotaPercentField(
             .minimumInteractiveComponentSize()
             .width(76.dp)
             // At least 40dp: enlarged text needs more.
-            .heightIn(min = 40.dp)
-            .semantics { contentDescription = "$label, percent" },
+            .heightIn(min = 40.dp),
         enabled = enabled,
         singleLine = true,
         textStyle = MaterialTheme.typography.bodyMedium.copy(
@@ -259,7 +257,8 @@ private fun QuotaPercentField(
                     .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(Modifier.weight(1f)) { field() }
+                // The words beside it are not tied to it, so the field carries its own name.
+                Box(Modifier.weight(1f)) { FieldName("$label, percent", shown = true, field) }
                 Text("%", color = LocalXdSignals.current.faint, style = MaterialTheme.typography.bodyMedium)
             }
         },
@@ -276,12 +275,13 @@ private fun PercentField(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    OutlinedTextField(
+    NamedOutlinedField(
         value = text,
         onValueChange = { typed -> onText(typed.filter(Char::isDigit).take(3)) },
         // The visible words beside it are not tied to it, so screen readers
         // are told what the number is.
-        modifier = modifier.width(92.dp).semantics { contentDescription = "$label, percent" },
+        name = "$label, percent",
+        modifier = modifier.width(92.dp),
         enabled = enabled,
         singleLine = true,
         isError = ChatQuota.typedPercent(text) == null,

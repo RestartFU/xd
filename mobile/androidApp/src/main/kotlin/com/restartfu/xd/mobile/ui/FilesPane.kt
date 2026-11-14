@@ -35,7 +35,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -82,6 +81,14 @@ internal const val LARGE_FILE_LINES = 600
 private const val EDITOR_COLOUR_PAUSE_MILLIS = 150L
 
 /**
+ * [tree]'s rows, walked once per tree rather than on every recomposition of
+ * the pane, which an editor keystroke is.
+ */
+@Composable
+internal fun rememberFileRows(tree: com.restartfu.xd.files.FileTree): List<com.restartfu.xd.files.TreeRow> =
+    remember(tree) { tree.rows() }
+
+/**
  * The working directory as a folding tree, and the files opened out of it.
  *
  * A tree rather than one directory at a time: the shape of a repository is
@@ -91,7 +98,7 @@ private const val EDITOR_COLOUR_PAUSE_MILLIS = 150L
 @Composable
 internal fun FilesPaneContent(model: FilesViewModel) {
     val state by model.state.collectAsStateWithLifecycle()
-    val rows = state.tree.rows()
+    val rows = rememberFileRows(state.tree)
     // The file whose tab was asked to close with edits in it, kept through a rotation.
     var closing by rememberSaveable { mutableStateOf<String?>(null) }
 
@@ -448,15 +455,15 @@ private fun FileEditor(
                 modifier = Modifier.weight(1f),
             )
         } else {
-            OutlinedTextField(
+            NamedOutlinedField(
                 value = editor.value,
                 onValueChange = { next -> editor.edit(next)?.let(onChange) },
+                // The field shows no label: a screen reader reads this with its text.
+                name = "Contents of ${path.substringAfterLast('/')}",
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp)
-                    // The field has no label: this names it for a screen reader.
-                    .semantics { contentDescription = "Contents of ${path.substringAfterLast('/')}" },
+                    .padding(horizontal = 8.dp),
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = XdMonoFamily),
                 // A large file is edited plain: even moving its colours along
                 // as it is typed would cost each keystroke.

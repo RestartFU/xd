@@ -451,8 +451,7 @@ internal fun AgentComposer(
                 BasicTextField(
                     value = draft,
                     onValueChange = onDraft,
-                    // Named even once it holds text and the placeholder is gone.
-                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot).semantics { contentDescription = "Message this agent" },
+                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
                     maxLines = 6,
@@ -472,7 +471,8 @@ internal fun AgentComposer(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            field()
+                            // Named by its placeholder, and once it holds text by its name in the field.
+                            FieldName("Message this agent", draft.isNotEmpty(), field)
                         }
                     },
                 )
