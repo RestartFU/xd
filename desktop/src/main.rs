@@ -339,11 +339,15 @@ fn pulse_opacity() -> f32 {
     if reduce_motion() {
         return 1.0;
     }
-    pulse_opacity_at(pulse_frame())
+    pulse_opacity_at(pulse_frame(), frame_colors())
 }
 
-fn pulse_opacity_at(step: usize) -> f32 {
-    [0.35, 0.65, 1.0, 0.65][step % 4]
+/// The pulse's four steps, from the theme's floor, where the working ink
+/// still reads at 3:1 on every ground, to full strength and back.
+fn pulse_opacity_at(step: usize, colors: ThemeColors) -> f32 {
+    let floor = f32::from(colors.pulse_floor) / 255.0;
+    let middle = (floor + 1.0) / 2.0;
+    [floor, middle, 1.0, middle][step % 4]
 }
 
 /// What moves with the shared pulse or the terminal's blink: a working dot,
@@ -592,7 +596,11 @@ fn paint_animated(
         AnimatedKind::Dot { color } => {
             let radius = mark.bounds.size.width.min(mark.bounds.size.height) / 2.0;
             window.paint_quad(
-                gpui::fill(mark.bounds, alpha(*color, pulse_opacity_at(step))).corner_radii(radius),
+                gpui::fill(
+                    mark.bounds,
+                    alpha(*color, pulse_opacity_at(step, frame_colors())),
+                )
+                .corner_radii(radius),
             );
         }
         AnimatedKind::Dots { color, text } => {
@@ -767,11 +775,19 @@ fn xd_mark(color: u32) -> gpui::AnyElement {
 }
 
 fn settings_switch(colors: ThemeColors, enabled: bool) -> gpui::AnyElement {
+    // Off, its track is a ground of its own, so the control edge shows where
+    // it is; on, the edge is the accent fill's. The knob sits inside it.
     div()
         .w(px(38.0))
         .h(px(22.0))
         .flex_none()
         .rounded_full()
+        .border_1()
+        .border_color(rgb(if enabled {
+            colors.accent
+        } else {
+            colors.control_border
+        }))
         .bg(rgb(if enabled {
             colors.accent
         } else {
@@ -779,8 +795,8 @@ fn settings_switch(colors: ThemeColors, enabled: bool) -> gpui::AnyElement {
         }))
         .child(
             div()
-                .mt(px(3.0))
-                .ml(px(if enabled { 19.0 } else { 3.0 }))
+                .mt(px(3.0 - SWITCH_EDGE))
+                .ml(px(if enabled { 19.0 } else { 3.0 } - SWITCH_EDGE))
                 .size(px(16.0))
                 .rounded_full()
                 .bg(rgb(if enabled {
@@ -791,6 +807,9 @@ fn settings_switch(colors: ThemeColors, enabled: bool) -> gpui::AnyElement {
         )
         .into_any_element()
 }
+
+/// The width of a switch's edge, which its knob sits inside.
+const SWITCH_EDGE: f32 = 1.0;
 
 /// What a session row shows of the sessions its agent started, which list
 /// right below it.
@@ -1695,42 +1714,48 @@ fn segment_button(
         .child(label.into())
 }
 
-/// A button that cannot be pressed now: the shape of [`ui_button`] in the
-/// quiet fill a disabled send button has, with nothing that reacts.
+/// A button that cannot be pressed now: the shape of [`ui_button`] with
+/// [`disabled_edge`] and no fill, its words in [`disabled_ink`], and nothing
+/// that reacts.
 fn disabled_button(
     id: impl Into<gpui::ElementId>,
     colors: ThemeColors,
 ) -> gpui::Stateful<gpui::Div> {
-    ui_button_shape(id)
-        .bg(rgb(colors.surface_high))
-        .text_color(rgb(disabled_ink(colors)))
+    disabled_edge(ui_button_shape(id), colors).text_color(rgb(disabled_ink(colors)))
 }
 
-/// What a control that cannot be used now is drawn in: the faint ink, which
-/// stays at least 4.8:1 on every ground of both themes, on the control's own
-/// ground at full strength. Nothing is dimmed by opacity, which let a
-/// disabled label fall under 3:1.
+/// What a control that cannot be used now is drawn in: the theme's disabled
+/// ink, at 4.5:1 or more on every ground of both themes and, in Dark, 1.5:1
+/// or more apart from the muted ink of a quiet control that can be used.
+/// Nothing is dimmed by opacity, which let a disabled label fall under 3:1.
 fn disabled_ink(colors: ThemeColors) -> u32 {
-    colors.faint
+    colors.disabled
+}
+
+/// The edge that says a control cannot be used now, whatever its kind: a
+/// dashed one in the control edge's ink, with no fill. No control that can
+/// be used has a dashed edge, so this tells the two apart without the ink,
+/// which Light cannot set far enough from its muted ink and keep readable.
+fn disabled_edge<E: Styled>(control: E, colors: ThemeColors) -> E {
+    control
+        .border_1()
+        .border_dashed()
+        .border_color(rgb(colors.control_border))
 }
 
 /// [`ui_button`], or the same button while it cannot be pressed: nothing
-/// reacts, its words are in [`disabled_ink`], and a button with a fill or a
-/// frame takes [`disabled_button`]'s quiet fill in their place.
+/// reacts, its words are in [`disabled_ink`], and it takes
+/// [`disabled_button`]'s dashed edge in place of any fill or frame.
 fn ui_button_when(
     enabled: bool,
     id: impl Into<gpui::ElementId>,
     kind: ButtonKind,
     colors: ThemeColors,
 ) -> gpui::Stateful<gpui::Div> {
-    match kind {
-        _ if enabled => ui_button(id, kind, colors),
-        ButtonKind::Ghost | ButtonKind::DangerGhost => {
-            ui_button_shape(id).text_color(rgb(disabled_ink(colors)))
-        }
-        ButtonKind::Primary | ButtonKind::Secondary | ButtonKind::Danger => {
-            disabled_button(id, colors)
-        }
+    if enabled {
+        ui_button(id, kind, colors)
+    } else {
+        disabled_button(id, colors)
     }
 }
 
@@ -1862,7 +1887,7 @@ impl IconButton {
             None => icon(path, glyph, ink),
         };
         if !enabled {
-            return button.child(mark(disabled_ink(colors)));
+            return disabled_edge(button, colors).child(mark(disabled_ink(colors)));
         }
         let button = button.cursor_pointer();
         if let Some(ink) = ink {
@@ -24059,11 +24084,7 @@ impl XdDesktop {
                     .gap_2()
                     .rounded(px(RADIUS_COMPOSER))
                     .border_1()
-                    .border_color(rgb(if focused {
-                        colors.selected_border
-                    } else {
-                        colors.border
-                    }))
+                    .border_color(field_border(focused, colors))
                     .bg(glass::composer(colors))
                     .shadow_md()
                     .child(

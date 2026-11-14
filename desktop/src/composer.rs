@@ -508,11 +508,8 @@ impl XdDesktop {
             .gap(px(if compact { 2.0 } else { 4.0 }))
             .rounded(px(RADIUS_COMPOSER))
             .border_1()
-            .border_color(rgb(if focus.is_focused(window) {
-                colors.selected_border
-            } else {
-                colors.border
-            }))
+            // At rest it has the control edge every field has.
+            .border_color(field_border(focus.is_focused(window), colors))
             .bg(crate::glass::composer(colors))
             .shadow_md()
             .drag_over::<ExternalPaths>(move |style, _, _, _| {

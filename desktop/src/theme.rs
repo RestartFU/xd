@@ -31,6 +31,14 @@ pub struct ThemeColors {
     pub claude_icon: u32,
     /// Counts, hints, and timestamps; never body copy.
     pub faint: u32,
+    /// The words and icon of a control that cannot be used now: at 4.5:1 or
+    /// more on every ground, and, where a theme leaves room for it, 1.5:1 or
+    /// more apart from [`ThemeColors::muted`], the ink of a quiet control
+    /// that can. Light leaves none: an ink that far lighter than its muted
+    /// falls under 4.5:1 on its paler grounds. In both themes a disabled
+    /// control also has a dashed edge and no fill, which no control that can
+    /// be used has.
+    pub disabled: u32,
     /// Fill of the primary action.
     pub accent: u32,
     /// Links, focus rings, and the caret.
@@ -73,6 +81,9 @@ pub struct ThemeColors {
     pub banner_wash: u32,
     /// A pill's fill: a quiet tint of its ink, as the alpha that tint takes.
     pub pill_alpha: u8,
+    /// The faintest a pulsing working dot gets, as an alpha: the working ink
+    /// at this strength still reads at 3:1 on every ground.
+    pub pulse_floor: u8,
     /// The full-window image viewer and the buttons laid over pictures.
     pub viewer: ViewerInk,
 }
@@ -214,6 +225,7 @@ impl ThemePreset {
                 claude_icon: 0xd97757,
                 muted: 0xadadad,
                 faint: 0x929292,
+                disabled: 0x898989,
                 accent: 0x8b8ff8,
                 accent_ink: 0xa9adff,
                 accent_hover: 0xa6a9ff,
@@ -251,6 +263,7 @@ impl ThemePreset {
                 scroll_thumb: 0xffffff5c,
                 banner_wash: 0xff94a224,
                 pill_alpha: 0x24,
+                pulse_floor: 0x78,
                 viewer: VIEWER_INK,
             },
             Self::Light => ThemeColors {
@@ -267,6 +280,7 @@ impl ThemePreset {
                 claude_icon: 0xb85c3f,
                 muted: 0x4b5165,
                 faint: 0x5a6074,
+                disabled: 0x5a6074,
                 accent: 0x5257d9,
                 accent_ink: 0x4045bb,
                 accent_hover: 0x4347c4,
@@ -304,6 +318,7 @@ impl ThemePreset {
                 scroll_thumb: 0x1b1e2c84,
                 banner_wash: 0x97203a24,
                 pill_alpha: 0x24,
+                pulse_floor: 0xac,
                 viewer: VIEWER_INK,
             },
         }
