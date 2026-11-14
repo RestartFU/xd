@@ -31,7 +31,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.material3.TextField
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -229,6 +230,15 @@ internal fun ChatScreen(
     val messagingAgent by model.messagingAgent.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
     val catalog by model.catalog.collectAsStateWithLifecycle()
+    // A queued message dropped or a picture taken off the draft: "Removed",
+    // with an Undo that puts it back where it was. Taken off only once its
+    // notice has gone, so a rotation while it shows shows it again.
+    val removed by model.removed.collectAsStateWithLifecycle()
+    val undoNotice = LocalUndoNotice.current
+    LaunchedEffect(removed) {
+        val gone = removed ?: return@LaunchedEffect
+        if (undoNotice?.invoke(REMOVED_NOTICE) == true) model.undoRemove(gone) else model.consumeRemoved(gone)
+    }
 
     // The desktop shows these beside the conversation. A phone has room for
     // one at a time, so they are tabs over the same chat.
@@ -258,8 +268,11 @@ internal fun ChatScreen(
     PredictiveBack(panes, enabled = pane != Pane.CHAT, back = Pane.CHAT) { pane = Pane.CHAT }
     // The conversation is on screen: always beside a tool, otherwise while no tool has taken its place.
     val chatShown = sideBySide || pane == Pane.CHAT
-    // An agent tab sits over the chat it belongs to, so Back returns to the chat.
-    androidx.activity.compose.BackHandler(enabled = pane == Pane.CHAT && viewingAgent != null) { model.showChat() }
+    // An agent tab sits over the chat it belongs to, so Back returns to the
+    // chat, which comes in as the gesture is dragged; a cut with animations off.
+    val agentPages = rememberPageTransition(viewingAgent, "agent")
+    PredictiveBack(agentPages, enabled = pane == Pane.CHAT && viewingAgent != null, back = null) { model.showChat() }
+    val still = reducedMotion()
     var choosingModel by rememberSaveable(state.chatId) { mutableStateOf(false) }
     var choosingOptions by rememberSaveable(state.chatId) { mutableStateOf(false) }
 
@@ -444,9 +457,9 @@ internal fun ChatScreen(
             lastIndex = lastTranscriptIndex,
         ),
     )
-    // The words streamed so far, which [state] leaves out: kept up in
-    // composition, as the rest of the target is, by something small enough
-    // to run for every word.
+    // The words streamed so far, which [state] leaves out: kept up with each
+    // frame, as the rest of the target is, by something small enough to run
+    // for every word.
     val streamed = remember { mutableStateOf("") }
     StreamedText(streamingState, streamed)
     LaunchedEffect(listState, model) {
@@ -542,11 +555,17 @@ internal fun ChatScreen(
             }
         }
     }
-    // The chat's name, said as the page appears and when another chat takes its place.
+    // The chat's name, said as the page appears and when another chat takes
+    // its place: the name it had then. A title the host gives the chat later
+    // shows in the header, and is not said as though a page had opened.
     val chatName = sessionChats?.chats?.firstOrNull { it.id == sessionChats.selectedId }?.title?.ifBlank { null }
         ?: state.title.ifEmpty { "New chat" }
+    // Until the host has answered for the chat (its backend is known), a
+    // tablet has no name for it but "New chat": the name it answers with counts.
+    val named = sessionChats != null || state.backend.isNotEmpty()
+    val announcedName = remember(state.chatId, named) { chatName }
     Scaffold(
-        modifier = Modifier.page(chatName),
+        modifier = Modifier.page(announcedName),
         containerColor = GlassPage,
         contentColor = MaterialTheme.colorScheme.onSurface,
         topBar = {
@@ -735,8 +754,15 @@ internal fun ChatScreen(
                     else -> Unit
                 }
             },
-        ) chat@{ padding ->
-        if (viewingAgent != null) {
+        ) { padding ->
+        // An agent's tab and the chat it belongs to share this place; Back's
+        // gesture brings the chat back in as it is dragged.
+        agentPages.transition.AnimatedContent(
+            modifier = Modifier.fillMaxSize(),
+            transitionSpec = { pageMotion(still, fadeThrough()) },
+        ) chat@{ shownKey ->
+        if (shownKey != null) {
+            val shownAgent = agentRuns[shownKey]
             val address = shownAgent?.messageAddress
             val sent = remember(transcript.items, address) {
                 if (address == null) {
@@ -750,9 +776,9 @@ internal fun ChatScreen(
             val queued = remember(state.queue, address) {
                 if (address == null) emptyList() else state.queue.mapNotNull(AgentRelay::parse).filter { it.address == address }
             }
-            val pending = viewingAgent?.let { subagentActions[it] }
+            val pending = subagentActions[shownKey]
             shownAgent?.let { SettleSubagentAction(it, pending, model) }
-            androidx.compose.runtime.key(viewingAgent) {
+            androidx.compose.runtime.key(shownKey) {
                 Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
                     AgentView(
                         run = shownAgent,
@@ -895,6 +921,7 @@ internal fun ChatScreen(
         }
         }
         }
+        }
     }
 }
 
@@ -958,6 +985,9 @@ private fun ChatPanes(
     }
 }
 
+/** What the notice says when a queued message or a picture is removed. */
+internal const val REMOVED_NOTICE = "Removed"
+
 /** The tool open beside the chat, and the conversation's list, for tests. */
 internal const val TOOL_PANE_TAG = "tool-pane"
 
@@ -1011,6 +1041,7 @@ private fun SettleSubagentAction(run: com.restartfu.xd.model.SubagentRun, pendin
  * is what Enter does on the desktop for the same reason: the button is a stop
  * by then.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Composer(
     state: com.restartfu.xd.model.ChatState,
@@ -1224,9 +1255,8 @@ private fun Composer(
             ) {
                 state.queue.forEachIndexed { index, queued ->
                     AssistChip(
-                        // Tapping opens the controls rather than dropping:
-                        // discarding a queued message on a stray tap, with no
-                        // undo, is not a good trade for one less tap.
+                        // Tapping opens the controls (Steer, Save, Move, Drop),
+                        // so a stray tap never drops one.
                         onClick = { model.openQueuedMessage(index) },
                         label = {
                             Text(
@@ -1258,24 +1288,43 @@ private fun Composer(
             Column {
                 prompt.section?.invoke()
                 Column(Modifier.padding(start = 4.dp, end = 8.dp, top = 2.dp, bottom = 6.dp)) {
-                    TextField(
+                    // Material's filled field with its fill and line taken off,
+                    // drawn from its parts so the name can sit inside it.
+                    val fieldColors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        disabledIndicatorColor = Color.Transparent,
+                    )
+                    val fieldInteractions = remember { MutableInteractionSource() }
+                    androidx.compose.foundation.text.BasicTextField(
                         value = composer,
                         onValueChange = model::updateDraft,
-                        // Named even once it holds text and the placeholder is gone.
-                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = COMPOSER_NAME },
-                        placeholder = {
-                            Text(prompt.placeholder ?: "Ask anything, or describe a task…", color = LocalXdSignals.current.faint)
-                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minWidth = TextFieldDefaults.MinWidth, minHeight = TextFieldDefaults.MinHeight),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = androidx.compose.ui.graphics.SolidColor(fieldColors.cursorColor),
+                        interactionSource = fieldInteractions,
                         minLines = 1,
                         maxLines = 6,
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent,
-                            disabledContainerColor = Color.Transparent,
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent,
-                            disabledIndicatorColor = Color.Transparent,
-                        ),
+                        decorationBox = { field ->
+                            TextFieldDefaults.DecorationBox(
+                                value = composer,
+                                // Named by its placeholder, and once it holds text by its name in the field.
+                                innerTextField = { FieldName(COMPOSER_NAME, composer.isNotEmpty(), field) },
+                                enabled = true,
+                                singleLine = false,
+                                visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
+                                interactionSource = fieldInteractions,
+                                placeholder = {
+                                    Text(prompt.placeholder ?: "Ask anything, or describe a task…", color = LocalXdSignals.current.faint)
+                                },
+                                colors = fieldColors,
+                            )
+                        },
                         // The desktop queues with Enter while a turn runs, since its
                         // button is the stop. The keyboard's own action key is where
                         // that lives here.
@@ -1451,8 +1500,7 @@ private fun CompactComposerRow(
                 androidx.compose.foundation.text.BasicTextField(
                     value = composer,
                     onValueChange = model::updateDraft,
-                    // Named even once it holds text and the placeholder is gone.
-                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot).semantics { contentDescription = COMPOSER_NAME },
+                    modifier = Modifier.weight(1f).heightIn(min = ComposerSlot),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                     cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.onSurface),
                     maxLines = 6,
@@ -1478,7 +1526,8 @@ private fun CompactComposerRow(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            field()
+                            // Named by its placeholder, and once it holds text by its name in the field.
+                            FieldName(COMPOSER_NAME, composer.isNotEmpty(), field)
                         }
                     },
                 )
@@ -1986,10 +2035,15 @@ internal const val LIVE_TEXT_ELSEWHERE = "\u2026"
 internal fun ChatState.withoutLiveText(): ChatState =
     if (working && liveSegment.isNotEmpty()) copy(liveSegment = LIVE_TEXT_ELSEWHERE, turnSequence = 0) else this
 
-/** Keeps [into] at the words streamed so far, for the follower. */
+/**
+ * Keeps [into] at the words streamed so far, for the follower: read here, so
+ * only this small scope runs again for each word, and written once the frame's
+ * composition is applied, never while it is under way.
+ */
 @Composable
 private fun StreamedText(state: State<ChatState>, into: MutableState<String>) {
-    into.value = state.value.liveSegment
+    val words = state.value.liveSegment
+    SideEffect { into.value = words }
 }
 
 /** Rows drawn alike, so the list can reuse one's layout for another. */

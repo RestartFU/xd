@@ -5,7 +5,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -78,7 +78,13 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
     val provider = state.provider
     var selectedModel by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedProvider by rememberSaveable { mutableStateOf<String?>(null) }
-    BackHandler(selectedModel != null) { selectedModel = null; selectedProvider = null }
+    // A model's detail is a page within Usage: Back's gesture brings the
+    // overview back in as it is dragged, and cuts with animations off.
+    val detail = selectedModel?.let { selectedProvider to it }
+    val details = rememberPageTransition(detail, "usage-detail")
+    PredictiveBack(details, enabled = selectedModel != null, back = null) { selectedModel = null; selectedProvider = null }
+    val still = reducedMotion()
+    val returns = LocalReturnFocus.current
     var pricesOpen by rememberSaveable { mutableStateOf(false) }
     // Saved by account, so turning the device keeps the question open.
     var confirmingResetKey by rememberSaveable { mutableStateOf<String?>(null) }
@@ -123,7 +129,15 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
                     )
                 }
             }
-            selectedModel?.let { name ->
+            // Into a model's detail and back out along one axis, as stepping into any page.
+            details.transition.AnimatedContent(
+                transitionSpec = { pageMotion(still, sharedAxisX(forward = targetState != null)) },
+            ) { shown ->
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            val shownModel = shown?.second
+            // The overview back from a model's detail: the focus goes to that model's row.
+            if (shownModel == null) LaunchedEffect(Unit) { returns?.restore() }
+            shownModel?.let { name ->
                 TextButton(onClick = { selectedModel = null; selectedProvider = null }) { Text("Back to overview") }
                 // A page of its own within Usage: said as it opens, with the focus on its name.
                 androidx.compose.runtime.key(name) {
@@ -134,16 +148,23 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
                     )
                 }
             }
-            val summary = state.summary?.filtered(provider, selectedProvider, selectedModel)
+            val summary = state.summary?.filtered(provider, shown?.first, shownModel)
             when {
                 summary == null && state.summaryError != null -> ErrorLine(state.summaryError.orEmpty(), model::refresh)
                 summary == null -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Text("Reading usage…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                else -> SummarySection(summary, state.summaryLoading, model, metric, selectedModel != null) { backend, name -> selectedProvider = backend; selectedModel = name }
+                else -> SummarySection(summary, state.summaryLoading, model, metric, shownModel != null) { backend, name ->
+                    // Back to the overview puts the focus on this row again.
+                    returns?.open(usageRowKey(backend, name))
+                    selectedProvider = backend
+                    selectedModel = name
+                }
             }
             state.summaryError?.takeIf { summary != null }?.let { ErrorLine(it, model::refresh) }
+            }
+            }
         } else {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Limits", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
@@ -283,7 +304,7 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
                 .map { (key, buckets) -> Triple(key, buckets.sumOf(UsageBucketReply::costUsd), buckets.sumOf { it.totals.all }) }
                 .sortedByDescending { if (metric == "Cost") it.second else it.third.toDouble() }
                 .forEach { (key, modelCost, modelTokens) ->
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { onModel(key.first, key.second) }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).returnsFocus(usageRowKey(key.first, key.second)).clickable { onModel(key.first, key.second) }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         BackendIcon(key.first, size = 16.dp)
                         Text(key.second, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontFamily = XdMonoFamily, style = MaterialTheme.typography.bodySmall)
                         Text(if (metric == "Cost") compact(modelTokens) else usd(modelCost), color = signals.faint, style = MaterialTheme.typography.labelMedium)
@@ -627,3 +648,6 @@ internal fun UsageSummaryReply.filtered(provider: String, modelProvider: String?
         sources = sources.filter { includes(it.provider) && (modelProvider == null || it.provider == modelProvider) },
     )
 }
+
+/** A model's row in the overview, for [ReturnFocus]. */
+private fun usageRowKey(provider: String, model: String) = "model-$provider-$model"

@@ -105,6 +105,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -211,6 +212,18 @@ internal class MobileWorkspaceModels : ViewModel() {
     private var usageOwner: SessionViewModelOwner? = null
     fun usage(): ViewModelStoreOwner = usageOwner ?: SessionViewModelOwner().also { usageOwner = it }
 
+    // The global Terminal's shell: kept here, so a rotation or a resized
+    // window finds the same terminal, scrollback and all, without opening it
+    // again; let go of when the reader leaves the Terminal page.
+    private var terminalOwner: SessionViewModelOwner? = null
+    fun terminal(): ViewModelStoreOwner = terminalOwner ?: SessionViewModelOwner().also { terminalOwner = it }
+
+    /** Closes the global Terminal's shell, as leaving its page does. */
+    fun leaveTerminal() {
+        terminalOwner?.viewModelStore?.clear()
+        terminalOwner = null
+    }
+
     fun retain(chatIds: Set<String>, sessionIds: Set<String>) {
         // Panes can reference a chat connection, so release them first.
         workspaces.keys.filterNot { it in sessionIds }.forEach { workspaces.remove(it)?.viewModelStore?.clear() }
@@ -218,6 +231,7 @@ internal class MobileWorkspaceModels : ViewModel() {
     }
 
     private fun clearStores() {
+        leaveTerminal()
         usageOwner?.viewModelStore?.clear()
         usageOwner = null
         workspaces.values.forEach { it.viewModelStore.clear() }
@@ -291,6 +305,9 @@ private fun MinimalMobileWorkspace(
     val settledNotice by model.settledNotice.collectAsStateWithLifecycle()
     // Held here, not in the projects list, so Back from a chat returns to the same place in it.
     val projectsList = rememberLazyListState()
+    // And with the focus on the row that was opened: a session's on Projects, a model's on Usage.
+    val projectsReturns = rememberReturnFocus()
+    val usageReturns = rememberReturnFocus()
     val sessionActions = SessionActions(
         settlement = tree.settlement,
         settle = { model.settleSession(it.id, it.title) },
@@ -374,6 +391,10 @@ private fun MinimalMobileWorkspace(
     val showBottomNavigation = !layout.rail && !imeVisible && !chatOpen
     // The floating bar is drawn over the page, which keeps this much of its bottom clear.
     val barInset = if (showBottomNavigation) FloatingBarClearance else 0.dp
+    // A session is opened from Projects and Back returns there, so the rail and
+    // the bar show Projects as the current place while one is open, and their
+    // Projects goes back to it as Back does.
+    val barDestination = if (mobileDestination == MobileDestination.SESSIONS) MobileDestination.PROJECTS else mobileDestination
     // Projects also stands in for a session that went away, so this follows the page shown.
     val projectsShown = when (mobileDestination) {
         MobileDestination.TERMINAL, MobileDestination.USAGE -> false
@@ -424,7 +445,17 @@ private fun MinimalMobileWorkspace(
     val notify: (String) -> Unit = remember(scope, snackbar) { { text -> scope.launch { snackbar.showSnackbar(text) } } }
     // The open chat's composer says how far up it reaches, so the snackbar keeps above it.
     val snackbarClearance = remember { SnackbarClearance() }
-    CompositionLocalProvider(LocalNotice provides notify, LocalSnackbarClearance provides snackbarClearance) {
+    // Removing a queued message or a picture leaves a notice with Undo, in place of asking first.
+    val undoNotice: suspend (String) -> Boolean = remember(snackbar) {
+        { text ->
+            snackbar.showSnackbar(text, actionLabel = "Undo", duration = SnackbarDuration.Long) == SnackbarResult.ActionPerformed
+        }
+    }
+    CompositionLocalProvider(
+        LocalNotice provides notify,
+        LocalUndoNotice provides undoNotice,
+        LocalSnackbarClearance provides snackbarClearance,
+    ) {
     // Clear of a cutout or a navigation bar at either side, as a phone on its
     // side has: the backdrop still runs under them, nothing else does.
     Box(Modifier.fillMaxSize().safeSidesPadding()) {
@@ -436,7 +467,7 @@ private fun MinimalMobileWorkspace(
             .then(if (settingsOpen) Modifier.clearAndSetSemantics {} else Modifier),
     ) {
         if (layout.rail) {
-            XdNavigationRail(mobileDestination, showProjects, showTerminal, showUsage)
+            XdNavigationRail(barDestination, showProjects, showTerminal, showUsage)
         }
         Column(Modifier.weight(1f)) {
             Box(Modifier.weight(1f)) {
@@ -465,9 +496,13 @@ private fun MinimalMobileWorkspace(
                 Box(Modifier.fillMaxSize().then(named)) {
                 when (shown) {
                     WorkspacePage.TERMINAL -> MinimalGlobalTerminal(
-                        model, barInset, onSettings = { settingsOpen = true },
+                        model, stores, barInset, onSettings = { settingsOpen = true },
+                        // Gone from the screen because the reader went elsewhere, not
+                        // because the window turned or was resized and is made again.
+                        left = { mobileDestination != MobileDestination.TERMINAL },
                     )
-                    WorkspacePage.USAGE -> Column(
+                    WorkspacePage.USAGE -> CompositionLocalProvider(LocalReturnFocus provides usageReturns) {
+                    Column(
                         Modifier.fillMaxSize().background(GlassPage),
                     ) {
                         ProductHeader(title = "Usage", onSettings = { settingsOpen = true })
@@ -478,6 +513,7 @@ private fun MinimalMobileWorkspace(
                             factory = UsageViewModel.Factory(model.client, settings),
                         )
                         UsageContent(usage, bottomInset = barInset)
+                    }
                     }
                     // Gone while its page is still leaving: nothing is drawn for those frames.
                     WorkspacePage.SESSION -> if (activeSession != null) {
@@ -558,6 +594,8 @@ private fun MinimalMobileWorkspace(
                                         tree.chats.firstOrNull { it.id == id }?.let { chat ->
                                             // Unfolded on the way, so its row shows on the Projects page.
                                             settings.setSessionsFolded(tree.sessionsAbove(chat.sessionId), false)
+                                            // Back to Projects goes to the row of the session it is in.
+                                            projectsReturns.open(sessionRowKey(chat.sessionId))
                                             activeSessionId = chat.sessionId
                                             chatSelections = chatSelections + (chat.sessionId to chat.id)
                                             hiddenChatIds = hiddenChatIds - chat.id
@@ -580,7 +618,8 @@ private fun MinimalMobileWorkspace(
                             }
                         }
                     } else Unit
-                    WorkspacePage.PROJECTS -> MinimalProjectsHome(
+                    WorkspacePage.PROJECTS -> CompositionLocalProvider(LocalReturnFocus provides projectsReturns) {
+                    MinimalProjectsHome(
                         model, settings, projects, tree.loading, tree.error,
                         onSettings = { settingsOpen = true },
                         listState = projectsList,
@@ -590,6 +629,8 @@ private fun MinimalMobileWorkspace(
                         onDeleteProject = { deletingProjectId = it.id },
                         open = { _, session ->
                             model.stopOpeningStartingSessions()
+                            // Back to Projects puts the focus on this row again.
+                            projectsReturns.open(sessionRowKey(session.id))
                             activeSessionId = session.id
                             // Opening a session always reveals at least its most recent chat.
                             if (session.chatIds.all { it in hiddenChatIds }) {
@@ -598,12 +639,13 @@ private fun MinimalMobileWorkspace(
                             mobileDestination = MobileDestination.SESSIONS
                         },
                     )
+                    }
                 }
                 }
                 }
                 if (showBottomNavigation) {
                     XdNavigationBar(
-                        mobileDestination, showProjects, showTerminal, showUsage,
+                        barDestination, showProjects, showTerminal, showUsage,
                         Modifier.align(Alignment.BottomCenter),
                     )
                 }
@@ -1277,16 +1319,21 @@ private fun MinimalProjectsHome(
 @Composable
 private fun MinimalGlobalTerminal(
     model: MainViewModel,
+    stores: MobileWorkspaceModels,
     bottomInset: Dp,
     onSettings: () -> Unit,
+    /** Whether the reader has gone to another page, read as the page leaves the screen. */
+    left: () -> Boolean,
 ) {
-    val terminalOwner = remember { SessionViewModelOwner() }
-    DisposableEffect(terminalOwner) {
-        onDispose { terminalOwner.viewModelStore.clear() }
+    // Leaving the page closes the shell, as it always has; a configuration
+    // change keeps it, since the page it comes back to is still Terminal.
+    val leaving by rememberUpdatedState(left)
+    DisposableEffect(stores) {
+        onDispose { if (leaving()) stores.leaveTerminal() }
     }
     val terminal: TerminalViewModel = viewModel(
         key = "global-shell",
-        viewModelStoreOwner = terminalOwner,
+        viewModelStoreOwner = stores.terminal(),
         factory = TerminalViewModel.ShellFactory(
             client = model.client,
             chatId = GLOBAL_TERMINAL_CHAT_ID,
@@ -1384,8 +1431,8 @@ private fun SessionTabStrip(
                 Surface(
                     modifier = Modifier.bringIntoViewRequester(reveal),
                     shape = MaterialTheme.shapes.medium,
-                    color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-                    border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
+                    color = selectedTabFill(selected),
+                    border = selectedTabEdge(selected),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Row(
@@ -1481,6 +1528,19 @@ private fun SessionTabStrip(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
+/*
+ * The selected chat or agent tab on the tablet header, drawn as the floating
+ * bar's selected tab is: a raised fill, edged in the control border, which
+ * stands at 3:1 on the header's glass as on the bar.
+ */
+@Composable
+private fun selectedTabFill(selected: Boolean): Color =
+    if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent
+
+@Composable
+private fun selectedTabEdge(selected: Boolean): BorderStroke? =
+    if (selected) BorderStroke(1.dp, controlBorder()) else null
+
 /** One of the open chat's agents in the tab row: its provider, task, a dot while it runs, and close. */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -1495,8 +1555,8 @@ private fun AgentTabChip(agent: AgentTab, selected: Boolean, agents: AgentTabs) 
     Surface(
         modifier = Modifier.bringIntoViewRequester(reveal),
         shape = MaterialTheme.shapes.medium,
-        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-        border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
+        color = selectedTabFill(selected),
+        border = selectedTabEdge(selected),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(
@@ -1551,8 +1611,9 @@ private fun ProductHeader(
         )
         Text(
             title,
-            // Where the focus lands when the page appears.
-            modifier = Modifier.weight(1f).pageHeading(),
+            // Where the focus lands when the page appears, unless Back
+            // brought the reader to a list from one of its rows.
+            modifier = Modifier.weight(1f).pageHeading(returnTo = LocalReturnFocus.current),
             style = MaterialTheme.typography.titleMedium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -2430,6 +2491,9 @@ private class SessionFold(
     val toggle: () -> Unit,
 )
 
+/** A session's row on Projects, for [ReturnFocus]. */
+private fun sessionRowKey(id: String) = "session-$id"
+
 /**
  * One session, on one line: its agent, its title, and a status mark only when
  * there is something to say. A branch shows when the session has its own.
@@ -2471,6 +2535,7 @@ private fun SessionRow(
             )
             .heightIn(min = 64.dp)
             .clip(MaterialTheme.shapes.small)
+            .returnsFocus(sessionRowKey(session.id))
             .clickable(role = Role.Button, onClickLabel = "Open session", onClick = onClick)
             .padding(start = 12.dp),
         verticalAlignment = Alignment.CenterVertically,

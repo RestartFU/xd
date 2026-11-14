@@ -30,7 +30,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -224,6 +223,7 @@ internal fun SettingsPage(
     }
 
     val open = section
+    val returns = rememberReturnFocus()
     // Back leaves a section, then clears a search, then closes Settings. A
     // back gesture shows the page it returns to as it is dragged: the
     // Settings home from a section, the page beneath from the home.
@@ -248,6 +248,8 @@ internal fun SettingsPage(
     Column(Modifier.fillMaxSize()) {
         SettingsTopBar(
             title = open?.title ?: "Settings",
+            // On the home, the row of the section left takes the focus in the heading's place.
+            returnTo = returns.takeIf { open == null },
             // The same order as system Back: leave a section, then a search, then Settings.
             onBack = {
                 when {
@@ -303,7 +305,12 @@ internal fun SettingsPage(
                                 else -> candidate.subtitle
                             }
                         },
-                        onOpen = { section = it },
+                        onOpen = {
+                            // Back to the home puts the focus on this section's row again.
+                            returns.open(it.name)
+                            section = it
+                        },
+                        returns = returns,
                     )
                 } else {
                     val matches = entries.filter { settingsMatch(query, it.section, it.words) }
@@ -346,7 +353,7 @@ internal fun SettingsPage(
 }
 
 @Composable
-private fun SettingsTopBar(title: String, onBack: () -> Unit) {
+private fun SettingsTopBar(title: String, returnTo: ReturnFocus?, onBack: () -> Unit) {
     Column(Modifier.background(glassPane())) {
         Row(
             Modifier
@@ -368,7 +375,7 @@ private fun SettingsTopBar(title: String, onBack: () -> Unit) {
             Text(
                 title,
                 // Takes the focus as Settings opens and as each section does.
-                modifier = Modifier.weight(1f).pageHeading(key = title),
+                modifier = Modifier.weight(1f).pageHeading(key = title, returnTo = returnTo),
                 style = MaterialTheme.typography.titleLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -382,11 +389,12 @@ private fun SettingsTopBar(title: String, onBack: () -> Unit) {
 
 @Composable
 private fun SettingsSearchField(query: String, onQuery: (String) -> Unit) {
-    OutlinedTextField(
+    NamedOutlinedField(
         value = query,
         onValueChange = onQuery,
-        // Named even once it holds a search and the placeholder is gone.
-        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Search settings" },
+        // Named by its placeholder, and once it holds a search by its name in the field.
+        name = "Search settings",
+        modifier = Modifier.fillMaxWidth(),
         singleLine = true,
         placeholder = { Text("Search settings") },
         leadingIcon = {
@@ -414,6 +422,7 @@ private fun SettingsSectionList(
     sections: List<SettingsSection>,
     summary: (SettingsSection) -> String,
     onOpen: (SettingsSection) -> Unit,
+    returns: ReturnFocus,
 ) {
     SettingsCardFrame {
         sections.forEachIndexed { index, item ->
@@ -422,6 +431,7 @@ private fun SettingsSectionList(
                 Modifier
                     .fillMaxWidth()
                     .heightIn(min = 64.dp)
+                    .returnsFocus(item.name, returns)
                     .clickable { onOpen(item) }
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,

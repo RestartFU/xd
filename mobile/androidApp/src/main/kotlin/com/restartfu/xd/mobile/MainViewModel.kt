@@ -1121,6 +1121,15 @@ class MainViewModel @JvmOverloads constructor(
     }
 }
 
+/** Something just taken out of a chat's queue or composer, which an Undo can put back. */
+sealed interface Removed {
+    /** Queued message [text], which stood at [index]. Compared by identity: each removal is its own. */
+    class Queued(val index: Int, val text: String) : Removed
+
+    /** A picture taken off the composer's draft, from [index]. */
+    class Image(val index: Int, val attachment: Attachment) : Removed
+}
+
 class ChatViewModel internal constructor(
     val client: XdClient,
     private val chatId: String,
@@ -1423,8 +1432,62 @@ class ChatViewModel internal constructor(
     }
 
     fun removeAttachment(index: Int) {
+        val image = _attachments.value.getOrNull(index) ?: return
         _attachments.value = _attachments.value.filterIndexed { at, _ -> at != index }
         scheduleDraftSync(attachments = true)
+        _removed.value = Removed.Image(index, image)
+    }
+
+    private val _removed = MutableStateFlow<Removed?>(null)
+
+    /**
+     * What was just taken out of the queue or the composer, which its notice's
+     * Undo puts back; kept here, so a rotation while the notice shows keeps it.
+     */
+    val removed: StateFlow<Removed?> = _removed.asStateFlow()
+
+    /** Its notice has gone, with or without Undo. */
+    fun consumeRemoved(removed: Removed) {
+        _removed.compareAndSet(removed, null)
+    }
+
+    /**
+     * Puts [removed] back where it was. A queued message joins the end of the
+     * queue and then moves back to its place, as on the desktop; once the turn
+     * has ended there is no queue to return it to, so it goes back into the
+     * composer instead.
+     */
+    fun undoRemove(removed: Removed) {
+        _removed.compareAndSet(removed, null)
+        when (removed) {
+            is Removed.Image -> {
+                val images = _attachments.value
+                if (images.size >= Limits.MAX_IMAGES || images.contains(removed.attachment)) return
+                _attachments.value = images.toMutableList().apply { add(removed.index.coerceIn(0, size), removed.attachment) }
+                scheduleDraftSync(attachments = true)
+            }
+            is Removed.Queued -> {
+                if (!state.value.working) {
+                    val draft = _draft.value
+                    updateDraft(if (draft.isBlank()) removed.text else "${draft.trimEnd()}\n\n${removed.text}")
+                    return
+                }
+                launchGuarded(_droppingQueued) {
+                    val before = state.value.queue
+                    session.enqueue(removed.text)
+                    // At the end of the queue once the host says so; then one step back to its place.
+                    val queued = withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
+                        state.first { it.queue.size > before.size && it.queue.lastOrNull() == removed.text }
+                    } ?: return@launchGuarded
+                    val end = queued.queue.lastIndex
+                    if (removed.index >= end || queued.queueRevision == null) return@launchGuarded
+                    session.reorderQueued(
+                        end, removed.text, removed.index, queued.queue[removed.index],
+                        after = false, revision = queued.queueRevision,
+                    )
+                }
+            }
+        }
     }
 
     fun clearAttachmentError() {
@@ -1845,6 +1908,8 @@ class ChatViewModel internal constructor(
         if (opened.revision == null) return
         launchGuarded(_droppingQueued) {
             session.dropQueued(index, text, opened.revision)
+            // Dropped at once, as on the desktop, with an Undo to put it back.
+            _removed.value = Removed.Queued(index, text)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != before }
             }

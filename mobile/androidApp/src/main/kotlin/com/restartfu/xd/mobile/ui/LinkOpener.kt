@@ -41,3 +41,10 @@ internal const val LINK_COPIED_NOTICE = "No app could open the link, so it was c
  * style or have read out with the rest of the screen.
  */
 internal val LocalNotice = staticCompositionLocalOf<(String) -> Unit> { {} }
+
+/**
+ * Says that something was removed, on the app's snackbar, with an Undo: true
+ * once Undo is pressed, false once the notice has gone without it. Null where
+ * there is no snackbar to say it on.
+ */
+internal val LocalUndoNotice = staticCompositionLocalOf<(suspend (String) -> Boolean)?> { null }
