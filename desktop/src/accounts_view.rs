@@ -650,18 +650,13 @@ impl XdDesktop {
                 )
             })
             .when(several, |block| {
-                block.child(
+                block.child(workspace_settings::key_switch(
                     div()
                         .id(("account-auto-switch", provider_index))
                         .mt(px(2.0))
                         .flex()
                         .items_center()
                         .gap_4()
-                        .cursor_pointer()
-                        .on_click(cx.listener({
-                            let flip = flip.clone();
-                            move |this, _, window, cx| flip(this, window, cx)
-                        }))
                         .child(
                             div()
                                 .flex_1()
@@ -683,21 +678,14 @@ impl XdDesktop {
                                             "At a 5-hour or weekly limit, the chat continues on the next account with room, in the same session."
                                         }),
                                 ),
-                        )
-                        .child(
-                            div()
-                                .relative()
-                                .flex_none()
-                                .child(settings_switch(colors, auto_switch))
-                                .child(keys.mark(
-                                    KeyLayer::Overlay,
-                                    KeyStop::Control(switch_stop.clone(), flip),
-                                ))
-                                .when(keys.stop_on(&switch_stop), |switch| {
-                                    switch.child(focus_ring(colors, PILL_RING_RADIUS))
-                                }),
                         ),
-                )
+                    &keys,
+                    switch_stop.clone(),
+                    auto_switch,
+                    colors,
+                    cx,
+                    move |this, window, cx| flip(this, window, cx),
+                ))
             })
             .into_any_element()
     }

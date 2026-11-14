@@ -545,7 +545,15 @@ impl XdDesktop {
                                     .border_b_1()
                                     .border_color(self.field_frame(&self.new_chat_search, cx))
                                     .child(icon(SEARCH_ICON, 14.0, colors.muted))
-                                    .child(div().flex_1().child(self.new_chat_search.clone())),
+                                    .child(div().flex_1().child(self.new_chat_search.clone()))
+                                    // Tab goes round the field and the
+                                    // provider tabs under it.
+                                    .child(keys.mark(
+                                        KeyLayer::Menu,
+                                        KeyStop::Field(
+                                            self.new_chat_search.read(cx).focus_handle(cx),
+                                        ),
+                                    )),
                             )
                         })
                         .when(kind == "model", |picker| {
@@ -554,45 +562,43 @@ impl XdDesktop {
                                     [AgentCli::Codex, AgentCli::Claude]
                                         .into_iter()
                                         .map(|agent| {
-                                            ui_button(
-                                                if agent == AgentCli::Codex {
-                                                    "draft-provider-codex"
-                                                } else {
-                                                    "draft-provider-claude"
-                                                },
-                                                ButtonKind::Ghost,
-                                                colors,
-                                            )
-                                            .relative()
-                                            .flex_1()
-                                            .h(px(CONTROL_HEIGHT))
-                                            .text_color(rgb(colors.text))
-                                            .when(agent == self.minimal_new_session_agent, |tab| {
-                                                tab.bg(rgb(colors.surface_high)).child(
-                                                    selection_marker(MarkerEdge::Foot, colors),
+                                            let id = draft_provider_stop(agent);
+                                            ui_button(id, ButtonKind::Ghost, colors)
+                                                .debug_selector(move || id.into())
+                                                .relative()
+                                                .flex_1()
+                                                .h(px(CONTROL_HEIGHT))
+                                                .text_color(rgb(colors.text))
+                                                .when(
+                                                    agent == self.minimal_new_session_agent,
+                                                    |tab| {
+                                                        tab.bg(rgb(colors.surface_high)).child(
+                                                            selection_marker(
+                                                                MarkerEdge::Foot,
+                                                                colors,
+                                                            ),
+                                                        )
+                                                    },
                                                 )
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if this.minimal_new_session_agent != agent {
-                                                    this.new_chat_remembered.effort = None;
-                                                    this.new_chat_remembered.account = None;
-                                                    this.minimal_new_session_agent = agent;
-                                                    this.new_chat_model = None;
-                                                }
-                                                this.remember_new_chat_choices();
-                                                this.new_chat_query.clear();
-                                                this.new_chat_search.update(cx, |input, cx| {
-                                                    input.set_text(String::new(), cx)
-                                                });
-                                                cx.notify();
-                                            }))
-                                            .child(assistant_icon(
-                                                agent_icon(agent),
-                                                14.0,
-                                                colors.muted,
-                                                colors,
-                                            ))
-                                            .child(agent.label())
+                                                // Left and Right switch too, from
+                                                // the list or from a tab.
+                                                .key_stop(
+                                                    &keys,
+                                                    KeyLayer::Menu,
+                                                    id,
+                                                    colors,
+                                                    cx,
+                                                    move |this, _, cx| {
+                                                        this.pick_draft_provider(agent, cx)
+                                                    },
+                                                )
+                                                .child(assistant_icon(
+                                                    agent_icon(agent),
+                                                    14.0,
+                                                    colors.muted,
+                                                    colors,
+                                                ))
+                                                .child(agent.label())
                                         }),
                                 ),
                             )
@@ -730,11 +736,17 @@ impl XdDesktop {
         }
         let send =
             composer::composer_send_button("draft-send", "Send (Enter)", ready, SEND_ICON, colors)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if ready {
-                        this.save_minimal_chat_create(cx);
-                    }
-                }))
+                .when(ready, |send| {
+                    send.key_stop_round(
+                        &self.key_targets,
+                        KeyLayer::Page,
+                        "draft-send",
+                        "Send (Enter)",
+                        colors,
+                        cx,
+                        |this, _, cx| this.save_minimal_chat_create(cx),
+                    )
+                })
                 .into_any_element();
         // Starting, it takes the open chat's width and place, which is
         // where the chat will show when it opens.
@@ -1449,6 +1461,73 @@ impl XdDesktop {
                 oid: b.oid.clone(),
             })
             .or(Some(NewSessionWorktree::New))
+    }
+}
+
+impl XdDesktop {
+    /// Starts the new chat on `agent`, from the model picker's tabs: its
+    /// models are the ones listed, and a choice made for the other one goes.
+    fn pick_draft_provider(&mut self, agent: AgentCli, cx: &mut Context<Self>) {
+        if self.minimal_new_session_agent != agent {
+            self.new_chat_remembered.effort = None;
+            self.new_chat_remembered.account = None;
+            self.minimal_new_session_agent = agent;
+            self.new_chat_model = None;
+        }
+        self.remember_new_chat_choices();
+        self.new_chat_query.clear();
+        self.new_chat_search
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
+    }
+
+    /// Left and Right in the new chat's model picker: Codex and Claude Code,
+    /// while the arrow keys are in its list or the Tab ring is on one of its
+    /// provider tabs. The keys stay where they were, on the new list's first
+    /// row or on the tab picked. Says whether they did this.
+    pub(super) fn step_draft_provider(&mut self, right: bool, cx: &mut Context<Self>) -> bool {
+        if self.new_chat_menu != Some("model") {
+            return false;
+        }
+        let on_list = self
+            .key_rows()
+            .is_some_and(|(layer, owner, _)| layer == KeyLayer::Menu && owner == DRAFT_PICKER)
+            && self.key_row_at().is_some();
+        let on_tab = self
+            .key_stop
+            .as_ref()
+            .is_some_and(|id| id.starts_with(DRAFT_PROVIDER_STOP));
+        if !on_list && !on_tab {
+            return false;
+        }
+        let agent = if right {
+            AgentCli::Claude
+        } else {
+            AgentCli::Codex
+        };
+        if agent != self.minimal_new_session_agent {
+            self.pick_draft_provider(agent, cx);
+            if on_tab {
+                self.key_stop = Some(draft_provider_stop(agent).into());
+            } else {
+                self.key_cursor = Some((DRAFT_PICKER, 0));
+            }
+        }
+        true
+    }
+}
+
+/// The new chat's pickers, as the owner of the rows the arrow keys move in.
+const DRAFT_PICKER: &str = "draft-picker";
+/// How the model picker's provider tabs are named as Tab stops.
+const DRAFT_PROVIDER_STOP: &str = "draft-provider-";
+
+/// The Tab stop of the model picker's tab for `agent`.
+fn draft_provider_stop(agent: AgentCli) -> &'static str {
+    if agent == AgentCli::Codex {
+        "draft-provider-codex"
+    } else {
+        "draft-provider-claude"
     }
 }
 

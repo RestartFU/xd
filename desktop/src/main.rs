@@ -1705,6 +1705,8 @@ fn segmented_control() -> gpui::Div {
 
 /// The corners of a segment's focus ring: the segment's own, moved out.
 const SEGMENT_RING_RADIUS: f32 = RADIUS_TAB + FOCUS_RING_GAP;
+/// The corners of a tab's focus ring: the tab's own, moved out.
+const TAB_RING_RADIUS: f32 = RADIUS_TAB + FOCUS_RING_GAP;
 
 /// One segment of a [`segmented_control`], at the compact height, on a
 /// selected fill while it is the one on.
@@ -3194,8 +3196,22 @@ trait KeyRow: Sized {
         run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
     ) -> Self;
 
-    /// [`KeyRow::key_stop`] for a control that is an icon alone: while the
-    /// ring is on it, its name shows under it, as under the pointer.
+    /// [`KeyRow::key_stop_ring`] for a control that is an icon alone: while
+    /// the ring is on it, its name shows under it, as under the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn key_stop_named_ring(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        radius: f32,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self;
+
+    /// [`KeyRow::key_stop_named_ring`] with the corners of a button.
     #[allow(clippy::too_many_arguments)]
     fn key_stop_named(
         self,
@@ -3206,7 +3222,25 @@ trait KeyRow: Sized {
         colors: ThemeColors,
         cx: &Context<XdDesktop>,
         run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
-    ) -> Self;
+    ) -> Self {
+        self.key_stop_named_ring(keys, layer, id, label, FOCUS_RING_RADIUS, colors, cx, run)
+    }
+
+    /// [`KeyRow::key_stop_named_ring`] for a round button, such as the
+    /// composer's Send and Stop.
+    #[allow(clippy::too_many_arguments)]
+    fn key_stop_round(
+        self,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self {
+        self.key_stop_named_ring(keys, layer, id, label, PILL_RING_RADIUS, colors, cx, run)
+    }
 
     /// [`KeyRow::key_stop`] for a row of a list that clips at its edges,
     /// such as the Files pane's: the ring is drawn just inside the row.
@@ -3215,6 +3249,22 @@ trait KeyRow: Sized {
         keys: &KeyTargets,
         layer: KeyLayer,
         id: impl Into<SharedString>,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self;
+
+    /// [`KeyRow::key_stop_ring`] for an item of a list whose arrow keys
+    /// move between its items, such as Settings' sections: only the item in
+    /// force (`roving`) is a Tab stop, and the others take a click alone.
+    #[allow(clippy::too_many_arguments)]
+    fn key_stop_roving(
+        self,
+        roving: bool,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        radius: f32,
         colors: ThemeColors,
         cx: &Context<XdDesktop>,
         run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
@@ -3281,12 +3331,13 @@ impl KeyRow for gpui::Stateful<gpui::Div> {
         .when(on, |control| control.child(focus_ring(colors, radius)))
     }
 
-    fn key_stop_named(
+    fn key_stop_named_ring(
         self,
         keys: &KeyTargets,
         layer: KeyLayer,
         id: impl Into<SharedString>,
         label: impl Into<SharedString>,
+        radius: f32,
         colors: ThemeColors,
         cx: &Context<XdDesktop>,
         run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
@@ -3295,8 +3346,10 @@ impl KeyRow for gpui::Stateful<gpui::Div> {
         let on = keys.stop_on(&id);
         let label = label.into();
         keys.note_named(&id);
-        self.key_stop(keys, layer, id, colors, cx, run)
-            .when(on, |control| control.child(focus_tooltip(label, colors)))
+        self.key_stop_ring(keys, layer, id, radius, colors, cx, run)
+            .when(on, |control| {
+                control.child(focus_tooltip(label, keys.detail(), colors))
+            })
     }
 
     fn key_reach(
@@ -3310,6 +3363,24 @@ impl KeyRow for gpui::Stateful<gpui::Div> {
         run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
     ) -> Self {
         key_reach(self, keys, layer, id, label, radius, colors, run)
+    }
+
+    fn key_stop_roving(
+        self,
+        roving: bool,
+        keys: &KeyTargets,
+        layer: KeyLayer,
+        id: impl Into<SharedString>,
+        radius: f32,
+        colors: ThemeColors,
+        cx: &Context<XdDesktop>,
+        run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
+    ) -> Self {
+        if roving {
+            self.key_stop_ring(keys, layer, id, radius, colors, cx, run)
+        } else {
+            self.on_click(cx.listener(move |this, _, window, cx| run(this, window, cx)))
+        }
     }
 
     fn key_stop_inset(
@@ -11545,25 +11616,34 @@ impl XdDesktop {
                     .text_color(rgb(if selected { colors.text } else { colors.muted }))
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(colors.surface_high)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        // Its own chat is already open behind an agent tab.
-                        if this.model.selected_chat.as_deref() == Some(open.id.as_str()) {
-                            this.open_agent = None;
-                            cx.notify();
-                            return;
-                        }
-                        if this.flush_draft_before_navigation()
-                            && let Some(agent) = AgentCli::from_backend(&open.backend)
-                        {
-                            this.open_minimal_session(
-                                open.folder.clone(),
-                                open.id.clone(),
-                                agent,
-                                window,
-                                cx,
-                            );
-                        }
-                    }))
+                    // A Tab stop before its close, as Ctrl+Tab steps to it.
+                    .key_stop_ring(
+                        &keys,
+                        KeyLayer::Page,
+                        format!("session-chat-tab-{index}"),
+                        TAB_RING_RADIUS,
+                        colors,
+                        cx,
+                        move |this, window, cx| {
+                            // Its own chat is already open behind an agent tab.
+                            if this.model.selected_chat.as_deref() == Some(open.id.as_str()) {
+                                this.open_agent = None;
+                                cx.notify();
+                                return;
+                            }
+                            if this.flush_draft_before_navigation()
+                                && let Some(agent) = AgentCli::from_backend(&open.backend)
+                            {
+                                this.open_minimal_session(
+                                    open.folder.clone(),
+                                    open.id.clone(),
+                                    agent,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        },
+                    )
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -11677,9 +11757,17 @@ impl XdDesktop {
                     .text_color(rgb(if selected { colors.text } else { colors.muted }))
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(colors.surface_high)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.show_agent_tab(chat.clone(), show.clone(), window, cx);
-                    }))
+                    .key_stop_ring(
+                        &keys,
+                        KeyLayer::Page,
+                        format!("session-agent-tab-{index}"),
+                        TAB_RING_RADIUS,
+                        colors,
+                        cx,
+                        move |this, window, cx| {
+                            this.show_agent_tab(chat.clone(), show.clone(), window, cx);
+                        },
+                    )
                     .when_some(provider_icon, |tab, path| {
                         tab.child(assistant_icon(path, 13.0, colors.muted, colors))
                     })
@@ -18179,7 +18267,15 @@ impl XdDesktop {
                         .build()
                         .occlude()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
+                        .key_stop_named(
+                            &self.key_targets,
+                            KeyLayer::Page,
+                            "minimal-browser-toggle",
+                            "Show or hide the side pane",
+                            colors,
+                            cx,
+                            |this, _, cx| this.toggle_browser(cx),
+                        ),
                     )
                 },
             )
@@ -18499,7 +18595,15 @@ impl XdDesktop {
                         .active(self.browser_is_open())
                         .build()
                         .debug_selector(|| "toggle-side-pane".into())
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
+                        .key_stop_named(
+                            &self.key_targets,
+                            KeyLayer::Page,
+                            "toggle-side-pane",
+                            format!("Show or hide the side pane ({MOD_KEY}+B)"),
+                            colors,
+                            cx,
+                            |this, _, cx| this.toggle_browser(cx),
+                        ),
                     )
                     .when(self.native_session(), |controls| {
                         controls.child(
@@ -18512,9 +18616,15 @@ impl XdDesktop {
                             .active(self.bottom_terminal_open)
                             .build()
                             .debug_selector(|| "toggle-bottom-pane".into())
-                            .on_click(cx.listener(
-                                |this, _, window, cx| this.toggle_bottom_terminal(window, cx),
-                            )),
+                            .key_stop_named(
+                                &self.key_targets,
+                                KeyLayer::Page,
+                                "toggle-bottom-pane",
+                                "Show or hide the terminal under the chat (Ctrl+`)",
+                                colors,
+                                cx,
+                                |this, window, cx| this.toggle_bottom_terminal(window, cx),
+                            ),
                         )
                     }),
             )
@@ -19756,37 +19866,46 @@ impl XdDesktop {
                 "Hide the agents it started"
             };
             let key = fold.key;
+            let key_fold = key.clone();
             // In the gutter left of the assistant's icon, under the
-            // project's own chevron, so titles stay lined up.
+            // project's own chevron, so titles stay lined up. Left and Right
+            // on the row fold it too, and Tab stops on it after the row.
             row.child(
-                div()
-                    .id(("minimal-session-fold", instance))
-                    .absolute()
-                    // 24 wide around the chevron, which stays where it was.
-                    .left(px(-10.0))
-                    .top_0()
-                    .bottom_0()
-                    .w(px(HIT_MIN))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(RADIUS_CONTROL))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.border)))
-                    .tooltip(pane_tooltip(label, colors))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.toggle_session_folded(key.clone(), cx);
-                    }))
-                    .child(icon(
-                        if fold.folded {
-                            CHEVRON_RIGHT_ICON
-                        } else {
-                            CHEVRON_DOWN_ICON
-                        },
-                        10.0,
-                        colors.faint,
-                    )),
+                self.tree_action(
+                    div()
+                        .id(("minimal-session-fold", instance))
+                        .absolute()
+                        // 24 wide around the chevron, which stays where it was.
+                        .left(px(-10.0))
+                        .top_0()
+                        .bottom_0()
+                        .w(px(HIT_MIN))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(RADIUS_CONTROL))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(colors.border)))
+                        .tooltip(pane_tooltip(label, colors))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_session_folded(key.clone(), cx);
+                        }))
+                        .child(icon(
+                            if fold.folded {
+                                CHEVRON_RIGHT_ICON
+                            } else {
+                                CHEVRON_DOWN_ICON
+                            },
+                            10.0,
+                            colors.faint,
+                        )),
+                    &stop,
+                    "fold",
+                    label,
+                    colors,
+                    move |this, _, cx| this.toggle_session_folded(key_fold.clone(), cx),
+                ),
             )
         })
         .when_some(settle_session, |row, session_id| {
@@ -20349,37 +20468,36 @@ impl XdDesktop {
             .child({
                 let key_parent = add_parent.clone();
                 let add_stop = format!("{}\tadd", stop.key);
-                let button = icon_button(
-                    ("catalog-folder-add", index),
-                    "New project or folder here",
-                    PLUS_ICON,
-                    colors,
-                )
-                .size(HIT_MIN)
-                .drawn(plus_icon)
-                .ink(colors.faint)
-                .wash(rgb(colors.border))
-                // A tooltip would linger over the menu it opens.
-                .named(!self.minimal_popup_is_open())
-                .build()
-                .when(!current && !stop.keyed, |button| {
-                    button
-                        .invisible()
-                        .group_hover("catalog-folder", |style| style.visible())
-                })
-                .on_click(cx.listener(
-                    move |this, event: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.open_project_add_menu(
-                            Some(add_parent.clone()),
-                            event.position(),
-                            window,
-                            cx,
-                        );
-                    },
-                ));
                 self.tree_action(
-                    button,
+                    icon_button(
+                        ("catalog-folder-add", index),
+                        "New project or folder here",
+                        PLUS_ICON,
+                        colors,
+                    )
+                    .size(HIT_MIN)
+                    .drawn(plus_icon)
+                    .ink(colors.faint)
+                    .wash(rgb(colors.border))
+                    // A tooltip would linger over the menu it opens.
+                    .named(!self.minimal_popup_is_open())
+                    .build()
+                    .when(!current && !stop.keyed, |button| {
+                        button
+                            .invisible()
+                            .group_hover("catalog-folder", |style| style.visible())
+                    })
+                    .on_click(cx.listener(
+                        move |this, event: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_project_add_menu(
+                                Some(add_parent.clone()),
+                                event.position(),
+                                window,
+                                cx,
+                            );
+                        },
+                    )),
                     &stop,
                     "add",
                     "New project or folder here",
@@ -20903,28 +21021,29 @@ impl XdDesktop {
                 })
                 .child({
                     let key_project = create_project.clone();
-                    let button = icon_button(
-                        ("minimal-session-group-add", project_index),
-                        format!("New session in {}", project.name),
-                        PLUS_ICON,
-                        colors,
-                    )
-                    .size(HIT_MIN)
-                    .drawn(plus_icon)
-                    .ink(colors.faint)
-                    .wash(rgb(colors.border))
-                    .build()
-                    .when(!current && !stop.keyed, |button| {
-                        button
-                            .invisible()
-                            .group_hover("catalog-project", |style| style.visible())
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.begin_chat_create(create_project.clone(), window, cx);
-                    }));
                     self.tree_action(
-                        button,
+                        icon_button(
+                            ("minimal-session-group-add", project_index),
+                            format!("New session in {}", project.name),
+                            PLUS_ICON,
+                            colors,
+                        )
+                        .size(HIT_MIN)
+                        .drawn(plus_icon)
+                        .ink(colors.faint)
+                        .wash(rgb(colors.border))
+                        .build()
+                        .when(!current && !stop.keyed, |button| {
+                            button
+                                .invisible()
+                                .group_hover("catalog-project", |style| style.visible())
+                        })
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.begin_chat_create(create_project.clone(), window, cx);
+                            },
+                        )),
                         &stop,
                         "add",
                         format!("New session in {}", project.name),
@@ -21360,9 +21479,18 @@ impl XdDesktop {
                                 .when(width >= CATALOG_UPDATE_LABEL_MIN_WIDTH, |button| {
                                     button.child("Update")
                                 })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_update_popup(window, cx)
-                                })),
+                                .key_stop_named(
+                                    &self.key_targets,
+                                    self.catalog_layer,
+                                    "minimal-update",
+                                    "Update xd",
+                                    colors,
+                                    cx,
+                                    |this, window, cx| {
+                                        this.leave_key_stop(window);
+                                        this.open_update_popup(window, cx)
+                                    },
+                                ),
                         )
                     }),
             )
@@ -21855,23 +21983,35 @@ impl XdDesktop {
                     .unwrap_or_else(|| path.clone());
                 // A Tab stop: Enter opens the picture in the viewer, as a
                 // click does.
-                let open = div().id(("message-image", index));
-                let open = match keys {
-                    Some(keys) => key_reach(
-                        open,
-                        keys,
-                        KeyLayer::Page,
-                        format!("message-image:{index}"),
-                        Some(format!("Open {name}").into()),
-                        RADIUS_PANEL + FOCUS_RING_GAP,
-                        colors,
-                        {
-                            let path = path.clone();
-                            move |this, window, cx| this.open_image_viewer(path.clone(), window, cx)
-                        },
-                    ),
-                    None => open,
-                };
+                let open = div()
+                    .id(("message-image", index))
+                    .on_click({
+                        let path = path.clone();
+                        move |_, window, cx| {
+                            window.dispatch_action(
+                                Box::new(OpenMessageImage {
+                                    path: path.clone(),
+                                    window: window.window_handle(),
+                                }),
+                                cx,
+                            );
+                        }
+                    })
+                    .map(|open| match keys {
+                        Some(keys) => key_reach(
+                            open,
+                            keys,
+                            KeyLayer::Page,
+                            format!("message-image:{index}"),
+                            Some(format!("Open {name}").into()),
+                            RADIUS_PANEL + FOCUS_RING_GAP,
+                            colors,
+                            move |this, window, cx| {
+                                this.open_image_viewer(path.clone(), window, cx)
+                            },
+                        ),
+                        None => open,
+                    });
                 div()
                     .relative()
                     .w_full()
@@ -21884,15 +22024,6 @@ impl XdDesktop {
                             .h(px(height))
                             .rounded(px(RADIUS_PANEL))
                             .cursor_pointer()
-                            .on_click(move |_, window, cx| {
-                                window.dispatch_action(
-                                    Box::new(OpenMessageImage {
-                                        path: path.clone(),
-                                        window: window.window_handle(),
-                                    }),
-                                    cx,
-                                );
-                            })
                             .child(
                                 img(ready.image.image.clone())
                                     .size_full()
@@ -24243,7 +24374,17 @@ impl XdDesktop {
                             SEND_ICON,
                             colors,
                         )
-                        .on_click(cx.listener(|this, _, _, cx| this.send_agent_message(cx))),
+                        .when(draft_ready, |send| {
+                            send.key_stop_round(
+                                &self.key_targets,
+                                KeyLayer::Page,
+                                "agent-send-message",
+                                "Send (Enter)",
+                                colors,
+                                cx,
+                                |this, _, cx| this.send_agent_message(cx),
+                            )
+                        }),
                     )
                     .into_any_element()
             }
@@ -25527,11 +25668,14 @@ impl XdDesktop {
                     .h(px(CONTROL_HEIGHT_COMPACT))
                     .px(px(8.0))
                     .text_size(text_px(TEXT_LABEL))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if can_queue {
-                            this.queue_composer(cx)
-                        }
-                    }))
+                    .key_stop(
+                        &self.key_targets,
+                        KeyLayer::Page,
+                        "native-queue-message",
+                        colors,
+                        cx,
+                        |this, _, cx| this.queue_composer(cx),
+                    )
                     .child("Queue")
                     .into_any_element(),
             );
@@ -25545,7 +25689,15 @@ impl XdDesktop {
                 )
                 // A short window keeps it to the options' compact height.
                 .when(short, |button| button.size(px(CONTROL_HEIGHT_COMPACT)))
-                .on_click(cx.listener(|this, _, _, cx| this.cancel_turn(cx)))
+                .key_stop_round(
+                    &self.key_targets,
+                    KeyLayer::Page,
+                    "native-cancel-turn",
+                    format!("Stop ({MOD_KEY}+.)"),
+                    colors,
+                    cx,
+                    |this, _, cx| this.cancel_turn(cx),
+                )
                 .into_any_element(),
             );
         }
@@ -25563,13 +25715,27 @@ impl XdDesktop {
                     colors,
                 )
                 .when(short, |button| button.size(px(CONTROL_HEIGHT_COMPACT)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if can_send {
-                        this.send_composer(cx)
-                    } else if can_resume {
-                        this.resume_turn(cx)
-                    }
-                }))
+                .when(can_send || can_resume, |button| {
+                    button.key_stop_round(
+                        &self.key_targets,
+                        KeyLayer::Page,
+                        "native-send-message",
+                        if shows_resume {
+                            "Resume chat"
+                        } else {
+                            "Send (Enter)"
+                        },
+                        colors,
+                        cx,
+                        move |this, _, cx| {
+                            if can_send {
+                                this.send_composer(cx)
+                            } else if can_resume {
+                                this.resume_turn(cx)
+                            }
+                        },
+                    )
+                })
                 .into_any_element(),
             );
         }
@@ -25692,8 +25858,13 @@ impl XdDesktop {
                                         .rounded_full()
                                         .text_size(text_px(TEXT_LABEL))
                                         .shadow_md()
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.jump_to_latest(cx)),
+                                        .key_stop(
+                                            &self.key_targets,
+                                            KeyLayer::Page,
+                                            "native-jump-latest",
+                                            colors,
+                                            cx,
+                                            |this, _, cx| this.jump_to_latest(cx),
                                         )
                                         .when(working, |button| {
                                             button.child(
@@ -28350,13 +28521,26 @@ impl XdDesktop {
                 this.open_context_menu_from_keys(window, cx);
             }))
             .on_action(cx.listener(|this, _: &KeyLeft, _, cx| {
-                if !this.tree_ring_step(TreeStep::Out, cx) {
+                if !this.tree_ring_step(TreeStep::Out, cx) && !this.step_draft_provider(false, cx) {
                     cx.propagate();
                 }
             }))
             .on_action(cx.listener(|this, _: &KeyRight, _, cx| {
-                if !this.tree_ring_step(TreeStep::In, cx) {
+                if !this.tree_ring_step(TreeStep::In, cx) && !this.step_draft_provider(true, cx) {
                     cx.propagate();
+                }
+            }))
+            // The new chat's model picker: from its search field, once the
+            // arrow keys are in its list, Left and Right switch provider
+            // rather than move the caret.
+            .capture_action(cx.listener(|this, _: &Left, _, cx| {
+                if this.step_draft_provider(false, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Right, _, cx| {
+                if this.step_draft_provider(true, cx) {
+                    cx.stop_propagation();
                 }
             }))
             .on_action(cx.listener(|this, _: &KeyHome, _, cx| {

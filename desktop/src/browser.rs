@@ -843,18 +843,16 @@ impl Render for BrowserPane {
                     label: Option<&'static str>,
                     radius: f32,
                     run: PaneKeyRun| {
-            let pane = pane_handle.clone();
-            crate::key_stop_in_view(
-                control,
+            pane_press(
                 &keys,
-                crate::KeyLayer::Page,
+                &pane_handle,
+                control,
                 id,
-                label.map(gpui::SharedString::from),
+                label,
                 radius,
                 colors,
-                move |window, cx| {
-                    let _ = pane.update(cx, |pane, cx| run(pane, window, cx));
-                },
+                cx,
+                run,
             )
         };
         let auxiliary_tabs = self
@@ -868,15 +866,9 @@ impl Render for BrowserPane {
                     self.auxiliary == Some(tab),
                     colors,
                 )
-                .on_click(cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)))
                 .child(crate::icon(tab.icon(), 13., colors.muted))
                 .child(tab.label());
-                let close = tab_close(("close-side-tool", index), "Close", colors).on_click(
-                    cx.listener(move |pane, _, _, cx| {
-                        cx.stop_propagation();
-                        pane.close_auxiliary(tab, cx);
-                    }),
-                );
+                let close = tab_close(("close-side-tool", index), "Close", colors);
                 stop(
                     pill,
                     format!("side-tool-tab-{index}"),
@@ -907,10 +899,7 @@ impl Render for BrowserPane {
                             tab.icon(),
                             colors,
                         )
-                        .build()
-                        .on_click(
-                            cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)),
-                        ),
+                        .build(),
                         format!("side-add-tool-{index}"),
                         Some(tab.label()),
                         crate::FOCUS_RING_RADIUS,
@@ -962,19 +951,12 @@ impl Render for BrowserPane {
                                     self.auxiliary.is_none() && index == self.session.active_tab;
                                 let pill = tab_pill(("browser-tab", slot.id), active, colors)
                                     .w(px(BROWSER_TAB_WIDTH))
-                                    .on_click(cx.listener(move |pane, _, window, cx| {
-                                        pane.select_tab(index, window, cx)
-                                    }))
                                     .child(crate::icon(crate::BROWSER_ICON, 13., colors.muted))
                                     // Cut short with an ellipsis, the whole
                                     // title under the pointer.
                                     .child(crate::truncating_label(label).flex_1());
                                 let close =
-                                    tab_close(("browser-close-tab", slot.id), "Close tab", colors)
-                                        .on_click(cx.listener(move |pane, _, window, cx| {
-                                            cx.stop_propagation();
-                                            pane.close_tab(index, window, cx);
-                                        }));
+                                    tab_close(("browser-close-tab", slot.id), "Close tab", colors);
                                 stop(
                                     pill,
                                     format!("browser-tab-{}", slot.id),
@@ -1005,10 +987,7 @@ impl Render for BrowserPane {
                             colors,
                         )
                         .drawn(crate::plus_icon)
-                        .build()
-                        .on_click(
-                            cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
-                        ),
+                        .build(),
                         "browser-new-tab".into(),
                         Some("New browser tab"),
                         crate::FOCUS_RING_RADIUS,
@@ -1026,8 +1005,82 @@ impl Render for BrowserPane {
     }
 }
 
-/// What Enter or Space on one of the pane's controls does to the pane.
-type PaneKeyRun = Box<dyn Fn(&mut BrowserPane, &mut Window, &mut Context<BrowserPane>)>;
+/// What a click on one of the pane's controls, or Enter or Space on it, does
+/// to the pane.
+type PaneKeyRun = Box<PaneRun>;
+type PaneRun = dyn Fn(&mut BrowserPane, &mut Window, &mut Context<BrowserPane>);
+
+/// One of the pane's own controls: a click runs `run`, and so do Enter and
+/// Space once the window's Tab ring is on it. The click goes no further, so
+/// a tab's close does not also pick the tab it sits in.
+#[allow(clippy::too_many_arguments)]
+fn pane_press(
+    keys: &crate::KeyTargets,
+    pane: &gpui::WeakEntity<BrowserPane>,
+    control: gpui::Stateful<gpui::Div>,
+    id: String,
+    label: Option<&'static str>,
+    radius: f32,
+    colors: ThemeColors,
+    cx: &Context<BrowserPane>,
+    run: PaneKeyRun,
+) -> gpui::Stateful<gpui::Div> {
+    let run: Rc<PaneRun> = Rc::from(run);
+    let click = run.clone();
+    let pane = pane.clone();
+    crate::key_stop_in_view(
+        control.on_click(cx.listener(move |pane, _, window, cx| {
+            cx.stop_propagation();
+            click(pane, window, cx);
+        })),
+        keys,
+        crate::KeyLayer::Page,
+        id,
+        label.map(gpui::SharedString::from),
+        radius,
+        colors,
+        move |window, cx| {
+            let _ = pane.update(cx, |pane, cx| run(pane, window, cx));
+        },
+    )
+}
+
+/// [`pane_press`] for a browser tab's own controls: its toolbar and what its
+/// empty and error states offer. One that cannot be used now is neither
+/// clicked nor a Tab stop.
+#[allow(clippy::too_many_arguments)]
+fn tab_press(
+    keys: &crate::KeyTargets,
+    control: gpui::Stateful<gpui::Div>,
+    id: impl Into<gpui::SharedString>,
+    label: Option<&'static str>,
+    enabled: bool,
+    colors: ThemeColors,
+    cx: &Context<BrowserTab>,
+    run: impl Fn(&mut BrowserTab, &mut Window, &mut Context<BrowserTab>) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    if !enabled {
+        return control;
+    }
+    let run = Rc::new(run);
+    let click = run.clone();
+    let tab = cx.entity().downgrade();
+    crate::key_stop_in_view(
+        control.on_click(cx.listener(move |tab, _, window, cx| {
+            cx.stop_propagation();
+            click(tab, window, cx);
+        })),
+        keys,
+        crate::KeyLayer::Page,
+        id,
+        label.map(gpui::SharedString::from),
+        crate::FOCUS_RING_RADIUS,
+        colors,
+        move |window, cx| {
+            let _ = tab.update(cx, |tab, cx| run(tab, window, cx));
+        },
+    )
+}
 
 /// The corners of the focus ring around one of the pane's tabs.
 const TAB_RING_RADIUS: f32 = RADIUS_TAB + crate::FOCUS_RING_GAP;
@@ -1573,23 +1626,35 @@ impl BrowserTab {
                 .items_center()
                 .gap(px(8.))
                 .when(error == WEBVIEW2_MISSING, |row| {
-                    row.child(
+                    row.child(tab_press(
+                        &self.keys,
                         crate::ui_button(
                             "browser-get-webview2",
                             crate::ButtonKind::Primary,
                             colors,
                         )
-                        .h(px(28.))
-                        .on_click(|_, _, cx| cx.open_url(WEBVIEW2_INSTALLER))
+                        .h(px(CONTROL_HEIGHT_COMPACT))
                         .child("Get WebView2"),
-                    )
+                        "browser-get-webview2",
+                        None,
+                        true,
+                        colors,
+                        cx,
+                        |_, _, cx| cx.open_url(WEBVIEW2_INSTALLER),
+                    ))
                 })
-                .child(
+                .child(tab_press(
+                    &self.keys,
                     crate::ui_button("browser-retry", crate::ButtonKind::Secondary, colors)
-                        .h(px(28.))
-                        .on_click(cx.listener(|pane, _, window, cx| pane.retry(window, cx)))
+                        .h(px(CONTROL_HEIGHT_COMPACT))
                         .child("Try again"),
-                )
+                    "browser-retry",
+                    None,
+                    true,
+                    colors,
+                    cx,
+                    |tab, window, cx| tab.retry(window, cx),
+                ))
                 .into_any_element(),
         )
     }
@@ -1647,7 +1712,6 @@ impl Render for BrowserTab {
         let colors = self.colors;
         let address_focused = self.address.read(cx).focus_handle(cx).is_focused(window);
         let keys = self.keys.clone();
-        let tab_handle = cx.entity().downgrade();
         // A toolbar button the window's Tab stops on while it can be used:
         // Enter or Space does what a click does.
         let stop = |button: gpui::Stateful<gpui::Div>,
@@ -1655,22 +1719,7 @@ impl Render for BrowserTab {
                     label: &'static str,
                     enabled: bool,
                     run: fn(&mut Self, &mut Window, &mut Context<Self>)| {
-            if !enabled {
-                return button;
-            }
-            let tab = tab_handle.clone();
-            crate::key_stop_in_view(
-                button,
-                &keys,
-                crate::KeyLayer::Page,
-                id,
-                Some(label.into()),
-                crate::FOCUS_RING_RADIUS,
-                colors,
-                move |window, cx| {
-                    let _ = tab.update(cx, |tab, cx| run(tab, window, cx));
-                },
-            )
+            tab_press(&keys, button, id, Some(label), enabled, colors, cx, run)
         };
         let mut pane = div()
             .size_full()
@@ -1692,12 +1741,7 @@ impl Render for BrowserTab {
                     .border_b_1()
                     .border_color(rgb(colors.border))
                     .child(stop(
-                        self.button("browser-back", "Back", crate::ARROW_LEFT_ICON, back_enabled)
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                if back_enabled {
-                                    pane.history(true, cx);
-                                }
-                            })),
+                        self.button("browser-back", "Back", crate::ARROW_LEFT_ICON, back_enabled),
                         "browser-back",
                         "Back",
                         back_enabled,
@@ -1709,12 +1753,7 @@ impl Render for BrowserTab {
                             "Forward",
                             crate::ARROW_RIGHT_ICON,
                             forward_enabled,
-                        )
-                        .on_click(cx.listener(move |pane, _, _, cx| {
-                            if forward_enabled {
-                                pane.history(false, cx);
-                            }
-                        })),
+                        ),
                         "browser-forward",
                         "Forward",
                         forward_enabled,
@@ -1726,16 +1765,7 @@ impl Render for BrowserTab {
                             "Reload",
                             crate::ROTATE_CW_ICON,
                             has_page || self.engine_failed,
-                        )
-                        .on_click(cx.listener(
-                            move |pane, _, window, cx| {
-                                if pane.engine_failed {
-                                    pane.retry(window, cx);
-                                } else if has_page {
-                                    pane.reload(cx);
-                                }
-                            },
-                        )),
+                        ),
                         "browser-reload",
                         "Reload",
                         has_page || self.engine_failed,
@@ -1794,12 +1824,7 @@ impl Render for BrowserTab {
                             "Open in your browser",
                             crate::EXTERNAL_LINK_ICON,
                             has_page,
-                        )
-                        .on_click(cx.listener(move |pane, _, _, cx| {
-                            if let Some(url) = &pane.url {
-                                cx.open_url(url);
-                            }
-                        })),
+                        ),
                         "browser-external",
                         "Open in your browser",
                         has_page,
@@ -1831,12 +1856,18 @@ impl Render for BrowserTab {
                     )
                     .map(|state| match self.engine_recovery(error, cx) {
                         Some(recovery) => state.child(recovery),
-                        None if has_page => state.child(
+                        None if has_page => state.child(tab_press(
+                            &keys,
                             crate::ui_button("browser-retry", crate::ButtonKind::Secondary, colors)
                                 .h(px(CONTROL_HEIGHT_COMPACT))
-                                .on_click(cx.listener(|pane, _, window, cx| pane.retry(window, cx)))
                                 .child("Reload"),
-                        ),
+                            "browser-retry",
+                            None,
+                            true,
+                            colors,
+                            cx,
+                            |tab, window, cx| tab.retry(window, cx),
+                        )),
                         None => state,
                     }),
             );
@@ -1906,21 +1937,27 @@ impl Render for BrowserTab {
                             .justify_center()
                             .gap(px(8.))
                             .children([3000_u32, 5173, 8080].map(|port| {
-                                crate::ui_button(
-                                    ("browser-localhost", port),
-                                    crate::ButtonKind::Secondary,
+                                tab_press(
+                                    &keys,
+                                    crate::ui_button(
+                                        ("browser-localhost", port),
+                                        crate::ButtonKind::Secondary,
+                                        colors,
+                                    )
+                                    .h(px(CONTROL_HEIGHT_COMPACT))
+                                    .font_family(crate::MONO)
+                                    .text_size(text_px(TEXT_LABEL))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .child(format!("localhost:{port}")),
+                                    format!("browser-localhost-{port}"),
+                                    None,
+                                    true,
                                     colors,
-                                )
-                                .h(px(CONTROL_HEIGHT_COMPACT))
-                                .font_family(crate::MONO)
-                                .text_size(text_px(TEXT_LABEL))
-                                .font_weight(FontWeight::NORMAL)
-                                .child(format!("localhost:{port}"))
-                                .on_click(cx.listener(
-                                    move |pane, _, _, cx| {
-                                        pane.navigate(&format!("http://localhost:{port}"), cx);
+                                    cx,
+                                    move |tab, _, cx| {
+                                        tab.navigate(&format!("http://localhost:{port}"), cx);
                                     },
-                                ))
+                                )
                             })),
                     ),
             );

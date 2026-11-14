@@ -557,6 +557,14 @@ fn settings_step_button(
 /// control.
 const SETTINGS_ROW_TEXT_MIN: f32 = 150.0;
 
+/// How a section of Settings' list is named as a Tab stop: this, then its
+/// place in the list.
+const SECTION_STOP: &str = "workspace-settings-section-";
+
+/// The corners of the ring around a section of Settings' list: a tab's,
+/// moved out.
+const SECTION_RING_RADIUS: f32 = RADIUS_TAB + crate::FOCUS_RING_GAP;
+
 /// The list the arrow keys are in while a Settings dropdown is open.
 const SETTINGS_MENU: &str = "settings-menu";
 /// The Interface size dropdown, among the page's dropdowns.
@@ -567,17 +575,18 @@ const INTERFACE_SIZE_DESCRIPTION: &str = "Scales everything in the window: text,
 
 /// A setting that is a switch. A click anywhere on its row flips it; Tab
 /// stops on the switch itself, which Space and Enter flip.
-fn key_switch(
+pub(super) fn key_switch(
     row: gpui::Stateful<gpui::Div>,
     keys: &KeyTargets,
-    id: &'static str,
+    id: impl Into<SharedString>,
     on: bool,
     colors: ThemeColors,
     cx: &Context<XdDesktop>,
     run: impl Fn(&mut XdDesktop, &mut Window, &mut Context<XdDesktop>) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let run: KeyRun = Rc::new(run);
-    let ringed = keys.stop_on(id);
+    let id = id.into();
+    let ringed = keys.stop_on(&id);
     row.cursor_pointer()
         .on_click(cx.listener({
             let run = run.clone();
@@ -588,7 +597,7 @@ fn key_switch(
                 .relative()
                 .flex_none()
                 .child(settings_switch(colors, on))
-                .child(keys.mark(KeyLayer::Overlay, KeyStop::Control(id.into(), run)))
+                .child(keys.mark(KeyLayer::Overlay, KeyStop::Control(id, run)))
                 .when(ringed, |switch| {
                     switch.child(focus_ring(colors, PILL_RING_RADIUS))
                 }),
@@ -1241,7 +1250,6 @@ impl XdDesktop {
                 let swatch = theme.colors();
                 let selected = self.settings.theme == theme;
                 let stop: SharedString = format!("minimal-theme-choice-{index}").into();
-                let ringed = keys.stop_on(&stop);
                 let choose: KeyRun = Rc::new(move |this, _, cx| {
                     this.choose_minimal_theme(theme, cx);
                     this.minimal_theme_open = true;
@@ -1261,10 +1269,6 @@ impl XdDesktop {
                     .bg(rgb(colors.surface))
                     .cursor_pointer()
                     .hover(|style| style.border_color(rgb(colors.selected_border)))
-                    .on_click(cx.listener({
-                        let choose = choose.clone();
-                        move |this, _, window, cx| choose(this, window, cx)
-                    }))
                     .child(
                         div()
                             .h(px(104.0))
@@ -1336,11 +1340,19 @@ impl XdDesktop {
                     );
                 // The card clips to its corners, so the ring goes around it.
                 div()
+                    .id(("minimal-theme-choice-stop", index))
                     .relative()
                     .flex_none()
                     .child(card)
-                    .child(keys.mark(KeyLayer::Overlay, KeyStop::Control(stop, choose)))
-                    .when(ringed, |card| card.child(focus_ring(colors, 13.0)))
+                    .key_stop_ring(
+                        &keys,
+                        KeyLayer::Overlay,
+                        stop,
+                        13.0,
+                        colors,
+                        cx,
+                        move |this, window, cx| choose(this, window, cx),
+                    )
             });
         SettingRow::custom(
             "Theme",
@@ -1517,11 +1529,18 @@ impl XdDesktop {
                         .when(!busy && download, |actions| {
                             actions.child(
                                 ui_button("download-app-update", ButtonKind::Primary, colors)
-                                    .on_click(|_, _, cx| {
-                                        cx.open_url(windows_installer_url(
-                                            xd_desktop::channel::nightly(),
-                                        ))
-                                    })
+                                    .key_stop(
+                                        &keys,
+                                        KeyLayer::Overlay,
+                                        "download-app-update",
+                                        colors,
+                                        cx,
+                                        |_, _, cx| {
+                                            cx.open_url(windows_installer_url(
+                                                xd_desktop::channel::nightly(),
+                                            ))
+                                        },
+                                    )
                                     .child("Download installer"),
                             )
                         })
@@ -2081,6 +2100,14 @@ impl XdDesktop {
         }
         let next = stepped_section(self.settings_section, SETTINGS_SECTIONS.len(), down);
         self.open_settings_section(next, cx);
+        // The ring on the section list goes along to the section opened.
+        if self
+            .key_stop
+            .as_ref()
+            .is_some_and(|id| id.starts_with(SECTION_STOP))
+        {
+            self.key_stop = Some(format!("{SECTION_STOP}{next}").into());
+        }
         true
     }
 
@@ -2161,10 +2188,13 @@ impl XdDesktop {
                     .w(px(84.0))
                     .px(px(6.0))
                     .gap(px(4.0))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.close_minimal_theme_popup(window, cx)
-                        }),
+                    .key_stop(
+                        &self.key_targets,
+                        KeyLayer::Overlay,
+                        "workspace-settings-close",
+                        colors,
+                        cx,
+                        |this, window, cx| this.close_minimal_theme_popup(window, cx),
                     )
                     .child(icon(CHEVRON_LEFT_ICON, 14.0, colors.muted))
                     .child(
@@ -2228,10 +2258,19 @@ impl XdDesktop {
                             .size(24.0)
                             .build()
                             .mr(px(-5.0))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.clear_settings_search(cx);
-                                cx.notify();
-                            })),
+                            .key_stop_named(
+                                &self.key_targets,
+                                KeyLayer::Overlay,
+                                "workspace-settings-search-clear",
+                                "Clear the search",
+                                colors,
+                                cx,
+                                |this, window, cx| {
+                                    this.leave_key_stop(window);
+                                    this.clear_settings_search(cx);
+                                    cx.notify();
+                                },
+                            ),
                         )
                     }),
             )
@@ -2271,10 +2310,17 @@ impl XdDesktop {
                         })
                         .cursor_pointer()
                         .hover(|style| style.bg(rgb(colors.surface_high)))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.open_settings_section(index, cx)
-                            }),
+                        // Tab reaches the section open, and Up and Down move
+                        // from it to the others.
+                        .key_stop_roving(
+                            selected,
+                            &self.key_targets,
+                            KeyLayer::Overlay,
+                            format!("{SECTION_STOP}{index}"),
+                            SECTION_RING_RADIUS,
+                            colors,
+                            cx,
+                            move |this, _, cx| this.open_settings_section(index, cx),
                         )
                         .child(icon(
                             entry.icon,
@@ -2338,9 +2384,17 @@ impl XdDesktop {
                             .text_color(rgb(colors.muted))
                             .cursor_pointer()
                             .hover(|style| style.text_color(rgb(colors.text)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_settings_section(index, cx)
-                            }))
+                            .key_stop(
+                                &self.key_targets,
+                                KeyLayer::Overlay,
+                                format!("workspace-settings-result-section-{index}"),
+                                colors,
+                                cx,
+                                move |this, window, cx| {
+                                    this.leave_key_stop(window);
+                                    this.open_settings_section(index, cx)
+                                },
+                            )
                             .child(icon(entry.icon, 14.0, colors.muted))
                             .child(entry.name),
                     )
