@@ -22,6 +22,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -203,9 +205,29 @@ internal fun PulseDot(color: Color, modifier: Modifier = Modifier, size: Dp = 7.
  * Whether the reader turned animations off ("Remove animations", or an
  * animator scale of zero). Loops driven by a timer rather than an animation
  * check this themselves; Compose's own animations already stop.
+ *
+ * Read from [LocalReducedMotion], which the app's root ([XdTheme]) provides
+ * from one watch on the setting, however many marks ask. Outside that root,
+ * as in a test that draws a piece on its own, it watches the setting itself.
  */
 @Composable
-internal fun reducedMotion(): Boolean {
+internal fun reducedMotion(): Boolean = LocalReducedMotion.current ?: watchReducedMotion()
+
+/**
+ * "Remove animations" as the root read it, or null outside one. Not static:
+ * flipping the setting recomposes only what reads it.
+ */
+internal val LocalReducedMotion = compositionLocalOf<Boolean?> { null }
+
+/** Provides [LocalReducedMotion] to [content] from a single watch on the setting. */
+@Composable
+internal fun ProvideReducedMotion(content: @Composable () -> Unit) {
+    CompositionLocalProvider(LocalReducedMotion provides watchReducedMotion(), content = content)
+}
+
+/** The animator scale setting, read now and again whenever it changes. */
+@Composable
+private fun watchReducedMotion(): Boolean {
     val resolver = LocalContext.current.contentResolver
     val read = { Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f }
     var reduced by remember(resolver) { mutableStateOf(read()) }

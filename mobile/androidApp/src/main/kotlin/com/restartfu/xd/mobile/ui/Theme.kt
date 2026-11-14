@@ -291,12 +291,15 @@ public fun XdTheme(theme: MinimalThemePreset, content: @Composable () -> Unit) {
         LocalXdSyntax provides xdSyntax(theme),
         LocalXdTheme provides theme,
     ) {
-        MaterialTheme(
-            colorScheme = minimalColors(theme),
-            typography = XdTypography,
-            shapes = XdShapes,
-            content = content,
-        )
+        // "Remove animations", watched once here for every mark and page that asks.
+        ProvideReducedMotion {
+            MaterialTheme(
+                colorScheme = minimalColors(theme),
+                typography = XdTypography,
+                shapes = XdShapes,
+                content = content,
+            )
+        }
     }
 }
 
