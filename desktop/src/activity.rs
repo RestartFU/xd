@@ -5,6 +5,7 @@ use serde_json::Value;
 const SUBAGENT_PREFIX: &str = "subagent\n";
 const SUBAGENT_RUN_PREFIX: &str = "subagent_run\n";
 const WORKFLOW_PREFIX: &str = "workflow_run\n";
+const CI_RUN_PREFIX: &str = "ci_run\n";
 const FILE_CHANGE_PREFIX: &str = "file_change\n";
 /// A chat moved to another account. A notice, never a tool card.
 const ACCOUNT_SWITCH_PREFIX: &str = "account_switch\n";
@@ -52,6 +53,7 @@ pub fn is_plain_activity(content: &str) -> bool {
     !content.starts_with(SUBAGENT_PREFIX)
         && !content.starts_with(SUBAGENT_RUN_PREFIX)
         && !content.starts_with(WORKFLOW_PREFIX)
+        && !content.starts_with(CI_RUN_PREFIX)
         && !content.starts_with(FILE_CHANGE_PREFIX)
         && !content.starts_with(ACCOUNT_SWITCH_PREFIX)
         && !content.starts_with(COMPACTION_PREFIX)
@@ -207,6 +209,50 @@ pub fn agent_report(text: &str) -> Option<AgentReport> {
         title,
         outcome,
     })
+}
+
+/// How a CI watch xd ran for the chat's agent ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiOutcome {
+    Passed,
+    Failed,
+    Stopped,
+}
+
+/// The message xd sends a chat when a CI watch its agent asked for with xd's
+/// watch_ci tool ends: `[xd] CI passed on <url> at <head>.`, `[xd] CI failed
+/// on …`, or `[xd] Stopped watching CI on <url>.`, and the details after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CiReport {
+    pub url: String,
+    pub number: String,
+    pub outcome: CiOutcome,
+}
+
+/// The CI report `text` is, when xd sent it.
+pub fn ci_report(text: &str) -> Option<CiReport> {
+    let first = text.lines().next()?.strip_prefix("[xd] ")?;
+    let (outcome, rest) = if let Some(rest) = first.strip_prefix("CI passed on ") {
+        (CiOutcome::Passed, rest)
+    } else if let Some(rest) = first.strip_prefix("CI failed on ") {
+        (CiOutcome::Failed, rest)
+    } else {
+        (
+            CiOutcome::Stopped,
+            first.strip_prefix("Stopped watching CI on ")?,
+        )
+    };
+    let url = match outcome {
+        CiOutcome::Stopped => rest.strip_suffix('.')?,
+        _ => rest.split_once(" at ")?.0,
+    };
+    let number = url.strip_prefix("https://")?.rsplit_once("/pull/")?.1;
+    (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) && !url.contains(' '))
+        .then(|| CiReport {
+            url: url.to_owned(),
+            number: number.to_owned(),
+            outcome,
+        })
 }
 
 impl SubagentView {
@@ -402,6 +448,9 @@ impl ActivityCard {
             return card;
         }
         if let Some(card) = parse_workflow(content) {
+            return card;
+        }
+        if let Some(card) = parse_ci_run(content, unix_seconds()) {
             return card;
         }
         if let Some(card) = parse_file_change(content) {
@@ -625,6 +674,136 @@ fn parse_subagent(content: &str) -> Option<ActivityCard> {
     })
 }
 
+/// Whether `content` is the card of a CI watch, drawn as a card of its own.
+pub fn is_ci_run(content: &str) -> bool {
+    content.starts_with(CI_RUN_PREFIX)
+}
+
+/// The card the host keeps for a CI watch an agent asked for with xd's
+/// watch_ci tool: the pull request's checks, rewritten in place as they go.
+fn parse_ci_run(content: &str, now: i64) -> Option<ActivityCard> {
+    let record: Value = serde_json::from_str(content.strip_prefix(CI_RUN_PREFIX)?).ok()?;
+    let url = record.get("url").and_then(Value::as_str)?;
+    let text = |key: &str| record.get(key).and_then(Value::as_str).unwrap_or_default();
+    let (kind, status) = match text("status") {
+        "passed" => (ActivityKind::Success, "Passed"),
+        "failed" => (ActivityKind::Failure, "Failed"),
+        "stopped" => (ActivityKind::Finished, "Stopped"),
+        _ => (ActivityKind::Running, "Running"),
+    };
+    let checks = record
+        .get("checks")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let items = checks
+        .iter()
+        .filter_map(|check| {
+            let name = check.get("name").and_then(Value::as_str)?;
+            let name = match check.get("workflow").and_then(Value::as_str) {
+                Some(workflow) if !workflow.is_empty() => format!("{workflow} / {name}"),
+                _ => name.to_owned(),
+            };
+            let (kind, status) = match check.get("state").and_then(Value::as_str) {
+                Some("passed") => (ActivityKind::Success, "Passed".to_owned()),
+                Some("skipped") => (ActivityKind::Finished, "Skipped".to_owned()),
+                Some("failed") => (
+                    ActivityKind::Failure,
+                    check
+                        .get("conclusion")
+                        .and_then(Value::as_str)
+                        .map(sentence_case)
+                        .unwrap_or_else(|| "Failed".into()),
+                ),
+                _ => (ActivityKind::Running, "Running".to_owned()),
+            };
+            Some(ActivityItem {
+                kind,
+                name: compact(&name, 120, "Check"),
+                status,
+                elapsed: None,
+                detail: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    // The host counts every check; the list may be cut short.
+    let listed = |kind: ActivityKind| items.iter().filter(|item| item.kind == kind).count();
+    let counted = |key: &str, kind: ActivityKind| {
+        record
+            .get("counts")
+            .and_then(|counts| counts.get(key))
+            .and_then(Value::as_u64)
+            .map_or_else(|| listed(kind), |count| count as usize)
+    };
+    let (running, failed, passed, skipped) = (
+        counted("pending", ActivityKind::Running),
+        counted("failed", ActivityKind::Failure),
+        counted("passed", ActivityKind::Success),
+        counted("skipped", ActivityKind::Finished),
+    );
+    let total = running + failed + passed + skipped;
+    let mut items = items;
+    if total > items.len() {
+        items.push(ActivityItem {
+            kind: ActivityKind::Finished,
+            name: format!("{} more", total - items.len()),
+            status: String::new(),
+            elapsed: None,
+            detail: None,
+        });
+    }
+    let detail = if let Some(reason) = record.get("reason").and_then(Value::as_str) {
+        reason.to_owned()
+    } else if let Some(commit) = record.get("waiting_for").and_then(Value::as_str) {
+        format!("Waiting for GitHub to show {commit}.")
+    } else if items.is_empty() {
+        "Waiting for checks to start.".into()
+    } else if running > 0 {
+        format!("{running} of {total} checks running")
+    } else if failed > 0 {
+        format!("{failed} failed, {passed} passed")
+    } else {
+        format!("{passed} passed")
+    };
+    let number = record.get("number").and_then(Value::as_u64);
+    let name = match (number, text("title")) {
+        (Some(number), "") => format!("#{number}"),
+        (Some(number), title) => format!("#{number} · {title}"),
+        (None, _) => "Pull request".into(),
+    };
+    let elapsed = record
+        .get("started_at")
+        .and_then(Value::as_i64)
+        .map(|started| {
+            let ended = record
+                .get("finished_at")
+                .and_then(Value::as_i64)
+                .unwrap_or(now);
+            duration_label(ended.saturating_sub(started).max(0) as u64)
+        });
+    let head = text("head");
+    Some(ActivityCard {
+        kind,
+        title: "CI".into(),
+        name: compact(&name, 120, "Pull request"),
+        status: status.into(),
+        elapsed,
+        detail,
+        footer: (!head.is_empty()).then(|| format!("Head {head}")),
+        url: Some(format!("{url}/checks")),
+        items,
+        patch: None,
+    })
+}
+
+fn sentence_case(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 fn parse_workflow(content: &str) -> Option<ActivityCard> {
     let mut lines = content.strip_prefix(WORKFLOW_PREFIX)?.lines();
     let id = lines.next()?.trim();
@@ -746,6 +925,7 @@ fn compact(value: &str, limit: usize, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn subagent_records_parse_with_their_steps_and_stats() {
@@ -1077,5 +1257,104 @@ mod tests {
         assert_eq!(format_tokens(12_500), "12.5K");
         assert_eq!(format_tokens(251_000), "251K");
         assert_eq!(format_tokens(999_999), "1M");
+    }
+
+    #[test]
+    fn a_ci_report_names_its_pull_request_and_outcome() {
+        let report = |text: &str| ci_report(text).map(|report| (report.outcome, report.number));
+        assert_eq!(
+            ci_report(
+                "[xd] CI failed on https://github.com/o/r/pull/291 at 1e3d4a4.\n\n1 of 2 checks did not pass"
+            ),
+            Some(CiReport {
+                url: "https://github.com/o/r/pull/291".into(),
+                number: "291".into(),
+                outcome: CiOutcome::Failed,
+            })
+        );
+        assert_eq!(
+            report("[xd] CI passed on https://github.com/o/r/pull/7 at abc."),
+            Some((CiOutcome::Passed, "7".into()))
+        );
+        assert_eq!(
+            report("[xd] Stopped watching CI on https://github.com/o/r/pull/7.\n\nMerged."),
+            Some((CiOutcome::Stopped, "7".into()))
+        );
+        assert_eq!(
+            report("CI passed on https://github.com/o/r/pull/7 at abc."),
+            None
+        );
+        assert_eq!(
+            report("[xd] CI passed on https://github.com/o/r/issues/7 at a."),
+            None
+        );
+        assert_eq!(report("[xd] CI passed on the moon."), None);
+    }
+
+    #[test]
+    fn a_ci_card_lists_its_checks_and_how_they_stand() {
+        let record = json!({"url": "https://github.com/o/r/pull/300", "number": 300,
+        "title": "Fix the settings test", "head": "9f2c7b1", "status": "running",
+        "started_at": 1_000, "checks": [
+            {"name": "linux", "workflow": "pr", "state": "pending"},
+            {"name": "macos", "workflow": "pr", "state": "passed"},
+            {"name": "lint", "state": "failed", "conclusion": "timed out"},
+        ]});
+        let card = parse_ci_run(&format!("ci_run\n{record}"), 1_125).unwrap();
+        assert_eq!(card.kind, ActivityKind::Running);
+        assert_eq!(card.title, "CI");
+        assert_eq!(card.name, "#300 · Fix the settings test");
+        assert_eq!(card.status, "Running");
+        assert_eq!(card.elapsed.as_deref(), Some("2m 05s"));
+        assert_eq!(card.detail, "1 of 3 checks running");
+        assert_eq!(card.footer.as_deref(), Some("Head 9f2c7b1"));
+        assert_eq!(
+            card.url.as_deref(),
+            Some("https://github.com/o/r/pull/300/checks")
+        );
+        let items = card
+            .items
+            .iter()
+            .map(|item| (item.name.as_str(), item.kind, item.status.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            items,
+            [
+                ("pr / linux", ActivityKind::Running, "Running"),
+                ("pr / macos", ActivityKind::Success, "Passed"),
+                ("lint", ActivityKind::Failure, "Timed out"),
+            ]
+        );
+        assert!(!is_plain_activity(&format!("ci_run\n{record}")));
+        let failed = json!({"url": "https://github.com/o/r/pull/300", "number": 300,
+            "status": "failed", "started_at": 1_000, "finished_at": 1_060, "checks": [
+                {"name": "linux", "state": "failed", "conclusion": "failure"},
+                {"name": "macos", "state": "passed"}]});
+        let card = ActivityCard::parse(&format!("ci_run\n{failed}"));
+        assert_eq!(
+            (card.kind, card.status.as_str()),
+            (ActivityKind::Failure, "Failed")
+        );
+        assert_eq!(card.detail, "1 failed, 1 passed");
+        assert_eq!(card.elapsed.as_deref(), Some("1m 00s"));
+        let stopped = json!({"url": "https://github.com/o/r/pull/7", "status": "stopped",
+            "reason": "Watched again below.", "checks": []});
+        let card = ActivityCard::parse(&format!("ci_run\n{stopped}"));
+        assert_eq!(
+            (card.kind, card.detail.as_str()),
+            (ActivityKind::Finished, "Watched again below.")
+        );
+        assert_eq!(card.name, "Pull request");
+        assert!(parse_ci_run("ci_run\nnot json", 0).is_none());
+        // A list cut short says how many more there are; the counts cover all.
+        let long = json!({"url": "https://github.com/o/r/pull/7", "status": "running",
+            "counts": {"failed": 0, "pending": 1, "passed": 60, "skipped": 0},
+            "checks": [{"name": "slow", "state": "pending"}, {"name": "a", "state": "passed"}]});
+        let card = ActivityCard::parse(&format!("ci_run\n{long}"));
+        assert_eq!(card.detail, "1 of 61 checks running");
+        assert_eq!(
+            card.items.last().map(|item| item.name.as_str()),
+            Some("59 more")
+        );
     }
 }

@@ -263,6 +263,25 @@ impl CodexAppParser {
                         }
                         events
                     }
+                    Some("mcpToolCall")
+                        if crate::agent_tools::is_watch_ci(
+                            item["server"].as_str().unwrap_or_default(),
+                            item["tool"].as_str().unwrap_or_default(),
+                        ) =>
+                    {
+                        let answer = item["result"]["content"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|content| content["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let answer = item["error"]["message"].as_str().unwrap_or(&answer);
+                        vec![AgentEvent::Tool(crate::agent_tools::watch_ci_summary(
+                            Some(&item["arguments"]),
+                            Some(answer),
+                        ))]
+                    }
                     Some("mcpToolCall") => vec![AgentEvent::Tool(format!(
                         "Tool: {} · {}\n{}",
                         item["server"].as_str().unwrap_or_default(),
@@ -849,6 +868,31 @@ mod tests {
         // Other commands are still commands.
         let plain = parser.feed(r#"{"method":"item/completed","params":{"threadId":"parent","item":{"type":"commandExecution","id":"cmd-2","command":"/bin/bash -lc 'cargo test'","aggregatedOutput":"ok"}}}"#);
         assert_eq!(plain, vec![AgentEvent::Tool("$ cargo test\nok".into())]);
+    }
+
+    #[test]
+    fn a_ci_watch_reads_as_what_it_does() {
+        let mut parser = parser_on("parent");
+        let watched = parser.feed(r#"{"method":"item/completed","params":{"threadId":"parent","item":{"type":"mcpToolCall","id":"m-1","server":"xd","tool":"watch_ci","arguments":{"pull_request":"https://github.com/o/r/pull/7"},"result":{"content":[{"type":"text","text":"Watching CI on pull request #7."}]}}}}"#);
+        assert_eq!(
+            watched,
+            vec![AgentEvent::Tool(
+                "Watch CI  https://github.com/o/r/pull/7\nWatching CI on pull request #7.".into()
+            )]
+        );
+        let refused = parser.feed(r#"{"method":"item/completed","params":{"threadId":"parent","item":{"type":"mcpToolCall","id":"m-2","server":"xd","tool":"watch_ci","arguments":{},"error":{"message":"No pull request."}}}}"#);
+        assert_eq!(
+            refused,
+            vec![AgentEvent::Tool(
+                "Watch CI  this chat's pull request\nNo pull request.".into()
+            )]
+        );
+        // Other servers' tools keep their names.
+        let other = parser.feed(r#"{"method":"item/completed","params":{"threadId":"parent","item":{"type":"mcpToolCall","id":"m-3","server":"other","tool":"watch_ci","result":null}}}"#);
+        assert_eq!(
+            other,
+            vec![AgentEvent::Tool("Tool: other · watch_ci\nnull".into())]
+        );
     }
 
     #[test]

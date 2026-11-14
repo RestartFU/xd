@@ -885,19 +885,23 @@ internal fun ChatScreen(
             items(rows, key = { it.key }, contentType = ::rowContentType) { row ->
                 when (row) {
                     is TranscriptRow.Single -> {
-                        // xd's word that one of this chat's agents ended a turn.
-                        val report = row.item.takeIf { it.kind == com.restartfu.xd.model.TranscriptKind.USER }
-                            ?.let { com.restartfu.xd.model.AgentReport.parse(it.text) }
-                        if (report != null) {
-                            AgentReportLine(report, agentChats[report.chatId]) { openChat(report.chatId) }
-                        } else {
-                            TranscriptRow(row.item, model, assistantName, answered[row.item.id], liveText)
+                        // xd's word that one of this chat's agents ended a
+                        // turn, or that a CI watch its agent asked for ended.
+                        val fromXd = row.item.takeIf { it.kind == com.restartfu.xd.model.TranscriptKind.USER }?.text
+                        val report = fromXd?.let { com.restartfu.xd.model.AgentReport.parse(it) }
+                        val ci = fromXd?.let { com.restartfu.xd.model.CiReport.parse(it) }
+                        when {
+                            report != null ->
+                                AgentReportLine(report, agentChats[report.chatId]) { openChat(report.chatId) }
+                            ci != null -> CiReportLine(ci, openLink)
+                            else -> TranscriptRow(row.item, model, assistantName, answered[row.item.id], liveText)
                         }
                     }
                     is TranscriptRow.Tools -> ToolGroupRow(row)
                     is TranscriptRow.AccountSwitch -> AccountSwitchNotice(row.sentence)
                     is TranscriptRow.Compaction -> CompactionDivider(row.compaction)
                     is TranscriptRow.Pipeline -> PipelineCard(row.run, model.client)
+                    is TranscriptRow.Ci -> CiCard(row.run, openLink)
                     is TranscriptRow.Subagent -> if (row.run.chat != null) {
                         // An agent started with start_agent is a chat of its own.
                         val chat = row.run.chat.orEmpty()
@@ -2084,6 +2088,7 @@ private fun rowContentType(row: TranscriptRow): String = when (row) {
     is TranscriptRow.AccountSwitch -> "account-switch"
     is TranscriptRow.Compaction -> "compaction"
     is TranscriptRow.Pipeline -> "pipeline"
+    is TranscriptRow.Ci -> "ci"
     is TranscriptRow.Subagent -> "subagent"
 }
 

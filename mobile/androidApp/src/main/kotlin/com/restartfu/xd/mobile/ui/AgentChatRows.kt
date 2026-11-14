@@ -39,6 +39,8 @@ import com.restartfu.xd.model.AgentChatStatus
 import com.restartfu.xd.model.AgentOutcome
 import com.restartfu.xd.model.AgentReport
 import com.restartfu.xd.model.ChatSummary
+import com.restartfu.xd.model.CiOutcome
+import com.restartfu.xd.model.CiReport
 import com.restartfu.xd.model.SubagentRun
 import com.restartfu.xd.model.agentChatStatus
 
@@ -193,6 +195,48 @@ internal fun AgentReportLine(report: AgentReport, chat: ChatSummary?, onOpen: ()
             Box(Modifier.size(6.dp).clip(CircleShape).background(tone))
             Text(
                 "$title $verb",
+                style = MaterialTheme.typography.labelMedium,
+                color = signals.faint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 260.dp),
+            )
+        }
+        Box(Modifier.weight(1f).height(1.dp).background(signals.rule))
+    }
+}
+
+/**
+ * The message xd sent this chat when a CI watch its agent asked for ended, as
+ * one quiet line like an agent's report. It opens the pull request's checks;
+ * the details are for the agent, which answers them.
+ */
+@Composable
+internal fun CiReportLine(report: CiReport, onOpen: (String) -> Unit) {
+    val signals = LocalXdSignals.current
+    val (label, tone) = when (report.outcome) {
+        CiOutcome.PASSED -> "CI passed" to signals.done
+        CiOutcome.FAILED -> "CI failed" to MaterialTheme.colorScheme.error
+        CiOutcome.STOPPED -> "Stopped watching CI" to signals.faint
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(Modifier.weight(1f).height(1.dp).background(signals.rule))
+        Row(
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable { onOpen("${report.url}/checks") }
+                .heightIn(min = 32.dp)
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Box(Modifier.size(6.dp).clip(CircleShape).background(tone))
+            Text(
+                "$label on #${report.number}",
                 style = MaterialTheme.typography.labelMedium,
                 color = signals.faint,
                 maxLines = 1,
