@@ -1,6 +1,10 @@
 package com.restartfu.xd.mobile.ui
 
+import android.os.Build
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.safeDrawing
@@ -9,10 +13,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.max
 import androidx.compose.ui.unit.min
+import kotlin.math.roundToInt
 
 /**
  * Which layout a window gets, from Material's window size classes on both
@@ -41,12 +48,36 @@ internal data class WindowLayout(val widthDp: Int, val heightDp: Int) {
     }
 }
 
-/** The window's layout, from the size the system reports for it, split-screen included. */
+/**
+ * The window's layout, from the room it really has for the app: its size,
+ * split-screen included, less the system bars and any cutout, which the
+ * headers, composer and sides keep clear of. From Android 15 the size the
+ * system reports includes those bars, so they are taken off here; before it,
+ * the reported size already left them out.
+ */
 @Composable
 internal fun rememberWindowLayout(): WindowLayout {
     val configuration = LocalConfiguration.current
-    return WindowLayout(configuration.screenWidthDp, configuration.screenHeightDp)
+    val density = LocalDensity.current
+    val direction = LocalLayoutDirection.current
+    val bars = WindowInsets.systemBars.union(WindowInsets.displayCutout)
+    val (barsWidth, barsHeight) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+        with(density) {
+            (bars.getLeft(density, direction) + bars.getRight(density, direction)).toDp() to
+                (bars.getTop(density) + bars.getBottom(density)).toDp()
+        }
+    } else {
+        0.dp to 0.dp
+    }
+    return windowLayoutOf(configuration.screenWidthDp, configuration.screenHeightDp, barsWidth, barsHeight)
 }
+
+/** The layout of a window [widthDp] by [heightDp] whose bars take [barsWidth] and [barsHeight] of it. */
+internal fun windowLayoutOf(widthDp: Int, heightDp: Int, barsWidth: Dp, barsHeight: Dp): WindowLayout =
+    WindowLayout(
+        (widthDp - barsWidth.value.roundToInt()).coerceAtLeast(0),
+        (heightDp - barsHeight.value.roundToInt()).coerceAtLeast(0),
+    )
 
 /** The widest a column of text is drawn: past it, lines grow too long to read back along. */
 internal val ReadingMeasure = 720.dp
