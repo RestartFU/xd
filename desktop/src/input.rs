@@ -9,7 +9,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::metrics::{TEXT_BODY, TEXT_CONTROL, px, text_px};
+use crate::metrics::{CONTROL_HEIGHT, TEXT_BODY, TEXT_CONTROL, px, text_px};
 use xd_desktop::theme::{ThemeColors, ThemePreset};
 
 use crate::{
@@ -1265,7 +1265,7 @@ impl Render for ComposerInput {
             .text_color(rgb(self.colors.unwrap_or(ThemePreset::Dark.colors()).text))
             .child(
                 div()
-                    .when(!self.compact, |line| line.h(px(30.)).py_1())
+                    .when(!self.compact, |line| line.h(px(CONTROL_HEIGHT)).py_1())
                     .w_full()
                     .child(TextElement { input: cx.entity() }),
             )

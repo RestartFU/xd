@@ -2815,6 +2815,10 @@ struct KeyFrame {
     finding: bool,
     /// The controls that show a name under the Tab ring.
     named: HashSet<SharedString>,
+    /// The whole of a label cut short in the control the Tab ring is on,
+    /// when that control shows its name: it goes under the name, in the
+    /// same box.
+    detail: Option<SharedString>,
 }
 
 #[derive(Clone, Default)]
@@ -3000,6 +3004,17 @@ impl KeyTargets {
     /// the whole of a label cut short in it stands under that name.
     fn note_named(&self, id: &SharedString) {
         self.0.borrow_mut().named.insert(id.clone());
+    }
+
+    /// Hands the name shown under the Tab ring the whole of a label cut
+    /// short in its control, to show under it.
+    fn set_detail(&self, detail: Option<SharedString>) {
+        self.0.borrow_mut().detail = detail;
+    }
+
+    /// What the name under the Tab ring shows under it.
+    fn detail(&self) -> Option<SharedString> {
+        self.0.borrow().detail.clone()
     }
 
     /// Notes a Tab stop where it is painted: an element that takes no room,
@@ -3316,7 +3331,7 @@ fn key_reach(
         .child(keys.mark(layer, KeyStop::Control(id, run)))
         .when(on, |control| control.child(focus_ring(colors, radius)))
         .when_some(label.filter(|_| on), |control, label| {
-            control.child(focus_tooltip(label, colors))
+            control.child(focus_tooltip(label, keys.detail(), colors))
         })
 }
 
@@ -3364,7 +3379,7 @@ fn key_action_stop(
                         .border_2()
                         .border_color(rgb(colors.selected_border)),
                 })
-                .child(focus_tooltip(label, colors))
+                .child(focus_tooltip(label, keys.detail(), colors))
         })
 }
 
@@ -3455,24 +3470,35 @@ fn details_label(expanded: bool) -> &'static str {
     }
 }
 
-/// How far below a control's name the whole of a label cut short in it
-/// stands: a tooltip's height and a little.
-const FOCUS_TOOLTIP_STACK: f32 = 32.0;
-
 /// How far under its control a name shown for the Tab ring sits: clear of
 /// the ring.
 const FOCUS_TOOLTIP_GAP: f32 = FOCUS_RING_GAP + 4.0;
 
 /// The name of an icon-only control the Tab ring is on, shown under it in
 /// the box the pointer's tooltip draws, over everything and inside the
-/// window. A child of the control, which must be `relative`.
-fn focus_tooltip(label: SharedString, colors: ThemeColors) -> impl IntoElement {
+/// window, with the whole of a label cut short in the control, its
+/// `detail`, under the name in the same box. A child of the control, which
+/// must be `relative`.
+fn focus_tooltip(
+    label: SharedString,
+    detail: Option<SharedString>,
+    colors: ThemeColors,
+) -> impl IntoElement {
     let tooltip = gpui::anchored()
         .snap_to_window_with_margin(px(MENU_MARGIN))
         .child(
             div()
                 .pt(px(FOCUS_TOOLTIP_GAP))
-                .child(tooltip_box(label, colors)),
+                .child(
+                    tooltip_box(label, colors).when_some(detail, |tooltip, detail| {
+                        tooltip.child(
+                            div()
+                                .debug_selector(|| "focus-tooltip-detail".into())
+                                .text_color(rgb(colors.muted))
+                                .child(detail),
+                        )
+                    }),
+                ),
         );
     div()
         .debug_selector(|| "focus-tooltip".into())
@@ -3505,11 +3531,11 @@ fn in_popover<R>(build: impl FnOnce() -> R) -> R {
 
 /// The whole text of a label cut short in the control the keyboard is on,
 /// under that control in the box the pointer's tooltip draws, as the name of
-/// an icon-only control shows under it.
+/// an icon-only control shows under it. A control that shows its name has
+/// the text in its name's box instead: see [`focus_tooltip`].
 fn keyed_title(
     bounds: Bounds<Pixels>,
     text: SharedString,
-    stacked: bool,
     colors: ThemeColors,
 ) -> impl IntoElement {
     gpui::deferred(
@@ -3519,10 +3545,7 @@ fn keyed_title(
             .child(
                 div()
                     .debug_selector(|| "keyed-title".into())
-                    // Under the control's own name, when it shows one.
-                    .pt(px(
-                        FOCUS_TOOLTIP_GAP + if stacked { FOCUS_TOOLTIP_STACK } else { 0.0 }
-                    ))
+                    .pt(px(FOCUS_TOOLTIP_GAP))
                     .child(tooltip_box(text, colors)),
             ),
     )
@@ -18413,7 +18436,12 @@ impl XdDesktop {
                                 cx,
                                 |this, _, cx| this.send_terminal_input(&[3], cx),
                             )
-                            .child(div().size(px(9.0)).rounded(px(1.5)).bg(rgb(colors.danger)))
+                            .child(
+                                div()
+                                    .size(px(9.0))
+                                    .rounded(px(RADIUS_MARK))
+                                    .bg(rgb(colors.danger)),
+                            )
                             .child("Stop"),
                     )
             })
@@ -28470,9 +28498,12 @@ impl XdDesktop {
             .when_some(pull_request_backdrop, |root, overlay| root.child(overlay))
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(message_menu_overlay, |root, overlay| root.child(overlay))
-            .when_some(self.key_title.clone(), |root, (bounds, text)| {
-                root.child(keyed_title(bounds, text, self.key_title_stacked, colors))
-            })
+            // One box under the control: its name with the whole text, or
+            // the text alone where it has no name to show.
+            .when_some(
+                self.key_title.clone().filter(|_| !self.key_title_stacked),
+                |root, (bounds, text)| root.child(keyed_title(bounds, text, colors)),
+            )
             .when_some(project_add_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
             .when_some(update_overlay, |root, overlay| root.child(overlay))
@@ -29835,6 +29866,12 @@ impl Render for XdDesktop {
             self.key_stop.clone(),
             self.shortcuts_blocked(),
             self.find_focused && !self.catalog_query.is_empty(),
+        );
+        self.key_targets.set_detail(
+            self.key_title
+                .as_ref()
+                .filter(|_| self.key_title_stacked)
+                .map(|(_, text)| text.clone()),
         );
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let custom_titlebar =
