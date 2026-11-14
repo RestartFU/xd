@@ -2045,15 +2045,19 @@ impl Engine {
                                     next = next.min(start);
                                     continue;
                                 }
-                                if !tried
-                                    .insert((candidate.chat_id.clone(), candidate.last_message))
-                                {
+                                let key = (candidate.chat_id.clone(), candidate.last_message);
+                                if tried.contains(&key) {
                                     continue;
                                 }
                                 let Some(engine) = engine.upgrade() else {
                                     return;
                                 };
-                                engine.compact_idle_chat(&candidate);
+                                // Only a send counts as the try: a chat held
+                                // back by a question or background work is
+                                // looked at again while its cache still lives.
+                                if engine.compact_idle_chat(&candidate) {
+                                    tried.insert(key);
+                                }
                             }
                         }
                         Err(error) => {
@@ -2072,16 +2076,17 @@ impl Engine {
 
     /// Sends `/compact` to an idle chat whose cache is about to expire, unless
     /// something still belongs to its next turn: a question or approval the
-    /// agent is waiting on, or background work that reports into it.
-    fn compact_idle_chat(&self, candidate: &storage::IdleCompactionCandidate) {
+    /// agent is waiting on, or background work that reports into it. Says
+    /// whether it tried to send.
+    fn compact_idle_chat(&self, candidate: &storage::IdleCompactionCandidate) -> bool {
         let Some(runtime) = self.runtime.as_ref() else {
-            return;
+            return false;
         };
         let chat_id = candidate.chat_id.as_str();
         // A process kept between turns is no reason to wait; background work
         // it still runs, or has finished and owes a report on, is.
         if runtime.has_interactions(chat_id) || runtime.waits_on_background(chat_id) {
-            return;
+            return false;
         }
         let reply = self.send_message_inner(
             &json!({"op": "send", "chat": chat_id, "text": compaction::COMMAND}),
@@ -2093,6 +2098,7 @@ impl Engine {
         } else {
             eprintln!("xd-host: not compacting idle chat {chat_id}: {reply}");
         }
+        true
     }
 
     fn set_chat_quota_settings(&self, request: &Value) -> Value {
