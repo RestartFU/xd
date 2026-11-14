@@ -17505,7 +17505,11 @@ impl XdDesktop {
             },
         ))))
         .size_full()
-        .p(px(TERMINAL_OUTPUT_PADDING));
+        .px(px(TERMINAL_OUTPUT_PADDING))
+        // The list counts its top and bottom padding twice, once in its
+        // content and once around it: half of each gives the whole.
+        .pt(px(TERMINAL_OUTPUT_PADDING / 2.0))
+        .pb(px(TERMINAL_OUTPUT_PADDING / 2.0));
         let active = selected_id.is_some();
         let keys = self.key_targets.clone();
         let tabs = panel
@@ -17570,6 +17574,7 @@ impl XdDesktop {
 
         let output_scroller = div()
             .id("minimal-terminal-output")
+            .debug_selector(|| "minimal-terminal-output".into())
             .relative()
             .size_full()
             .whitespace_nowrap()
@@ -40262,6 +40267,19 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         let first = built() - before;
         assert!((20..=60).contains(&first), "built {first} rows of {count}");
         assert!(newest, "the newest line is in view");
+        // At its foot, as before, the last line stands the output's padding
+        // above the bottom edge.
+        let output = cx.debug_bounds("minimal-terminal-output").unwrap();
+        let last = cx
+            .debug_bounds(Box::leak(
+                format!("terminal-row-{}", count - 1).into_boxed_str(),
+            ))
+            .unwrap();
+        let below = f32::from(output.bottom() - last.bottom());
+        assert!(
+            (below - TERMINAL_OUTPUT_PADDING).abs() < 1.5,
+            "{below}px under the last line"
+        );
         // Another frame builds nothing.
         let before = built();
         redraw(cx);

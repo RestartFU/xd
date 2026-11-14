@@ -47,6 +47,27 @@ pub(super) enum ThumbnailState {
     Failed,
 }
 
+/// Two 1px lines in the viewer's dark, just outside and just inside the
+/// Tab ring of a button drawn over a picture, so the ring reads whatever
+/// the picture's colours.
+fn picture_ring_edges() -> [gpui::Div; 2] {
+    let edge = |inset: f32, radius: f32| {
+        div()
+            .absolute()
+            .top(px(-inset))
+            .bottom(px(-inset))
+            .left(px(-inset))
+            .right(px(-inset))
+            .rounded(px(radius))
+            .border_1()
+            .border_color(rgba(frame_colors().viewer.button))
+    };
+    [
+        edge(FOCUS_RING_GAP + 1.0, FOCUS_RING_RADIUS + 1.0),
+        edge(FOCUS_RING_GAP - 2.0, RADIUS_CONTROL + 1.0),
+    ]
+}
+
 /// Scale and center-crop a PNG to fill a square, as PNG bytes.
 fn cover_thumbnail(png: &[u8], side: u32) -> Result<Vec<u8>, image::ImageError> {
     let thumbnail = image::load_from_memory_with_format(png, image::ImageFormat::Png)?
@@ -683,6 +704,12 @@ impl XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgba(frame_colors().viewer.button_hover)))
                             .child(icon(CLOSE_ICON, 14.0, frame_colors().viewer.ink))
+                            // Over a picture, whose colours can match the
+                            // ring's, the ring is edged in the viewer's dark.
+                            .when(
+                                targets.stop_on(&format!("remove-draft-image-{index}")),
+                                |button| button.children(picture_ring_edges()),
+                            )
                             .key_stop_named(
                                 &targets,
                                 KeyLayer::Page,
