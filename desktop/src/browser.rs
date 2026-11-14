@@ -966,7 +966,9 @@ impl Render for BrowserPane {
                                         pane.select_tab(index, window, cx)
                                     }))
                                     .child(crate::icon(crate::BROWSER_ICON, 13., colors.muted))
-                                    .child(div().flex_1().min_w_0().text_ellipsis().child(label));
+                                    // Cut short with an ellipsis, the whole
+                                    // title under the pointer.
+                                    .child(crate::truncating_label(label).flex_1());
                                 let close =
                                     tab_close(("browser-close-tab", slot.id), "Close tab", colors)
                                         .on_click(cx.listener(move |pane, _, window, cx| {

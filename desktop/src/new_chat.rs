@@ -372,29 +372,7 @@ impl XdDesktop {
                             .key_not_a_choice(&keys)
                             .key_stays(&keys)
                             .child(div().flex_1().child("Start from remote"))
-                            .child(
-                                div()
-                                    .w(px(28.0))
-                                    .h(px(16.0))
-                                    .p(px(2.0))
-                                    .rounded_full()
-                                    .bg(rgb(if self.new_chat_remote {
-                                        colors.accent
-                                    } else {
-                                        colors.surface_high
-                                    }))
-                                    .child(
-                                        div()
-                                            .size(px(12.0))
-                                            .rounded_full()
-                                            .when(self.new_chat_remote, |knob| knob.ml(px(12.0)))
-                                            .bg(rgb(if self.new_chat_remote {
-                                                colors.accent_text
-                                            } else {
-                                                colors.muted
-                                            })),
-                                    ),
-                            )
+                            .child(settings_switch(colors, self.new_chat_remote))
                             .into_any_element(),
                     );
                     // A pull request's branch, checked out in a worktree of
@@ -550,11 +528,15 @@ impl XdDesktop {
                         .id("draft-picker")
                         .debug_selector(|| "draft-picker".into())
                         .w(px(if kind == "workspace" { 280.0 } else { 320.0 }))
+                        // No taller than the window has room for: its
+                        // options scroll inside what is left.
+                        .max_h(px(popover_max_height()))
                         // Its search field's hairline runs edge to edge.
                         .p_0()
                         .when(kind != "workspace", |picker| {
                             picker.child(
                                 div()
+                                    .flex_none()
                                     .px_3()
                                     .py_2()
                                     .flex()
@@ -568,7 +550,7 @@ impl XdDesktop {
                         })
                         .when(kind == "model", |picker| {
                             picker.child(
-                                div().p_1().flex().gap_1().children(
+                                div().flex_none().p_1().flex().gap_1().children(
                                     [AgentCli::Codex, AgentCli::Claude]
                                         .into_iter()
                                         .map(|agent| {
@@ -581,11 +563,14 @@ impl XdDesktop {
                                                 ButtonKind::Ghost,
                                                 colors,
                                             )
+                                            .relative()
                                             .flex_1()
                                             .h(px(CONTROL_HEIGHT))
                                             .text_color(rgb(colors.text))
                                             .when(agent == self.minimal_new_session_agent, |tab| {
-                                                tab.bg(rgb(colors.surface_high))
+                                                tab.bg(rgb(colors.surface_high)).child(
+                                                    selection_marker(MarkerEdge::Foot, colors),
+                                                )
                                             })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if this.minimal_new_session_agent != agent {
@@ -616,6 +601,8 @@ impl XdDesktop {
                             div()
                                 .id("draft-picker-options")
                                 .max_h(px(280.0))
+                                .flex_shrink()
+                                .min_h_0()
                                 .overflow_y_scroll()
                                 .track_scroll(&self.key_scroll)
                                 .p_1()

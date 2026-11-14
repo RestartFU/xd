@@ -2104,6 +2104,12 @@ fn menu_under_max_height(control_height: f32, most: f32) -> f32 {
     (window / 2.0 - control_height - 2.0 * MENU_GAP).clamp(3.0 * ROW_HEIGHT, most)
 }
 
+/// The tallest a popover may be and still fit in the window inside its
+/// margins; what it holds past that scrolls inside it.
+fn popover_max_height() -> f32 {
+    (FRAME_VIEWPORT.with(Cell::get).1 - 2.0 * MENU_MARGIN).max(3.0 * ROW_HEIGHT)
+}
+
 /// [`menu_popover`] at a point in the window, such as where the pointer was.
 fn menu_at(position: Point<Pixels>, menu: impl IntoElement) -> gpui::Deferred {
     gpui::deferred(
@@ -17512,18 +17518,17 @@ impl XdDesktop {
                 let selected = selected_id.as_deref() == Some(terminal_id.as_str());
                 div()
                     .id(("minimal-terminal-tab", index))
+                    .relative()
                     .h_full()
                     .flex_shrink_0()
                     .px_3()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .border_b_2()
-                    .border_color(rgb(if selected {
-                        colors.selected_border
-                    } else {
-                        colors.sidebar
-                    }))
+                    // The shared selection bar at its foot, as a chat tab's.
+                    .when(selected, |tab| {
+                        tab.child(selection_marker(MarkerEdge::Foot, colors))
+                    })
                     .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(if selected { colors.text } else { colors.muted }))
                     .cursor_pointer()
@@ -17744,12 +17749,17 @@ impl XdDesktop {
             .items_center()
             .child(
                 control("minimal-window-minimize", 38.0, false)
+                    .tooltip(pane_tooltip("Minimize", colors))
                     .window_control_area(WindowControlArea::Min)
                     .on_click(|_, window, _| window.minimize_window())
                     .child(icon(MINIMIZE_ICON, 14.0, colors.muted)),
             )
             .child(
                 control("minimal-window-maximize", 38.0, false)
+                    .tooltip(pane_tooltip(
+                        if maximized { "Restore" } else { "Maximize" },
+                        colors,
+                    ))
                     .window_control_area(WindowControlArea::Max)
                     .on_click(|_, window, _| window.zoom_window())
                     .child(icon(
@@ -17764,6 +17774,7 @@ impl XdDesktop {
             )
             .child(
                 control("minimal-window-close", 42.0, true)
+                    .tooltip(pane_tooltip("Close", colors))
                     .window_control_area(WindowControlArea::Close)
                     .on_click(|_, window, _| window.remove_window())
                     .child(icon(CLOSE_ICON, 14.0, colors.muted)),
