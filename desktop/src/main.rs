@@ -691,6 +691,28 @@ fn catalog_pane_width(requested: u16, room: f32) -> f32 {
     )
 }
 
+/// The height of a secret question's masked field: a line of the message
+/// box's type and its frame.
+const SECRET_FIELD_HEIGHT: f32 = 40.0;
+
+/// One of the window's dividers, which a drag or the keyboard moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Divider {
+    /// Between the sidebar and the session.
+    Sidebar,
+    /// Between the session and the side pane.
+    SidePane,
+    /// Above the terminal under the chat.
+    Terminal,
+}
+
+/// How far one press of a divider's keys moves it.
+const PANE_KEY_STEP: f32 = 16.0;
+
+/// What the window keeps above and below the terminal under the chat: the
+/// title bar, the session's header and the panel's own tab row.
+const TERMINAL_PANEL_CHROME: f32 = 86.0;
+
 /// Keep room for the chat when sizing the bottom terminal.
 fn bottom_terminal_height(requested: u16, available: f32) -> f32 {
     f32::from(requested).clamp(120.0, (available - 180.0).clamp(120.0, 600.0))
@@ -5941,6 +5963,9 @@ struct XdDesktop {
     /// The docked ask's choice the arrow keys moved to, by the question it
     /// belongs to, so it does not carry over to the next one.
     ask_focus: Option<(String, usize)>,
+    /// The docked field last handed the keyboard as it docked: a quota
+    /// stop's or a secret question's, so it takes it once, not every frame.
+    docked_field_focused: Option<String>,
     source_build_panel: SourceBuildPanel,
     source_build_run: Option<SourceBuildRun>,
     source_build_generation: u64,
@@ -6807,6 +6832,7 @@ impl XdDesktop {
             interaction_answers: HashMap::new(),
             answer_restores: HashMap::new(),
             ask_focus: None,
+            docked_field_focused: None,
             source_build_panel,
             source_build_run: None,
             source_build_generation: 0,
@@ -24602,18 +24628,44 @@ impl XdDesktop {
                 .children(self.render_ask_choices(colors, cx));
             // A secret is never typed into the composer, which shows its text
             // and keeps it as a draft, so it keeps a masked field of its own.
+            // It takes the keyboard when the question docks, Tab stops on
+            // it and on Send answer, and Enter in it sends.
             if question["isSecret"] == true {
+                let keys = self.key_targets.clone();
+                let field = self.secret_question_input.read(cx).focus_handle(cx);
                 card = card.child(
                     div()
                         .flex()
                         .items_center()
                         .gap_2()
                         .child(
+                            // In a field's frame, which shows where it is
+                            // and takes the focus colour while it has the
+                            // keyboard.
                             div()
+                                .relative()
                                 .flex_1()
                                 .min_w_0()
-                                .h(px(40.0))
-                                .child(self.secret_question_input.clone()),
+                                .h(px(SECRET_FIELD_HEIGHT))
+                                .px(px(10.0))
+                                .flex()
+                                .items_center()
+                                .cursor_text()
+                                .rounded(px(RADIUS_CONTROL))
+                                .border_1()
+                                .border_color(self.field_frame(&self.secret_question_input, cx))
+                                .bg(rgb(colors.background))
+                                .on_mouse_down(MouseButton::Left, {
+                                    let field = field.clone();
+                                    move |_, window, _| window.focus(&field)
+                                })
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(self.secret_question_input.clone()),
+                                )
+                                .child(keys.mark(KeyLayer::Page, KeyStop::Field(field))),
                         )
                         .child(
                             ui_button_when(
@@ -24622,15 +24674,23 @@ impl XdDesktop {
                                 ButtonKind::Primary,
                                 colors,
                             )
+                            .debug_selector(|| "interaction-submit".into())
                             .when(!submitting, |button| {
-                                button.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.answer_interaction(
-                                        request_id.clone(),
-                                        question_id.clone(),
-                                        this.question_answer.clone(),
-                                        cx,
-                                    );
-                                }))
+                                button.key_stop(
+                                    &keys,
+                                    KeyLayer::Page,
+                                    "interaction-submit",
+                                    colors,
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.answer_interaction(
+                                            request_id.clone(),
+                                            question_id.clone(),
+                                            this.question_answer.clone(),
+                                            cx,
+                                        );
+                                    },
+                                )
                             })
                             .child("Send answer"),
                         ),
@@ -29792,6 +29852,62 @@ impl XdDesktop {
             .map(|(_, text)| (keyed, text))
     }
 
+    /// The field docked in the open chat's composer that takes typed words
+    /// of its own: a quota stop's new quota or a secret question's answer,
+    /// named for the stop or question it is there for.
+    fn docked_field(&self, cx: &App) -> Option<(String, FocusHandle)> {
+        match self.docked_ask()? {
+            DockedAsk::Quota => {
+                let (chat, percent) = self.quota_card.filled_for.as_ref()?;
+                Some((
+                    format!("quota\n{chat}\n{percent:?}"),
+                    self.quota_input.read(cx).focus_handle(cx),
+                ))
+            }
+            DockedAsk::Interaction => {
+                let (key, question) = self.docked_secret_question()?;
+                Some((
+                    format!("secret\n{key:?}\n{question}"),
+                    self.secret_question_input.read(cx).focus_handle(cx),
+                ))
+            }
+            DockedAsk::Question => None,
+        }
+    }
+
+    /// Hands the keyboard to a docked field as it docks, as a docked
+    /// question's choices take the keys from the message box: the quota
+    /// stop's field or the secret question's. Once, as it docks, and only
+    /// from the message box with nothing typed in it or from nothing in
+    /// particular, while the chat is in front of everything else: words
+    /// being typed elsewhere stay where they are going.
+    fn settle_docked_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let docked = self.docked_field(cx);
+        let key = docked.as_ref().map(|(key, _)| key.clone());
+        if key == self.docked_field_focused {
+            return;
+        }
+        self.docked_field_focused = key;
+        let Some((_, field)) = docked else {
+            return;
+        };
+        let composer = self.composer_input.read(cx).focus_handle(cx);
+        let free = match window.focused(cx) {
+            None => true,
+            Some(focus) => {
+                focus == self.root_focus || (focus == composer && self.composer.is_empty())
+            }
+        };
+        if free
+            && !self.shortcuts_blocked()
+            && !self.menu_open()
+            && self.open_agent_key().is_none()
+            && self.creating_chat_folder.is_none()
+        {
+            window.focus(&field);
+        }
+    }
+
     /// Forgets where the arrow keys were once their list is no longer the
     /// one on top, so a menu opened again starts fresh. Called before a frame
     /// is drawn, about the frame before it.
@@ -29844,6 +29960,7 @@ impl Render for XdDesktop {
         // What the keyboard can reach is noted again as this frame is drawn.
         self.settle_key_cursor();
         self.settle_key_stop(window);
+        self.settle_docked_field(window, cx);
         self.key_title = self.keyed_cut_label();
         self.key_title_stacked = self
             .key_stop

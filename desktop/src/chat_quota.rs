@@ -13,7 +13,7 @@ pub(super) struct QuotaCard {
     /// The stop the field was last filled for: the chat and the quota it
     /// stopped at. A new stop fills it again; a frame of the same one keeps
     /// what the user typed.
-    filled_for: Option<(String, Option<u8>)>,
+    pub(super) filled_for: Option<(String, Option<u8>)>,
     /// What the new quota field holds.
     pub(super) text: String,
     /// The chat a `set-chat-quota` is on its way for, so its buttons wait.
@@ -172,11 +172,9 @@ impl XdDesktop {
         let can_continue = !waiting && self.model.connected && percent.is_some();
         let can_lift = !waiting && self.model.connected;
         let invalid = percent.is_none();
-        let focused = self
-            .quota_input
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window);
+        let field = self.quota_input.read(cx).focus_handle(cx);
+        let focused = field.is_focused(window);
+        let keys = self.key_targets.clone();
         let field_border = if invalid {
             colors.danger
         } else if focused {
@@ -227,7 +225,9 @@ impl XdDesktop {
                                     }),
                                 )
                                 .child(div().flex_1().min_w_0().child(self.quota_input.clone()))
-                                .child(div().flex_none().text_color(rgb(colors.faint)).child("%")),
+                                .child(div().flex_none().text_color(rgb(colors.faint)).child("%"))
+                                // Tab stops on it; Enter in it is Continue.
+                                .child(keys.mark(KeyLayer::Page, KeyStop::Field(field))),
                         )
                         .child(
                             ui_button_when(
@@ -238,9 +238,14 @@ impl XdDesktop {
                             )
                             .debug_selector(|| "chat-quota-continue".into())
                             .when_some(percent.filter(|_| can_continue), |button, percent| {
-                                button.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.continue_with_quota(Some(percent), cx)
-                                }))
+                                button.key_stop(
+                                    &keys,
+                                    KeyLayer::Page,
+                                    "chat-quota-continue",
+                                    colors,
+                                    cx,
+                                    move |this, _, cx| this.continue_with_quota(Some(percent), cx),
+                                )
                             })
                             .child("Continue"),
                         )
@@ -251,9 +256,14 @@ impl XdDesktop {
                             ui_button_when(can_lift, "chat-quota-lift", ButtonKind::Ghost, colors)
                                 .debug_selector(|| "chat-quota-lift".into())
                                 .when(can_lift, |button| {
-                                    button.on_click(cx.listener(|this, _, _, cx| {
-                                        this.continue_with_quota(None, cx)
-                                    }))
+                                    button.key_stop(
+                                        &keys,
+                                        KeyLayer::Page,
+                                        "chat-quota-lift",
+                                        colors,
+                                        cx,
+                                        |this, _, cx| this.continue_with_quota(None, cx),
+                                    )
                                 })
                                 .child("Continue without a limit"),
                         ),
