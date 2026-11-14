@@ -120,6 +120,8 @@ public object TranscriptMachine {
                     working = true,
                     resumable = false,
                     quotaReached = false,
+                    // Busy again, so no longer idle; the next reload says afresh.
+                    compactBeforeSend = null,
                     label = input.label,
                     turnId = input.turnId,
                     turnSequence = input.turnSequence ?: 0,
@@ -362,6 +364,7 @@ public object TranscriptMachine {
                 resumable = chat.resumable,
                 quota = ChatQuota.parse(chat.quota),
                 quotaReached = chat.quotaReached,
+                compactBeforeSend = com.restartfu.xd.model.CompactBeforeSend.parse(chat.compactBeforeSend),
                 label = chat.label,
                 turnEpoch = chat.turnEpoch,
                 turnId = if (chat.working) chat.turnId else null,

@@ -66,6 +66,8 @@ public data class ChatState(
      * one, so the composer offers that instead of resuming.
      */
     val quotaReached: Boolean = false,
+    /** A send can compact this idle chat first, from a given time; null when it never does. */
+    val compactBeforeSend: CompactBeforeSend? = null,
     val label: String? = null,
     /** Live turn this state reflects, and how far into it we have applied. */
     val turnEpoch: String = "",

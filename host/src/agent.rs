@@ -11,6 +11,7 @@ use std::{
 use serde_json::{Value, json};
 
 use crate::{
+    compaction::{self, Compaction, CompactionState},
     subagent::{SubagentPatch, SubagentStatus, SubagentStep},
     tool_diff,
 };
@@ -55,6 +56,16 @@ pub enum AgentEvent {
         input: u64,
         output: u64,
         window: u64,
+    },
+    /// A context compaction began, finished or failed. Each report replaces
+    /// the last one for the same compaction.
+    Compaction(Compaction),
+    /// The prompt cache of the assistant's latest request: how long it lives,
+    /// from when the request was made, in Unix milliseconds. `ttl_ms` is None
+    /// when the request wrote no cache, so its expiry is unknown.
+    PromptCache {
+        ttl_ms: Option<i64>,
+        requested_at_ms: i64,
     },
     Completed,
     Error(String),
@@ -527,6 +538,12 @@ pub struct ClaudeParser {
     /// A run was cut short for a steer, and the `init` still to come is the one
     /// that answers it rather than a sign of another steer picked up.
     replacement_pending: bool,
+    /// The compaction Claude reported last, until its boundary or the end of
+    /// the turn. A successful one waits here for the boundary's token counts.
+    compaction: Option<Compaction>,
+    /// The context a compaction left, until a request after it reports its
+    /// own: a turn that ends on a compaction reports the compaction's usage.
+    compacted_tokens: Option<u64>,
 }
 
 /// Whether a rate limit report turns work away, or `None` when it says neither.
@@ -617,6 +634,14 @@ impl ClaudeParser {
                 .get("request_id")
                 .map(|id| vec![AgentEvent::InteractionResolved(id.clone())])
                 .unwrap_or_default(),
+            Some("system")
+                if matches!(
+                    root.get("subtype").and_then(Value::as_str),
+                    Some("status" | "compact_boundary")
+                ) =>
+            {
+                self.compaction_event(&root)
+            }
             Some("system") if root.get("subtype").and_then(Value::as_str) != Some("init") => {
                 let mut events = claude_task_event(&root)
                     .map(|patch| vec![AgentEvent::Subagent(patch)])
@@ -747,6 +772,20 @@ impl ClaudeParser {
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                // A compaction still running when the turn ends never finished.
+                if let Some(mut compaction) = self
+                    .compaction
+                    .take()
+                    .filter(|compaction| compaction.state == CompactionState::Running)
+                {
+                    compaction.state = if failed {
+                        CompactionState::Failed
+                    } else {
+                        CompactionState::Stopped
+                    };
+                    events.push(AgentEvent::Compaction(compaction));
+                }
+                let compacted_tokens = self.compacted_tokens.take();
                 if !failed
                     && !self.saw_text
                     && !self.superseded
@@ -773,7 +812,15 @@ impl ClaudeParser {
                             .unwrap_or_else(|| "Claude turn failed".to_owned()),
                     ));
                 } else {
-                    if let Some(usage) = claude_usage(&root) {
+                    if let Some(after) = compacted_tokens {
+                        // The result's usage is the summary request's, not
+                        // what is left in context.
+                        events.push(AgentEvent::Usage {
+                            input: after,
+                            output: 0,
+                            window: claude_context_window(&root),
+                        });
+                    } else if let Some(usage) = claude_usage(&root) {
                         let input = usage
                             .get("input_tokens")
                             .and_then(Value::as_u64)
@@ -811,6 +858,74 @@ impl ClaudeParser {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Claude's compaction reports: `status: "compacting"` as it starts, a
+    /// `compact_boundary` with the token counts once the summary replaces the
+    /// history, and a status with `compact_result` when it ends. A status
+    /// back to null with no result means it was stopped.
+    fn compaction_event(&mut self, root: &Value) -> Vec<AgentEvent> {
+        let id = || {
+            text_field(root, "uuid")
+                .map(str::to_owned)
+                .unwrap_or_else(|| "compaction".to_owned())
+        };
+        if root.get("subtype").and_then(Value::as_str) == Some("compact_boundary") {
+            let metadata = root.get("compact_metadata");
+            let tokens = |name: &str| {
+                metadata
+                    .and_then(|metadata| metadata.get(name))
+                    .and_then(Value::as_u64)
+                    .filter(|tokens| *tokens > 0)
+            };
+            let mut compaction = self
+                .compaction
+                .take()
+                .unwrap_or_else(|| Compaction::new(id(), CompactionState::Running));
+            compaction.state = CompactionState::Completed;
+            compaction.error = None;
+            compaction.before = tokens("pre_tokens").or(compaction.before);
+            compaction.after = tokens("post_tokens").or(compaction.after);
+            self.compacted_tokens = compaction.after;
+            return vec![AgentEvent::Compaction(compaction)];
+        }
+        let status = root.get("status");
+        if status.and_then(Value::as_str) == Some("compacting") {
+            if self
+                .compaction
+                .as_ref()
+                .is_some_and(|compaction| compaction.state == CompactionState::Running)
+            {
+                return Vec::new();
+            }
+            let compaction = Compaction::new(id(), CompactionState::Running);
+            self.compaction = Some(compaction.clone());
+            return vec![AgentEvent::Compaction(compaction)];
+        }
+        let result = root.get("compact_result").and_then(Value::as_str);
+        let ended = result.is_some()
+            || (matches!(status, Some(Value::Null)) && root.get("permissionMode").is_none());
+        let running = self
+            .compaction
+            .as_ref()
+            .is_some_and(|compaction| compaction.state == CompactionState::Running);
+        if !ended || !running {
+            return Vec::new();
+        }
+        let mut compaction = self.compaction.take().expect("a running compaction");
+        match result {
+            Some("success") => {
+                compaction.state = CompactionState::Completed;
+                // The boundary may still follow with the token counts.
+                self.compaction = Some(compaction.clone());
+            }
+            Some("failed") => {
+                compaction.state = CompactionState::Failed;
+                compaction.error = text_field(root, "compact_error").map(str::to_owned);
+            }
+            _ => compaction.state = CompactionState::Stopped,
+        }
+        vec![AgentEvent::Compaction(compaction)]
     }
 
     /// The last words of an abandoned reply must not land after the user's
@@ -854,6 +969,18 @@ impl ClaudeParser {
             return Vec::new();
         };
         match event.get("type").and_then(Value::as_str) {
+            // Each request opens with the cache it wrote, which is what decides
+            // how long an idle chat stays cheap to compact.
+            Some("message_start") => {
+                self.compacted_tokens = None;
+                let Some(usage) = event.pointer("/message/usage") else {
+                    return Vec::new();
+                };
+                vec![AgentEvent::PromptCache {
+                    ttl_ms: compaction::claude_prompt_cache_ttl_ms(usage),
+                    requested_at_ms: crate::accounts::now_ms(),
+                }]
+            }
             Some("content_block_start") => {
                 let Some(index) = event.get("index").and_then(Value::as_u64) else {
                     return Vec::new();
@@ -2280,6 +2407,119 @@ mod tests {
         parser.feed(init);
         assert_eq!(parser.take_unread_steers(), [] as [u64; 0]);
         assert!(!parser.settling());
+    }
+
+    #[test]
+    fn a_compaction_reads_as_one_row_with_its_token_counts() {
+        let mut parser = ClaudeParser::default();
+        parser.feed(r#"{"type":"system","subtype":"init","session_id":"s1"}"#);
+        let started = parser
+            .feed(r#"{"type":"system","subtype":"status","status":"compacting","uuid":"u1"}"#);
+        assert_eq!(
+            started,
+            [AgentEvent::Compaction(Compaction::new(
+                "u1",
+                CompactionState::Running
+            ))]
+        );
+        // A second report of the same compaction adds nothing.
+        assert_eq!(
+            parser
+                .feed(r#"{"type":"system","subtype":"status","status":"compacting","uuid":"u2"}"#),
+            []
+        );
+        let boundary = parser.feed(
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"u3","compact_metadata":{"trigger":"manual","pre_tokens":251000,"post_tokens":32000}}"#,
+        );
+        let mut done = Compaction::new("u1", CompactionState::Completed);
+        done.before = Some(251_000);
+        done.after = Some(32_000);
+        assert_eq!(boundary, [AgentEvent::Compaction(done)]);
+        assert_eq!(
+            parser.feed(
+                r#"{"type":"system","subtype":"status","status":null,"compact_result":"success"}"#
+            ),
+            []
+        );
+        // The turn's usage is what the compaction left, not the summary request.
+        let result = parser.feed(
+            r#"{"type":"result","is_error":false,"result":"","usage":{"input_tokens":250000,"output_tokens":3000},"modelUsage":{"m":{"contextWindow":1000000}}}"#,
+        );
+        assert_eq!(
+            result,
+            [
+                AgentEvent::Usage {
+                    input: 32_000,
+                    output: 0,
+                    window: 1_000_000
+                },
+                AgentEvent::Completed
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_or_stopped_compaction_says_so() {
+        let mut parser = ClaudeParser::default();
+        parser.feed(r#"{"type":"system","subtype":"status","status":"compacting","uuid":"u1"}"#);
+        let failed = parser.feed(
+            r#"{"type":"system","subtype":"status","status":null,"compact_result":"failed","compact_error":"Not enough messages to compact."}"#,
+        );
+        let mut expected = Compaction::new("u1", CompactionState::Failed);
+        expected.error = Some("Not enough messages to compact.".into());
+        assert_eq!(failed, [AgentEvent::Compaction(expected)]);
+
+        parser.feed(r#"{"type":"system","subtype":"status","status":"compacting","uuid":"u2"}"#);
+        // A permission mode change is not the end of a compaction.
+        assert_eq!(
+            parser.feed(
+                r#"{"type":"system","subtype":"status","status":null,"permissionMode":"plan"}"#
+            ),
+            []
+        );
+        let stopped = parser.feed(r#"{"type":"system","subtype":"status","status":null}"#);
+        assert_eq!(
+            stopped,
+            [AgentEvent::Compaction(Compaction::new(
+                "u2",
+                CompactionState::Stopped
+            ))]
+        );
+
+        // One still running when the turn ends never finished.
+        parser.feed(r#"{"type":"system","subtype":"status","status":"compacting","uuid":"u3"}"#);
+        let events =
+            parser.feed(r#"{"type":"result","is_error":true,"result":"Prompt is too long"}"#);
+        assert_eq!(
+            events[0],
+            AgentEvent::Compaction(Compaction::new("u3", CompactionState::Failed))
+        );
+    }
+
+    #[test]
+    fn each_request_reports_the_cache_it_wrote() {
+        let mut parser = ClaudeParser::default();
+        let events = parser.feed(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":3,"cache_creation":{"ephemeral_1h_input_tokens":1200,"ephemeral_5m_input_tokens":0}}}}}"#,
+        );
+        let [
+            AgentEvent::PromptCache {
+                ttl_ms,
+                requested_at_ms,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("{events:?}");
+        };
+        assert_eq!(*ttl_ms, Some(3_600_000));
+        assert!(*requested_at_ms > 0);
+        let read_only = parser.feed(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":3,"cache_read_input_tokens":90000}}}}"#,
+        );
+        assert!(matches!(
+            read_only.as_slice(),
+            [AgentEvent::PromptCache { ttl_ms: None, .. }]
+        ));
     }
 
     /// The run ended by itself with a steer unread, and the answer arrives with

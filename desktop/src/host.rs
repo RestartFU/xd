@@ -21,7 +21,9 @@ use thiserror::Error;
 use crate::channel;
 #[cfg(all(test, unix))]
 use crate::local_socket::UnixStream;
-use crate::model::{Attachment, AutoDeleteRules, AutoSettleRules, ChatQuotaSettings};
+use crate::model::{
+    Attachment, AutoDeleteRules, AutoSettleRules, ChatQuotaSettings, IdleCompaction,
+};
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
 const MESSAGE_PAGE_SIZE: usize = 120;
@@ -533,6 +535,8 @@ pub enum RequestKind {
     SetAutoSettleSettings,
     AutoDeleteSettings,
     SetAutoDeleteSettings,
+    IdleCompactionSettings,
+    SetIdleCompactionSettings,
     /// `broadcasts` is how many `chat-quota-settings` broadcasts had arrived
     /// when the request was sent; a reply is older than any after it.
     ChatQuotaSettings {
@@ -1606,6 +1610,20 @@ impl HostHandle {
         )
     }
 
+    pub fn idle_compaction_settings(&self) -> Result<(), String> {
+        self.send(
+            RequestKind::IdleCompactionSettings,
+            json!({"op": "idle-compaction-settings"}),
+        )
+    }
+
+    pub fn set_idle_compaction_settings(&self, mode: IdleCompaction) -> Result<(), String> {
+        self.send(
+            RequestKind::SetIdleCompactionSettings,
+            json!({"op": "set-idle-compaction-settings", "mode": mode.as_str()}),
+        )
+    }
+
     pub fn chat_quota_settings(&self, broadcasts: u64) -> Result<(), String> {
         self.send(
             RequestKind::ChatQuotaSettings { broadcasts },
@@ -2141,6 +2159,7 @@ impl HostHandle {
         worktree_backend: Option<&str>,
         worktree_model: Option<&str>,
         steer: bool,
+        compact_first: bool,
     ) -> Result<(), String> {
         let attachments = attachments
             .iter()
@@ -2171,6 +2190,10 @@ impl HostHandle {
         }
         if steer {
             body["steer"] = Value::Bool(true);
+        }
+        // "When you return": the host runs `/compact` first and queues this.
+        if compact_first {
+            body["compact_first"] = Value::Bool(true);
         }
         self.send(
             RequestKind::Send {

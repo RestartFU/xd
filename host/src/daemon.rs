@@ -208,6 +208,7 @@ fn run_inner(options: HostOptions, stop_with_app: bool) -> io::Result<()> {
     engine.start_auto_settle();
     engine.start_account_switching();
     engine.start_chat_quotas();
+    engine.start_idle_compaction();
     engine.start_reporting_agents();
     engine.deliver_waiting_agent_reports();
     #[cfg(target_os = "linux")]

@@ -3,6 +3,8 @@ package com.restartfu.xd
 import com.restartfu.xd.credentials.CredentialStore
 import com.restartfu.xd.credentials.SshConnection
 import com.restartfu.xd.model.ChatQuotaSettings
+import com.restartfu.xd.model.IdleCompactionMode
+import com.restartfu.xd.model.IdleCompactionSettings
 import com.restartfu.xd.model.TreeSnapshot
 import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.Link
@@ -308,6 +310,73 @@ public class XdClient(
         scope.launch { runCatching { loadChatQuotaSettings() } }
     }
 
+    private val _idleCompactionSettings = MutableStateFlow<IdleCompactionSettings?>(null)
+
+    /**
+     * When the host compacts an idle Claude chat. Null until read, after
+     * forgetting the host, and on hosts that do not compact.
+     *
+     * Kept the way [chatQuotaSettings] is: broadcasts apply as they come, and a
+     * reply only when no broadcast arrived while it was out.
+     */
+    public val idleCompactionSettings: StateFlow<IdleCompactionSettings?> = _idleCompactionSettings.asStateFlow()
+    private val idleCompactionLock = Mutex()
+    private var idleCompactionBroadcasts = 0L
+    private var idleCompactionCalls = 0L
+    private var idleCompactionApplied = 0L
+    /** Something has asked for the mode on this host, so a reconnect reads it again. */
+    private var idleCompactionWanted = false
+
+    /**
+     * Reads the host's idle compaction mode into [idleCompactionSettings].
+     * Throws when the host refuses, as one without compaction does.
+     */
+    public suspend fun loadIdleCompactionSettings(): IdleCompactionSettings? =
+        idleCompactionCall(Ops.idleCompactionSettings(), requested = null)
+
+    /** Sets when the host compacts an idle Claude chat. */
+    public suspend fun setIdleCompactionSettings(mode: IdleCompactionMode): IdleCompactionSettings? =
+        idleCompactionCall(Ops.setIdleCompactionSettings(mode), requested = IdleCompactionSettings(mode))
+
+    /** [requested] stands in for a reply that does not name a mode: what a change asked for. */
+    private suspend fun idleCompactionCall(
+        request: kotlinx.serialization.json.JsonObject,
+        requested: IdleCompactionSettings?,
+    ): IdleCompactionSettings? {
+        val generation = _sessionGeneration.value
+        val (call, broadcasts) = idleCompactionLock.withLock {
+            idleCompactionWanted = true
+            ++idleCompactionCalls to idleCompactionBroadcasts
+        }
+        val settings = IdleCompactionSettings.parse(actor.call(request)) ?: requested
+        idleCompactionLock.withLock {
+            if (
+                settings != null &&
+                generation == _sessionGeneration.value &&
+                broadcasts == idleCompactionBroadcasts &&
+                call > idleCompactionApplied
+            ) {
+                _idleCompactionSettings.value = settings
+                idleCompactionApplied = call
+            }
+        }
+        return settings
+    }
+
+    private suspend fun idleCompactionBroadcast(event: kotlinx.serialization.json.JsonObject) {
+        val settings = IdleCompactionSettings.parse(event)
+        idleCompactionLock.withLock {
+            idleCompactionBroadcasts++
+            if (settings != null) _idleCompactionSettings.value = settings
+        }
+        // One that does not say what changed is read again.
+        if (settings == null) rereadIdleCompaction()
+    }
+
+    private fun rereadIdleCompaction() {
+        scope.launch { runCatching { loadIdleCompactionSettings() } }
+    }
+
     private fun rereadAutoSettle() {
         // Counted before launching, so there is no moment the read is due but not counted.
         _autoSettleInFlight.update { it + 1 }
@@ -420,6 +489,7 @@ public class XdClient(
                     // Broadcasts sent while disconnected were missed.
                     if (autoSettleWanted.value) rereadAutoSettle()
                     if (chatQuotaLock.withLock { chatQuotaWanted }) rereadChatQuota()
+                    if (idleCompactionLock.withLock { idleCompactionWanted }) rereadIdleCompaction()
                     // A failure is not dropped: what is shown may be out of
                     // date, and the next read that lands clears the mark.
                     if (agentAuthWanted.value) {
@@ -454,6 +524,11 @@ public class XdClient(
                 if (eventName == "chat-quota-settings") {
                     chatQuotaBroadcast(event.value)
                     // Open chats that follow the default have a new quota too.
+                    reloadSessions()
+                }
+                if (eventName == "idle-compaction-settings") {
+                    idleCompactionBroadcast(event.value)
+                    // Whether an open chat offers to compact before sending follows the mode.
                     reloadSessions()
                 }
                 if (eventName == "owner-icon") {
@@ -549,6 +624,11 @@ public class XdClient(
             _chatQuotaSettings.value = null
             chatQuotaWanted = false
             chatQuotaApplied = chatQuotaCalls
+        }
+        idleCompactionLock.withLock {
+            _idleCompactionSettings.value = null
+            idleCompactionWanted = false
+            idleCompactionApplied = idleCompactionCalls
         }
         agentAuthStates.clear()
         agentCliStates.clear()

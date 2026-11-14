@@ -32,6 +32,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use gpui::AnimationExt as _;
 use gpui::{
     App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
     Decorations, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, HighlightStyle, Image,
@@ -54,9 +55,9 @@ use xd_desktop::{
     markdown,
     model::{
         AppModel, Attachment, AutoDeleteRules, AutoSettleRules, BackgroundTaskOutput, ChatQuota,
-        ChatQuotaSettings, ChatSummary, DEFAULT_CHAT_TITLE, Folder, LinkedPullRequest,
-        MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage, MessagePageDirection, PauseAllAction,
-        PullRequestState, SentFrom, ToolView, Worktree, is_default_chat_title,
+        ChatQuotaSettings, ChatSummary, DEFAULT_CHAT_TITLE, Folder, IdleCompaction,
+        LinkedPullRequest, MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage, MessagePageDirection,
+        PauseAllAction, PullRequestState, SentFrom, ToolView, Worktree, is_default_chat_title,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -169,6 +170,8 @@ const COPILOT_ICON: &str = "icons/copilot.svg";
 const XD_MARK_ICON: &str = "icons/xd-mark.svg";
 const SEND_ICON: &str = "icons/send.svg";
 const STOP_ICON: &str = "icons/stop.svg";
+/// A context compaction: the conversation pressed into less.
+const COMPACT_ICON: &str = "icons/minimize-2.svg";
 const PLAY_ICON: &str = "icons/play.svg";
 const PAUSE_ICON: &str = "icons/pause.svg";
 const FOLDER_ICON: &str = "icons/folder.svg";
@@ -2394,6 +2397,71 @@ fn workspace_icon(avatar: Option<Arc<Image>>, size: f32, color: u32) -> gpui::An
             .into_any_element(),
         None => icon(FOLDER_ICON, size, color),
     }
+}
+
+/// A context compaction in the conversation, as T3 Code draws it: a quiet
+/// divider with the compaction's sentence in the middle, red if it failed and
+/// breathing while it runs.
+fn render_compaction_notice(
+    id: impl Into<gpui::ElementId>,
+    state: activity::CompactionState,
+    label: &str,
+    colors: ThemeColors,
+) -> gpui::AnyElement {
+    let failed = state == activity::CompactionState::Failed;
+    let tone = if failed { colors.danger } else { colors.muted };
+    let rule = || {
+        div().h(px(1.0)).flex_1().min_w(px(24.0)).bg(rgb(if failed {
+            colors.danger_surface
+        } else {
+            colors.border
+        }))
+    };
+    let content = div()
+        .id(id)
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(12.0))
+        .text_color(rgb(tone))
+        .child(icon(
+            if failed { ALERT_ICON } else { COMPACT_ICON },
+            12.0,
+            tone,
+        ))
+        .child(div().min_w_0().truncate().child(label.to_owned()));
+    let content = if state == activity::CompactionState::Running {
+        content
+            .with_animation(
+                "compaction-running",
+                gpui::Animation::new(Duration::from_millis(1600))
+                    .repeat()
+                    .with_easing(gpui::pulsating_between(0.45, 1.0)),
+                |content, delta| content.opacity(delta),
+            )
+            .into_any_element()
+    } else {
+        content.into_any_element()
+    };
+    div()
+        .w_full()
+        .max_w(px(780.0))
+        .py(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .child(rule())
+        .child(content)
+        .child(rule())
+        .into_any_element()
+}
+
+/// The time the compact offer compares against, in Unix milliseconds.
+fn compaction_clock_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
 
 struct PaneTooltip {
@@ -6194,6 +6262,15 @@ struct XdDesktop {
     settled_visible: usize,
     auto_settle: Option<AutoSettleRules>,
     auto_delete: Option<AutoDeleteRules>,
+    /// The host's idle compaction mode, once read. Decides whether the
+    /// composer offers to compact before a send.
+    idle_compaction: Option<IdleCompaction>,
+    /// The chat whose full history the user chose to keep for its next send,
+    /// rather than compact first.
+    keep_full_history: Option<String>,
+    /// The time a scheduled redraw waits for, so the compact offer appears
+    /// when the chat's cache goes cold. One at a time.
+    compact_offer_wake: Option<i64>,
     /// The host's default chat quota, once a host with `chat_quotas` says it.
     chat_quota: Option<ChatQuotaSettings>,
     /// How many `chat-quota-settings` broadcasts have arrived; each request
@@ -7114,6 +7191,9 @@ impl XdDesktop {
             settled_visible: SETTLED_INITIAL_ROWS,
             auto_settle: None,
             auto_delete: None,
+            idle_compaction: None,
+            keep_full_history: None,
+            compact_offer_wake: None,
             chat_quota: None,
             chat_quota_broadcasts: 0,
             quota_stops_seen: None,
@@ -7553,6 +7633,8 @@ impl XdDesktop {
                 | RequestKind::SetAutoSettleSettings
                 | RequestKind::AutoDeleteSettings
                 | RequestKind::SetAutoDeleteSettings
+                | RequestKind::IdleCompactionSettings
+                | RequestKind::SetIdleCompactionSettings
                 | RequestKind::ChatQuotaSettings { .. }
                 | RequestKind::SetChatQuotaSettings { .. }
                 | RequestKind::SetChatQuota { .. }
@@ -7585,6 +7667,7 @@ impl XdDesktop {
                 | "owner-icon"
                 | "auto-settle-settings"
                 | "auto-delete-settings"
+                | "idle-compaction-settings"
                 | "chat-quota-settings"
                 | "terminal-opened"
                 | "terminal-activity"
@@ -7638,6 +7721,7 @@ impl XdDesktop {
         self.settle_advances.clear();
         self.auto_settle = None;
         self.auto_delete = None;
+        self.idle_compaction = None;
         self.chat_quota = None;
         self.quota_card = chat_quota::QuotaCard::default();
         self.quota_stops_seen = None;
@@ -7646,6 +7730,7 @@ impl XdDesktop {
             self.request_auto_settle_settings();
             self.request_auto_delete_settings();
             self.request_chat_quota_settings();
+            self.request_idle_compaction_settings();
         }
         self.model.selected_chat = None;
         self.invalidate_live_render();
@@ -7702,6 +7787,7 @@ impl XdDesktop {
         self.quota_stops_seen = None;
         self.quota_stops_announced.clear();
         self.request_chat_quota_settings();
+        self.request_idle_compaction_settings();
         self.list_chat_accounts();
         true
     }
@@ -7887,6 +7973,7 @@ impl XdDesktop {
         // Broadcasts sent while away were missed.
         if self.active_endpoint == ChatEndpoint::Remote {
             self.request_chat_quota_settings();
+            self.request_idle_compaction_settings();
             // The tree asked for above lists the accounts again.
             self.chat_accounts_listed = false;
         }
@@ -8363,6 +8450,7 @@ impl XdDesktop {
                 self.chat_accounts_listed = false;
                 // Broadcasts sent while away were missed.
                 self.request_chat_quota_settings();
+                self.request_idle_compaction_settings();
                 if let Some(host) = &self.host {
                     self.request_local_host_state(host);
                 }
@@ -8563,6 +8651,7 @@ impl XdDesktop {
                     | RequestKind::SetChatTitleSettings
                     | RequestKind::AutoSettleSettings
                     | RequestKind::AutoDeleteSettings
+                    | RequestKind::IdleCompactionSettings
                     | RequestKind::ChatQuotaSettings { .. }
             ) {
                 self.model.connection_error = Some(
@@ -8587,6 +8676,7 @@ impl XdDesktop {
                 RequestKind::PauseAll { .. } => self.pause_all_pending = false,
                 RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
                 RequestKind::SetAutoDeleteSettings => self.request_auto_delete_settings(),
+                RequestKind::SetIdleCompactionSettings => self.request_idle_compaction_settings(),
                 RequestKind::ChatQuotaSettings { .. } => self.chat_quota = None,
                 // The switch moved ahead of the host, so take back its answer.
                 RequestKind::SetChatQuotaSettings { .. } => self.request_chat_quota_settings(),
@@ -9910,6 +10000,9 @@ impl XdDesktop {
             RequestKind::AutoDeleteSettings | RequestKind::SetAutoDeleteSettings => {
                 self.auto_delete = AutoDeleteRules::from_value(&value);
             }
+            RequestKind::IdleCompactionSettings | RequestKind::SetIdleCompactionSettings => {
+                self.idle_compaction = IdleCompaction::from_value(&value);
+            }
             RequestKind::ChatQuotaSettings { broadcasts }
             | RequestKind::SetChatQuotaSettings { broadcasts } => {
                 // A broadcast since the request was sent is newer than its
@@ -10077,9 +10170,15 @@ impl XdDesktop {
                     .get("queued")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                // A message the host compacts first is queued behind the
+                // compaction, which is the turn that started.
+                let compacting = value
+                    .get("compacting")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 if let Some(pending) = self.pending_send.take() {
                     let predicted_queued = matches!(pending.optimistic, OptimisticSend::Queued);
-                    if predicted_queued != queued {
+                    if predicted_queued != (queued || compacting) {
                         self.rollback_optimistic_send(&pending);
                         if !queued {
                             let _ = self.apply_optimistic_send(&pending.text);
@@ -10708,6 +10807,9 @@ impl XdDesktop {
             }
             "auto-delete-settings" => {
                 self.auto_delete = AutoDeleteRules::from_value(&body);
+            }
+            "idle-compaction-settings" => {
+                self.idle_compaction = IdleCompaction::from_value(&body);
             }
             "chat-quota-settings" => {
                 self.chat_quota_broadcasts += 1;
@@ -12303,6 +12405,7 @@ impl XdDesktop {
             &prompt.attachments,
             self.settings.git_writer.backend(),
             self.settings.git_writer_model.as_deref(),
+            false,
             false,
         ) {
             self.model.connection_error = Some(error);
@@ -15688,6 +15791,7 @@ impl XdDesktop {
             self.model.connection_error = Some("xd is not connected to a host.".into());
             return;
         };
+        let compact_first = !steer && self.compacts_before_send();
         if let Err(error) = host.send_message(
             &chat_id,
             &text,
@@ -15695,12 +15799,23 @@ impl XdDesktop {
             self.settings.git_writer.backend(),
             self.settings.git_writer_model.as_deref(),
             steer,
+            compact_first,
         ) {
             self.model.connection_error = Some(error);
             return;
         }
+        // Keeping the full history was for this send only.
+        self.keep_full_history = None;
 
-        let optimistic = self.apply_optimistic_send(&text);
+        // A send that compacts first waits in the queue behind the compaction.
+        let optimistic = if compact_first {
+            // Not marked working yet: should the host send it as it is after
+            // all, the reply takes this back and shows it started.
+            self.model.queue.push(text.clone());
+            OptimisticSend::Queued
+        } else {
+            self.apply_optimistic_send(&text)
+        };
         self.sending = true;
         self.pending_send = Some(PendingSend {
             chat_id: chat_id.clone(),
@@ -15890,6 +16005,7 @@ impl XdDesktop {
             self.settings.git_writer.backend(),
             self.settings.git_writer_model.as_deref(),
             false,
+            false,
         ) {
             self.model.connection_error = Some(error);
             return false;
@@ -15905,6 +16021,117 @@ impl XdDesktop {
             agent_draft: None,
         });
         true
+    }
+
+    /// The tokens the next send compacts first, as T3 Code's "When you
+    /// return" does, or None when it sends as it is: the host offers it for an
+    /// idle Claude chat past its prompt cache, and nothing is waiting on the
+    /// chat. A typed `/compact` is already the compaction.
+    fn compact_offer(&self) -> Option<u64> {
+        let offer = self.model.compact_before_send?;
+        let typed = self.composer.trim_start();
+        let typed_compact = typed
+            .get(..8)
+            .is_some_and(|head| head.eq_ignore_ascii_case("/compact"))
+            && typed[8..].chars().next().is_none_or(char::is_whitespace);
+        (self.idle_compaction == Some(IdleCompaction::OnReturn)
+            && self.model.connected
+            && !self.model.working
+            && !self.model.quota_reached
+            && self.model.interactions.is_empty()
+            && self.queue_edit.is_none()
+            && !self.shows_resume()
+            && !typed_compact
+            && compaction_clock_ms() >= offer.after_ms)
+            .then_some(offer.tokens)
+    }
+
+    /// Whether the next send compacts first: offered, and not turned down.
+    fn compacts_before_send(&self) -> bool {
+        self.compact_offer().is_some()
+            && self.keep_full_history.as_ref() != self.model.selected_chat.as_ref()
+    }
+
+    /// Redraws when the open chat's compact offer comes due, so it appears
+    /// without waiting on anything else to change.
+    fn schedule_compact_offer(&mut self, cx: &mut Context<Self>) {
+        let Some(offer) = self.model.compact_before_send else {
+            return;
+        };
+        let now = compaction_clock_ms();
+        if offer.after_ms <= now || self.compact_offer_wake == Some(offer.after_ms) {
+            return;
+        }
+        self.compact_offer_wake = Some(offer.after_ms);
+        let wait = Duration::from_millis((offer.after_ms - now) as u64 + 50);
+        cx.spawn(async move |this, cx| {
+            Timer::after(wait).await;
+            let _ = this.update(cx, |this, cx| {
+                this.compact_offer_wake = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The Compact / Keep switch beside Send, with the history's size.
+    fn render_compact_toggle(
+        keys: &KeyTargets,
+        tokens: u64,
+        compacts: bool,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let size = activity::format_tokens(tokens);
+        let (headline, hint) = if compacts {
+            (
+                format!("Next send compacts {size} tokens first."),
+                "Click to keep full history",
+            )
+        } else {
+            (
+                format!("Next send keeps all {size} tokens."),
+                "Click to compact first",
+            )
+        };
+        ui_button("native-compact-before-send", ButtonKind::Ghost, colors)
+            .h(px(CONTROL_HEIGHT_COMPACT))
+            .px(px(8.0))
+            .gap(px(5.0))
+            .text_size(text_px(TEXT_LABEL))
+            .tooltip(pane_tooltip_lines(
+                vec![headline.into(), hint.into()],
+                colors,
+            ))
+            .key_stop(
+                keys,
+                KeyLayer::Page,
+                "native-compact-before-send",
+                colors,
+                cx,
+                |this, _, cx| {
+                    this.keep_full_history = if this.keep_full_history.is_some()
+                        && this.keep_full_history == this.model.selected_chat
+                    {
+                        None
+                    } else {
+                        this.model.selected_chat.clone()
+                    };
+                    cx.notify();
+                },
+            )
+            .child(icon(
+                COMPACT_ICON,
+                12.0,
+                if compacts { colors.text } else { colors.muted },
+            ))
+            .child(div().text_color(rgb(colors.text)).child(if compacts {
+                "Compact"
+            } else {
+                "Keep"
+            }))
+            .child(div().text_color(rgb(colors.muted)).child(size))
+            .into_any_element()
     }
 
     /// Whether the send button is the resume button: only with nothing typed,
@@ -17776,6 +18003,7 @@ impl XdDesktop {
             self.request_auto_delete_settings();
             self.request_chat_quota_settings();
             self.request_cli_versions();
+            self.request_idle_compaction_settings();
             self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         } else {
             self.clear_settings_search(cx);
@@ -19930,6 +20158,28 @@ impl XdDesktop {
         if let Err(error) = result {
             self.model.connection_error = Some(error);
         }
+    }
+
+    fn request_idle_compaction_settings(&mut self) {
+        let result = self
+            .active_host()
+            .map(|host| host.idle_compaction_settings())
+            .unwrap_or(Ok(()));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn change_idle_compaction(&mut self, mode: IdleCompaction, cx: &mut Context<Self>) {
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.set_idle_compaction_settings(mode));
+        match result {
+            Ok(()) => self.idle_compaction = Some(mode),
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
     }
 
     fn change_auto_delete(&mut self, rules: AutoDeleteRules, cx: &mut Context<Self>) {
@@ -24383,6 +24633,7 @@ impl XdDesktop {
             self.settings.git_writer.backend(),
             self.settings.git_writer_model.as_deref(),
             self.model.working,
+            false,
         ) {
             self.model.connection_error = Some(error);
             cx.notify();
@@ -25597,6 +25848,21 @@ impl XdDesktop {
                 let Some(message) = messages.get(index) else {
                     return div().into_any_element();
                 };
+                if message.role == "tool"
+                    && let Some((state, label)) = activity::compaction_notice(&message.content)
+                {
+                    return div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(div().w(px(column)).child(render_compaction_notice(
+                            ("compaction-notice", index),
+                            state,
+                            label,
+                            colors,
+                        )))
+                        .into_any_element();
+                }
                 if let Some(sentence) = accounts_view::switch_notice(message) {
                     return div()
                         .w_full()
@@ -26078,15 +26344,33 @@ impl XdDesktop {
                 .into_any_element(),
             );
         }
+        // "When you return": the next send compacts the idle chat first,
+        // unless the user keeps its full history this once.
+        self.schedule_compact_offer(cx);
+        let compact_offer = self.compact_offer();
+        let compacts_first = self.compacts_before_send();
+        if let Some(tokens) = compact_offer {
+            actions.push(Self::render_compact_toggle(
+                &self.key_targets,
+                tokens,
+                compacts_first,
+                colors,
+                cx,
+            ));
+        }
         if !working || can_send || answering {
+            let send_label = if shows_resume {
+                "Resume chat"
+            } else if compact_offer.is_some() && compacts_first {
+                // The chip beside it says how much history goes.
+                "Compact and send"
+            } else {
+                "Send (Enter)"
+            };
             actions.push(
                 composer::composer_send_button(
                     "native-send-message",
-                    if shows_resume {
-                        "Resume chat"
-                    } else {
-                        "Send (Enter)"
-                    },
+                    send_label,
                     can_submit,
                     if shows_resume { PLAY_ICON } else { SEND_ICON },
                     colors,
@@ -26097,11 +26381,7 @@ impl XdDesktop {
                         &self.key_targets,
                         KeyLayer::Page,
                         "native-send-message",
-                        if shows_resume {
-                            "Resume chat"
-                        } else {
-                            "Send (Enter)"
-                        },
+                        send_label,
                         colors,
                         cx,
                         move |this, _, cx| {
@@ -31485,6 +31765,9 @@ impl AssetSource for EmbeddedIcons {
             STOP_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/stop.svg").as_slice(),
             )),
+            COMPACT_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/minimize-2.svg").as_slice(),
+            )),
             PLAY_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/play.svg").as_slice(),
             )),
@@ -31632,6 +31915,7 @@ impl AssetSource for EmbeddedIcons {
             XD_MARK_ICON.into(),
             SEND_ICON.into(),
             STOP_ICON.into(),
+            COMPACT_ICON.into(),
             PLAY_ICON.into(),
             FOLDER_ICON.into(),
             FOLDERS_ICON.into(),

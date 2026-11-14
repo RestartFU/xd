@@ -27,6 +27,7 @@ public val TranscriptRow.key: String
         // Keyed on the run's first call, which is stable as the run grows.
         is TranscriptRow.Tools -> "tools-${items.first().id}"
         is TranscriptRow.AccountSwitch -> "account-switch-${item.id}"
+        is TranscriptRow.Compaction -> "compaction-${item.id}"
         is TranscriptRow.Pipeline -> "pipeline-${item.id}"
         is TranscriptRow.Subagent -> "subagent-${item.id}"
     }
@@ -105,6 +106,7 @@ private fun TranscriptRow.renamed(keys: MutableSet<String>): TranscriptRow {
                 items = listOf(items.first().let { it.copy(id = "${it.id}#$suffix") }) + items.drop(1),
             )
             is TranscriptRow.AccountSwitch -> copy(item = item.copy(id = "${item.id}#$suffix"))
+            is TranscriptRow.Compaction -> copy(item = item.copy(id = "${item.id}#$suffix"))
             is TranscriptRow.Pipeline -> copy(item = item.copy(id = "${item.id}#$suffix"))
             is TranscriptRow.Subagent -> copy(item = item.copy(id = "${item.id}#$suffix"))
         }

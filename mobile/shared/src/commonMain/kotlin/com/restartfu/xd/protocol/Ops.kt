@@ -112,6 +112,11 @@ public object Ops {
         images: List<PngAttachment> = emptyList(),
         /** Steer a message that would be queued into the running turn instead. */
         steer: Boolean = false,
+        /**
+         * Run `/compact` first in an idle chat that offered it with
+         * `compact_before_send`; the message waits right behind it.
+         */
+        compactFirst: Boolean = false,
     ): JsonObject {
         require(text.isNotEmpty() || images.isNotEmpty()) {
             "A message needs text or an image"
@@ -123,6 +128,7 @@ public object Ops {
             put("chat", chatId)
             put("text", text)
             if (steer) put("steer", true)
+            if (compactFirst) put("compact_first", true)
             if (images.isNotEmpty()) {
                 put(
                     "attachments",
@@ -333,6 +339,15 @@ public object Ops {
     public fun setChatQuotaSettings(percent: Int?): JsonObject = buildJsonObject {
         put("op", "set-chat-quota-settings")
         put("percent", percent?.let { JsonPrimitive(requirePercent(it)) } ?: JsonNull)
+    }
+
+    /** When the host compacts an idle Claude chat: `onReturn`, `beforeCacheExpires` or `off`. */
+    public fun idleCompactionSettings(): JsonObject = op("idle-compaction-settings")
+
+    /** Sets when the host compacts an idle Claude chat. */
+    public fun setIdleCompactionSettings(mode: com.restartfu.xd.model.IdleCompactionMode): JsonObject = buildJsonObject {
+        put("op", "set-idle-compaction-settings")
+        put("mode", mode.wire)
     }
 
     /**
