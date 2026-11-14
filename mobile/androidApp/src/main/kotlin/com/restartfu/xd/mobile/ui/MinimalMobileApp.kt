@@ -18,6 +18,7 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
+import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -69,6 +70,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.material3.ButtonDefaults
 import androidx.lifecycle.ViewModel
 import com.restartfu.xd.model.ChatSummary
@@ -2881,27 +2885,7 @@ internal fun AutoSettleSettings(model: MainViewModel) {
         enabled = editable,
     )
     val setDays = { days: Int -> model.setAutoSettle(afterDays = Ops.AfterDays.Days(days)) }
-    current.afterDays?.let { days ->
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                Text("Days before settling", fontWeight = FontWeight.SemiBold)
-                Text(
-                    SETTLE_DAYS_DETAIL,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            IconButton(
-                onClick = { setDays(days - 1) },
-                enabled = editable && days > 1,
-            ) { Text("\u2212", style = MaterialTheme.typography.titleMedium) }
-            Text(days.toString(), fontWeight = FontWeight.SemiBold, modifier = Modifier.widthIn(min = 24.dp))
-            IconButton(
-                onClick = { setDays(days + 1) },
-                enabled = editable && days < 90,
-            ) { Text("+", style = MaterialTheme.typography.titleMedium) }
-        }
-    }
+    current.afterDays?.let { days -> SettleDaysStepper(days, editable, setDays) }
     SettingSwitch(
         title = "Keep sessions with a pull request",
         detail = SETTLE_KEEP_PR_DETAIL,
@@ -2951,6 +2935,79 @@ internal fun SettingSwitch(
             )
         }
         Switch(checked = checked, onCheckedChange = null, enabled = enabled)
+    }
+}
+
+/** The fewest and the most days the host takes for the inactivity rule. */
+internal const val MIN_SETTLE_DAYS = 1
+internal const val MAX_SETTLE_DAYS = 90
+
+/** A number of days as it is said: "1 day", "3 days". */
+internal fun daysLabel(days: Int): String = if (days == 1) "1 day" else "$days days"
+
+/**
+ * How many days a session sits before it settles. For TalkBack the row is one
+ * stop, "Days before settling, 3 days", adjusted by swiping up or down as a
+ * slider is, and the new number is said whenever it changes, from these
+ * buttons or from another device. At either end the button that would pass
+ * it turns off, and the row says why.
+ */
+@Composable
+private fun SettleDaysStepper(days: Int, editable: Boolean, setDays: (Int) -> Unit) {
+    val value = daysLabel(days)
+    val bound = when {
+        days <= MIN_SETTLE_DAYS -> "$value is the shortest."
+        days >= MAX_SETTLE_DAYS -> "$value is the longest."
+        else -> null
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .semantics(mergeDescendants = true) {
+                stateDescription = value
+                liveRegion = LiveRegionMode.Polite
+                progressBarRangeInfo = ProgressBarRangeInfo(
+                    current = days.toFloat(),
+                    range = MIN_SETTLE_DAYS.toFloat()..MAX_SETTLE_DAYS.toFloat(),
+                    steps = MAX_SETTLE_DAYS - MIN_SETTLE_DAYS - 1,
+                )
+                if (editable) {
+                    setProgress { target ->
+                        val next = target.roundToInt().coerceIn(MIN_SETTLE_DAYS, MAX_SETTLE_DAYS)
+                        if (next != days) setDays(next)
+                        true
+                    }
+                }
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(end = 8.dp)) {
+            Text("Days before settling", fontWeight = FontWeight.SemiBold)
+            Text(
+                listOfNotNull(SETTLE_DAYS_DETAIL, bound).joinToString(" "),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        IconButton(
+            onClick = { setDays(days - 1) },
+            enabled = editable && days > MIN_SETTLE_DAYS,
+            // A whole 48dp target, not 40 inside a larger touch area.
+            modifier = Modifier.size(48.dp).semantics { contentDescription = "Fewer days" },
+        ) { Text("\u2212", style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics {}) }
+        // The row says the number as its state, so the digits are not read twice.
+        Text(
+            days.toString(),
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.widthIn(min = 24.dp).clearAndSetSemantics {},
+        )
+        IconButton(
+            onClick = { setDays(days + 1) },
+            enabled = editable && days < MAX_SETTLE_DAYS,
+            modifier = Modifier.size(48.dp).semantics { contentDescription = "More days" },
+        ) { Text("+", style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics {}) }
     }
 }
 
