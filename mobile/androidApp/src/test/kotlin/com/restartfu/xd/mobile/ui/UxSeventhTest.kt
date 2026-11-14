@@ -374,6 +374,46 @@ class UxSeventhTest {
         await { !shows(REMOVED_NOTICE) }
     }
 
+    @Test fun aRemovedNoticeIsNotShownAgainAfterLeavingTheChat() = app(override = queued, afterReply = queueEvents) {
+        dropFirstQueued()
+        // Left while it shows: it goes with the chat.
+        pressBack()
+        await { !shows(CHAT_MARK) }
+        await { !shows(REMOVED_NOTICE) }
+        // Back within its time: it is not shown, nor said, a second time.
+        click("Reconnect backoff")
+        await { shows(CHAT_MARK) }
+        repeat(20) {
+            idle()
+            assertFalse("the notice was shown again on coming back", shows(REMOVED_NOTICE))
+        }
+        assertEquals(null, sent("queue"))
+    }
+
+    @Test fun aRemovedNoticeShowingDuringARotationIsShownAgain() = app(override = queued, afterReply = queueEvents) {
+        dropFirstQueued()
+        recreate()
+        // The same chat made again: the notice is not lost, and its Undo still works.
+        await { shows(REMOVED_NOTICE) && shows("Undo") }
+        click("Undo")
+        await { sent("reorder-queue") != null }
+    }
+
+    private fun dropFirstQueued() {
+        motion(false)
+        click("Reconnect backoff")
+        await { shows(FIRST_QUEUED) }
+        idle()
+        click(FIRST_QUEUED)
+        repeat(3) {
+            ShadowLooper.idleMainLooper()
+            idle()
+        }
+        click("Drop")
+        await { sent("drop-queue") != null }
+        await { shows(REMOVED_NOTICE) && shows("Undo") }
+    }
+
     @Test fun aRemovedPictureComesBackToItsPlace() {
         val first = png(0xff3366cc.toInt())
         val second = png(0xffcc6633.toInt())

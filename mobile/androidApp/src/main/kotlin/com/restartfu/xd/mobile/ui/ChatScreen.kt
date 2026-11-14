@@ -230,15 +230,6 @@ internal fun ChatScreen(
     val messagingAgent by model.messagingAgent.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
     val catalog by model.catalog.collectAsStateWithLifecycle()
-    // A queued message dropped or a picture taken off the draft: "Removed",
-    // with an Undo that puts it back where it was. Taken off only once its
-    // notice has gone, so a rotation while it shows shows it again.
-    val removed by model.removed.collectAsStateWithLifecycle()
-    val undoNotice = LocalUndoNotice.current
-    LaunchedEffect(removed) {
-        val gone = removed ?: return@LaunchedEffect
-        if (undoNotice?.invoke(REMOVED_NOTICE) == true) model.undoRemove(gone) else model.consumeRemoved(gone)
-    }
 
     // The desktop shows these beside the conversation. A phone has room for
     // one at a time, so they are tabs over the same chat.
@@ -423,6 +414,23 @@ internal fun ChatScreen(
     DisposableEffect(model) {
         onDispose {
             if (activity?.isChangingConfigurations != true) model.landed = false
+        }
+    }
+
+    // A queued message dropped or a picture taken off the draft: "Removed",
+    // with an Undo that puts it back where it was. Shown once: spent when it
+    // times out, is dismissed or its Undo is pressed, and when the reader
+    // leaves the chat while it shows, so coming back does not say it again.
+    // Only a rotation, which makes the same chat again, shows it again.
+    val removed by model.removed.collectAsStateWithLifecycle()
+    val undoNotice = LocalUndoNotice.current
+    LaunchedEffect(removed) {
+        val gone = removed ?: return@LaunchedEffect
+        try {
+            if (undoNotice?.invoke(REMOVED_NOTICE) == true) model.undoRemove(gone) else model.consumeRemoved(gone)
+        } catch (left: CancellationException) {
+            if (activity?.isChangingConfigurations != true) model.consumeRemoved(gone)
+            throw left
         }
     }
 
