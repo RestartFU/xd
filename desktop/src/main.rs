@@ -17586,6 +17586,8 @@ impl XdDesktop {
             colors.faint
         };
         let font = self.caption_font;
+        // An icon glyph, sized with its button.
+        let glyph_size = px(window_chrome::CAPTION_GLYPH_SIZE);
         let button = move |id: &'static str,
                            area: WindowControlArea,
                            glyph: &'static str,
@@ -17622,7 +17624,7 @@ impl XdDesktop {
                 })
                 .window_control_area(area)
                 .map(|button| match font {
-                    Some(font) => button.font_family(font).text_size(px(10.0)).child(glyph),
+                    Some(font) => button.font_family(font).text_size(glyph_size).child(glyph),
                     // No Segoe icon font: draw the glyph, in the text colour so
                     // it turns white over the red of a hovered close button.
                     None => button.child(svg().path(drawn).size(px(14.0)).flex_none()),
@@ -27709,23 +27711,30 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .rounded(px(8.0))
+                    .rounded(px(RADIUS_PANEL))
                     .border_1()
                     .border_color(glass::edge(colors))
                     .bg(rgb(colors.surface_high))
                     .shadow_lg()
-                    .text_size(px(13.0))
+                    .text_size(text_px(TEXT_CONTROL))
                     .text_color(rgb(colors.text))
                     .occlude()
                     .child(div().flex_1().min_w_0().child(notice))
                     .child(
                         ui_button("startup-notice-dismiss", ButtonKind::Ghost, colors)
-                            .h(px(28.0))
+                            .h(px(CONTROL_HEIGHT_COMPACT))
                             .flex_none()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.startup_notice = None;
-                                cx.notify();
-                            }))
+                            .key_stop(
+                                &self.key_targets,
+                                KeyLayer::Page,
+                                "startup-notice-dismiss",
+                                colors,
+                                cx,
+                                |this, _, cx| {
+                                    this.startup_notice = None;
+                                    cx.notify();
+                                },
+                            )
                             .child("Dismiss"),
                     )
                     .into_any_element()
