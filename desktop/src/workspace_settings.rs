@@ -324,7 +324,7 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ("Open the option Tab is on", "Enter or Space".into()),
                 ("Back to the message box from its options", "Escape".into()),
                 (
-                    "From the message box back through its attachments: Enter opens a picture, and each has its Remove",
+                    "From the message box back through its attachments: each picture, which opens in the viewer, and its Remove",
                     "Shift Tab".into(),
                 ),
                 (
