@@ -1518,9 +1518,10 @@ private fun ProductHeader(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        // Decorative: the title beside it already names the page.
         Icon(
             painterResource(R.drawable.ic_xd_mark),
-            contentDescription = "xd",
+            contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.size(22.dp),
         )
