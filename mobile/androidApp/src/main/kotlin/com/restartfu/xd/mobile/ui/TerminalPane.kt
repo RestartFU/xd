@@ -63,6 +63,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Density
@@ -101,7 +102,8 @@ internal fun TerminalPaneContent(
 ) {
     val state by model.state.collectAsStateWithLifecycle()
     val focus = remember { FocusRequester() }
-    var control by remember { mutableStateOf(false) }
+    // Saved, so a latched Ctrl is still down after the window turns or is resized.
+    var control by rememberSaveable { mutableStateOf(false) }
     // Saved, so turning the phone keeps the question up.
     var confirmingStop by rememberSaveable { mutableStateOf(false) }
     if (confirmingStop) {
@@ -350,6 +352,14 @@ private fun typed(
     else -> null
 }
 
+/**
+ * Whether a cell shows even with nothing in it: a background of its own, an
+ * inverse cell (a highlighted bar of blanks, in the terminal's own colours
+ * swapped), or a line under or through it.
+ */
+internal fun Cell.drawsOnBlank(): Boolean =
+    char != ' ' || background != null || inverse || underline || strikethrough
+
 /** A row's characters, without the blank cells after the last one. */
 private fun List<Cell>.lineText(): String = buildString { this@lineText.forEach { append(it.char) } }.trimEnd()
 
@@ -357,14 +367,14 @@ private fun List<Cell>.lineText(): String = buildString { this@lineText.forEach 
 private fun List<List<Cell>>.screenText(): String =
     map { it.lineText() }.dropLastWhile(String::isEmpty).joinToString("\n")
 
-private fun List<Cell>.render(
+internal fun List<Cell>.render(
     caret: Int,
     defaultForeground: Color,
     defaultBackground: Color,
     palette: List<Color>,
     light: Boolean,
 ): AnnotatedString = buildAnnotatedString {
-    val trailing = indexOfLast { it.char != ' ' || it.background != null } + 1
+    val trailing = indexOfLast { it.drawsOnBlank() } + 1
     val visible = maxOf(trailing, if (caret >= 0) caret + 1 else 0)
     // One span for each run of cells drawn alike, not one per character:
     // a row of plain output is a single span.
@@ -382,6 +392,12 @@ private fun List<Cell>.render(
             color = ink,
             background = ground ?: Color.Unspecified,
             fontWeight = if (cell.bold) FontWeight.Bold else null,
+            textDecoration = when {
+                cell.underline && cell.strikethrough -> TextDecoration.combine(listOf(TextDecoration.Underline, TextDecoration.LineThrough))
+                cell.underline -> TextDecoration.Underline
+                cell.strikethrough -> TextDecoration.LineThrough
+                else -> null
+            },
         )
         if (style != run) {
             flush()
@@ -409,8 +425,10 @@ internal fun StopTerminalDialog(onStop: () -> Unit, onDismiss: () -> Unit) {
 /**
  * The text colour and the background, if it has one of its own, that a cell
  * is drawn in. The caret is drawn as a block, the way a terminal draws it:
- * the cell under it swaps its two colours, as an inverse cell does. What
- * comes out is then kept readable by the desktop's rule, [terminalCellInk].
+ * the cell under it swaps its two colours, as an inverse cell does, and an
+ * inverse cell left in the terminal's own colours swaps those. What comes out
+ * is then kept readable by the desktop's rule, [terminalCellInk]; a faint
+ * cell's text is then drawn fainter, as far as it still reads at 3:1.
  */
 internal fun Cell.colours(
     caret: Boolean,
@@ -424,7 +442,8 @@ internal fun Cell.colours(
     val swapped = inverse != caret
     val ink = if (swapped) background ?: defaultBackground else foreground
     val ground = if (swapped) foreground ?: defaultForeground else background
-    return (terminalCellInk(ink, ground, palette, light) ?: defaultForeground) to ground
+    val readable = terminalCellInk(ink, ground, palette, light) ?: defaultForeground
+    return (if (dim) terminalFaintInk(readable, ground ?: defaultBackground) else readable) to ground
 }
 
 private fun List<Color>.colour(index: Int): Color = getOrElse(index) { this[7] }

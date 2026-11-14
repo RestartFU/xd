@@ -7,6 +7,12 @@ public data class Cell(
     val background: Int? = null,
     val bold: Boolean = false,
     val inverse: Boolean = false,
+    /** SGR 2: drawn fainter. */
+    val dim: Boolean = false,
+    /** SGR 4. */
+    val underline: Boolean = false,
+    /** SGR 9: crossed out. */
+    val strikethrough: Boolean = false,
 )
 
 /**
@@ -17,7 +23,8 @@ public data class Cell(
  * show escape sequences instead of output.
  *
  * This implements the part of VT100/xterm that shell output actually uses --
- * cursor movement, erase, scrolling and SGR colour. Sequences beyond that are
+ * cursor movement, erase, scrolling, SGR colour and the bold, faint,
+ * underlined, crossed-out and inverse attributes. Sequences beyond that are
  * consumed and ignored rather than printed, so an unsupported escape costs
  * formatting rather than turning the screen into noise. A full-screen
  * application will not render faithfully; the desktop keeps VTE for that.
@@ -220,7 +227,13 @@ public class TerminalScreen(
             when (val code = numbers[index] ?: 0) {
                 0 -> style = Cell()
                 1 -> style = style.copy(bold = true)
-                22 -> style = style.copy(bold = false)
+                2 -> style = style.copy(dim = true)
+                // Normal intensity: neither bold nor faint.
+                22 -> style = style.copy(bold = false, dim = false)
+                4 -> style = style.copy(underline = true)
+                24 -> style = style.copy(underline = false)
+                9 -> style = style.copy(strikethrough = true)
+                29 -> style = style.copy(strikethrough = false)
                 7 -> style = style.copy(inverse = true)
                 27 -> style = style.copy(inverse = false)
                 39 -> style = style.copy(foreground = null)

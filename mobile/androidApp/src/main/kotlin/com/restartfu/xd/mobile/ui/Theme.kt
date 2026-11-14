@@ -125,13 +125,15 @@ public val LocalXdGlass = staticCompositionLocalOf { xdGlass(MinimalThemePreset.
  * The terminal's sixteen ANSI colours: black, red, green, yellow, blue,
  * magenta, cyan, white, then the bright eight. The desktop's, colour for
  * colour. Light's are darkened so each reads at 4.5:1 or better on the light
- * terminal ground, where Dark's pastels would wash out.
+ * terminal ground, where Dark's pastels would wash out. Dark's bright black is
+ * a lighter grey than the desktop's old one, so it too reads at 4.5:1 on every
+ * dark ground.
  */
 public fun terminalPalette(theme: MinimalThemePreset): List<Color> = when (theme) {
     MinimalThemePreset.DARK -> listOf(
         Color(0xFF1F2329), Color(0xFFE06C75), Color(0xFF98C379), Color(0xFFE5C07B),
         Color(0xFF61AFEF), Color(0xFFC678DD), Color(0xFF56B6C2), Color(0xFFD7DAE0),
-        Color(0xFF5C6370), Color(0xFFFF7A85), Color(0xFFB3E180), Color(0xFFFFD68A),
+        Color(0xFF828997), Color(0xFFFF7A85), Color(0xFFB3E180), Color(0xFFFFD68A),
         Color(0xFF7DBAFF), Color(0xFFD99BFF), Color(0xFF75D5E0), Color(0xFFFFFFFF),
     )
     MinimalThemePreset.LIGHT -> listOf(
@@ -191,7 +193,7 @@ public fun xdSyntax(theme: MinimalThemePreset): XdSyntax = when (theme) {
 
 public val LocalXdSyntax = staticCompositionLocalOf { xdSyntax(MinimalThemePreset.DARK) }
 
-/** Below this, text on its own cell background is replaced in the Light set, as on the desktop. */
+/** Below this, text on its own cell background is replaced, in either set, as on the desktop. */
 public const val MIN_CELL_CONTRAST: Float = 3f
 
 /** The WCAG contrast ratio between two colours, from 1 to 21. */
@@ -207,24 +209,43 @@ public fun contrastRatio(first: Color, second: Color): Float {
  * and null where it left the terminal's own.
  *
  * A cell with a background of its own and no text colour takes one that reads
- * on it. In the Light set that also goes for text under [MIN_CELL_CONTRAST]
- * against its background: that set has no light colour, so a program that
- * sets both (black on white, white on blue) would otherwise draw dark on dark.
- * The replacement is whichever of white and the set's black reads better on
- * that background; one of the two always clears 4:1.
+ * on it, and so does text under [MIN_CELL_CONTRAST] against its background,
+ * in either set: Light has no light colour, so black on white would draw dark
+ * on dark, and Dark's white on its blue reads at 1.7:1. The replacement is
+ * whichever of white and the set's black reads better on that background;
+ * one of the two always clears 4:1. [light] is the set in force, which the
+ * rule no longer needs; it stays for the callers that pass it.
  */
 public fun terminalCellInk(
     foreground: Color?,
     background: Color?,
     palette: List<Color>,
-    light: Boolean,
+    @Suppress("UNUSED_PARAMETER") light: Boolean,
 ): Color? {
     background ?: return foreground
-    val unreadable = foreground == null || (light && contrastRatio(foreground, background) < MIN_CELL_CONTRAST)
+    val unreadable = foreground == null || contrastRatio(foreground, background) < MIN_CELL_CONTRAST
     if (!unreadable) return foreground
     val dark = palette[0]
     return if (contrastRatio(Color.White, background) >= contrastRatio(dark, background)) Color.White else dark
 }
+
+/**
+ * A faint cell's text (SGR 2): [ink] laid partly over its [ground], as faint
+ * as it can be while it still reads at [MIN_CELL_CONTRAST]. Text already
+ * under that is left as it is.
+ */
+public fun terminalFaintInk(ink: Color, ground: Color): Color {
+    if (contrastRatio(ink, ground) <= MIN_CELL_CONTRAST) return ink
+    // From faintest to full, the first that still reads.
+    for (step in FAINT_STEPS) {
+        val faint = ink.copy(alpha = step).compositeOver(ground)
+        if (contrastRatio(faint, ground) >= MIN_CELL_CONTRAST) return faint
+    }
+    return ink
+}
+
+/** How much of a faint cell's own colour is kept, from the faintest up. */
+private val FAINT_STEPS = listOf(0.55f, 0.6f, 0.65f, 0.7f, 0.75f, 0.8f, 0.85f, 0.9f, 0.95f)
 
 /**
  * The theme in force, for the few things that follow it outside Material's

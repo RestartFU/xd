@@ -90,6 +90,22 @@ class TerminalScreenTest {
     }
 
     @Test
+    fun sgrSetsAndResetsFaintUnderlineAndCrossedOut() {
+        val screen = TerminalScreen(columns = 8, rows = 1)
+
+        screen.write("\u001B[2;4;9ma\u001B[22mb\u001B[24mc\u001B[29md\u001B[1;2;4me\u001B[0mf")
+
+        val cells = screen.snapshot()[0]
+        assertEquals(Triple(true, true, true), cells[0].let { Triple(it.dim, it.underline, it.strikethrough) })
+        // 22 ends faint, and bold with it; the others stay.
+        assertEquals(Triple(false, true, true), cells[1].let { Triple(it.dim, it.underline, it.strikethrough) })
+        assertEquals(Triple(false, false, true), cells[2].let { Triple(it.dim, it.underline, it.strikethrough) })
+        assertEquals(Triple(false, false, false), cells[3].let { Triple(it.dim, it.underline, it.strikethrough) })
+        assertEquals(true, cells[4].bold && cells[4].dim && cells[4].underline)
+        assertEquals(Cell('f'), cells[5])
+    }
+
+    @Test
     fun brightAnd256ColourAreUnderstood() {
         val screen = TerminalScreen(columns = 8, rows = 1)
 

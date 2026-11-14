@@ -1,6 +1,7 @@
 package com.restartfu.xd.mobile.ui
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextDecoration
 import com.restartfu.xd.terminal.Cell
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -9,7 +10,8 @@ import org.junit.Test
 /**
  * A terminal cell with a background of its own stays readable, by the rule
  * the desktop draws with (`light_cells_with_their_own_background_stay_readable`
- * in terminal-core): the same cells, the same colours out.
+ * in terminal-core), in either set since round 7: the same cells, the same
+ * colours out. Faint, underlined, crossed-out and inverse cells are drawn so.
  */
 class TerminalCellColoursTest {
     private val dark = terminalPalette(MinimalThemePreset.DARK)
@@ -48,12 +50,69 @@ class TerminalCellColoursTest {
         assertEquals(darkInk to null, Cell('a').onDark())
     }
 
-    @Test fun theDarkSetKeepsWhatTheProgramAskedFor() {
+    @Test fun theDarkSetKeepsWhatReadsAndMendsWhatDoesNot() {
+        // Black on white reads, so it is what the program asked for.
         assertEquals(Color(0xFF1F2329) to Color(0xFFD7DAE0), bar.onDark())
-        assertEquals(Color(0xFFD7DAE0) to Color(0xFF61AFEF), dir.onDark())
+        // White on Dark's blue is 1.7:1: the text gives way, to the set's black, as in Light.
+        assertTrue(contrastRatio(Color(0xFFD7DAE0), Color(0xFF61AFEF)) < MIN_CELL_CONTRAST)
+        assertEquals(Color(0xFF1F2329) to Color(0xFF61AFEF), dir.onDark())
         // A background with no text colour takes one that reads on it, in either set.
         assertEquals(Color(0xFF1F2329) to Color(0xFFE06C75), bad.onDark())
         assertEquals(Color.White, Cell('k', background = 0).onDark().first)
+        for (cell in listOf(bar, dir, bad)) {
+            val (ink, ground) = cell.onDark()
+            assertTrue("${cell.char}: $ink on $ground", contrastRatio(ink, checkNotNull(ground)) >= MIN_CELL_CONTRAST)
+        }
+    }
+
+    @Test fun darkBrightBlackReadsOnTheDarkTerminal() {
+        assertEquals(Color(0xFF828997), dark[8])
+        // On the terminal's own ground, as body text.
+        val ratio = contrastRatio(dark[8], darkGround)
+        assertTrue("bright black on the terminal is $ratio:1", ratio >= 4.5f)
+        // On the set's black, which a program can set behind it, it still clears 3:1 and is kept.
+        assertTrue(contrastRatio(dark[8], dark[0]) >= MIN_CELL_CONTRAST)
+        assertEquals(dark[8], Cell('g', foreground = 8, background = 0).onDark().first)
+    }
+
+    @Test fun anInverseCellInTheTerminalsOwnColoursSwapsThem() {
+        // No colours of its own: the terminal's ground as its text, its text colour as its ground.
+        assertEquals(darkGround to darkInk, Cell('a', inverse = true).onDark())
+        assertEquals(lightGround to lightInk, Cell('a', inverse = true).onLight())
+        // A highlighted bar of blanks is drawn to its end, not dropped as trailing space.
+        val row = listOf(Cell('a'), Cell(' ', inverse = true), Cell(' ', inverse = true))
+        val drawn = row.render(caret = -1, darkInk, darkGround, dark, light = false)
+        assertEquals("a  ", drawn.text)
+        assertEquals(darkInk, drawn.spanStyles.last { it.end == 3 }.item.background)
+    }
+
+    @Test fun faintTextIsFainterAndStillReads() {
+        for ((ink, ground) in listOf(darkInk to darkGround, lightInk to lightGround, dark[1] to darkGround)) {
+            val faint = terminalFaintInk(ink, ground)
+            assertTrue("$faint on $ground", contrastRatio(faint, ground) >= MIN_CELL_CONTRAST)
+            assertTrue("$faint is no fainter than $ink", contrastRatio(faint, ground) < contrastRatio(ink, ground))
+        }
+        // Through the cell: SGR 2 on plain text.
+        val (ink, _) = Cell('a', dim = true).onDark()
+        assertTrue(contrastRatio(ink, darkGround) in MIN_CELL_CONTRAST..contrastRatio(darkInk, darkGround) - 1f)
+        // Text that already reads at 3:1 or less is not made fainter still.
+        assertEquals(Color(0xFF555555), terminalFaintInk(Color(0xFF555555), Color(0xFF333333)))
+    }
+
+    @Test fun underlinedAndCrossedOutCellsAreDrawnSo() {
+        val row = listOf(Cell('u', underline = true), Cell('s', strikethrough = true), Cell('b', underline = true, strikethrough = true), Cell(' ', underline = true))
+        val drawn = row.render(caret = -1, darkInk, darkGround, dark, light = false)
+        assertEquals("usb ", drawn.text)
+        val decorations = drawn.spanStyles.sortedBy { it.start }.map { it.item.textDecoration }
+        assertEquals(
+            listOf(
+                TextDecoration.Underline,
+                TextDecoration.LineThrough,
+                TextDecoration.combine(listOf(TextDecoration.Underline, TextDecoration.LineThrough)),
+                TextDecoration.Underline,
+            ),
+            decorations,
+        )
     }
 
     @Test fun theCaretSwapsTheCellsColoursAndStaysReadable() {
