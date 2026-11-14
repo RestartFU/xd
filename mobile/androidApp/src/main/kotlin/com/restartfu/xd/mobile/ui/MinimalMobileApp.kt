@@ -1657,6 +1657,9 @@ private fun XdNavigationBar(
                             .size(width = FloatingTabWidth, height = 48.dp)
                             .clip(CircleShape)
                             .background(if (selected) colors.surfaceContainerHighest else Color.Transparent)
+                            // The selected pill is edged in the control border, 3:1 on the bar,
+                            // as Material's indicator stands out from its bar.
+                            .then(if (selected) Modifier.border(1.dp, controlBorder(), CircleShape) else Modifier)
                             .selectable(selected = selected, role = Role.Tab, onClick = onClick)
                             .semantics { contentDescription = label },
                         contentAlignment = Alignment.Center,
