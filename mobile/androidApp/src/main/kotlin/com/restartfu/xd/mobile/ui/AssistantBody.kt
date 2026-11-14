@@ -140,19 +140,20 @@ internal val LocalStreaming = staticCompositionLocalOf { false }
 /**
  * [compute] of [key], kept up with it away from the main thread.
  *
- * The first value is worked out in place, so nothing is ever drawn empty.
- * After that each new [key] is computed on a background thread and shown when
- * it is ready; keys that arrive meanwhile are skipped for the newest, which is
- * always computed last, so what is shown ends as [compute] of the final key.
- * [compute] is also given the value it last produced.
+ * Every value is worked out on a background thread, the first one included,
+ * so a long reply already streaming when its chat opens is not parsed in
+ * composition: until the first is ready this is null, and the caller draws
+ * the plain text in its place. Keys that arrive meanwhile are skipped for the
+ * newest, which is always computed last, so what is shown ends as [compute]
+ * of the final key. [compute] is also given the value it last produced.
  */
 @Composable
-internal fun <K, T> rememberOffMain(key: K, compute: (key: K, previous: T?) -> T): T {
+internal fun <K, T : Any> rememberOffMain(key: K, compute: (key: K, previous: T?) -> T): T? {
     val latest = rememberUpdatedState(key)
     val computing = rememberUpdatedState(compute)
-    val shown = remember { mutableStateOf(compute(key, null)) }
+    val shown = remember { mutableStateOf<T?>(null) }
     LaunchedEffect(Unit) {
-        var done = key
+        var done: Any? = NOTHING_YET
         snapshotFlow { latest.value }.collect { next ->
             if (next != done) {
                 val previous = shown.value
@@ -163,3 +164,6 @@ internal fun <K, T> rememberOffMain(key: K, compute: (key: K, previous: T?) -> T
     }
     return shown.value
 }
+
+/** Stands for "no key computed yet", which no real key equals. */
+private val NOTHING_YET = Any()

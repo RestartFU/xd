@@ -136,11 +136,12 @@ internal fun CodeText(
 ) {
     val key = CodeKey(code, language, ink = codeInk())
     val text = if (LocalStreaming.current) {
-        val (coloured, highlighted) = rememberOffMain(key) { next: CodeKey, _: Pair<CodeKey, AnnotatedString>? ->
+        val prepared = rememberOffMain(key) { next: CodeKey, _: Pair<CodeKey, AnnotatedString>? ->
             next to highlight(next.code, next.language, next.ink)
         }
-        StreamedCode.put(coloured, highlighted)
-        highlighted
+        // Uncoloured until its first colouring is ready.
+        prepared?.let { (coloured, highlighted) -> StreamedCode.put(coloured, highlighted) }
+        prepared?.second ?: AnnotatedString(code)
     } else {
         StreamedCode.get(key)?.let { CodeColours.offer(key, it) }
         rememberPrepared(CodeColours, key) ?: AnnotatedString(code)

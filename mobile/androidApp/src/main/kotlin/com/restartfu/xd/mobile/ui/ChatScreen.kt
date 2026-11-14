@@ -1808,7 +1808,9 @@ private fun SelectableMessageBody(item: TranscriptItem, model: ChatViewModel) {
 internal fun AssistantBody(item: TranscriptItem, model: ChatViewModel) {
     val parts = if (item.live) {
         rememberOffMain(item.text) { text, previous: List<BodyPart>? -> assistantBody(text, live = true, previous) }
-            .also { LiveHandoff.remember(item.text, it) }
+            ?.also { LiveHandoff.remember(item.text, it) }
+            // Until the first reading is ready, what an earlier frame of this reply rendered.
+            ?: LiveHandoff.forText(item.text)
     } else {
         rememberPrepared(ReplyBodies, ReplyKey(item.id, item.text)) ?: LiveHandoff.forText(item.text)
     }
