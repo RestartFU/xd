@@ -16,6 +16,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.text
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.semantics.stateDescription
@@ -649,6 +650,13 @@ internal fun ChatScreen(
                         if (chatShown) {
                             TextButton(
                                 onClick = { choosingModel = true },
+                                // Says what it does, not only the model it names, as the composer's does.
+                                modifier = Modifier.semantics {
+                                    onClick(label = "Choose model") {
+                                        choosingModel = true
+                                        true
+                                    }
+                                },
                                 colors = ButtonDefaults.textButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 ),
