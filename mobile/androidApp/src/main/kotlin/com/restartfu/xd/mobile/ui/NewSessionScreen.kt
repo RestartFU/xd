@@ -6,6 +6,12 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -29,6 +35,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -226,23 +233,72 @@ private data class FormHeader(
 
 private fun pageTransition(forward: Boolean) = sharedAxisX(forward)
 
-/** A whole-screen surface over the app, rising from the bottom as a full-screen dialog does. */
+/**
+ * New session's surface. In a compact window, a phone's, a whole-screen
+ * surface rising from the bottom, as Material's full-screen dialog does. With
+ * a medium or expanded width and the height to go with it, a tablet's, a
+ * basic dialog instead: centred, no wider than [BasicDialogWidth], with the
+ * same top bar and scrolling page inside, over the dimmed app. A phone on its
+ * side keeps the whole screen: a dialog in its short height would leave the
+ * form a sliver. One dialog window either way, so the form keeps its state
+ * when the window changes size.
+ */
 @Composable
 private fun FullScreenSheet(onDismiss: () -> Unit, content: @Composable () -> Unit) {
+    val basic = rememberWindowLayout().tabletChat
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
         val window = (LocalView.current.parent as? DialogWindowProvider)?.window
-        LaunchedEffect(window) { window?.setWindowAnimations(android.R.style.Animation_InputMethod) }
+        LaunchedEffect(window, basic) {
+            window?.setWindowAnimations(if (basic) android.R.style.Animation_Dialog else android.R.style.Animation_InputMethod)
+        }
         // Its own window, so its bars are set here: the activity's do not reach it.
         DialogSystemBars()
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-            // Clear of a cutout or a navigation bar at either side.
-            Box(Modifier.fillMaxSize().safeSidesPadding()) { content() }
+        if (basic) {
+            var card by remember { mutableStateOf(Rect.Zero) }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    // A tap on the dimmed app around it closes it, as a dialog's
+                    // scrim does; the form keeps its draft for next time.
+                    .pointerInput(onDismiss) { detectTapGestures { if (!card.contains(it)) onDismiss() } }
+                    // Clear of the bars, a cutout and the keyboard: the page
+                    // inside has none of them to keep clear of.
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(BasicDialogMargin),
+                contentAlignment = Alignment.Center,
+            ) {
+                Surface(
+                    Modifier
+                        .widthIn(max = BasicDialogWidth)
+                        .heightIn(max = BasicDialogHeight)
+                        .fillMaxSize()
+                        .onGloballyPositioned { card = it.boundsInRoot() },
+                    shape = MaterialTheme.shapes.extraLarge,
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, glassEdge()),
+                    shadowElevation = 6.dp,
+                ) { content() }
+            }
+        } else {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+                // Clear of a cutout or a navigation bar at either side.
+                Box(Modifier.fillMaxSize().safeSidesPadding()) { content() }
+            }
         }
     }
 }
+
+/** The widest New session is drawn as a basic dialog: Material's widest basic dialog. */
+private val BasicDialogWidth = 560.dp
+
+/** The tallest it is drawn as one, so a tall tablet does not stretch a short list. */
+private val BasicDialogHeight = 720.dp
+
+/** Its least gap to the window's edges. */
+private val BasicDialogMargin = 24.dp
 
 @Composable
 private fun TopBar(title: String, navigation: Navigation) {
