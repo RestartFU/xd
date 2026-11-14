@@ -37570,7 +37570,9 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
     }
 
     /// Which of the Tab stops the keyboard is on: the control the ring is
-    /// on, or the field that has the keyboard, as `fields` names them.
+    /// on, or the field that has the keyboard, as `fields` names them. Unix
+    /// only, like the tests that use it.
+    #[cfg(unix)]
     fn keyboard_at(
         desktop: &Entity<XdDesktop>,
         cx: &mut gpui::VisualTestContext,
