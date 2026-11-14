@@ -36780,6 +36780,437 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert_eq!(diff(&desktop, cx), px(0.0));
     }
 
+    /// A small picture, as PNG bytes.
+    fn tiny_png() -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([40, 80, 160, 255]))
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    /// The names of the attachments in the open chat's draft.
+    fn draft_names(desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext) -> Vec<String> {
+        desktop.read_with(cx, |desktop, _| {
+            desktop
+                .model
+                .draft_attachments
+                .iter()
+                .map(|attachment| attachment.name.clone())
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn a_drafts_attachments_open_and_go_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.draft_attachments = vec![
+                Attachment::from_png("palette.png", tiny_png()).unwrap(),
+                Attachment::from_file("notes.txt", b"notes".to_vec()),
+            ];
+            cx.notify();
+        });
+        redraw(cx);
+        // The picture is a Tab stop, named under the ring; Enter opens it in
+        // the viewer, and Escape closes it.
+        tab_to(&desktop, cx, "draft-image-0");
+        assert!(named_under_ring(&desktop, cx));
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| assert!(desktop.image_preview.is_some()));
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| assert!(desktop.image_preview.is_none()));
+        // Its Remove follows it, named for the file. Enter removes it, and
+        // the undo notice puts it back where it stood.
+        tab_to(&desktop, cx, "remove-draft-image-0");
+        assert!(named_under_ring(&desktop, cx));
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        assert_eq!(draft_names(&desktop, cx), ["notes.txt"]);
+        desktop.update(cx, |desktop, cx| {
+            assert_eq!(desktop.undo_notice().as_deref(), Some("Removed"));
+            desktop.undo_last(cx);
+        });
+        redraw(cx);
+        assert_eq!(draft_names(&desktop, cx), ["palette.png", "notes.txt"]);
+        // A file's Remove is a Tab stop too, after the pictures.
+        let passed = tab_to(&desktop, cx, "remove-draft-file-0");
+        assert!(named_under_ring(&desktop, cx));
+        assert!(passed.iter().any(|on| on == "native-attach"), "{passed:?}");
+        cx.simulate_keystrokes("space");
+        redraw(cx);
+        assert_eq!(draft_names(&desktop, cx), ["palette.png"]);
+    }
+
+    #[gpui::test]
+    fn backspace_at_the_start_of_a_composer_removes_its_last_attachment(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.draft_attachments = vec![
+                Attachment::from_file("notes.txt", b"notes".to_vec()),
+                Attachment::from_png("palette.png", tiny_png()).unwrap(),
+            ];
+            cx.notify();
+        });
+        cx.simulate_keystrokes("ctrl-l");
+        cx.simulate_input("ab");
+        redraw(cx);
+        // Text before the caret goes first, as ever.
+        cx.simulate_keystrokes("backspace");
+        redraw(cx);
+        assert_eq!(draft_names(&desktop, cx).len(), 2);
+        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.composer, "a"));
+        // At the very start, the last attachment shown goes: the file, which
+        // follows the pictures. The text after the caret stays.
+        cx.simulate_keystrokes("home backspace");
+        redraw(cx);
+        assert_eq!(draft_names(&desktop, cx), ["palette.png"]);
+        desktop.update(cx, |desktop, cx| {
+            assert_eq!(desktop.composer, "a");
+            assert_eq!(desktop.undo_notice().as_deref(), Some("Removed"));
+            desktop.undo_last(cx);
+        });
+        assert_eq!(draft_names(&desktop, cx), ["notes.txt", "palette.png"]);
+        // The new chat's composer, empty, does the same. (With no host to
+        // keep the chat's draft, the window would not leave the chat.)
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.draft_dirty = false;
+            desktop.attachments_dirty = false;
+            desktop.begin_chat_create("atlas".into(), window, cx);
+            desktop.new_chat_attachments = vec![Attachment::from_file("plan.md", b"plan".to_vec())];
+            desktop
+                .new_chat_input
+                .update(cx, |input, cx| input.set_text("", cx));
+            window.focus(&desktop.new_chat_input.read(cx).focus_handle(cx));
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("backspace");
+        redraw(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            let focused = desktop
+                .new_chat_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window);
+            assert!(
+                desktop.new_chat_attachments.is_empty(),
+                "focused {focused}, prompt {:?}, key {:?}, submitting {}",
+                desktop.new_chat_prompt,
+                desktop.new_chat_draft_key(),
+                desktop.chat_create_submitting
+            );
+            assert_eq!(desktop.undo_notice().as_deref(), Some("Removed"));
+            desktop.undo_last(cx);
+            assert_eq!(desktop.new_chat_attachments.len(), 1);
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_stop_key_stops_the_agent_in_front_and_not_the_chat_behind(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.bind_keys(all_key_bindings()));
+        let (desktop, cx, mut requests, _updates) = docked_ask_fixture(cx);
+        let record = r#"subagent_run
+{"key":"toolu_1","task_id":"a1b2","provider":"Claude","agent":"Explore","description":"Read the parser","status":"running","steps":[]}"#;
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model.start_working();
+            desktop.transcript_snapshot.messages = Arc::new(vec![
+                Message::new(Some(1), "user", "Map the parser.", None),
+                Message::new(Some(2), "tool", record, None),
+            ]);
+            desktop.transcript_snapshot.sync_derived_rows();
+            desktop.sync_transcript_count(true);
+            desktop.open_agent_tab("toolu_1".into(), window, cx);
+        });
+        redraw(cx);
+        // The tab's Background and Stop are Tab stops, named under the ring.
+        let passed = tab_to(&desktop, cx, "agent-view-stop");
+        assert!(
+            passed.iter().any(|on| on == "agent-view-background"),
+            "{passed:?}"
+        );
+        assert!(named_under_ring(&desktop, cx));
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        // Ctrl+. stops the agent, as the tab's Stop does, and leaves the
+        // chat behind it working.
+        cx.simulate_keystrokes("ctrl-.");
+        let request = next_request_with_op(&mut requests, "subagent");
+        assert_eq!(
+            (request["key"].as_str(), request["action"].as_str()),
+            (Some("toolu_1"), Some("stop"))
+        );
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.model.working, "the chat behind keeps its turn");
+            assert_eq!(desktop.subagent_actions.get("toolu_1"), Some(&"Stopping"));
+        });
+    }
+
+    #[gpui::test]
+    fn the_background_tasks_and_a_picture_in_the_chat_are_tab_stops(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        desktop.update(cx, |desktop, cx| {
+            Arc::make_mut(&mut desktop.message_images)
+                .insert("/kept/a.png".to_owned(), ready_message_image(0));
+            desktop.transcript_snapshot.messages = Arc::new(vec![
+                Message::new(Some(1), "user", "Port this.\n[image: /kept/a.png]", None),
+                Message::new(Some(2), "assistant", "Ported it.", None),
+            ]);
+            desktop.transcript_snapshot.sync_derived_rows();
+            desktop.sync_transcript_count(true);
+            let chat = desktop
+                .model
+                .chats
+                .iter_mut()
+                .find(|chat| chat.id == "implementation")
+                .unwrap();
+            chat.background_tasks = 2;
+            cx.notify();
+        });
+        redraw(cx);
+        // The row that shows what runs in the background, else out of reach.
+        tab_to(&desktop, cx, "native-background-tasks");
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.background_expanded.is_some())
+        });
+        // The picture the message carries: Enter opens it in the viewer.
+        let mut on = None;
+        for _ in 0..80 {
+            cx.simulate_keystrokes("tab");
+            redraw(cx);
+            on = ring(&desktop, cx).filter(|id| id.starts_with("message-image:"));
+            if on.is_some() {
+                break;
+            }
+        }
+        assert!(on.is_some(), "Tab reaches the picture");
+        assert!(named_under_ring(&desktop, cx));
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| assert!(desktop.image_viewer.is_some()));
+    }
+
+    #[gpui::test]
+    fn the_draft_row_is_a_row_of_the_sidebars_tree_with_its_discard(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        let row = |key: &str| format!("{SIDEBAR_ROW_STOP}{key}");
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.begin_chat_create("atlas".into(), window, cx);
+            desktop
+                .new_chat_input
+                .update(cx, |input, cx| input.set_text("Port the palette", cx));
+            desktop.new_chat_prompt = "Port the palette".into();
+            desktop.persist_new_chat_draft();
+            window.focus(&desktop.root_focus);
+        });
+        redraw(cx);
+        // The open draft is selected, by its fill and the selection bar at
+        // its leading edge, and is where Tab lands in the tree.
+        let draft = cx.debug_bounds("draft-chat-row").unwrap();
+        let marker = cx.debug_bounds("selection-marker-leading").unwrap();
+        assert!(marker.top() > draft.top() && marker.bottom() < draft.bottom());
+        assert!(marker.left() < draft.left());
+        tab_to(&desktop, cx, &row("d:atlas"));
+        // The arrows reach it from its project and go on to the sessions.
+        cx.simulate_keystrokes("up");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), Some(row("f:atlas")));
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), Some(row("d:atlas")));
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), Some(row("s:implementation")));
+        cx.simulate_keystrokes("up");
+        redraw(cx);
+        // Its Discard draft follows it, named under the ring.
+        cx.simulate_keystrokes("tab");
+        redraw(cx);
+        assert_eq!(
+            ring(&desktop, cx),
+            Some(format!("{}\tdiscard", row("d:atlas")))
+        );
+        assert!(named_under_ring(&desktop, cx));
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.undo_notice().as_deref(), Some("Discarded"));
+        });
+    }
+
+    #[gpui::test]
+    fn a_starting_chats_row_is_reached_with_the_arrows(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        let row = |key: &str| format!("{SIDEBAR_ROW_STOP}{key}");
+        desktop.update(cx, |desktop, cx| {
+            desktop.starting_chats.push(new_chat::StartingChat {
+                token: 7,
+                endpoint: desktop.active_endpoint,
+                draft_key: "atlas/new".into(),
+                folder_id: "atlas".into(),
+                session: None,
+                title: "Port the palette".into(),
+                agent: AgentCli::Codex,
+                model: None,
+                choices: Default::default(),
+                worktree: None,
+                remote: false,
+                prompt: "Port the palette".into(),
+                attachments: Vec::new(),
+            });
+            cx.notify();
+        });
+        redraw(cx);
+        tab_to(&desktop, cx, &row("f:atlas"));
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), Some(row("t:7")));
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), Some(row("s:implementation")));
+    }
+
+    #[gpui::test]
+    fn escape_clears_the_startup_notice_after_the_error_banner(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, _| {
+            desktop.startup_notice = Some("xd closed unexpectedly last time.".into());
+            desktop.model.connection_error = Some("xd is not connected to a host.".into());
+            window.focus(&desktop.root_focus);
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("escape");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.model.connection_error.is_none());
+            assert!(desktop.startup_notice.is_some(), "the banner goes first");
+        });
+        cx.simulate_keystrokes("escape");
+        desktop.read_with(cx, |desktop, _| assert!(desktop.startup_notice.is_none()));
+    }
+
+    #[gpui::test]
+    fn the_side_pane_key_and_button_work_on_the_new_chat_page(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.begin_chat_create("atlas".into(), window, cx);
+        });
+        redraw(cx);
+        let open = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| desktop.browser_is_open())
+        };
+        let before = open(&desktop, cx);
+        // Ctrl+B from the new chat's message box, as in a session.
+        cx.simulate_keystrokes("ctrl-b");
+        redraw(cx);
+        assert_eq!(open(&desktop, cx), !before);
+        // The toolbar's button is a Tab stop, named under the ring.
+        tab_to(&desktop, cx, "toggle-side-pane");
+        assert!(named_under_ring(&desktop, cx));
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        assert_eq!(open(&desktop, cx), before);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn escape_leaving_the_chat_keeps_what_was_typed(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.bind_keys(all_key_bindings()));
+        let (desktop, cx, mut requests, _updates) = docked_ask_fixture(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+        });
+        redraw(cx);
+        cx.simulate_input("Half a thought");
+        redraw(cx);
+        // Escape with nothing open leaves the chat, which the host keeps
+        // the draft of first.
+        cx.simulate_keystrokes("escape");
+        let draft = next_request_with_op(&mut requests, "set-draft");
+        assert_eq!(draft["chat"], "implementation");
+        assert_eq!(draft["text"], "Half a thought");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(matches!(
+                desktop.minimal_route,
+                MinimalRoute::Projects { .. }
+            ));
+        });
+        // Without a host to keep it, the chat stays open with its text.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.model.select_chat("implementation");
+            desktop.host = None;
+            desktop.set_composer_text("Another thought".into(), cx);
+            desktop.draft_dirty = true;
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("escape");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(
+                desktop.model.selected_chat.as_deref(),
+                Some("implementation")
+            );
+            assert_eq!(desktop.composer, "Another thought");
+        });
+    }
+
+    #[gpui::test]
+    fn the_model_picker_fits_a_short_window_at_a_large_interface_size(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.set_interface_size(150, window, cx);
+        });
+        let height = window_px(560.0);
+        cx.simulate_resize(size(window_px(1180.0), height));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            // More models than the picker has room for at its full height.
+            desktop.model.agent_backends = ["codex", "claude"]
+                .into_iter()
+                .map(|id| xd_desktop::model::AgentBackend {
+                    id: id.into(),
+                    name: id.into(),
+                    default_model: String::new(),
+                    models: (1..=12)
+                        .map(|index| xd_desktop::model::AgentModel {
+                            id: format!("model-{index}"),
+                            name: format!("Model {index}"),
+                        })
+                        .collect(),
+                    efforts: Vec::new(),
+                })
+                .collect();
+            desktop.begin_chat_create("atlas".into(), window, cx);
+            desktop.new_chat_menu = Some("model");
+        });
+        redraw(cx);
+        redraw(cx);
+        let picker = cx.debug_bounds("draft-picker").unwrap();
+        assert!(
+            picker.top() >= gpui::px(0.0) && picker.bottom() <= height,
+            "{picker:?} in a window {height:?} high"
+        );
+        // Its Codex/Claude switch marks the one chosen with the selection bar.
+        let bar = cx.debug_bounds("selection-marker-foot").unwrap();
+        assert!(bar.top() > picker.top() && bar.bottom() < picker.bottom());
+    }
+
     #[gpui::test]
     fn the_undo_notice_waits_and_answers_the_keyboard(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = keyboard_window(cx);
