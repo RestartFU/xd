@@ -398,7 +398,9 @@ private fun MinimalMobileWorkspace(
     )
     // A brief word to the reader goes on the app's one snackbar, not a system toast.
     val notify: (String) -> Unit = remember(scope, snackbar) { { text -> scope.launch { snackbar.showSnackbar(text) } } }
-    CompositionLocalProvider(LocalNotice provides notify) {
+    // The open chat's composer says how far up it reaches, so the snackbar keeps above it.
+    val snackbarClearance = remember { SnackbarClearance() }
+    CompositionLocalProvider(LocalNotice provides notify, LocalSnackbarClearance provides snackbarClearance) {
     // Clear of a cutout or a navigation bar at either side, as a phone on its
     // side has: the backdrop still runs under them, nothing else does.
     Box(Modifier.fillMaxSize().safeSidesPadding()) {
@@ -587,11 +589,12 @@ private fun MinimalMobileWorkspace(
         snackbar,
         Modifier
             .align(Alignment.BottomCenter)
-            .navigationBarsPadding()
             .padding(horizontal = 16.dp)
             // Bottom only: a short split-screen window still leaves the snackbar its height.
-            .padding(
-                bottom = when {
+            // Over an open chat's composer; else above the keyboard or the navigation bar.
+            .snackbarPlacement(
+                snackbarClearance,
+                above = when {
                     // Above Projects' New session button, as Material places snackbars over a FAB.
                     showBottomNavigation && projectsShown -> NewSessionBottom + FloatingBarHeight + 8.dp
                     showBottomNavigation -> FloatingBarClearance

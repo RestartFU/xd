@@ -498,7 +498,8 @@ internal fun ChatScreen(
     // composer, or the chat's with its agents tray. No wider than the reading
     // measure, so on a wide window it sits under the text it answers.
     val composerBar: @Composable () -> Unit = {
-        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+        // A notice on the app's snackbar shows above it, never over what is being written.
+        Box(Modifier.fillMaxWidth().keepsSnackbarAbove(), contentAlignment = Alignment.TopCenter) {
             Box(Modifier.widthIn(max = ReadingMeasure + TranscriptEdge * 2)) {
                 if (viewingAgent != null) {
                     val key = viewingAgent
