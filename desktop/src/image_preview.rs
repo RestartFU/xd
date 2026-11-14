@@ -406,22 +406,121 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match (owner, self.draft_attachment_index(owner, key)) {
-            (DraftOwner::Chat, Some(index)) => {
-                self.model.draft_attachments.remove(index);
+        if let Some(index) = self.draft_attachment_index(owner, key) {
+            self.take_draft_attachment(owner, index, cx);
+        }
+        let focus = self.draft_editor_focus(owner, cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    /// Backspace at the very start of a composer: the last attachment shown
+    /// above it goes, the files after the pictures, and the undo notice
+    /// offers it back. Says whether there was one.
+    pub(super) fn remove_last_draft_attachment(
+        &mut self,
+        owner: DraftOwner,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let draft = self.draft(owner);
+        let last = draft
+            .iter()
+            .rposition(|attachment| attachment.preview.is_none())
+            .or_else(|| {
+                draft
+                    .iter()
+                    .rposition(|attachment| attachment.preview.is_some())
+            });
+        let Some(index) = last else {
+            return false;
+        };
+        self.take_draft_attachment(owner, index, cx)
+    }
+
+    /// Takes the attachment at `index` out of a composer's draft, with the
+    /// undo notice offering it back. A chat being created already has its
+    /// first message, so its attachments stay. Says whether one went.
+    fn take_draft_attachment(
+        &mut self,
+        owner: DraftOwner,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let from = match owner {
+            DraftOwner::Chat => match self.model.selected_chat.clone() {
+                Some(chat) if index < self.model.draft_attachments.len() => {
+                    AttachmentFrom::Chat(self.active_endpoint, chat)
+                }
+                _ => return false,
+            },
+            DraftOwner::NewChat => match self.new_chat_draft_key() {
+                Some(key)
+                    if !self.chat_create_submitting && index < self.new_chat_attachments.len() =>
+                {
+                    AttachmentFrom::NewChat(key)
+                }
+                _ => return false,
+            },
+        };
+        let attachment = match owner {
+            DraftOwner::Chat => {
+                let attachment = self.model.draft_attachments.remove(index);
+                self.attachments_dirty = true;
+                self.attachment_generation = self.attachment_generation.saturating_add(1);
+                self.schedule_draft_sync(cx);
+                attachment
+            }
+            DraftOwner::NewChat => {
+                let attachment = self.new_chat_attachments.remove(index);
+                self.persist_new_chat_draft();
+                attachment
+            }
+        };
+        self.offer_discard_undo(
+            Discarded::Attachment {
+                from,
+                index,
+                attachment,
+            },
+            cx,
+        );
+        cx.notify();
+        true
+    }
+
+    /// Puts a removed attachment back where it stood, if its composer is
+    /// still the one open.
+    pub(super) fn restore_attachment(
+        &mut self,
+        from: AttachmentFrom,
+        index: usize,
+        attachment: Attachment,
+        cx: &mut Context<Self>,
+    ) {
+        match from {
+            AttachmentFrom::Chat(endpoint, chat) => {
+                if endpoint != self.active_endpoint
+                    || self.model.selected_chat.as_deref() != Some(chat.as_str())
+                {
+                    return;
+                }
+                let index = index.min(self.model.draft_attachments.len());
+                self.model.draft_attachments.insert(index, attachment);
                 self.attachments_dirty = true;
                 self.attachment_generation = self.attachment_generation.saturating_add(1);
                 self.schedule_draft_sync(cx);
             }
-            // A chat being created already has its first message.
-            (DraftOwner::NewChat, Some(index)) if !self.chat_create_submitting => {
-                self.new_chat_attachments.remove(index);
+            AttachmentFrom::NewChat(key) => {
+                if self.new_chat_draft_key().as_deref() != Some(key.as_str())
+                    || self.chat_create_submitting
+                {
+                    return;
+                }
+                let index = index.min(self.new_chat_attachments.len());
+                self.new_chat_attachments.insert(index, attachment);
                 self.persist_new_chat_draft();
             }
-            _ => {}
         }
-        let focus = self.draft_editor_focus(owner, cx);
-        window.focus(&focus);
         cx.notify();
     }
 
@@ -497,6 +596,7 @@ impl XdDesktop {
             return None;
         }
         let keys = self.draft_keys(owner);
+        let targets = self.key_targets.clone();
         let tiles = self
             .draft(owner)
             .iter()
@@ -525,6 +625,7 @@ impl XdDesktop {
                         .into_any_element(),
                     Some(ThumbnailState::Loading) | None => div().into_any_element(),
                 };
+                let name = attachment.name.clone();
                 div()
                     .relative()
                     .size(px(TILE_SIZE))
@@ -535,13 +636,24 @@ impl XdDesktop {
                         div()
                             .id(("draft-image", index))
                             .debug_selector(move || format!("draft-image-{index}"))
+                            .relative()
                             .size_full()
                             .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.open_image_preview(owner, image, window, cx);
-                            }))
-                            .child(content),
+                            .child(content)
+                            // A Tab stop: Enter opens it in the viewer, as a
+                            // click does.
+                            .key_stop_named(
+                                &targets,
+                                KeyLayer::Page,
+                                format!("draft-image-{index}"),
+                                format!("Open {name}"),
+                                colors,
+                                cx,
+                                move |this, window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_image_preview(owner, image, window, cx);
+                                },
+                            ),
                     )
                     .child(
                         div()
@@ -555,7 +667,7 @@ impl XdDesktop {
                         div()
                             .id(("remove-draft-image", index))
                             .debug_selector(move || format!("remove-draft-image-{index}"))
-                            .tooltip(pane_tooltip("Remove image", colors))
+                            .tooltip(pane_tooltip(format!("Remove {name}"), colors))
                             .absolute()
                             .top(px(4.0))
                             .right(px(4.0))
@@ -570,11 +682,19 @@ impl XdDesktop {
                             .shadow_sm()
                             .cursor_pointer()
                             .hover(|style| style.bg(rgba(frame_colors().viewer.button_hover)))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.remove_draft_attachment(owner, image, window, cx);
-                            }))
-                            .child(icon(CLOSE_ICON, 14.0, frame_colors().viewer.ink)),
+                            .child(icon(CLOSE_ICON, 14.0, frame_colors().viewer.ink))
+                            .key_stop_named(
+                                &targets,
+                                KeyLayer::Page,
+                                format!("remove-draft-image-{index}"),
+                                format!("Remove {name}"),
+                                colors,
+                                cx,
+                                move |this, window, cx| {
+                                    cx.stop_propagation();
+                                    this.remove_draft_attachment(owner, image, window, cx);
+                                },
+                            ),
                     )
             })
             .collect::<Vec<_>>();
@@ -648,22 +768,32 @@ impl XdDesktop {
                             .child(file_size_label(attachment.bytes)),
                     ),
             )
-            .child(
+            .child({
+                let label = format!("Remove {}", attachment.name);
                 icon_button(
                     ("remove-draft-file", index),
-                    "Remove file",
+                    label.clone(),
                     CLOSE_ICON,
                     colors,
                 )
                 .size(HIT_MIN)
                 .glyph(13.0)
                 .build()
+                .relative()
                 .debug_selector(move || format!("remove-draft-file-{index}"))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.remove_draft_attachment(owner, id, window, cx);
-                })),
-            )
+                .key_stop_named(
+                    &self.key_targets,
+                    KeyLayer::Page,
+                    format!("remove-draft-file-{index}"),
+                    label,
+                    colors,
+                    cx,
+                    move |this, window, cx| {
+                        cx.stop_propagation();
+                        this.remove_draft_attachment(owner, id, window, cx);
+                    },
+                )
+            })
     }
 
     fn open_image_preview(

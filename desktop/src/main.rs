@@ -5063,6 +5063,20 @@ enum Discarded {
         index: usize,
         text: String,
     },
+    /// An attachment taken out of a composer's draft, and where it stood.
+    Attachment {
+        from: AttachmentFrom,
+        index: usize,
+        attachment: Attachment,
+    },
+}
+
+/// Which composer an attachment was taken out of: a chat's, or the new
+/// chat's of a project, by its draft's key.
+#[derive(Clone, Debug, PartialEq)]
+enum AttachmentFrom {
+    Chat(ChatEndpoint, String),
+    NewChat(String),
 }
 
 impl Discarded {
@@ -5071,7 +5085,7 @@ impl Discarded {
     fn notice(&self) -> &'static str {
         match self {
             Self::Draft { .. } => "Discarded",
-            Self::Queued { .. } => "Removed",
+            Self::Queued { .. } | Self::Attachment { .. } => "Removed",
         }
     }
 }
@@ -5983,6 +5997,9 @@ impl XdDesktop {
             EditorEvent::PasteImage { format, bytes } => {
                 this.attach_new_chat_image(*format, bytes.clone(), cx)
             }
+            EditorEvent::BackspaceAtStart => {
+                this.remove_last_draft_attachment(image_preview::DraftOwner::NewChat, cx);
+            }
             EditorEvent::Save => {}
         })
         .detach();
@@ -5994,6 +6011,9 @@ impl XdDesktop {
             }
             EditorEvent::Submit => this.send_composer(cx),
             EditorEvent::SubmitNow => this.steer_composer(cx),
+            EditorEvent::BackspaceAtStart => {
+                this.remove_last_draft_attachment(image_preview::DraftOwner::Chat, cx);
+            }
             EditorEvent::Save => {}
         })
         .detach();
@@ -6006,13 +6026,13 @@ impl XdDesktop {
                 cx.notify();
             }
             EditorEvent::Submit | EditorEvent::SubmitNow => this.send_agent_message(cx),
-            EditorEvent::PasteImage { .. } | EditorEvent::Save => {}
+            EditorEvent::PasteImage { .. } | EditorEvent::Save | EditorEvent::BackspaceAtStart => {}
         })
         .detach();
         let queue_edit_input = cx.new(|cx| FileEditor::message(cx, "Edit queued message…"));
         cx.subscribe(&queue_edit_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => this.queue_edit_changed(text.clone(), cx),
-            EditorEvent::PasteImage { .. } => {}
+            EditorEvent::PasteImage { .. } | EditorEvent::BackspaceAtStart => {}
             EditorEvent::Submit | EditorEvent::SubmitNow => this.save_queue_edit(cx),
             EditorEvent::Save => {}
         })
@@ -6158,7 +6178,10 @@ impl XdDesktop {
                 }
             }
             EditorEvent::Save => this.save_file_tab(cx),
-            EditorEvent::PasteImage { .. } | EditorEvent::SubmitNow | EditorEvent::Submit => {}
+            EditorEvent::PasteImage { .. }
+            | EditorEvent::SubmitNow
+            | EditorEvent::Submit
+            | EditorEvent::BackspaceAtStart => {}
         })
         .detach();
         cx.subscribe(&file_editor, |this, _, event, cx| match event {
@@ -6173,7 +6196,7 @@ impl XdDesktop {
                     cx.notify();
                 }
             }
-            EditorEvent::PasteImage { .. } => {}
+            EditorEvent::PasteImage { .. } | EditorEvent::BackspaceAtStart => {}
             EditorEvent::Submit | EditorEvent::SubmitNow => {}
             EditorEvent::Save => this.save_browse_file(cx),
         })
@@ -19036,6 +19059,11 @@ impl XdDesktop {
                 index,
                 text,
             } => self.restore_queued(endpoint, &chat_id, index, text, cx),
+            Discarded::Attachment {
+                from,
+                index,
+                attachment,
+            } => self.restore_attachment(from, index, attachment, cx),
         }
         cx.notify();
     }

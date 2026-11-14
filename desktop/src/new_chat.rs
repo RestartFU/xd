@@ -1158,7 +1158,7 @@ impl XdDesktop {
         )
     }
 
-    fn new_chat_draft_key(&self) -> Option<String> {
+    pub(super) fn new_chat_draft_key(&self) -> Option<String> {
         let folder = self.creating_chat_folder.as_ref()?;
         Some(format!(
             "{}/{}",

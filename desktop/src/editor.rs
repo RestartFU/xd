@@ -67,6 +67,10 @@ pub enum EditorEvent {
     /// Send this into whatever is running now, rather than after it.
     SubmitNow,
     Save,
+    /// Backspace with the caret at the very start of a composer and nothing
+    /// selected, where there is no text to delete: the composer's last
+    /// attachment goes instead.
+    BackspaceAtStart,
 }
 
 pub struct FileEditor {
@@ -269,6 +273,14 @@ impl FileEditor {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.allow_images
+            && self.selected_range.is_empty()
+            && self.marked_range.is_none()
+            && self.cursor_offset() == 0
+        {
+            cx.emit(EditorEvent::BackspaceAtStart);
+            return;
+        }
         self.begin_delete(EditKind::Delete);
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
