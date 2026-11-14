@@ -5604,6 +5604,138 @@ mod tests {
         });
     }
 
+    /// Which of the price dialog's Tab stops the keyboard is on.
+    #[cfg(unix)]
+    fn price_stop_at(
+        desktop: &Entity<XdDesktop>,
+        cx: &mut gpui::VisualTestContext,
+        fields: &[(String, FocusHandle)],
+    ) -> String {
+        if let Some(on) = ring(desktop, cx) {
+            return on;
+        }
+        cx.update_window_entity(desktop, |_, window, _| {
+            fields
+                .iter()
+                .find(|(_, focus)| focus.is_focused(window))
+                .map_or_else(String::new, |(name, _)| name.clone())
+        })
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_model_prices_dialog_is_worked_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = usage_page(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_usage_prices(Some("set-me".into()), window, cx);
+            desktop.usage.environments[0].prices = Some(serde_json::json!({
+                "prices": {"held": {"input": 1.5, "output": 3.0, "cache_read": null, "cache_write": null}},
+                "aliases": {},
+            }));
+            desktop.usage.hidden_environments.clear();
+            desktop.usage_fill_price_rows(&[0], cx);
+        });
+        draw(cx);
+        let mut fields = Vec::new();
+        let (held, set_me) = desktop.read_with(cx, |desktop, _| {
+            let rows = &desktop.usage.price.as_ref().unwrap().rows;
+            (rows[0].id, rows[1].id)
+        });
+        desktop.read_with(cx, |desktop, cx| {
+            for row in &desktop.usage.price.as_ref().unwrap().rows {
+                let focus = |input: &Entity<ComposerInput>| input.read(cx).focus_handle(cx);
+                if let Some(input) = &row.model_input {
+                    fields.push((format!("model:{}", row.model), focus(input)));
+                }
+                fields.push((format!("map:{}", row.model), focus(&row.alias_input)));
+                for (index, input) in row.cell_inputs.iter().enumerate() {
+                    fields.push((format!("price{index}:{}", row.model), focus(input)));
+                }
+            }
+        });
+        // Add first, then each row's fields in the order they read, then its
+        // Reset or Remove.
+        let mut order = Vec::new();
+        for _ in 0..16 {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+            order.push(price_stop_at(&desktop, cx, &fields));
+        }
+        assert_eq!(
+            order,
+            [
+                "usage-price-add".to_owned(),
+                "map:held".into(),
+                "price0:held".into(),
+                "price1:held".into(),
+                "price2:held".into(),
+                "price3:held".into(),
+                format!("usage-price-reset-{held}"),
+                "model:set-me".into(),
+                "map:set-me".into(),
+                "price0:set-me".into(),
+                "price1:set-me".into(),
+                "price2:set-me".into(),
+                "price3:set-me".into(),
+                format!("usage-price-reset-{set_me}"),
+                "usage-price-cancel".into(),
+                "usage-price-save".into(),
+            ]
+        );
+        // Enter on Reset marks the row for automatic pricing.
+        while price_stop_at(&desktop, cx, &fields) != format!("usage-price-reset-{held}") {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+        }
+        cx.simulate_keystrokes("enter");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.usage.price.as_ref().unwrap().rows[0].removed);
+        });
+        // Enter on Add adds a row and puts the keyboard in its model.
+        while price_stop_at(&desktop, cx, &fields) != "usage-price-add" {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+        }
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            let rows = &desktop.usage.price.as_ref().unwrap().rows;
+            assert_eq!(rows.len(), 3);
+            let model = rows[2].model_input.as_ref().unwrap();
+            assert!(model.read(cx).focus_handle(cx).is_focused(window));
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_model_prices_fields_stay_wide_enough_in_a_small_window(cx: &mut gpui::TestAppContext) {
+        assert!(!price_table_narrow(1180.0));
+        assert!(!price_table_narrow(760.0));
+        assert!(price_table_narrow(760.0 / 1.5));
+        let (desktop, cx) = usage_page(cx);
+        cx.simulate_resize(size(px(760.0), px(560.0)));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.set_interface_size(150, window, cx);
+            desktop.open_usage_prices(Some("set-me".into()), window, cx);
+            desktop.usage.environments[0].prices = Some(serde_json::json!({
+                "prices": {}, "aliases": {},
+            }));
+            desktop.usage.hidden_environments.clear();
+            desktop.usage_fill_price_rows(&[0], cx);
+        });
+        draw(cx);
+        let cell = cx
+            .debug_bounds("usage-price-cell")
+            .expect("a price field shows");
+        crate::metrics::set_interface_size(100);
+        // Each price on a line of its own under the model, at least 72 wide.
+        assert!(
+            cell.size.width >= gpui::px(72.0 * 1.5),
+            "a price field is {:?} wide",
+            cell.size.width
+        );
+    }
+
     #[gpui::test]
     fn price_rows_validate_and_saved_prices_reopen(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);

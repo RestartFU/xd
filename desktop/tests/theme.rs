@@ -276,6 +276,83 @@ fn the_selection_marker_reads_at_three_to_one_on_every_ground() {
     }
 }
 
+/// The row the arrow keys are on in a menu, a picker or a list carries a
+/// ring in the selection colour, which hover never draws: at 3:1 or more on
+/// the menu and on the lit fill the row takes, so it is seen apart from a
+/// row that is only lit.
+#[test]
+fn the_arrow_keys_ring_reads_at_three_to_one_on_a_menu_and_its_lit_row() {
+    for preset in ThemePreset::ALL {
+        let colors = preset.colors();
+        for (ground, color) in [
+            ("menu", colors.surface),
+            ("lit row", colors.surface_high),
+            ("lit answer", colors.selected_surface),
+        ] {
+            let ratio = contrast(colors.selected_border, color);
+            assert!(ratio >= 3.0, "{preset:?} ring on {ground} is {ratio:.2}:1");
+        }
+        // The lit fill alone is the pointer's, and does not carry it.
+        assert!(contrast(colors.surface_high, colors.surface) < 3.0);
+    }
+}
+
+/// A control that cannot be used now is readable, and is told apart from
+/// one that can. Its words stay at 4.5:1 or more on every ground. In Dark
+/// they are also 1.5:1 or more from the muted ink of a quiet control that
+/// can be used. Light has no such ink: anything that far lighter than its
+/// muted falls under 4.5:1 on its paler grounds, as checked here, so there
+/// the dashed edge a disabled control takes, and no usable control has,
+/// tells them apart.
+#[test]
+fn disabled_words_read_and_stand_apart_from_a_usable_controls() {
+    for preset in ThemePreset::ALL {
+        let colors = preset.colors();
+        for (ground, color) in grounds(colors) {
+            let ratio = contrast(colors.disabled, color);
+            assert!(
+                ratio >= 4.5,
+                "{preset:?} disabled words on {ground} are {ratio:.2}:1"
+            );
+        }
+        // Its edge, dashed, shows where the control is.
+        assert!(contrast(colors.control_border, colors.surface) >= 3.0);
+    }
+    let dark = ThemePreset::Dark.colors();
+    let apart = contrast(dark.disabled, dark.muted);
+    assert!(apart >= 1.5, "Dark disabled is {apart:.2}:1 from muted");
+    let light = ThemePreset::Light.colors();
+    let lighter_than_muted = (0..=0xff_u32)
+        .map(|value| (value << 16) | (value << 8) | value)
+        .filter(|&grey| luminance(grey) > luminance(light.muted))
+        .filter(|&grey| contrast(grey, light.muted) >= 1.5);
+    for grey in lighter_than_muted {
+        assert!(
+            grounds(light)
+                .iter()
+                .any(|&(_, ground)| contrast(grey, ground) < 4.5),
+            "#{grey:06x} would do in Light"
+        );
+    }
+}
+
+/// A working dot pulses, but never so faintly that it falls under 3:1 on
+/// the grounds it is drawn on.
+#[test]
+fn a_pulsing_dot_stays_at_three_to_one_at_its_faintest() {
+    for preset in ThemePreset::ALL {
+        let colors = preset.colors();
+        let faintest = (colors.working << 8) | u32::from(colors.pulse_floor);
+        for (ground, color) in grounds(colors) {
+            let ratio = contrast(Glass::over(faintest, color), color);
+            assert!(
+                ratio >= 3.0,
+                "{preset:?} working dot at its faintest on {ground} is {ratio:.2}:1"
+            );
+        }
+    }
+}
+
 fn contrast(foreground: u32, background: u32) -> f64 {
     let foreground = luminance(foreground);
     let background = luminance(background);

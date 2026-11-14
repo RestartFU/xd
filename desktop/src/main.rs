@@ -36258,6 +36258,18 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             "ctrl-end",
             "ctrl-z",
             "cmd-z",
+            "ctrl-alt-left",
+            "cmd-alt-left",
+            "ctrl-alt-right",
+            "cmd-alt-right",
+            "ctrl-alt-shift-left",
+            "cmd-alt-shift-left",
+            "ctrl-alt-shift-right",
+            "cmd-alt-shift-right",
+            "ctrl-alt-up",
+            "cmd-alt-up",
+            "ctrl-alt-down",
+            "cmd-alt-down",
         ];
         if cfg!(target_os = "macos") {
             keys.extend(["cmd-up", "cmd-down"]);
@@ -36357,6 +36369,814 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             let is = key_action(&after, key, &["XdDesktop", "TerminalInput"]).unwrap();
             assert!(is.starts_with("xd::"), "{key} in the terminal reaches {is}");
         }
+    }
+
+    /// Which of the Tab stops the keyboard is on: the control the ring is
+    /// on, or the field that has the keyboard, as `fields` names them.
+    fn keyboard_at(
+        desktop: &Entity<XdDesktop>,
+        cx: &mut gpui::VisualTestContext,
+        fields: &[(&str, FocusHandle)],
+    ) -> String {
+        if let Some(on) = ring(desktop, cx) {
+            return on;
+        }
+        cx.update_window_entity(desktop, |_, window, _| {
+            fields
+                .iter()
+                .find(|(_, focus)| focus.is_focused(window))
+                .map_or_else(String::new, |(name, _)| (*name).to_owned())
+        })
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_quota_stop_is_cleared_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.bind_keys(all_key_bindings()));
+        let (desktop, cx, mut requests, _updates) = docked_ask_fixture(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model.chat_quotas_supported = true;
+            desktop.model.quota = Some(ChatQuota {
+                percent: 10,
+                used: 10.4,
+                own: false,
+            });
+            desktop.model.quota_reached = true;
+            desktop.sync_quota_input(cx);
+            // The message box had the keyboard, with nothing typed in it.
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+        });
+        redraw(cx);
+        let fields = desktop.read_with(cx, |desktop, cx| {
+            [
+                ("quota", desktop.quota_input.read(cx).focus_handle(cx)),
+                ("composer", desktop.composer_input.read(cx).focus_handle(cx)),
+            ]
+        });
+        // The card takes the keyboard as it docks, in its New quota field.
+        assert_eq!(keyboard_at(&desktop, cx, &fields), "quota");
+        // Enter there is Continue, with the quota it holds.
+        cx.simulate_keystrokes("enter");
+        let request = next_request_with_op(&mut requests, "set-chat-quota");
+        assert_eq!(request["percent"], 20);
+        desktop.update(cx, |desktop, cx| {
+            desktop.quota_card.pending = None;
+            cx.notify();
+        });
+        redraw(cx);
+        // Tab goes on to Continue and Continue without a limit, then the
+        // message box; Enter presses the button the ring is on.
+        cx.simulate_keystrokes("tab");
+        redraw(cx);
+        assert_eq!(keyboard_at(&desktop, cx, &fields), "chat-quota-continue");
+        cx.simulate_keystrokes("tab");
+        redraw(cx);
+        assert_eq!(keyboard_at(&desktop, cx, &fields), "chat-quota-lift");
+        cx.simulate_keystrokes("enter");
+        let request = next_request_with_op(&mut requests, "set-chat-quota");
+        assert!(request["percent"].is_null());
+        desktop.update(cx, |desktop, cx| {
+            desktop.quota_card.pending = None;
+            cx.notify();
+        });
+        redraw(cx);
+        // Space presses it too.
+        for _ in 0..20 {
+            if keyboard_at(&desktop, cx, &fields) == "chat-quota-continue" {
+                break;
+            }
+            cx.simulate_keystrokes("tab");
+            redraw(cx);
+        }
+        assert_eq!(keyboard_at(&desktop, cx, &fields), "chat-quota-continue");
+        cx.simulate_keystrokes("space");
+        assert_eq!(
+            next_request_with_op(&mut requests, "set-chat-quota")["percent"],
+            20
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_quota_stop_leaves_words_being_typed_where_they_are(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.bind_keys(all_key_bindings()));
+        let (desktop, cx, _requests, _updates) = docked_ask_fixture(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.set_composer_text("Also check the footer".into(), cx);
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+            desktop.model.chat_quotas_supported = true;
+            desktop.model.quota = Some(ChatQuota {
+                percent: 10,
+                used: 10.4,
+                own: false,
+            });
+            desktop.model.quota_reached = true;
+            desktop.sync_quota_input(cx);
+        });
+        redraw(cx);
+        redraw(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(
+                desktop
+                    .composer_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window),
+                "a message being typed keeps the keyboard"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_secret_question_is_answered_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.bind_keys(all_key_bindings()));
+        let (desktop, cx, mut requests, _updates) = docked_ask_fixture(cx);
+        let secret = |request_id: &str| {
+            serde_json::json!({
+                "request_id": request_id,
+                "method": "item/tool/requestUserInput",
+                "params": {"questions": [
+                    {"id": "q0", "question": "Your token?", "isSecret": true, "options": []},
+                ]},
+            })
+        };
+        let dock =
+            |desktop: &Entity<XdDesktop>, request: Value, cx: &mut gpui::VisualTestContext| {
+                cx.update_window_entity(desktop, |desktop, window, cx| {
+                    window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+                    desktop.handle_reply(
+                        RequestKind::Chat {
+                            chat_id: "implementation".into(),
+                        },
+                        serde_json::json!({
+                            "ok": true,
+                            "working": true,
+                            "backend": "codex",
+                            "interactions": [request],
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                        None,
+                        cx,
+                    );
+                });
+                redraw(cx);
+            };
+        dock(&desktop, secret("ask-1"), cx);
+        let fields = desktop.read_with(cx, |desktop, cx| {
+            [
+                (
+                    "secret",
+                    desktop.secret_question_input.read(cx).focus_handle(cx),
+                ),
+                ("composer", desktop.composer_input.read(cx).focus_handle(cx)),
+            ]
+        });
+        // The masked field takes the keyboard as the question docks, and
+        // Enter there sends what was typed.
+        assert_eq!(keyboard_at(&desktop, cx, &fields), "secret");
+        cx.simulate_input("hunter2");
+        cx.simulate_keystrokes("enter");
+        let request = next_request_with_op(&mut requests, "respond");
+        assert_eq!(request["request_id"], "ask-1");
+        assert_eq!(
+            request["response"]["answers"]["q0"]["answers"][0],
+            "hunter2"
+        );
+        // The next one: Tab reaches Send answer, which Enter presses.
+        desktop.update(cx, |desktop, cx| {
+            desktop.interaction_answers.clear();
+            cx.notify();
+        });
+        dock(&desktop, secret("ask-2"), cx);
+        assert_eq!(keyboard_at(&desktop, cx, &fields), "secret");
+        cx.simulate_input("swordfish");
+        cx.simulate_keystrokes("tab");
+        redraw(cx);
+        assert_eq!(keyboard_at(&desktop, cx, &fields), "interaction-submit");
+        cx.simulate_keystrokes("enter");
+        let request = next_request_with_op(&mut requests, "respond");
+        assert_eq!(request["request_id"], "ask-2");
+        assert_eq!(
+            request["response"]["answers"]["q0"]["answers"][0],
+            "swordfish"
+        );
+    }
+
+    #[gpui::test]
+    fn the_arrow_keys_row_has_a_ring_the_pointer_never_draws(cx: &mut gpui::TestAppContext) {
+        let working = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.update(cx, |desktop, cx| {
+                let chat = desktop
+                    .model
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == "pricing")
+                    .unwrap();
+                chat.working = true;
+                cx.notify();
+            });
+            redraw(cx);
+        };
+        // Where the landing page's first row is.
+        let row = {
+            let (desktop, cx) = keyboard_window(cx);
+            working(&desktop, cx);
+            cx.simulate_keystrokes("down");
+            redraw(cx);
+            desktop
+                .read_with(cx, |desktop, _| {
+                    desktop.key_targets.0.borrow().cursor_bounds
+                })
+                .unwrap()
+        };
+        let (desktop, cx) = keyboard_window(cx);
+        working(&desktop, cx);
+        // Under the pointer the row lights, with no ring.
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        redraw(cx);
+        assert!(cx.debug_bounds("key-row-ring").is_none());
+        // On the arrow keys' row, the ring lines its edge.
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        let ring = cx.debug_bounds("key-row-ring").expect("the ring shows");
+        assert_eq!(ring, row);
+    }
+
+    #[gpui::test]
+    fn the_new_chats_provider_tabs_are_reached_and_switched_from_the_keyboard(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.begin_chat_create("atlas".into(), window, cx);
+            desktop.minimal_new_session_agent = AgentCli::Codex;
+            desktop.new_chat_menu = Some("model");
+            window.focus(&desktop.new_chat_search.read(cx).focus_handle(cx));
+            cx.notify();
+        });
+        redraw(cx);
+        let agent = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| desktop.minimal_new_session_agent)
+        };
+        // Tab from the search field goes to the provider tabs; Enter picks.
+        cx.simulate_keystrokes("tab");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("draft-provider-codex"));
+        cx.simulate_keystrokes("tab");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("draft-provider-claude"));
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        assert_eq!(agent(&desktop, cx), AgentCli::Claude);
+        // Left and Right on a tab switch, and the ring goes along.
+        cx.simulate_keystrokes("left");
+        redraw(cx);
+        assert_eq!(agent(&desktop, cx), AgentCli::Codex);
+        assert_eq!(ring(&desktop, cx).as_deref(), Some("draft-provider-codex"));
+        // Back in the search field, Left and Right move the caret...
+        cx.simulate_keystrokes("tab");
+        redraw(cx);
+        cx.simulate_keystrokes("tab");
+        redraw(cx);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(
+                desktop
+                    .new_chat_search
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        });
+        cx.simulate_keystrokes("right");
+        redraw(cx);
+        assert_eq!(agent(&desktop, cx), AgentCli::Codex);
+        // ...until the arrow keys are in the list, which then switches.
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        cx.simulate_keystrokes("right");
+        redraw(cx);
+        assert_eq!(agent(&desktop, cx), AgentCli::Claude);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.key_row_at(), Some(0), "the keys stay in the list");
+            assert_eq!(desktop.new_chat_menu, Some("model"));
+        });
+    }
+
+    #[gpui::test]
+    fn the_browsers_empty_page_offers_its_servers_to_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = long_chat_window(cx);
+        cx.update_window_entity(&desktop, |desktop, window, _| {
+            desktop.set_browser_open(true);
+            window.focus(&desktop.root_focus);
+        });
+        redraw(cx);
+        tab_to(&desktop, cx, "browser-localhost-5173");
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        let url = cx.update_window_entity(&desktop, |desktop, window, cx| {
+            let pane = desktop.sync_browser_pane(window, cx).unwrap();
+            let session = pane.read(cx).session();
+            session.tabs[session.active_tab].clone()
+        });
+        assert!(
+            url.as_deref()
+                .is_some_and(|url| url.starts_with("http://localhost:5173")),
+            "{url:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn the_dividers_move_from_the_keyboard_and_stay_where_they_are_left(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        cx.update_window_entity(&desktop, |desktop, window, _| {
+            desktop.settings.catalog_width = 280;
+            desktop.settings.browser_width = 460;
+            desktop.settings.terminal_height = 240;
+            desktop.set_browser_open(true);
+            desktop.bottom_terminal_open = true;
+            window.focus(&desktop.root_focus);
+        });
+        redraw(cx);
+        let sizes = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| {
+                (
+                    desktop.settings.catalog_width,
+                    desktop.settings.browser_width,
+                    desktop.settings.terminal_height,
+                )
+            })
+        };
+        let step = PANE_KEY_STEP as u16;
+        cx.simulate_keystrokes("ctrl-alt-right");
+        assert_eq!(sizes(&desktop, cx), (280 + step, 460, 240));
+        cx.simulate_keystrokes("ctrl-alt-left ctrl-alt-left");
+        assert_eq!(sizes(&desktop, cx), (280 - step, 460, 240));
+        cx.simulate_keystrokes("ctrl-alt-shift-left");
+        assert_eq!(sizes(&desktop, cx), (280 - step, 460 + step, 240));
+        cx.simulate_keystrokes("ctrl-alt-shift-right ctrl-alt-shift-right");
+        assert_eq!(sizes(&desktop, cx), (280 - step, 460 - step, 240));
+        cx.simulate_keystrokes("ctrl-alt-up");
+        assert_eq!(sizes(&desktop, cx), (280 - step, 460 - step, 240 + step));
+        cx.simulate_keystrokes("ctrl-alt-down ctrl-alt-down");
+        assert_eq!(sizes(&desktop, cx), (280 - step, 460 - step, 240 - step));
+        // From the message box too, which has no use for these keys.
+        cx.simulate_keystrokes("ctrl-l ctrl-alt-right");
+        assert_eq!(sizes(&desktop, cx), (280, 460 - step, 240 - step));
+        // Each stops where a drag stops.
+        for _ in 0..40 {
+            cx.simulate_keystrokes("ctrl-alt-left ctrl-alt-shift-right ctrl-alt-down");
+        }
+        let (sidebar, side, terminal) = sizes(&desktop, cx);
+        assert_eq!(f32::from(sidebar), CATALOG_MIN_WIDTH);
+        assert_eq!(terminal, 120);
+        assert!(f32::from(side) <= BROWSER_MIN_WIDTH, "{side}");
+        // A pane that is not showing keeps its size.
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            desktop.set_browser_open(false);
+            desktop.bottom_terminal_open = false;
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("ctrl-alt-shift-left ctrl-alt-up");
+        assert_eq!(sizes(&desktop, cx), (sidebar, side, terminal));
+    }
+
+    #[gpui::test]
+    fn a_name_under_the_ring_holds_the_whole_of_a_label_cut_short(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        let record = r#"subagent_run
+{"key":"toolu_1","task_id":"a1b2","provider":"Claude","agent":"Explore","description":"Write the e2e feature for the DoubleClick module under tests/e2e/features, covering every control, mode and guard, then open a pull request for it","status":"completed","summary":"Done.","steps":[]}"#;
+        cx.simulate_resize(size(px(760.0), px(560.0)));
+        desktop.update(cx, |desktop, cx| {
+            desktop.transcript_snapshot.messages = Arc::new(vec![
+                Message::new(Some(1), "user", "Map the parser.", None),
+                Message::new(Some(2), "tool", record, None),
+            ]);
+            desktop.transcript_snapshot.sync_derived_rows();
+            desktop.sync_transcript_count(true);
+            cx.notify();
+        });
+        redraw(cx);
+        tab_to(&desktop, cx, "native-subagent-toggle:1");
+        // One frame notes the cut, the next shows it.
+        desktop.update(cx, |_, cx| cx.notify());
+        redraw(cx);
+        assert!(named_under_ring(&desktop, cx));
+        let name = cx.debug_bounds("focus-tooltip").unwrap();
+        let detail = cx
+            .debug_bounds("focus-tooltip-detail")
+            .expect("the whole text is under the name");
+        assert!(detail.top() >= name.top());
+        assert!(
+            cx.debug_bounds("keyed-title").is_none(),
+            "one box, not a second one under it"
+        );
+    }
+
+    /// Source text with its comments and the insides of its string and
+    /// character literals blanked out, byte for byte, so brackets and
+    /// semicolons in them do not count.
+    fn code_only(source: &str) -> Vec<u8> {
+        let bytes = source.as_bytes();
+        let mut out = bytes.to_vec();
+        let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+            for byte in &mut out[from..to] {
+                if *byte != b'\n' {
+                    *byte = b' ';
+                }
+            }
+        };
+        let mut i = 0;
+        while i < bytes.len() {
+            let rest = &bytes[i..];
+            if rest.starts_with(b"//") {
+                let end = rest
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(bytes.len(), |n| i + n);
+                blank(&mut out, i, end);
+                i = end;
+            } else if rest.starts_with(b"/*") {
+                let end = source[i + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |n| i + 2 + n + 2);
+                blank(&mut out, i, end);
+                i = end;
+            } else if bytes[i] == b'r'
+                && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+                && rest[1..]
+                    .iter()
+                    .position(|&b| b != b'#')
+                    .is_some_and(|n| rest[1 + n] == b'"')
+            {
+                let hashes = rest[1..].iter().take_while(|&&b| b == b'#').count();
+                let open = i + 1 + hashes + 1;
+                let close = format!("\"{}", "#".repeat(hashes));
+                let end = source[open..]
+                    .find(&close)
+                    .map_or(bytes.len(), |n| open + n);
+                blank(&mut out, open, end);
+                i = end + close.len();
+            } else if bytes[i] == b'"' {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j] != b'"' {
+                    j += if bytes[j] == b'\\' { 2 } else { 1 };
+                }
+                blank(&mut out, i + 1, j);
+                i = j + 1;
+            } else if bytes[i] == b'\'' {
+                // A character literal, not a lifetime.
+                let end = if rest.get(1) == Some(&b'\\') {
+                    rest[2..]
+                        .iter()
+                        .position(|&b| b == b'\'')
+                        .map(|n| i + 2 + n)
+                } else {
+                    source[i + 1..]
+                        .chars()
+                        .next()
+                        .map(|c| i + 1 + c.len_utf8())
+                        .filter(|&end| bytes.get(end) == Some(&b'\''))
+                };
+                match end {
+                    Some(end) => {
+                        blank(&mut out, i + 1, end);
+                        i = end + 1;
+                    }
+                    None => i += 1,
+                }
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Where the bracket that closes, or opens, the one at `at` is.
+    fn matching_bracket(code: &[u8], at: usize) -> usize {
+        let forward = matches!(code[at], b'(' | b'[' | b'{');
+        let mut depth = 0usize;
+        let mut i = at;
+        loop {
+            match code[i] {
+                b'(' | b'[' | b'{' if forward => depth += 1,
+                b')' | b']' | b'}' if !forward => depth += 1,
+                b')' | b']' | b'}' if forward => depth -= 1,
+                b'(' | b'[' | b'{' if !forward => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                return i;
+            }
+            if forward {
+                i += 1;
+            } else {
+                i -= 1;
+            }
+        }
+    }
+
+    /// The name a call or method is written with, just before `at`.
+    fn name_before(code: &[u8], at: usize) -> &str {
+        let end = at;
+        let mut start = end;
+        while start > 0 && (code[start - 1].is_ascii_alphanumeric() || code[start - 1] == b'_') {
+            start -= 1;
+        }
+        std::str::from_utf8(&code[start..end]).unwrap_or_default()
+    }
+
+    /// Whether the bracket at `at` opens the argument list of a method that
+    /// only passes its builder on, such as `.when(…, |row| row…)`: what is
+    /// built inside it is the same chain.
+    fn passes_the_chain_on(code: &[u8], at: usize) -> bool {
+        code[at] == b'('
+            && matches!(name_before(code, at), "when" | "when_some" | "map" | "then")
+            && code[..at - name_before(code, at).len()].ends_with(b".")
+    }
+
+    /// Whether the brace at `at` opens a closure's body.
+    fn opens_a_closure(code: &[u8], at: usize) -> bool {
+        code[at] == b'{' && code[..at].trim_ascii_end().ends_with(b"|")
+    }
+
+    /// The builder chain an `.on_click(` at `at` is part of, as a range of
+    /// `code`, or `None` where it is an argument of a call that makes it a
+    /// Tab stop, as `key_action_stop(div()…on_click(…), …)` does.
+    fn click_chain(code: &[u8], at: usize) -> Option<(usize, usize)> {
+        let mut start = at;
+        loop {
+            if start == 0 {
+                break;
+            }
+            let i = start - 1;
+            match code[i] {
+                b')' | b']' | b'}' => start = matching_bracket(code, i),
+                b'(' if passes_the_chain_on(code, i) => start = i,
+                b'(' if KEY_PATH_CALLS.contains(&name_before(code, i)) => return None,
+                b'{' if opens_a_closure(code, i) => start = i,
+                b'(' | b'[' | b'{' | b';' => break,
+                b',' => {
+                    // An argument of a method that passes the chain on, such
+                    // as the closure of a `.when(…)`, is in the chain.
+                    let mut open = i;
+                    while open > 0 {
+                        open -= 1;
+                        match code[open] {
+                            b')' | b']' | b'}' => open = matching_bracket(code, open),
+                            b'(' | b'[' | b'{' => break,
+                            _ => {}
+                        }
+                    }
+                    if passes_the_chain_on(code, open) {
+                        start = open;
+                    } else {
+                        break;
+                    }
+                }
+                b'=' if !matches!(code[i - 1], b'=' | b'!' | b'<' | b'>')
+                    && !matches!(code[i + 1], b'=' | b'>') =>
+                {
+                    break;
+                }
+                b'>' if code[i - 1] == b'=' => break,
+                _ => start = i,
+            }
+        }
+        let mut end = at;
+        while end < code.len() {
+            match code[end] {
+                b'(' | b'[' | b'{' => end = matching_bracket(code, end) + 1,
+                b')' | b']' | b'}' => {
+                    let open = matching_bracket(code, end);
+                    if passes_the_chain_on(code, open) || opens_a_closure(code, open) {
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                b';' | b',' => break,
+                _ => end += 1,
+            }
+        }
+        Some((start, end))
+    }
+
+    /// The chain with what its children build blanked out, so a key stop on
+    /// a child does not count for its parent. A Tab stop's mark among its
+    /// children stays: it is the parent's own.
+    fn own_part_of_chain(code: &[u8]) -> String {
+        let mut own = code.to_vec();
+        for method in [&b".child("[..], b".children("] {
+            let mut from = 0;
+            while let Some(found) = code[from..]
+                .windows(method.len())
+                .position(|window| window == method)
+            {
+                let open = from + found + method.len() - 1;
+                let close = matching_bracket(code, open);
+                let argument = String::from_utf8_lossy(&code[open + 1..close]);
+                let argument = argument.trim_start();
+                if !["keys.mark(", "self.key_targets.mark(", "tree_marks"]
+                    .iter()
+                    .any(|mark| argument.starts_with(mark))
+                {
+                    for byte in &mut own[open + 1..close] {
+                        *byte = b' ';
+                    }
+                }
+                from = close;
+            }
+        }
+        String::from_utf8_lossy(&own).into_owned()
+    }
+
+    /// The calls that make a control a Tab stop: in a control's builder
+    /// chain, beside its `.on_click(`, or around it.
+    const KEY_PATH_CALLS: [&str; 6] = [
+        "key_reach",
+        "key_stop_in_view",
+        "key_action_stop",
+        "tree_action",
+        "pane_press",
+        "tab_press",
+    ];
+
+    /// What in a builder chain says its control is a Tab stop, or a field
+    /// that is one, or a row the arrow keys reach.
+    const KEY_PATH_MARKS: [&str; 16] = [
+        ".key_stop(",
+        ".key_stop_ring(",
+        ".key_stop_named(",
+        ".key_stop_named_ring(",
+        ".key_stop_round(",
+        ".key_stop_inset(",
+        ".key_stop_roving(",
+        ".key_reach(",
+        "key_row(",
+        "key_button(",
+        "key_reach(",
+        "key_action_stop(",
+        "agent_action_button(",
+        "KeyStop::Control(",
+        "KeyStop::Field(",
+        "tree_marks",
+    ];
+
+    /// The functions that are the key path itself: each attaches a click
+    /// and a Tab stop, or a row the arrow keys reach, from one action.
+    const KEY_PATH_FNS: [(&str, &str); 8] = [
+        ("main.rs", "key_row"),
+        ("main.rs", "key_button"),
+        ("main.rs", "key_stop_ring"),
+        ("main.rs", "key_stop_inset"),
+        ("main.rs", "key_stop_roving"),
+        ("browser.rs", "pane_press"),
+        ("browser.rs", "tab_press"),
+        ("workspace_settings.rs", "key_switch"),
+    ];
+
+    /// The few controls a click presses that the keyboard does not reach as
+    /// a Tab stop, because something else already does what they do or a
+    /// Tab stop there would be wrong. Each is a file, the function that
+    /// builds it, how many of its clicks are pointer-only, and why.
+    const POINTER_ONLY: [(&str, &str, usize, &str); 4] = [
+        // Minimize, Maximize and Close in the title bar xd draws on Linux
+        // and Windows: the window manager's own keys do these, and three
+        // stops at the top of every page would come first in its Tab order.
+        (
+            "main.rs",
+            "render_minimal_window_controls",
+            3,
+            "window caption buttons",
+        ),
+        // A click in the terminal's output gives the keyboard to the
+        // terminal, which Ctrl+` and the Terminal page already hand it to;
+        // the terminal keeps Tab for the shell.
+        (
+            "main.rs",
+            "render_minimal_terminal",
+            1,
+            "terminal click-to-focus",
+        ),
+        // The docked question's answers: 1 to 9 pick one, and Up from the
+        // empty message box moves onto them and Enter picks, as Settings ›
+        // Keyboard lists.
+        ("main.rs", "render_ask_choices", 1, "a question's answers"),
+        // The picture viewer holds the keyboard while it is open, and its
+        // keys do all its buttons do: Escape closes it, Left and Right step,
+        // Enter, Space, + and - zoom. Its backdrop closes it on a click.
+        (
+            "image_preview.rs",
+            "render_image_preview",
+            4,
+            "the picture viewer",
+        ),
+    ];
+
+    /// The name of the function the byte at `at` is in.
+    fn enclosing_fn(code: &[u8], at: usize) -> String {
+        let text = String::from_utf8_lossy(&code[..at]);
+        let mut found = String::new();
+        let mut from = 0;
+        while let Some(n) = text[from..].find("fn ") {
+            let start = from + n + 3;
+            let name: String = text[start..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            let boundary = from + n == 0
+                || !text.as_bytes()[from + n - 1].is_ascii_alphanumeric()
+                    && text.as_bytes()[from + n - 1] != b'_';
+            if boundary && !name.is_empty() {
+                found = name;
+            }
+            from = start;
+        }
+        found
+    }
+
+    /// Every control a click presses is a Tab stop as well, pressed by Enter
+    /// or Space: `ui_button(…)` and `icon_button(…).build()` only lay a
+    /// control out, and a handler goes on it through `key_stop` and its
+    /// kind, which attach the click and the stop from one action. This reads
+    /// every UI source and fails on a `.on_click(` whose builder chain has
+    /// no Tab stop, unless it is one of the few in [`POINTER_ONLY`].
+    #[test]
+    fn every_control_a_click_presses_is_a_tab_stop_too() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .collect::<Vec<_>>();
+        files.sort();
+        let mut pointer_only = HashMap::<(String, String), usize>::new();
+        let mut missing = Vec::new();
+        let mut clicks = 0;
+        for path in files {
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            let source = std::fs::read_to_string(&path).unwrap();
+            let code = code_only(&source);
+            let needle = b".on_click(";
+            let mut from = 0;
+            while let Some(found) = code[from..]
+                .windows(needle.len())
+                .position(|window| window == needle)
+            {
+                let at = from + found;
+                from = at + needle.len();
+                let function = enclosing_fn(&code, at);
+                clicks += 1;
+                if KEY_PATH_FNS.contains(&(file.as_str(), function.as_str())) {
+                    continue;
+                }
+                // A click that only stops there, so it does not reach what
+                // is behind, presses nothing.
+                let open = at + needle.len() - 1;
+                let handler: String =
+                    String::from_utf8_lossy(&code[open + 1..matching_bracket(&code, open)])
+                        .split_whitespace()
+                        .collect();
+                if handler == "|_,_,cx|cx.stop_propagation()" {
+                    continue;
+                }
+                let Some((start, end)) = click_chain(&code, at) else {
+                    continue;
+                };
+                let own = own_part_of_chain(&code[start..end]);
+                if KEY_PATH_MARKS.iter().any(|mark| own.contains(mark)) {
+                    continue;
+                }
+                let line = source[..at].matches('\n').count() + 1;
+                *pointer_only
+                    .entry((file.clone(), function.clone()))
+                    .or_default() += 1;
+                missing.push(format!("{file}:{line} in {function}"));
+            }
+        }
+        assert!(clicks > 50, "the scan found the clicks: {clicks}");
+        for (file, function, count, what) in POINTER_ONLY {
+            let found = pointer_only
+                .remove(&(file.to_owned(), function.to_owned()))
+                .unwrap_or_default();
+            assert_eq!(found, count, "{what} in {file} {function}");
+            missing.retain(|site| {
+                !site.starts_with(&format!("{file}:"))
+                    || !site.ends_with(&format!(" in {function}"))
+            });
+        }
+        assert!(
+            missing.is_empty(),
+            "a click with no Tab stop: make it a key_stop, or say why in POINTER_ONLY:\n{}",
+            missing.join("\n")
+        );
     }
 
     #[test]
