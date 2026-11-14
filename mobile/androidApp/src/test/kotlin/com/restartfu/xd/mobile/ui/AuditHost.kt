@@ -10,6 +10,8 @@ import com.restartfu.xd.credentials.StoredCredentials
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.net.PlatformSocket
 import com.restartfu.xd.net.PlatformSocketListener
+import com.restartfu.xd.net.SocketFailure
+import com.restartfu.xd.net.SocketFailureKind
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -40,6 +42,9 @@ internal class AuditHost(
     /** Every request the app sent, in order. */
     val sent = CopyOnWriteArrayList<JsonObject>()
 
+    /** While set, the host cannot be reached: each attempt to connect fails, as with no network. */
+    @Volatile var offline = false
+
     /** How many times the pairing was erased. */
     val forgotten = AtomicInteger()
 
@@ -56,6 +61,14 @@ internal class AuditHost(
     /** Sends an event, as the host does when something changes. */
     fun push(event: String) {
         listener.get()?.onBytes((event + "\n").encodeToByteArray())
+    }
+
+    /**
+     * Ends the connection as the host does: [kind] AUTHENTICATION refuses this
+     * device, which needs a new pairing; IO drops it, as a lost network does.
+     */
+    fun drop(kind: SocketFailureKind, message: String) {
+        listener.get()?.onClosed(SocketFailure(kind, message))
     }
 
     /**
@@ -87,7 +100,10 @@ internal class AuditHost(
     private inner class Socket : PlatformSocket {
         override fun connect(connection: SshConnection, listener: PlatformSocketListener) {
             this@AuditHost.listener.set(listener)
-            Thread { listener.onConnected() }.start()
+            Thread {
+                if (offline) listener.onClosed(SocketFailure(SocketFailureKind.UNREACHABLE, "The host cannot be reached"))
+                else listener.onConnected()
+            }.start()
         }
 
         override fun send(bytes: ByteArray) {
