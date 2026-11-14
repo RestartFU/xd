@@ -72,6 +72,8 @@ pub enum BrowserEvent {
     Close,
     /// One of the app's shortcuts, pressed in the page, as GPUI writes its
     /// keys. The page has given the keyboard back; the app acts on the keys.
+    /// Only Linux's engine reports one.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     AppShortcut(&'static str),
     SessionChanged(BrowserSession),
     AuxiliarySelected(Option<SideTab>),
