@@ -32,7 +32,6 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use gpui::AnimationExt as _;
 use gpui::{
     App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
     Decorations, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, HighlightStyle, Image,
@@ -1227,7 +1226,18 @@ fn frame_colors() -> ThemeColors {
 /// over that once the label has its place, cut to the room it really has.
 #[track_caller]
 fn truncating_label(text: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
-    let text = text.into();
+    let text: SharedString = text.into();
+    // One line: GPUI shapes no line break, so a title that has one, such as
+    // a chat named from a pasted message, reads on with a space instead.
+    let text: SharedString = if text.contains(['\n', '\r']) {
+        text.split(['\n', '\r'])
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .into()
+    } else {
+        text
+    };
     let site = std::panic::Location::caller();
     let mut hasher = DefaultHasher::new();
     (text.as_ref(), site.file(), site.line(), site.column()).hash(&mut hasher);
@@ -2252,6 +2262,16 @@ fn menu_shell(colors: ThemeColors) -> gpui::Div {
 
 /// One choice in a menu. It grows for a second line.
 fn menu_row(id: impl Into<gpui::ElementId>, colors: ThemeColors) -> gpui::Stateful<gpui::Div> {
+    menu_row_shape(id, colors).hover(|style| style.bg(rgb(colors.surface_high)))
+}
+
+/// A [`menu_row`] with no hover of its own, for a row that lights in another
+/// fill, such as a destructive one, or not at all, as one that cannot be
+/// picked now. GPUI takes one hover per element.
+fn menu_row_shape(
+    id: impl Into<gpui::ElementId>,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .w_full()
@@ -2265,7 +2285,6 @@ fn menu_row(id: impl Into<gpui::ElementId>, colors: ThemeColors) -> gpui::Statef
         .text_size(text_px(TEXT_CONTROL))
         .text_color(rgb(colors.text))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(colors.surface_high)))
 }
 
 /// The room a menu row keeps for its check mark, and the mark on the choice
@@ -2423,7 +2442,7 @@ fn render_compaction_notice(
         .flex()
         .items_center()
         .gap(px(6.0))
-        .text_size(px(12.0))
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(tone))
         .child(icon(
             if failed { ALERT_ICON } else { COMPACT_ICON },
@@ -2431,18 +2450,11 @@ fn render_compaction_notice(
             tone,
         ))
         .child(div().min_w_0().truncate().child(label.to_owned()));
+    // It breathes with the shared pulse, not a per-frame animation.
     let content = if state == activity::CompactionState::Running {
-        content
-            .with_animation(
-                "compaction-running",
-                gpui::Animation::new(Duration::from_millis(1600))
-                    .repeat()
-                    .with_easing(gpui::pulsating_between(0.45, 1.0)),
-                |content, delta| content.opacity(delta),
-            )
-            .into_any_element()
+        content.opacity(pulse_opacity())
     } else {
-        content.into_any_element()
+        content
     };
     div()
         .w_full()
@@ -27763,12 +27775,10 @@ impl XdDesktop {
                     &keys,
                     KeyLayer::Menu,
                     "sidebar-menu",
-                    menu_row(id, colors)
+                    menu_row_shape(id, colors)
                         .debug_selector(move || id.into())
-                        .when(danger, |row| {
-                            row.text_color(rgb(colors.danger))
-                                .hover(|style| style.bg(rgb(colors.danger_surface)))
-                        }),
+                        .text_color(rgb(if danger { colors.danger } else { colors.text }))
+                        .hover(move |style| style.bg(rgb(fill))),
                     fill,
                     cx,
                     run,
@@ -27905,11 +27915,10 @@ impl XdDesktop {
                                     this.apply_row_move(step.clone(), cx);
                                 }),
                             ),
-                            None => menu_row(id, colors)
+                            None => menu_row_shape(id, colors)
                                 .debug_selector(move || id.into())
                                 .cursor_default()
                                 .text_color(rgb(disabled_ink(colors)))
-                                .hover(|style| style.bg(gpui::transparent_black()))
                                 .child(label)
                                 .into_any_element(),
                         });
@@ -28404,15 +28413,14 @@ impl XdDesktop {
                 .enumerate()
                 .map(|(index, (value, label))| {
                     let selected = current == value;
-                    let row = menu_row(("native-setting-choice", index), colors)
+                    let row = menu_row_shape(("native-setting-choice", index), colors)
                         .debug_selector(move || format!("native-setting-choice-{index}"));
                     let row = if disabled {
                         // Not to be picked now: in the ink of a disabled
                         // control, with nothing that reacts.
-                        row.cursor_default()
-                            .text_color(rgb(disabled_ink(colors)))
-                            .hover(|style| style.bg(gpui::transparent_black()))
+                        row.cursor_default().text_color(rgb(disabled_ink(colors)))
                     } else {
+                        let row = row.hover(|style| style.bg(rgb(colors.surface_high)));
                         let row = key_row(
                             &keys,
                             KeyLayer::Menu,
@@ -40851,9 +40859,14 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             desktop.begin_workspace_create_in(WorkspaceCreateKind::Project, None, window, cx);
         });
         redraw(cx);
+        let repository = if cfg!(target_os = "windows") {
+            "dialog-field-label:Linux repository path"
+        } else {
+            "dialog-field-label:Repository path (optional)"
+        };
         for label in [
             "dialog-field-label:Project name",
-            "dialog-field-label:Repository path (optional)",
+            repository,
             "dialog-field-label:Clone URL (optional)",
         ] {
             let name = cx

@@ -1237,12 +1237,14 @@ impl XdDesktop {
         };
         const TITLE: &str = "Compact idle chats";
         const DESCRIPTION: &str = "When to compact an idle Claude chat over 200,000 tokens: after you return, just before its prompt cache expires, or never.";
+        let keys = self.key_targets.clone();
         let choices = div().mt(px(10.0)).flex().flex_wrap().gap(px(4.0)).children(
             IdleCompaction::CHOICES.iter().map(|(choice, label)| {
                 let choice = *choice;
                 let active = choice == mode;
                 div()
                     .id(("workspace-settings-idle-compaction", choice as usize))
+                    .relative()
                     .h(px(28.0))
                     .px(px(10.0))
                     .flex()
@@ -1254,7 +1256,7 @@ impl XdDesktop {
                     } else {
                         crate::glass::edge(colors)
                     })
-                    .text_size(px(12.0))
+                    .text_size(text_px(TEXT_LABEL))
                     .font_weight(FontWeight::MEDIUM)
                     .cursor_pointer()
                     .text_color(rgb(if active { colors.text } else { colors.muted }))
@@ -1262,11 +1264,19 @@ impl XdDesktop {
                     .when(!active, |button| {
                         button.hover(|style| style.bg(rgb(colors.surface)))
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.idle_compaction != Some(choice) {
-                            this.change_idle_compaction(choice, cx);
-                        }
-                    }))
+                    .key_stop_ring(
+                        &keys,
+                        KeyLayer::Overlay,
+                        format!("workspace-settings-idle-compaction-{}", choice.as_str()),
+                        7.0 + FOCUS_RING_GAP,
+                        colors,
+                        cx,
+                        move |this, _, cx| {
+                            if this.idle_compaction != Some(choice) {
+                                this.change_idle_compaction(choice, cx);
+                            }
+                        },
+                    )
                     .child(*label)
             }),
         );
@@ -1285,15 +1295,15 @@ impl XdDesktop {
                     .py(px(11.0))
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(text_px(TEXT_CONTROL))
                             .text_color(rgb(colors.text))
                             .child(TITLE),
                     )
                     .child(
                         div()
                             .mt(px(3.0))
-                            .text_size(px(12.0))
-                            .line_height(px(17.0))
+                            .text_size(text_px(TEXT_LABEL))
+                            .line_height(line_px(LINE_LABEL, TEXT_LABEL))
                             .text_color(rgb(colors.muted))
                             .child(DESCRIPTION),
                     )
