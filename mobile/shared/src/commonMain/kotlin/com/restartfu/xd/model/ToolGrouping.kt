@@ -26,6 +26,15 @@ public sealed interface TranscriptRow {
         val sentence: String,
     ) : TranscriptRow
 
+    /**
+     * The host compacted, or is compacting, the chat's context: a quiet
+     * divider, never a tool call, so it neither joins nor hides in a run.
+     */
+    public data class Compaction(
+        val item: TranscriptItem,
+        val compaction: ContextCompaction,
+    ) : TranscriptRow
+
     /** A run of ordinary tool calls worth hiding behind one line. */
     public data class Tools(val items: List<TranscriptItem>) : TranscriptRow {
         val label: String get() = "${items.size} tool calls"
@@ -68,6 +77,10 @@ public object ToolGrouping {
                     flush()
                     rows += TranscriptRow.AccountSwitch(item, shape.sentence)
                 }
+                is ToolShape.Compaction -> {
+                    flush()
+                    rows += TranscriptRow.Compaction(item, shape.compaction)
+                }
                 is ToolShape.Pipeline -> {
                     flush()
                     rows += TranscriptRow.Pipeline(item, shape.run)
@@ -91,6 +104,7 @@ public object ToolGrouping {
     public fun classify(item: TranscriptItem): ToolShape {
         if (item.kind != TranscriptKind.TOOL) return ToolShape.Alone
         AccountSwitch.sentence(item.text)?.let { return ToolShape.Switch(it) }
+        ContextCompaction.parse(item.text)?.let { return ToolShape.Compaction(it) }
         PipelineRun.parse(item.text)?.let { return ToolShape.Pipeline(it) }
         SubagentRun.parse(item.text)?.let { return ToolShape.Subagent(it) }
         return if (ToolText.isPatch(item.text)) ToolShape.Alone else ToolShape.Ordinary
@@ -105,6 +119,7 @@ public sealed interface ToolShape {
     /** An ordinary tool call, which joins a run of its neighbours. */
     public data object Ordinary : ToolShape
     public data class Switch(val sentence: String) : ToolShape
+    public data class Compaction(val compaction: ContextCompaction) : ToolShape
     public data class Pipeline(val run: PipelineRun) : ToolShape
     public data class Subagent(val run: SubagentRun) : ToolShape
 }

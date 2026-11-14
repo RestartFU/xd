@@ -1185,7 +1185,7 @@ impl TurnRuntime {
     /// Whether the chat's kept process still runs background work of its
     /// own, or has finished some and owes a turn reporting on it, read under
     /// one lock of its router.
-    fn waits_on_background(&self, chat_id: &str) -> bool {
+    pub(crate) fn waits_on_background(&self, chat_id: &str) -> bool {
         self.router(chat_id).is_some_and(|router| {
             router.lock().is_ok_and(|router| {
                 !router.ended && (!router.tasks.is_empty() || router.report_due)
@@ -2954,6 +2954,38 @@ impl TurnRuntime {
                         match self.write_record(&turn, turn_id, &progress, write) {
                             Ok(()) => had_activity = true,
                             Err(error) => latest_error = Some(error),
+                        }
+                    }
+                    AgentEvent::Compaction(compaction) => {
+                        let write = self.fold_record(
+                            &turn.chat_id,
+                            format!("{turn_id}:compaction:{}", compaction.id),
+                            compaction.record(turn.idle_compaction),
+                        );
+                        if matches!(write, RecordWrite::New { .. }) {
+                            close_segment!();
+                        }
+                        match self.write_record(&turn, turn_id, &progress, write) {
+                            Ok(()) => had_activity = true,
+                            Err(error) => latest_error = Some(error),
+                        }
+                    }
+                    AgentEvent::PromptCache {
+                        ttl_ms,
+                        read,
+                        requested_at_ms,
+                    } => {
+                        if let Err(error) = self.inner.store.set_prompt_cache(
+                            &turn.chat_id,
+                            &turn.session_backend,
+                            ttl_ms,
+                            read,
+                            requested_at_ms,
+                        ) {
+                            eprintln!(
+                                "xd-host: cannot record the prompt cache of chat {}: {error}",
+                                turn.chat_id
+                            );
                         }
                     }
                     AgentEvent::Tool(text) => {

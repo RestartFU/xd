@@ -124,6 +124,55 @@ class ToolGroupingTest {
     }
 
     @Test
+    fun aCompactionIsADividerThatBreaksARun() {
+        val rows = ToolGrouping.rows(
+            listOf(
+                tool("a"),
+                tool("b"),
+                tool("context_compaction\ncompleted\nContext compacted 250K → 32K tokens"),
+                tool("c"),
+                tool("d"),
+            ),
+        )
+
+        assertEquals(3, rows.size)
+        assertEquals(2, assertIs<TranscriptRow.Tools>(rows[0]).items.size)
+        val divider = assertIs<TranscriptRow.Compaction>(rows[1])
+        assertEquals(CompactionState.COMPLETED, divider.compaction.state)
+        assertEquals("Context compacted 250K → 32K tokens", divider.compaction.label)
+        assertEquals(2, assertIs<TranscriptRow.Tools>(rows[2]).items.size)
+    }
+
+    @Test
+    fun aLoneCompactionIsNeverAToolRow() {
+        val running = tool("context_compaction\nrunning\nCompacting before the cache expires…")
+        val failed = tool("context_compaction\nfailed\nContext compaction failed · Not enough messages")
+        val stopped = tool("context_compaction\nstopped\nContext compaction stopped")
+
+        assertEquals(
+            ToolShape.Compaction(ContextCompaction(CompactionState.RUNNING, "Compacting before the cache expires…")),
+            ToolGrouping.classify(running),
+        )
+        assertEquals(
+            listOf(CompactionState.FAILED, CompactionState.STOPPED),
+            ToolGrouping.rows(listOf(failed, stopped)).map { assertIs<TranscriptRow.Compaction>(it).compaction.state },
+        )
+        assertEquals("compaction-${running.id}", ToolGrouping.rows(listOf(running)).single().key)
+    }
+
+    @Test
+    fun onlyAWellFormedToolRowIsACompaction() {
+        val reply = message("context_compaction\ncompleted\nnot from the host")
+
+        assertEquals(reply, assertIs<TranscriptRow.Single>(ToolGrouping.rows(listOf(reply)).single()).item)
+        assertEquals(null, ContextCompaction.parse("context_compaction\ncompleted"))
+        assertEquals(null, ContextCompaction.parse("context_compaction\npaused\nPaused"))
+        assertEquals(null, ContextCompaction.parse("$ context_compaction\nrunning\nx"))
+        // An unknown state is an ordinary tool row rather than a divider.
+        assertEquals(ToolShape.Ordinary, ToolGrouping.classify(tool("context_compaction\npaused\nPaused")))
+    }
+
+    @Test
     fun anEmptyTranscriptHasNoRows() {
         assertEquals(emptyList(), ToolGrouping.rows(emptyList()))
     }

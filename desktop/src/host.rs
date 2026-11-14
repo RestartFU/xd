@@ -21,7 +21,9 @@ use thiserror::Error;
 use crate::channel;
 #[cfg(all(test, unix))]
 use crate::local_socket::UnixStream;
-use crate::model::{Attachment, AutoDeleteRules, AutoSettleRules, ChatQuotaSettings};
+use crate::model::{
+    Attachment, AutoDeleteRules, AutoSettleRules, ChatQuotaSettings, IdleCompaction,
+};
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
 const MESSAGE_PAGE_SIZE: usize = 120;
@@ -533,6 +535,8 @@ pub enum RequestKind {
     SetAutoSettleSettings,
     AutoDeleteSettings,
     SetAutoDeleteSettings,
+    IdleCompactionSettings,
+    SetIdleCompactionSettings,
     /// `broadcasts` is how many `chat-quota-settings` broadcasts had arrived
     /// when the request was sent; a reply is older than any after it.
     ChatQuotaSettings {
@@ -1606,6 +1610,20 @@ impl HostHandle {
         )
     }
 
+    pub fn idle_compaction_settings(&self) -> Result<(), String> {
+        self.send(
+            RequestKind::IdleCompactionSettings,
+            json!({"op": "idle-compaction-settings"}),
+        )
+    }
+
+    pub fn set_idle_compaction_settings(&self, mode: IdleCompaction) -> Result<(), String> {
+        self.send(
+            RequestKind::SetIdleCompactionSettings,
+            json!({"op": "set-idle-compaction-settings", "mode": mode.as_str()}),
+        )
+    }
+
     pub fn chat_quota_settings(&self, broadcasts: u64) -> Result<(), String> {
         self.send(
             RequestKind::ChatQuotaSettings { broadcasts },
@@ -2133,6 +2151,7 @@ impl HostHandle {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn send_message(
         &self,
         chat_id: &str,
@@ -2141,6 +2160,7 @@ impl HostHandle {
         worktree_backend: Option<&str>,
         worktree_model: Option<&str>,
         steer: bool,
+        compact_first: bool,
     ) -> Result<(), String> {
         let attachments = attachments
             .iter()
@@ -2171,6 +2191,10 @@ impl HostHandle {
         }
         if steer {
             body["steer"] = Value::Bool(true);
+        }
+        // "When you return": the host runs `/compact` first and queues this.
+        if compact_first {
+            body["compact_first"] = Value::Bool(true);
         }
         self.send(
             RequestKind::Send {
@@ -3527,9 +3551,9 @@ mod tests {
             HostUpdate::Connected { .. }
         ));
         let report = Attachment::from_file("Report.pdf", b"%PDF".to_vec());
-        host.send_message("chat-1", "read it", &[report], None, None, false)
+        host.send_message("chat-1", "read it", &[report], None, None, false, false)
             .unwrap();
-        host.send_message("chat-1", "a shortcut", &[], None, None, false)
+        host.send_message("chat-1", "a shortcut", &[], None, None, false, false)
             .unwrap();
         // The clear after a send claims the whole list, files included.
         host.set_draft("chat-1", "", Some(&[]), Some(7)).unwrap();
@@ -4037,6 +4061,8 @@ mod tests {
             assert_eq!(request["generate_worktree_name"], true);
             assert_eq!(request["worktree_backend"], "claude");
             assert_eq!(request["worktree_model"], "claude-sonnet-5");
+            assert_eq!(request["compact_first"], true);
+            assert!(request.get("steer").is_none());
             let request_id = request["_xd_request"].as_u64().unwrap();
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
@@ -4053,6 +4079,7 @@ mod tests {
             Some("claude"),
             Some("claude-sonnet-5"),
             false,
+            true,
         )
         .unwrap();
         assert!(matches!(

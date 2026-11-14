@@ -588,6 +588,14 @@ public data class ChatReply(
     val contextUsed: Long? = null,
     @SerialName("context_window")
     val contextWindow: Long? = null,
+    /**
+     * `{tokens, after_ms}` when a plain send into this idle Claude chat can
+     * compact first. Kept as raw JSON and read with
+     * [com.restartfu.xd.model.CompactBeforeSend.parse], so an unexpected
+     * shape means no offer rather than an unreadable chat.
+     */
+    @SerialName("compact_before_send")
+    val compactBeforeSend: JsonElement? = null,
     @SerialName("new_worktree")
     val newWorktree: Boolean,
     @SerialName("has_messages")

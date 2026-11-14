@@ -147,6 +147,7 @@ import com.restartfu.xd.model.ImageReference
 import com.restartfu.xd.model.MessagePart
 import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.model.TranscriptRow
+import com.restartfu.xd.model.CompactBeforeSend
 import com.restartfu.xd.model.TodoStatus
 import com.restartfu.xd.model.DisplayLabels
 import com.restartfu.xd.protocol.Limits
@@ -895,6 +896,7 @@ internal fun ChatScreen(
                     }
                     is TranscriptRow.Tools -> ToolGroupRow(row)
                     is TranscriptRow.AccountSwitch -> AccountSwitchNotice(row.sentence)
+                    is TranscriptRow.Compaction -> CompactionDivider(row.compaction)
                     is TranscriptRow.Pipeline -> PipelineCard(row.run, model.client)
                     is TranscriptRow.Subagent -> if (row.run.chat != null) {
                         // An agent started with start_agent is a chat of its own.
@@ -1280,8 +1282,11 @@ private fun Composer(
         }
         Spacer(Modifier.height(6.dp))
         val prompt = rememberComposerAsk(state, sending, model)
+        val compactOffer = rememberCompactOffer(state, composer, model)
+        val keepHistory by model.keepHistory.collectAsStateWithLifecycle()
+        val compactFirst = compactOffer != null && !keepHistory
         if (compact) {
-            CompactComposerRow(state, composer, sending, cancelling, steering, model, attachments.size, onModel, prompt) {
+            CompactComposerRow(state, composer, sending, cancelling, steering, model, attachments.size, onModel, prompt, compactOffer) {
                 picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             }
             return@Column
@@ -1342,7 +1347,7 @@ private fun Composer(
                                 when {
                                     prompt.answer != null -> prompt.answer.invoke()
                                     state.working -> model.enqueue()
-                                    else -> model.send()
+                                    else -> model.send(compactFirst)
                                 }
                             },
                         ),
@@ -1374,6 +1379,9 @@ private fun Composer(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Spacer(Modifier.weight(1f))
+                        compactOffer?.let { offer ->
+                            CompactChip(offer.tokens, keepHistory, model::toggleKeepHistory, Modifier.padding(end = 6.dp))
+                        }
                         SendButton(
                             state = state,
                             empty = composer.isBlank() && attachments.isEmpty(),
@@ -1384,6 +1392,7 @@ private fun Composer(
                             size = 48.dp,
                             answer = prompt.answer?.takeIf { composer.isNotBlank() },
                             submittingAnswer = prompt.submitting,
+                            compactFirst = compactFirst,
                         )
                     }
                 }
@@ -1479,9 +1488,13 @@ private fun CompactComposerRow(
     attached: Int,
     onModel: () -> Unit,
     prompt: ComposerAsk,
+    /** The offer to compact this idle chat before sending, while there is one. */
+    compactOffer: CompactBeforeSend?,
     onAttach: () -> Unit,
 ) {
     val catalog by model.catalog.collectAsStateWithLifecycle()
+    val keepHistory by model.keepHistory.collectAsStateWithLifecycle()
+    val compactFirst = compactOffer != null && !keepHistory
     val faint = LocalXdSignals.current.faint
     Surface(
         shape = MaterialTheme.shapes.extraLarge,
@@ -1518,7 +1531,7 @@ private fun CompactComposerRow(
                             when {
                                 prompt.answer != null -> prompt.answer.invoke()
                                 state.working -> model.enqueue()
-                                else -> model.send()
+                                else -> model.send(compactFirst)
                             }
                         },
                     ),
@@ -1542,9 +1555,10 @@ private fun CompactComposerRow(
                 // The agent and model: the whole slot's height takes the tap,
                 // and nothing is drawn around it until it is pressed.
                 val modelLabel = DisplayLabels.model(state.model, state.backend, catalog)
-                // With enlarged text the name would leave the message no room,
-                // so the agent's mark stands alone and the name is spoken.
-                val nameShown = LocalDensity.current.fontScale <= LARGE_TEXT_SCALE
+                // With enlarged text, or the compact chip beside it, the name
+                // would leave the message no room, so the agent's mark stands
+                // alone and the name is spoken.
+                val nameShown = LocalDensity.current.fontScale <= LARGE_TEXT_SCALE && compactOffer == null
                 Row(
                     modifier = Modifier
                         .height(ComposerSlot)
@@ -1566,6 +1580,11 @@ private fun CompactComposerRow(
                         modifier = Modifier.widthIn(max = 96.dp),
                     )
                 }
+                compactOffer?.let { offer ->
+                    Box(Modifier.height(ComposerSlot).padding(end = 4.dp), contentAlignment = Alignment.Center) {
+                        CompactChip(offer.tokens, keepHistory, model::toggleKeepHistory)
+                    }
+                }
                 Box(Modifier.size(ComposerSlot), contentAlignment = Alignment.Center) {
                     SendButton(
                         state = state,
@@ -1577,6 +1596,7 @@ private fun CompactComposerRow(
                         size = 40.dp,
                         answer = prompt.answer?.takeIf { composer.isNotBlank() },
                         submittingAnswer = prompt.submitting,
+                        compactFirst = compactFirst,
                     )
                 }
             }
@@ -1662,6 +1682,8 @@ private fun SendButton(
     answer: (() -> Unit)? = null,
     /** Answers to the agent's question are on their way. */
     submittingAnswer: Boolean = false,
+    /** A send runs `/compact` first, as the composer's chip offers. */
+    compactFirst: Boolean = false,
 ) {
     val action = sendAction(
         working = state.working,
@@ -1680,7 +1702,7 @@ private fun SendButton(
                 SendAction.SEND_ANSWER -> answer?.invoke()
                 SendAction.STOP -> model.cancel()
                 SendAction.RESUME -> model.resumeTurn()
-                SendAction.SEND -> model.send()
+                SendAction.SEND -> model.send(compactFirst)
             }
         },
         enabled = when (action) {
@@ -1719,6 +1741,7 @@ private fun SendButton(
                 stopping -> "Stop"
                 sending -> "Sending"
                 resuming -> "Continue where it left off"
+                compactFirst -> COMPACT_AND_SEND
                 else -> "Send"
             },
             modifier = Modifier.size(if (stopping || resuming) size / 3 else size * 5 / 12),
@@ -2059,6 +2082,7 @@ private fun rowContentType(row: TranscriptRow): String = when (row) {
     is TranscriptRow.Single -> "single-${row.item.kind}"
     is TranscriptRow.Tools -> "tools"
     is TranscriptRow.AccountSwitch -> "account-switch"
+    is TranscriptRow.Compaction -> "compaction"
     is TranscriptRow.Pipeline -> "pipeline"
     is TranscriptRow.Subagent -> "subagent"
 }

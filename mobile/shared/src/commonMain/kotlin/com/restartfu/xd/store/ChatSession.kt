@@ -76,7 +76,9 @@ public class ChatSession internal constructor(
         images: List<PngAttachment> = emptyList(),
         /** Steer into the running turn rather than queue behind it. */
         steer: Boolean = false,
-    ): Unit = core.send(text, images, steer)
+        /** Run `/compact` first in an idle chat that offers it; see [ChatState.compactBeforeSend]. */
+        compactFirst: Boolean = false,
+    ): Unit = core.send(text, images, steer, compactFirst)
 
     public suspend fun approve(requestId: String, decision: String): Unit = core.call(buildJsonObject {
         put("op", "respond"); put("chat", core.chatId); put("request_id", requestId)
@@ -413,6 +415,7 @@ internal class ChatSessionCore(
         text: String,
         images: List<PngAttachment>,
         steer: Boolean = false,
+        compactFirst: Boolean = false,
     ) = sendMutex.withLock {
         ensureActive()
         require(text.isNotEmpty() || images.isNotEmpty())
@@ -443,7 +446,7 @@ internal class ChatSessionCore(
         oldTimer?.cancel()
         timer.start()
         try {
-            actor.call(Ops.send(chatId, text, images, steer))
+            actor.call(Ops.send(chatId, text, images, steer, compactFirst))
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {

@@ -20,6 +20,8 @@ import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.net.Link
 import com.restartfu.xd.protocol.ChatTitleSettingsReply
 import com.restartfu.xd.model.ChatQuotaSettings
+import com.restartfu.xd.model.IdleCompactionMode
+import com.restartfu.xd.model.IdleCompactionSettings
 import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.Limits
@@ -231,6 +233,16 @@ class MainViewModel @JvmOverloads constructor(
     val chatQuotaError: StateFlow<String?> = _chatQuotaError.asStateFlow()
     private var chatQuotaRequests = 0L
 
+    /**
+     * When the host compacts an idle Claude chat. Null until read, and on
+     * hosts that do not compact, which refuse the read.
+     */
+    val idleCompaction: StateFlow<IdleCompactionSettings?> = client.idleCompactionSettings
+    private val _idleCompactionError = MutableStateFlow<String?>(null)
+    /** Why the newest change to the idle compaction mode failed; cleared by the next one that lands. */
+    val idleCompactionError: StateFlow<String?> = _idleCompactionError.asStateFlow()
+    private var idleCompactionRequests = 0L
+
     private val _accountsError = MutableStateFlow<String?>(null)
     val accountsError: StateFlow<String?> = _accountsError.asStateFlow()
     val agentAuth = client.agentAuth
@@ -319,6 +331,8 @@ class MainViewModel @JvmOverloads constructor(
                 chatTitlesWanted = false
                 _chatQuotaError.value = null
                 chatQuotaRequests++
+                _idleCompactionError.value = null
+                idleCompactionRequests++
             }
         }
     }
@@ -542,6 +556,38 @@ class MainViewModel @JvmOverloads constructor(
     /** Sets the host's default chat quota; null limits no chat. */
     fun setChatQuota(percent: Int?) =
         chatQuotaRequest("Could not change the chat quota") { client.setChatQuotaSettings(percent) }
+
+    /**
+     * Reads the idle compaction mode. A host without compaction refuses, and
+     * its setting then stays hidden, so a failed read shows nothing.
+     */
+    fun loadIdleCompaction() {
+        viewModelScope.launch {
+            try {
+                client.loadIdleCompactionSettings()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    fun setIdleCompaction(mode: IdleCompactionMode) {
+        val serial = ++idleCompactionRequests
+        val generation = client.sessionGeneration.value
+        viewModelScope.launch {
+            try {
+                client.setIdleCompactionSettings(mode)
+                if (serial == idleCompactionRequests && generation == client.sessionGeneration.value) _idleCompactionError.value = null
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (serial == idleCompactionRequests && generation == client.sessionGeneration.value) {
+                    _idleCompactionError.value = error.message ?: "Could not change when idle chats compact"
+                }
+            }
+        }
+    }
 
     /** The value arrives through [chatQuota]; only the newest request's failure is shown. */
     private fun chatQuotaRequest(failure: String, request: suspend () -> Unit) {
@@ -1149,6 +1195,25 @@ class ChatViewModel internal constructor(
     private val _attachmentError = MutableStateFlow<String?>(null)
     private val _queueNotice = MutableStateFlow<String?>(null)
     private val _openQueued = MutableStateFlow<OpenedMessage?>(null)
+    private val _keepHistory = MutableStateFlow(false)
+
+    /** When the host compacts an idle chat; the composer's offer follows it. */
+    val idleCompaction: StateFlow<IdleCompactionSettings?> = client.idleCompactionSettings
+
+    /**
+     * The reader chose to keep the full history for the next send rather
+     * than compact first. Every send starts over at compacting.
+     */
+    val keepHistory: StateFlow<Boolean> = _keepHistory.asStateFlow()
+
+    fun toggleKeepHistory() {
+        _keepHistory.update { !it }
+    }
+
+    /** Reads the idle compaction mode, so the composer knows whether to offer compacting. */
+    fun loadIdleCompaction() {
+        viewModelScope.launch { runCatching { client.loadIdleCompactionSettings() } }
+    }
 
     /**
      * Whether the chat on screen has landed on its newest message. Cleared
@@ -1494,11 +1559,13 @@ class ChatViewModel internal constructor(
         _attachmentError.value = null
     }
 
-    fun send() {
+    /** [compactFirst] runs `/compact` before the message, in an idle chat whose composer offered it. */
+    fun send(compactFirst: Boolean = false) {
         val text = _draft.value
         val images = _attachments.value
         launchGuarded(_sending) {
-            session.send(text, images.map(Attachment::png))
+            _keepHistory.value = false
+            session.send(text, images.map(Attachment::png), compactFirst = compactFirst)
             // Only clear what was actually sent: the composer may have moved
             // on while the request was in flight. Images go by content, one
             // per image sent: one swapped in meanwhile was never sent, and a

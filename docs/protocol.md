@@ -298,8 +298,10 @@ turn starts. It also includes `session`, `session_title`, and
 that conversation; the session title is managed independently.
 
 Optional members: `auth_detail`, `queued` (compatibility alias for the first
-queue item), `model`, `access`, `context_used`, `context_window`, `workdir`,
-`linked_worktree`, `worktrees`, `selected_worktree`.
+queue item), `model`, `access`, `context_used`, `context_window`,
+`compact_before_send`, `workdir`, `linked_worktree`, `worktrees`,
+`selected_worktree`. `compact_before_send` is described under
+[Context compaction](#context-compaction).
 
 A worktree is:
 
@@ -671,6 +673,12 @@ With `"steer":true`, a message that would have been queued is steered at once,
 as `steer-queue` describes, and the reply adds `steered`. With no turn running
 the member has no effect.
 
+With `"compact_first":true`, a message to an idle Claude chat that the chat's
+`compact_before_send` offers to compact runs `/compact` first: the turn that
+starts is the compaction, the message goes to the head of the queue behind it,
+and the reply adds `"compacting":true`. A message that no longer qualifies, or
+that starts with `/compact` itself, is sent as it is.
+
 Each attachment is a file with a `name`, a media type in `mime`, and base64
 `data`:
 
@@ -823,6 +831,56 @@ then lets its queue run as usual. A paused chat that can no longer be resumed,
 because it has moved on or is still stopping, just loses its mark and runs its
 queue. Sending a message, resuming, or steering in one paused chat picks up only
 that chat. Both operations publish `changed` for each chat they touch and `tree`.
+
+### Context compaction
+
+Claude and Codex compact a conversation on their own as it nears the model's
+window, and on `/compact`. For Codex, a message that is exactly `/compact` asks
+the app server to compact the thread (`thread/compact/start`) rather than going
+to the model. Each compaction is one `tool` row, rewritten in place as it goes:
+
+```text
+context_compaction
+completed
+Context compacted 251K → 32K tokens
+```
+
+The second line is `running`, `completed`, `failed` or `stopped`; the third is
+the sentence to show, such as `Compacting context`, `Context compacted`,
+`Context compaction failed · <reason>` or `Context compaction stopped`. A
+compaction the host started on its own says why: `Compacting before the cache
+expires…` and `Context automatically compacted before cache expiry 251K → 32K
+tokens`, or `Compacting…` and `Context compacted before sending …`. Clients
+draw it as a divider, not a tool card.
+
+```json
+{"op":"idle-compaction-settings"}
+{"ok":true,"mode":"onReturn"}
+{"op":"set-idle-compaction-settings","mode":"beforeCacheExpires"}
+```
+
+`mode` says when the host compacts an idle Claude chat with at least 200,000
+tokens in context, as T3 Code does:
+
+- `onReturn`, the default: a chat that has sat idle past its prompt cache
+  carries `compact_before_send`, `{"tokens":251000,"after_ms":1763100000000}`:
+  from `after_ms` (Unix milliseconds) a send can compact it first. Clients
+  offer this beside Send, with Compact chosen, unless the chat is working,
+  waiting on an approval, question or its quota, or the message starts with
+  `/compact`; choosing Keep sends this one message with the full history. A
+  send that compacts carries `"compact_first":true`.
+- `beforeCacheExpires`: the host sends `/compact` to an idle chat two minutes
+  before the prompt cache of its last request expires, while summarizing is
+  still a cached read. The cache lives as long as the last request that wrote
+  it says (1 hour or 5 minutes), counted again from each request served from
+  it. The host does this once per idle spell, and not while the chat is
+  working, paused, settled, queued, waiting on an approval or question, or has
+  background work running, or when its last turn failed or was itself a
+  compaction.
+- `off`: neither.
+
+`set-idle-compaction-settings` replies like `idle-compaction-settings` and
+broadcasts `idle-compaction-settings`.
 
 ### Chat quotas
 
@@ -1461,6 +1519,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `auto-settle-settings` | `after_days`, `on_merge`, `keep_pull_requests` | The host's automatic settling rules changed. |
 | `auto-delete-settings` | `after_days` | The host's automatic deletion rule changed. |
 | `chat-quota-settings` | `percent` | The host's default chat quota changed. |
+| `idle-compaction-settings` | `mode` | When the host compacts idle Claude chats changed. |
 | `changed` | `chat` | Stored chat state changed; refetch when idle. |
 | `worktrees-changed` | — | A Git worktree changed; refetch chat state and worktree lists. |
 | `shortcuts-changed` | optional `folder` | Global or workspace prompt shortcuts changed; refetch chat state. |

@@ -1225,6 +1225,84 @@ impl XdDesktop {
         rows
     }
 
+    /// When the host compacts an idle Claude chat, as T3 Code's "Compact idle
+    /// threads" setting: three choices under the title, too long to sit beside it.
+    fn idle_compaction_rows(
+        &mut self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Vec<SettingRow> {
+        let Some(mode) = self.idle_compaction else {
+            return Vec::new();
+        };
+        const TITLE: &str = "Compact idle chats";
+        const DESCRIPTION: &str = "When to compact an idle Claude chat over 200,000 tokens: after you return, just before its prompt cache expires, or never.";
+        let choices = div().mt(px(10.0)).flex().flex_wrap().gap(px(4.0)).children(
+            IdleCompaction::CHOICES.iter().map(|(choice, label)| {
+                let choice = *choice;
+                let active = choice == mode;
+                div()
+                    .id(("workspace-settings-idle-compaction", choice as usize))
+                    .h(px(28.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(if active {
+                        rgb(colors.selected_border)
+                    } else {
+                        crate::glass::edge(colors)
+                    })
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .text_color(rgb(if active { colors.text } else { colors.muted }))
+                    .when(active, |button| button.bg(rgb(colors.selected_surface)))
+                    .when(!active, |button| {
+                        button.hover(|style| style.bg(rgb(colors.surface)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.idle_compaction != Some(choice) {
+                            this.change_idle_compaction(choice, cx);
+                        }
+                    }))
+                    .child(*label)
+            }),
+        );
+        let label = IdleCompaction::CHOICES
+            .iter()
+            .find(|(choice, _)| *choice == mode)
+            .map_or("", |(_, label)| label);
+        vec![
+            SettingRow::custom(
+                TITLE,
+                DESCRIPTION,
+                div()
+                    .id("workspace-settings-idle-compaction-row")
+                    .w_full()
+                    .px(px(SETTINGS_CARD_PADDING))
+                    .py(px(11.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(rgb(colors.text))
+                            .child(TITLE),
+                    )
+                    .child(
+                        div()
+                            .mt(px(3.0))
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .text_color(rgb(colors.muted))
+                            .child(DESCRIPTION),
+                    )
+                    .child(choices),
+            )
+            .searchable(label),
+        ]
+    }
+
     /// A switch row for one of this device's own settings, saved on change.
     #[allow(clippy::too_many_arguments)]
     fn local_switch(
@@ -1852,6 +1930,10 @@ impl XdDesktop {
                         ),
                     ],
                 ));
+                let compaction = self.idle_compaction_rows(colors, cx);
+                if !compaction.is_empty() {
+                    groups.push(group("Context", compaction));
+                }
                 let quota = self.chat_quota_rows(colors, cx);
                 if !quota.is_empty() {
                     groups.push(group("Usage", quota));

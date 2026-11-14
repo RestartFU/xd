@@ -18,6 +18,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    compaction::IdleMode,
     database::{self, Checkpointer, Reader, ReaderPool},
     deletion::{self, AutoDeleteSettings, AutoDeletion},
     private_fs::{create_private_file, open_without_waiting, secure_directory},
@@ -249,6 +250,8 @@ pub struct TurnSpec {
     pub carries_cut_off_note: bool,
     pub label: String,
     pub environment: Vec<(String, String)>,
+    /// Why xd sent this turn's `/compact` on its own, if it did.
+    pub idle_compaction: Option<crate::compaction::IdleReason>,
 }
 
 /// One link of a chat, as settling reads it.
@@ -328,6 +331,20 @@ pub(crate) enum Continuation {
     /// while this user message is still the chat's latest and its turn is
     /// still resumable, so a late continuation cannot restart newer work.
     AfterLimit(i64),
+    /// The host compacting an idle Claude chat before its prompt cache
+    /// expires. Valid while this user message is still the chat's latest and
+    /// the chat is still at rest with nothing queued.
+    IdleCompaction(i64),
+}
+
+/// An idle Claude chat "Before the cache expires" may compact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IdleCompactionCandidate {
+    pub(crate) chat_id: String,
+    /// The chat's latest user message, which the compaction must still follow.
+    pub(crate) last_message: i64,
+    /// When the prompt cache of its latest request expires, in Unix milliseconds.
+    pub(crate) expires_ms: i64,
 }
 
 /// A chat a restart cut off, and the user message it was working on.
@@ -375,8 +392,17 @@ pub enum ReportDelivery {
 
 #[allow(clippy::large_enum_variant)]
 pub enum SendDisposition {
-    Queued { reply: Value, event: Value },
-    Start { reply: Value, turn: TurnSpec },
+    Queued {
+        reply: Value,
+        event: Value,
+    },
+    /// `queued` is the queue's new state when the send also queued: the
+    /// message a compaction runs ahead of.
+    Start {
+        reply: Value,
+        turn: TurnSpec,
+        queued: Option<Value>,
+    },
 }
 
 /// The chat an agent works in, as [`StateStore::agent_origin`] reads it.
@@ -1129,6 +1155,10 @@ impl StateStore {
         if let Some((_, used, window)) = context_usage {
             response["context_used"] = Value::Number(used.into());
             response["context_window"] = Value::Number(window.into());
+        }
+        // The composer offers to compact a send into this chat from `after_ms`.
+        if let Some((tokens, after_ms)) = compact_before_send(&database, chat_id)? {
+            response["compact_before_send"] = json!({"tokens": tokens, "after_ms": after_ms});
         }
         let quota = read_chat_quota(&database, chat_id)?;
         if let Some(percent) = quota.percent {
@@ -1895,6 +1925,17 @@ impl StateStore {
         self.prepare_send_inner(request, Some(Continuation::AfterLimit(last_message)))
     }
 
+    /// Sends the `/compact` "Before the cache expires" stands for, unless the
+    /// chat has moved on since it went idle. Like a restart's continuation it
+    /// is the host's doing, so it leaves the user's draft alone.
+    pub(crate) fn prepare_idle_compaction(
+        &self,
+        request: &Value,
+        last_message: i64,
+    ) -> Result<SendDisposition, StorageError> {
+        self.prepare_send_inner(request, Some(Continuation::IdleCompaction(last_message)))
+    }
+
     /// The id of the chat's newest user message, or 0.
     pub fn latest_user_message(&self, chat_id: &str) -> Result<i64, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
@@ -2048,6 +2089,32 @@ impl StateStore {
                     ));
                 }
             }
+            Some(Continuation::IdleCompaction(last_message)) => {
+                let (latest, queued, resumable) = transaction.query_row(
+                    "SELECT (SELECT COALESCE(MAX(id), 0) FROM messages \
+                     WHERE chat_id = ?1 AND role = 'user'), COALESCE(queued, ''), turn_resumable \
+                     FROM chats WHERE id = ?1",
+                    [chat_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, bool>(2)?,
+                        ))
+                    },
+                )?;
+                if working
+                    || paused
+                    || resumable
+                    || latest != last_message
+                    || !queue_from_column(Some(&queued)).is_empty()
+                    || read_idle_compaction_mode(&transaction)? != IdleMode::BeforeCacheExpires
+                {
+                    return Err(StorageError::InvalidRequest(
+                        "This chat has moved on since it went idle.".into(),
+                    ));
+                }
+            }
             Some(Continuation::Resume) => {
                 let (resumable, quota_reached) = transaction.query_row(
                     "SELECT turn_resumable, quota_reached FROM chats WHERE id = ?",
@@ -2118,24 +2185,59 @@ impl StateStore {
         // A restart's continuation is the host's doing, not the user speaking
         // again, so it keeps the time settling compares a finished pull request
         // against. Pressing resume is the user speaking.
-        let user_message_at = matches!(continues, Some(Continuation::AfterRestart(_)))
-            .then(|| {
-                transaction.query_row(
-                    "SELECT last_user_message_at FROM chats WHERE id = ?",
-                    [chat_id],
-                    |row| row.get::<_, i64>(0),
-                )
-            })
-            .transpose()?;
-        let turn = prepare_turn(
+        let user_message_at = matches!(
+            continues,
+            Some(Continuation::AfterRestart(_) | Continuation::IdleCompaction(_))
+        )
+        .then(|| {
+            transaction.query_row(
+                "SELECT last_user_message_at FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .transpose()?;
+        // "When you return": the composer asked to compact this idle chat
+        // first, and it still qualifies. The compaction is the turn, and the
+        // message waits at the head of the queue for it.
+        let compacts_first = continues.is_none()
+            && request.get("compact_first").and_then(Value::as_bool) == Some(true)
+            && !crate::compaction::starts_with_command(&message.prompt)
+            && compact_before_send(&transaction, chat_id)?
+                .is_some_and(|(_, after_ms)| crate::accounts::now_ms() >= after_ms);
+        let mut turn = prepare_turn(
             &transaction,
             &self.workspace_root,
             chat_id,
-            &message.prompt,
+            if compacts_first {
+                crate::compaction::COMMAND
+            } else {
+                &message.prompt
+            },
             worktree_name,
             premade.as_ref(),
             None,
         )?;
+        let mut queued = None;
+        if compacts_first {
+            turn.idle_compaction = Some(crate::compaction::IdleReason::OnReturn);
+            let stored = transaction.query_row(
+                "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, String>(0),
+            )?;
+            let mut queue = queue_from_column(Some(&stored));
+            queue.insert(0, message.prompt.clone());
+            transaction.execute(
+                "UPDATE chats SET queued = ? WHERE id = ?",
+                params![serde_json::to_string(&queue).unwrap(), chat_id],
+            )?;
+            let revision = bump_queue_revision(&transaction, chat_id)?;
+            queued = Some(queued_event(chat_id, &queue, revision));
+        }
+        if matches!(continues, Some(Continuation::IdleCompaction(_))) {
+            turn.idle_compaction = Some(crate::compaction::IdleReason::BeforeCacheExpires);
+        }
         if let Some(user_message_at) = user_message_at {
             transaction.execute(
                 "UPDATE chats SET last_user_message_at = ? WHERE id = ?",
@@ -2167,8 +2269,9 @@ impl StateStore {
             made.keep();
         }
         Ok(SendDisposition::Start {
-            reply: json!({"ok": true, "queued": false}),
+            reply: json!({"ok": true, "queued": false, "compacting": compacts_first}),
             turn,
+            queued,
         })
     }
 
@@ -2962,13 +3065,143 @@ impl StateStore {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         database.execute(
             "INSERT INTO chat_sessions \
-             (chat_id, backend, context_model, context_used, context_window) \
-             VALUES (?, ?, ?, ?, ?) ON CONFLICT (chat_id, backend) DO UPDATE SET \
+             (chat_id, backend, context_model, context_used, context_window, context_updated_ms) \
+             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (chat_id, backend) DO UPDATE SET \
              context_model = excluded.context_model, context_used = excluded.context_used, \
-             context_window = excluded.context_window",
-            params![chat_id, backend, model, used, window],
+             context_window = excluded.context_window, \
+             context_updated_ms = excluded.context_updated_ms",
+            params![
+                chat_id,
+                backend,
+                model,
+                used,
+                window,
+                crate::accounts::now_ms()
+            ],
         )?;
         Ok(())
+    }
+
+    /// Records the prompt cache of a session's latest request. `ttl_ms` is
+    /// None when that request wrote no cache. One served from cache (`read`)
+    /// restarts the lifetime of the cache already recorded, as Anthropic's
+    /// cache does on every hit. One that did neither has no cache, so when it
+    /// expires is unknown.
+    pub fn set_prompt_cache(
+        &self,
+        chat_id: &str,
+        backend: &str,
+        ttl_ms: Option<i64>,
+        read: bool,
+        requested_at_ms: i64,
+    ) -> Result<(), StorageError> {
+        let ttl = ttl_ms.filter(|ttl| *ttl > 0).unwrap_or(0);
+        if ttl == 0 && read {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            database.execute(
+                "UPDATE chat_sessions SET prompt_cache_expires_ms = CASE \
+                 WHEN prompt_cache_ttl_ms > 0 THEN ? + prompt_cache_ttl_ms ELSE 0 END \
+                 WHERE chat_id = ? AND backend = ?",
+                params![requested_at_ms, chat_id, backend],
+            )?;
+            return Ok(());
+        }
+        let expires = if ttl > 0 {
+            requested_at_ms.saturating_add(ttl)
+        } else {
+            0
+        };
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "INSERT INTO chat_sessions \
+             (chat_id, backend, prompt_cache_ttl_ms, prompt_cache_expires_ms) \
+             VALUES (?, ?, ?, ?) ON CONFLICT (chat_id, backend) DO UPDATE SET \
+             prompt_cache_ttl_ms = excluded.prompt_cache_ttl_ms, \
+             prompt_cache_expires_ms = excluded.prompt_cache_expires_ms",
+            params![chat_id, backend, ttl, expires],
+        )?;
+        Ok(())
+    }
+
+    /// When xd compacts an idle Claude chat.
+    pub(crate) fn idle_compaction_mode(&self) -> Result<IdleMode, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        read_idle_compaction_mode(&database)
+    }
+
+    /// Changes the idle compaction mode. A request without `mode` leaves it.
+    pub(crate) fn set_idle_compaction_mode(
+        &self,
+        request: &Value,
+    ) -> Result<IdleMode, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let Some(mode) = request.get("mode") else {
+            return read_idle_compaction_mode(&database);
+        };
+        let mode = mode.as_str().and_then(IdleMode::parse).ok_or_else(|| {
+            StorageError::InvalidRequest(
+                "Idle compaction is onReturn, beforeCacheExpires or off.".into(),
+            )
+        })?;
+        database.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![crate::compaction::MODE_META_KEY, mode.as_str()],
+        )?;
+        Ok(mode)
+    }
+
+    /// Idle Claude chats whose prompt cache has yet to expire, for
+    /// "Before the cache expires": each with the user message it would follow
+    /// and when its cache expires. Empty under any other mode. The chat must
+    /// be at rest: not working, paused, settled or queued, its last turn
+    /// finished without error and was not itself a compaction, and its
+    /// context still on the model the cache was written for.
+    pub(crate) fn idle_compaction_candidates(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<IdleCompactionCandidate>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        if read_idle_compaction_mode(&database)? != IdleMode::BeforeCacheExpires {
+            return Ok(Vec::new());
+        }
+        let mut statement = database.prepare(
+            "SELECT c.id, s.prompt_cache_expires_ms, \
+               (SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = c.id AND role = 'user') \
+             FROM chats c JOIN chat_sessions s ON s.chat_id = c.id AND s.backend = c.backend \
+             LEFT JOIN workspace_sessions w ON w.id = c.workspace_session_id \
+             WHERE c.backend = 'claude' AND s.prompt_cache_expires_ms > ?1 \
+               AND s.context_used >= ?2 AND s.session_id IS NOT NULL \
+               AND (c.model IS NULL OR s.context_model IS NULL OR s.context_model = c.model) \
+               AND c.host_working = 0 AND c.paused = 0 AND c.turn_resumable = 0 \
+               AND COALESCE(c.queued, '') IN ('', '[]') AND w.settled_at IS NULL",
+        )?;
+        let rows = statement
+            .query_map(
+                params![now_ms, crate::compaction::SUGGESTION_MIN_TOKENS as i64],
+                |row| {
+                    Ok(IdleCompactionCandidate {
+                        chat_id: row.get(0)?,
+                        expires_ms: row.get(1)?,
+                        last_message: row.get(2)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut candidates = Vec::new();
+        for candidate in rows {
+            if candidate.last_message > 0
+                && last_turn_was_a_finished_request(
+                    &database,
+                    &candidate.chat_id,
+                    candidate.last_message,
+                )?
+            {
+                candidates.push(candidate);
+            }
+        }
+        Ok(candidates)
     }
 
     pub fn finish_turn(
@@ -7462,6 +7695,23 @@ fn ensure_chat_session_context_columns(database: &Connection) -> Result<(), Stor
     if !columns.contains("account") {
         database.execute("ALTER TABLE chat_sessions ADD COLUMN account TEXT", [])?;
     }
+    // When the context usage was last reported, and the prompt cache of the
+    // session's latest request: how long it lives and when it expires, both
+    // 0 when unknown. Idle compaction reads them; see `compaction`.
+    for column in [
+        "context_updated_ms",
+        "prompt_cache_ttl_ms",
+        "prompt_cache_expires_ms",
+    ] {
+        if !columns.contains(column) {
+            database.execute(
+                &format!(
+                    "ALTER TABLE chat_sessions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                ),
+                [],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -7936,6 +8186,94 @@ fn quota_percent(value: &Value) -> Result<Option<i64>, StorageError> {
                 )
             }),
     }
+}
+
+fn read_idle_compaction_mode(database: &Connection) -> Result<IdleMode, StorageError> {
+    let stored = database
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?",
+            [crate::compaction::MODE_META_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(stored
+        .as_deref()
+        .and_then(IdleMode::parse)
+        .unwrap_or(IdleMode::DEFAULT))
+}
+
+/// Whether the turn that followed `last_message` finished without error, and
+/// that message was not itself a compaction: one idle spell compacts at most once.
+fn last_turn_was_a_finished_request(
+    database: &Connection,
+    chat_id: &str,
+    last_message: i64,
+) -> Result<bool, StorageError> {
+    let (content, failed) = database.query_row(
+        "SELECT content, EXISTS (SELECT 1 FROM messages \
+           WHERE chat_id = ?1 AND role = 'error' AND id > ?2) \
+         FROM messages WHERE id = ?2",
+        params![chat_id, last_message],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+    )?;
+    Ok(!failed && !crate::compaction::is_command(&content))
+}
+
+/// The tokens a plain send into this idle Claude chat would compact first,
+/// under "When you return", and from when, in Unix milliseconds: once the
+/// chat has sat idle past its prompt cache, or [`RESUME_FALLBACK_MS`] when the
+/// last request did not say how long that lives. None when a send never
+/// compacts: another mode, another assistant, less than
+/// [`SUGGESTION_MIN_TOKENS`] in context, or a chat with nothing to compact.
+///
+/// [`RESUME_FALLBACK_MS`]: crate::compaction::RESUME_FALLBACK_MS
+/// [`SUGGESTION_MIN_TOKENS`]: crate::compaction::SUGGESTION_MIN_TOKENS
+fn compact_before_send(
+    database: &Connection,
+    chat_id: &str,
+) -> Result<Option<(u64, i64)>, StorageError> {
+    if read_idle_compaction_mode(database)? != IdleMode::OnReturn {
+        return Ok(None);
+    }
+    let row = database
+        .query_row(
+            "SELECT s.context_used, s.context_updated_ms, s.prompt_cache_ttl_ms \
+             FROM chats c JOIN chat_sessions s ON s.chat_id = c.id AND s.backend = c.backend \
+             WHERE c.id = ? AND c.backend = 'claude' AND s.session_id IS NOT NULL \
+               AND (c.model IS NULL OR s.context_model IS NULL OR s.context_model = c.model)",
+            [chat_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((used, updated_ms, ttl_ms)) = row else {
+        return Ok(None);
+    };
+    let used = u64::try_from(used).unwrap_or(0);
+    if used < crate::compaction::SUGGESTION_MIN_TOKENS || updated_ms <= 0 {
+        return Ok(None);
+    }
+    // Something to compact: a message other than a compaction.
+    let has_request: bool = database.query_row(
+        "SELECT EXISTS (SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user' \
+           AND lower(trim(content)) != ?)",
+        params![chat_id, crate::compaction::COMMAND],
+        |row| row.get(0),
+    )?;
+    if !has_request {
+        return Ok(None);
+    }
+    let idle_for = if ttl_ms > 0 {
+        ttl_ms
+    } else {
+        crate::compaction::RESUME_FALLBACK_MS
+    };
+    Ok(Some((used, updated_ms.saturating_add(idle_for))))
 }
 
 fn read_default_quota(database: &Connection) -> Result<Option<i64>, StorageError> {
@@ -11468,6 +11806,7 @@ fn prepare_turn(
             }
         ),
         environment: Vec::new(),
+        idle_compaction: None,
     })
 }
 
@@ -17005,7 +17344,7 @@ mod tests {
         let first = store
             .prepare_send(&json!({"chat": "chat-1", "text": "first"}))
             .unwrap();
-        let SendDisposition::Start { reply, turn } = first else {
+        let SendDisposition::Start { reply, turn, .. } = first else {
             panic!("idle send should start");
         };
         assert_eq!(reply["queued"], false);
@@ -20487,6 +20826,198 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    /// A Claude chat with a session, after one finished turn, holding
+    /// `used` tokens of context that were last reported `idle_ms` ago.
+    fn idle_claude_chat(used: u64, idle_ms: i64) -> (Fixture, StateStore) {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        database
+            .execute("UPDATE chats SET backend = 'claude'", [])
+            .unwrap();
+        drop(database);
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let SendDisposition::Start { .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "build it"}))
+            .unwrap()
+        else {
+            panic!("the first message starts a turn");
+        };
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        store
+            .set_context_usage("chat-1", "claude", None, used, 1_000_000)
+            .unwrap();
+        let reported = crate::accounts::now_ms() - idle_ms;
+        let database = Connection::open(&fixture.database).unwrap();
+        database
+            .execute(
+                "UPDATE chat_sessions SET session_id = 's1', context_updated_ms = ? \
+                 WHERE chat_id = 'chat-1'",
+                [reported],
+            )
+            .unwrap();
+        drop(database);
+        store
+            .set_prompt_cache("chat-1", "claude", Some(3_600_000), false, reported)
+            .unwrap();
+        (fixture, store)
+    }
+
+    #[test]
+    fn a_send_into_a_long_idle_chat_can_compact_first() {
+        let (_fixture, store) = idle_claude_chat(250_000, 2 * 3_600_000);
+        let offer = store.chat("chat-1").unwrap()["compact_before_send"].clone();
+        assert_eq!(offer["tokens"], 250_000);
+        assert!(offer["after_ms"].as_i64().unwrap() <= crate::accounts::now_ms());
+
+        // Without asking, the message goes as it is.
+        let SendDisposition::Start { turn, queued, .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "next"}))
+            .unwrap()
+        else {
+            panic!("an idle chat starts the turn");
+        };
+        assert_eq!(turn.prompt, "next");
+        assert!(queued.is_none());
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+
+        // Asked, the compaction runs first and the message waits for it.
+        let SendDisposition::Start {
+            turn,
+            queued,
+            reply,
+        } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "and then", "compact_first": true}))
+            .unwrap()
+        else {
+            panic!("an idle chat starts the turn");
+        };
+        assert_eq!(turn.prompt, "/compact");
+        assert_eq!(
+            turn.idle_compaction,
+            Some(crate::compaction::IdleReason::OnReturn)
+        );
+        assert_eq!(reply["compacting"], true);
+        assert_eq!(queued.unwrap()["queue"], json!(["and then"]));
+    }
+
+    #[test]
+    fn a_send_compacts_only_once_the_cache_has_gone_cold() {
+        // Still inside the hour the cache lives.
+        let (_fixture, store) = idle_claude_chat(250_000, 10 * 60_000);
+        let offer = store.chat("chat-1").unwrap()["compact_before_send"].clone();
+        assert!(offer["after_ms"].as_i64().unwrap() > crate::accounts::now_ms());
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "go", "compact_first": true}))
+            .unwrap()
+        else {
+            panic!("an idle chat starts the turn");
+        };
+        assert_eq!(turn.prompt, "go");
+    }
+
+    #[test]
+    fn small_chats_and_other_modes_are_not_offered_a_compaction() {
+        let (_fixture, store) = idle_claude_chat(150_000, 2 * 3_600_000);
+        assert!(
+            store
+                .chat("chat-1")
+                .unwrap()
+                .get("compact_before_send")
+                .is_none()
+        );
+
+        let (_fixture, store) = idle_claude_chat(250_000, 2 * 3_600_000);
+        assert_eq!(
+            store.idle_compaction_mode().unwrap(),
+            crate::compaction::IdleMode::OnReturn
+        );
+        store
+            .set_idle_compaction_mode(&json!({"mode": "off"}))
+            .unwrap();
+        assert!(
+            store
+                .chat("chat-1")
+                .unwrap()
+                .get("compact_before_send")
+                .is_none()
+        );
+        assert!(
+            store
+                .set_idle_compaction_mode(&json!({"mode": "sometimes"}))
+                .is_err()
+        );
+        assert_eq!(
+            store.idle_compaction_mode().unwrap(),
+            crate::compaction::IdleMode::Off
+        );
+    }
+
+    #[test]
+    fn an_idle_chat_is_compacted_once_before_its_cache_expires() {
+        let (fixture, store) = idle_claude_chat(250_000, 10 * 60_000);
+        let now = crate::accounts::now_ms();
+        // Not under the default mode.
+        assert!(store.idle_compaction_candidates(now).unwrap().is_empty());
+        store
+            .set_idle_compaction_mode(&json!({"mode": "beforeCacheExpires"}))
+            .unwrap();
+        let candidates = store.idle_compaction_candidates(now).unwrap();
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.chat_id, "chat-1");
+        assert!(candidate.expires_ms > now);
+
+        // A chat that moved on is left alone.
+        assert!(
+            store
+                .prepare_idle_compaction(
+                    &json!({"chat": "chat-1", "text": "/compact"}),
+                    candidate.last_message - 1
+                )
+                .is_err()
+        );
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_idle_compaction(
+                &json!({"chat": "chat-1", "text": "/compact"}),
+                candidate.last_message,
+            )
+            .unwrap()
+        else {
+            panic!("an idle chat starts the compaction");
+        };
+        assert_eq!(turn.prompt, "/compact");
+        assert_eq!(
+            turn.idle_compaction,
+            Some(crate::compaction::IdleReason::BeforeCacheExpires)
+        );
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        // Never compact a compaction.
+        assert!(store.idle_compaction_candidates(now).unwrap().is_empty());
+
+        // An expired cache, or one of unknown age, is not compacted.
+        let (_other, store) = idle_claude_chat(250_000, 2 * 3_600_000);
+        store
+            .set_idle_compaction_mode(&json!({"mode": "beforeCacheExpires"}))
+            .unwrap();
+        assert!(store.idle_compaction_candidates(now).unwrap().is_empty());
+        // A request served from the cache restarts its lifetime.
+        store
+            .set_prompt_cache("chat-1", "claude", None, true, now)
+            .unwrap();
+        let refreshed = store.idle_compaction_candidates(now).unwrap();
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].expires_ms, now + 3_600_000);
+        // One that neither wrote nor read a cache leaves it unknown.
+        store
+            .set_prompt_cache("chat-1", "claude", None, false, now)
+            .unwrap();
+        assert!(store.idle_compaction_candidates(now).unwrap().is_empty());
+        drop(fixture);
     }
 
     #[test]

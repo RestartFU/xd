@@ -28,6 +28,7 @@ mod child_agents;
 mod cli_updates;
 mod cli_versions;
 mod codex_app;
+mod compaction;
 mod database;
 mod delegation;
 mod deletion;
@@ -671,6 +672,12 @@ impl Engine {
                     .map(|percent| json!({"ok": true, "percent": percent}))
             }),
             Some("set-chat-quota-settings") => self.set_chat_quota_settings(&request),
+            Some("idle-compaction-settings") => self.read(|store| {
+                store
+                    .idle_compaction_mode()
+                    .map(|mode| json!({"ok": true, "mode": mode.as_str()}))
+            }),
+            Some("set-idle-compaction-settings") => self.set_idle_compaction_settings(&request),
             Some("set-chat-quota") => self.set_chat_quota(&request),
             Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
             Some("move-chat") => self.tree_mutation(|store| store.move_chat(&request)),
@@ -1993,6 +2000,107 @@ impl Engine {
         }
     }
 
+    fn set_idle_compaction_settings(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        match store.set_idle_compaction_mode(request) {
+            Ok(mode) => {
+                self.events
+                    .publish(json!({"event": "idle-compaction-settings", "mode": mode.as_str()}));
+                json!({"ok": true, "mode": mode.as_str()})
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    /// Compacts idle Claude chats shortly before their prompt cache expires,
+    /// under "Before the cache expires"; see [`compaction`]. Only the daemon
+    /// does this, since it is what outlives the clients. The schedule is read
+    /// from the database each time, so a restart misses nothing still due.
+    pub fn start_idle_compaction(self: &Arc<Self>) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        // Weak, since the engine owns the thread that holds this.
+        let engine = Arc::downgrade(self);
+        let _ = thread::Builder::new()
+            .name("xd-idle-compaction".into())
+            .spawn(move || {
+                // Each chat is tried once per idle spell, even if the send fails.
+                let mut tried: HashSet<(String, i64)> = HashSet::new();
+                loop {
+                    let now = accounts::now_ms();
+                    let mut next = now + 30_000;
+                    match store.idle_compaction_candidates(now) {
+                        Ok(candidates) => {
+                            tried.retain(|(chat, last)| {
+                                candidates.iter().any(|candidate| {
+                                    &candidate.chat_id == chat && candidate.last_message == *last
+                                })
+                            });
+                            for candidate in candidates {
+                                let start = candidate.expires_ms - compaction::LEAD_MS;
+                                if now < start {
+                                    next = next.min(start);
+                                    continue;
+                                }
+                                let key = (candidate.chat_id.clone(), candidate.last_message);
+                                if tried.contains(&key) {
+                                    continue;
+                                }
+                                let Some(engine) = engine.upgrade() else {
+                                    return;
+                                };
+                                // Only a send counts as the try: a chat held
+                                // back by a question or background work is
+                                // looked at again while its cache still lives.
+                                if engine.compact_idle_chat(&candidate) {
+                                    tried.insert(key);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("xd-host: cannot read chats to compact: {error}");
+                        }
+                    }
+                    match engine.upgrade() {
+                        Some(engine) if !engine.shutdown.load(Ordering::SeqCst) => {}
+                        _ => return,
+                    }
+                    let wait = (next - accounts::now_ms()).clamp(1_000, 30_000);
+                    thread::sleep(Duration::from_millis(wait as u64));
+                }
+            });
+    }
+
+    /// Sends `/compact` to an idle chat whose cache is about to expire, unless
+    /// something still belongs to its next turn: a question or approval the
+    /// agent is waiting on, or background work that reports into it. Says
+    /// whether it tried to send.
+    fn compact_idle_chat(&self, candidate: &storage::IdleCompactionCandidate) -> bool {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return false;
+        };
+        let chat_id = candidate.chat_id.as_str();
+        // A process kept between turns is no reason to wait; background work
+        // it still runs, or has finished and owes a report on, is.
+        if runtime.has_interactions(chat_id) || runtime.waits_on_background(chat_id) {
+            return false;
+        }
+        let reply = self.send_message_inner(
+            &json!({"op": "send", "chat": chat_id, "text": compaction::COMMAND}),
+            Some(Continuation::IdleCompaction(candidate.last_message)),
+        );
+        if reply["ok"] == true {
+            self.events
+                .publish(json!({"event": "changed", "chat": chat_id}));
+        } else {
+            eprintln!("xd-host: not compacting idle chat {chat_id}: {reply}");
+        }
+        true
+    }
+
     fn set_chat_quota_settings(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
@@ -2527,6 +2635,9 @@ impl Engine {
             Some(Continuation::AfterLimit(last_message)) => {
                 store.prepare_after_limit(request, last_message)
             }
+            Some(Continuation::IdleCompaction(last_message)) => {
+                store.prepare_idle_compaction(request, last_message)
+            }
             None => store.prepare_send(request),
         };
         if resumes && prepared.is_ok() {
@@ -2558,8 +2669,16 @@ impl Engine {
                 }
                 reply
             }
-            Ok(SendDisposition::Start { reply, turn }) => match runtime.start(turn.clone()) {
+            Ok(SendDisposition::Start {
+                reply,
+                turn,
+                queued,
+            }) => match runtime.start(turn.clone()) {
                 Ok(()) => {
+                    // The message a compaction runs ahead of waits in the queue.
+                    if let Some(event) = queued {
+                        self.events.publish(event);
+                    }
                     if let Some(spec) = chat_title {
                         self.chat_titles.start(spec);
                     }

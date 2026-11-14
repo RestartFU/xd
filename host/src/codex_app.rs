@@ -1,6 +1,7 @@
 //! Codex app-server adapter. The host owns RPC IDs and pending requests.
 use crate::{
     agent::{AgentEvent, TodoItem, TodoStatus, TodoUpdate, shell_script},
+    compaction::{self, Compaction, CompactionState},
     storage::TurnSpec,
     subagent::{SubagentPatch, SubagentStatus, SubagentStep},
 };
@@ -37,6 +38,12 @@ pub(crate) struct CodexAppParser {
     /// Messages a steer cut short. Their last words are still on the way, and
     /// would otherwise land after the user's message as part of the answer.
     superseded: HashSet<String>,
+    /// The turn is a bare `/compact`, which Codex runs as its own request
+    /// rather than as a message to the model.
+    compact: bool,
+    /// Compactions Codex has started and not yet finished, by item id. A failed
+    /// one can end the turn without its `item/completed`.
+    running_compactions: HashSet<String>,
 }
 impl CodexAppParser {
     pub(crate) fn new(turn: &TurnSpec) -> Self {
@@ -66,12 +73,17 @@ impl CodexAppParser {
             held_outcome: Vec::new(),
             streaming_item: None,
             superseded: HashSet::new(),
+            compact: compaction::is_command(&turn.prompt),
+            running_compactions: HashSet::new(),
         }
     }
     pub(crate) fn initialize() -> Value {
         json!({"id":1, "method":"initialize", "params":{"clientInfo":{"name":"xd", "title":"xd", "version":env!("CARGO_PKG_VERSION")}, "capabilities":{"experimentalApi":true}}})
     }
     pub(crate) fn turn_request(&self) -> Value {
+        if self.compact {
+            return json!({"id":3, "method":"thread/compact/start", "params":{"threadId":self.thread}});
+        }
         let mut params = self.input.clone();
         params["threadId"] = json!(self.thread);
         json!({"id":3, "method":"turn/start", "params":params})
@@ -196,6 +208,22 @@ impl CodexAppParser {
             {
                 self.collab_call(&params["item"])
             }
+            "item/started" | "item/completed"
+                if params["item"]["type"].as_str() == Some("contextCompaction") =>
+            {
+                let id = params["item"]["id"]
+                    .as_str()
+                    .unwrap_or("compaction")
+                    .to_owned();
+                let state = if method == "item/started" {
+                    self.running_compactions.insert(id.clone());
+                    CompactionState::Running
+                } else {
+                    self.running_compactions.remove(&id);
+                    CompactionState::Completed
+                };
+                vec![AgentEvent::Compaction(Compaction::new(id, state))]
+            }
             "item/agentMessage/delta" => {
                 if let Some(id) = params["itemId"].as_str() {
                     if self.superseded.contains(id) {
@@ -282,7 +310,26 @@ impl CodexAppParser {
                 .unwrap_or_default(),
             "turn/completed" => {
                 self.turn = None;
-                let outcome = match params["turn"]["status"].as_str() {
+                let status = params["turn"]["status"].as_str();
+                // Failed compaction can end the turn without item/completed.
+                let mut cut_short = std::mem::take(&mut self.running_compactions)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                cut_short.sort();
+                let mut outcome = cut_short
+                    .into_iter()
+                    .map(|id| {
+                        AgentEvent::Compaction(Compaction::new(
+                            id,
+                            match status {
+                                Some("completed") => CompactionState::Completed,
+                                Some("interrupted") => CompactionState::Stopped,
+                                _ => CompactionState::Failed,
+                            },
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                outcome.extend(match status {
                     Some("completed") => vec![AgentEvent::Completed],
                     Some("interrupted") => {
                         vec![
@@ -291,7 +338,7 @@ impl CodexAppParser {
                         ]
                     }
                     _ => codex_failure(&params["turn"]["error"], "Codex turn failed."),
-                };
+                });
                 if self.pending_steers.is_empty() {
                     outcome
                 } else {
@@ -470,9 +517,68 @@ mod tests {
             held_outcome: Vec::new(),
             streaming_item: None,
             superseded: HashSet::new(),
+            compact: false,
+            running_compactions: HashSet::new(),
         };
         parser.feed(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#);
         parser
+    }
+
+    #[test]
+    fn a_bare_compact_asks_codex_to_compact_the_thread() {
+        let mut parser = running_parser();
+        parser.compact = true;
+        let request = parser.turn_request();
+        assert_eq!(request["method"], "thread/compact/start");
+        assert_eq!(request["params"], json!({"threadId": "thread-1"}));
+        assert_eq!(request["id"], 3);
+        parser.compact = false;
+        assert_eq!(parser.turn_request()["method"], "turn/start");
+    }
+
+    #[test]
+    fn compaction_items_become_one_row_each() {
+        let mut parser = running_parser();
+        let started = parser.feed(
+            r#"{"method":"item/started","params":{"threadId":"thread-1","item":{"type":"contextCompaction","id":"cc-1"}}}"#,
+        );
+        assert_eq!(
+            started,
+            [AgentEvent::Compaction(Compaction::new(
+                "cc-1",
+                CompactionState::Running
+            ))]
+        );
+        let finished = parser.feed(
+            r#"{"method":"item/completed","params":{"threadId":"thread-1","item":{"type":"contextCompaction","id":"cc-1"}}}"#,
+        );
+        assert_eq!(
+            finished,
+            [AgentEvent::Compaction(Compaction::new(
+                "cc-1",
+                CompactionState::Completed
+            ))]
+        );
+        assert_eq!(
+            parser.feed(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"completed"}}}"#),
+            [AgentEvent::Completed]
+        );
+    }
+
+    #[test]
+    fn a_failed_turn_fails_the_compaction_it_cut_short() {
+        let mut parser = running_parser();
+        parser.feed(
+            r#"{"method":"item/started","params":{"threadId":"thread-1","item":{"type":"contextCompaction","id":"cc-1"}}}"#,
+        );
+        let events = parser.feed(
+            r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"failed","error":{"message":"Boom"}}}}"#,
+        );
+        assert_eq!(
+            events[0],
+            AgentEvent::Compaction(Compaction::new("cc-1", CompactionState::Failed))
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::Error(_))));
     }
 
     #[test]
@@ -651,6 +757,8 @@ mod tests {
             held_outcome: Vec::new(),
             streaming_item: None,
             superseded: HashSet::new(),
+            compact: false,
+            running_compactions: HashSet::new(),
         };
         assert_eq!(parser.feed(r#"{"id":1,"result":{}}"#).len(), 2);
         let events = parser.feed(r#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#);
@@ -706,6 +814,8 @@ mod tests {
             held_outcome: Vec::new(),
             streaming_item: None,
             superseded: HashSet::new(),
+            compact: false,
+            running_compactions: HashSet::new(),
         }
     }
 

@@ -302,6 +302,22 @@ class OpsTest {
     }
 
     @Test
+    fun idleCompactionReadsAndSetsTheMode() {
+        assertEquals("idle-compaction-settings", Ops.idleCompactionSettings()["op"]!!.jsonPrimitive.content)
+        val set = Ops.setIdleCompactionSettings(com.restartfu.xd.model.IdleCompactionMode.BEFORE_CACHE_EXPIRES)
+        assertEquals("set-idle-compaction-settings", set["op"]!!.jsonPrimitive.content)
+        assertEquals("beforeCacheExpires", set["mode"]!!.jsonPrimitive.content)
+        assertEquals("onReturn", Ops.setIdleCompactionSettings(com.restartfu.xd.model.IdleCompactionMode.ON_RETURN)["mode"]!!.jsonPrimitive.content)
+        assertEquals("off", Ops.setIdleCompactionSettings(com.restartfu.xd.model.IdleCompactionMode.OFF)["mode"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun sendCompactsFirstOnlyWhenAsked() {
+        assertFalse("compact_first" in Ops.send("chat", "hi"))
+        assertEquals(true, Ops.send("chat", "hi", compactFirst = true)["compact_first"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
     fun sendSteersOnlyWhenAsked() {
         assertEquals(null, Ops.send("chat", "hi")["steer"])
         assertEquals("true", Ops.send("chat", "hi", steer = true)["steer"].toString())

@@ -119,6 +119,8 @@ internal fun SettingsPage(
     val tree by model.client.tree.collectAsStateWithLifecycle()
     // The quota row says its current share, so search reads the same words.
     val quota by model.chatQuota.collectAsStateWithLifecycle()
+    // Only hosts that compact answer with a mode, so its row waits for one.
+    val idleCompaction by model.idleCompaction.collectAsStateWithLifecycle()
     // Likewise the settling rules, whose day count shows in a stepper.
     val settleRules by model.autoSettle.collectAsStateWithLifecycle()
     var section by rememberSaveable { mutableStateOf<SettingsSection?>(null) }
@@ -158,6 +160,15 @@ internal fun SettingsPage(
                     SettingsSection.CHATS,
                     listOf("Limit each chat's usage", chatQuotaDetail(quota?.percent), "Quota per chat", QUOTA_PER_CHAT_DETAIL),
                 ) { ChatQuotaSection(model) },
+            )
+        }
+        idleCompaction?.let { current ->
+            add(
+                SettingsEntry(
+                    SettingsSection.CHATS,
+                    listOf(IDLE_COMPACTION_TITLE, IDLE_COMPACTION_DETAIL) +
+                        com.restartfu.xd.model.IdleCompactionMode.entries.map(::idleCompactionLabel),
+                ) { IdleCompactionSection(model, current.mode) },
             )
         }
         add(SettingsEntry(SettingsSection.CHATS, listOf("Prompt shortcuts", SHORTCUTS_DETAIL)) {
@@ -218,6 +229,7 @@ internal fun SettingsPage(
     LaunchedEffect(tree.chatQuotas) {
         if (tree.chatQuotas) model.loadChatQuota()
     }
+    LaunchedEffect(Unit) { model.loadIdleCompaction() }
     LaunchedEffect(tree.settlement) {
         if (tree.settlement) model.refreshAutoSettle()
     }

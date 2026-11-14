@@ -8,6 +8,9 @@ const WORKFLOW_PREFIX: &str = "workflow_run\n";
 const FILE_CHANGE_PREFIX: &str = "file_change\n";
 /// A chat moved to another account. A notice, never a tool card.
 const ACCOUNT_SWITCH_PREFIX: &str = "account_switch\n";
+/// A context compaction: `context_compaction\n<state>\n<label>`. A divider in
+/// the conversation, never a tool card.
+const COMPACTION_PREFIX: &str = "context_compaction\n";
 const PATCH_MARKER: &str = "diff --git ";
 const MAX_AUTO_EXPANDED_PATCH_LINES: usize = 60;
 
@@ -51,6 +54,62 @@ pub fn is_plain_activity(content: &str) -> bool {
         && !content.starts_with(WORKFLOW_PREFIX)
         && !content.starts_with(FILE_CHANGE_PREFIX)
         && !content.starts_with(ACCOUNT_SWITCH_PREFIX)
+        && !content.starts_with(COMPACTION_PREFIX)
+}
+
+/// How a context compaction the host reported stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionState {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+/// A compaction row's state and sentence, if `content` is one.
+pub fn compaction_notice(content: &str) -> Option<(CompactionState, &str)> {
+    let (state, label) = content.strip_prefix(COMPACTION_PREFIX)?.split_once('\n')?;
+    let state = match state {
+        "running" => CompactionState::Running,
+        "completed" => CompactionState::Completed,
+        "failed" => CompactionState::Failed,
+        "stopped" => CompactionState::Stopped,
+        _ => return None,
+    };
+    let label = label.trim();
+    (!label.is_empty()).then_some((state, label))
+}
+
+/// Tokens as T3 Code writes them, as the host does: 950, 1.25K, 12.5K, 251K, 1M.
+pub fn format_tokens(value: u64) -> String {
+    fn trim(value: f64) -> String {
+        let digits = if value >= 100.0 {
+            0
+        } else if value >= 10.0 {
+            1
+        } else {
+            2
+        };
+        let fixed = format!("{value:.digits$}");
+        match fixed.split_once('.') {
+            Some((whole, fraction)) if fraction.chars().all(|digit| digit == '0') => {
+                whole.to_owned()
+            }
+            _ => fixed,
+        }
+    }
+    if value < 1_000 {
+        return value.to_string();
+    }
+    const SUFFIXES: [&str; 4] = ["K", "M", "B", "T"];
+    let mut scaled = value as f64 / 1e3;
+    let mut unit = 0;
+    // Choose the unit after rounding, so 999,999 reads 1M rather than 1000K.
+    while trim(scaled).parse::<f64>().unwrap_or(scaled) >= 1e3 && unit < SUFFIXES.len() - 1 {
+        scaled /= 1e3;
+        unit += 1;
+    }
+    format!("{}{}", trim(scaled), SUFFIXES[unit])
 }
 
 /// A delegated agent, as the host's live record describes it.
@@ -945,6 +1004,9 @@ mod tests {
     #[test]
     fn only_plain_activity_stacks_into_a_run() {
         assert!(is_plain_activity("$ make build"));
+        assert!(!is_plain_activity(
+            "context_compaction\nrunning\nCompacting context"
+        ));
         assert!(!is_plain_activity("subagent\nExplore\nRunning · Tracing"));
         assert!(!is_plain_activity(
             "workflow_run\n123\nhttps://github.com/RestartFU/xd/actions/runs/123"
@@ -987,5 +1049,33 @@ mod tests {
             None
         );
         assert_eq!(agent_report("[xd] something else"), None);
+    }
+
+    #[test]
+    fn compaction_rows_are_read_from_the_host_record() {
+        assert_eq!(
+            compaction_notice("context_compaction\ncompleted\nContext compacted 251K → 32K tokens"),
+            Some((
+                CompactionState::Completed,
+                "Context compacted 251K → 32K tokens"
+            ))
+        );
+        assert_eq!(
+            compaction_notice("context_compaction\nfailed\nContext compaction failed · No"),
+            Some((CompactionState::Failed, "Context compaction failed · No"))
+        );
+        assert_eq!(compaction_notice("context_compaction\nodd\nx"), None);
+        assert_eq!(compaction_notice("context_compaction\nrunning\n "), None);
+        assert_eq!(compaction_notice("$ context_compaction\nrunning\nx"), None);
+    }
+
+    #[test]
+    fn tokens_read_as_t3_code_writes_them() {
+        assert_eq!(format_tokens(950), "950");
+        assert_eq!(format_tokens(1_250), "1.25K");
+        assert_eq!(format_tokens(1_500), "1.50K");
+        assert_eq!(format_tokens(12_500), "12.5K");
+        assert_eq!(format_tokens(251_000), "251K");
+        assert_eq!(format_tokens(999_999), "1M");
     }
 }

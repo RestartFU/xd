@@ -807,6 +807,60 @@ pub struct AgentBackend {
     pub efforts: Vec<String>,
 }
 
+/// The host's offer to compact an idle Claude chat before the next send, as
+/// T3 Code's "When you return" does: `tokens` of history, from `after_ms`
+/// (Unix milliseconds), once the chat has sat idle past its prompt cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactBeforeSend {
+    pub tokens: u64,
+    pub after_ms: i64,
+}
+
+impl CompactBeforeSend {
+    pub fn from_value(value: Option<&Value>) -> Option<Self> {
+        let value = value?;
+        Some(Self {
+            tokens: value.get("tokens")?.as_u64()?,
+            after_ms: value.get("after_ms")?.as_i64()?,
+        })
+    }
+}
+
+/// When the host compacts an idle Claude chat. See the host's `compaction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleCompaction {
+    OnReturn,
+    BeforeCacheExpires,
+    Off,
+}
+
+impl IdleCompaction {
+    /// The choices, in the order the setting shows them, with their labels.
+    pub const CHOICES: [(Self, &'static str); 3] = [
+        (Self::OnReturn, "When you return"),
+        (Self::BeforeCacheExpires, "Before the cache expires (beta)"),
+        (Self::Off, "Never"),
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OnReturn => "onReturn",
+            Self::BeforeCacheExpires => "beforeCacheExpires",
+            Self::Off => "off",
+        }
+    }
+
+    /// The mode in a host reply or broadcast, if it names one.
+    pub fn from_value(value: &Value) -> Option<Self> {
+        match value.get("mode")?.as_str()? {
+            "onReturn" => Some(Self::OnReturn),
+            "beforeCacheExpires" => Some(Self::BeforeCacheExpires),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AppModel {
     pub folders: Vec<Folder>,
@@ -871,6 +925,8 @@ pub struct AppModel {
     pub account: Option<String>,
     pub context_used: u64,
     pub context_window: u64,
+    /// A send into the open chat can compact it first; see [`CompactBeforeSend`].
+    pub compact_before_send: Option<CompactBeforeSend>,
     pub auth_state: String,
     pub workdir: Option<String>,
     pub commands: Vec<String>,
@@ -1434,6 +1490,7 @@ impl AppModel {
             self.account = None;
             self.context_used = 0;
             self.context_window = 0;
+            self.compact_before_send = None;
             self.auth_state.clear();
             self.workdir = None;
             self.commands.clear();
@@ -1480,6 +1537,7 @@ impl AppModel {
         self.account = None;
         self.context_used = 0;
         self.context_window = 0;
+        self.compact_before_send = None;
         self.auth_state.clear();
         self.workdir = None;
         self.commands.clear();
@@ -1606,6 +1664,7 @@ impl AppModel {
             .get("context_window")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        self.compact_before_send = CompactBeforeSend::from_value(body.get("compact_before_send"));
         self.auth_state = body
             .get("auth_state")
             .and_then(Value::as_str)
@@ -2393,6 +2452,7 @@ impl AppModel {
             account: None,
             context_used: 16_948,
             context_window: 272_000,
+            compact_before_send: None,
             auth_state: "signed-in".into(),
             workdir: None,
             commands: vec!["review".into(), "compact".into()],
@@ -2639,6 +2699,25 @@ mod tests {
             })
         );
         assert_eq!(AutoDeleteRules::from_value(&json!({"ok":false})), None);
+        assert_eq!(
+            IdleCompaction::from_value(&json!({"ok":true,"mode":"beforeCacheExpires"})),
+            Some(IdleCompaction::BeforeCacheExpires)
+        );
+        assert_eq!(
+            IdleCompaction::from_value(&json!({"mode":"sometimes"})),
+            None
+        );
+        assert_eq!(
+            CompactBeforeSend::from_value(Some(&json!({"tokens":251000,"after_ms":12}))),
+            Some(CompactBeforeSend {
+                tokens: 251_000,
+                after_ms: 12
+            })
+        );
+        assert_eq!(
+            CompactBeforeSend::from_value(Some(&json!({"tokens":1}))),
+            None
+        );
         assert_eq!(AutoDeleteRules::step(30, true), Some(60));
         assert_eq!(AutoDeleteRules::step(30, false), Some(14));
         assert_eq!(AutoDeleteRules::step(45, true), Some(60));
