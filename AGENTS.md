@@ -18,6 +18,18 @@ changes limited to documentation, comments, or formatting may skip review.
 Report the reviewed head, review outcome, checks performed, and any validation
 that remains incomplete. Never claim a review or check passed when it did not run.
 
+## Waiting for CI
+
+When you run in xd and need a pull request's CI result, call xd's `watch_ci`
+tool (`mcp__xd__watch_ci`) with the pull request's URL. Do not wait on CI with
+`gh run watch`, `gh pr checks --watch`, `sleep` loops or other polling commands,
+in the foreground or in a background shell. xd watches the checks, shows them
+on a live CI card in the chat, and sends you one report when they finish: what
+passed, what failed, and the end of each failed job's log. Carry on with other
+work or end your turn meanwhile. After you push again, call `watch_ci` again.
+Read a failed job's full log with `gh run view --log-failed` only when the
+report's excerpt is not enough.
+
 ## Commit and merge authorship
 
 Codex and Claude must never add themselves, each other, or any other AI assistant

@@ -11,6 +11,12 @@ public sealed interface TranscriptRow {
         val run: PipelineRun,
     ) : TranscriptRow
 
+    /** A CI watch's card: a pull request's checks, rewritten as they go. */
+    public data class Ci(
+        val item: TranscriptItem,
+        val run: CiRun,
+    ) : TranscriptRow
+
     /** A delegated agent with its own status and task details. */
     public data class Subagent(
         val item: TranscriptItem,
@@ -85,6 +91,10 @@ public object ToolGrouping {
                     flush()
                     rows += TranscriptRow.Pipeline(item, shape.run)
                 }
+                is ToolShape.Ci -> {
+                    flush()
+                    rows += TranscriptRow.Ci(item, shape.run)
+                }
                 is ToolShape.Subagent -> {
                     flush()
                     rows += TranscriptRow.Subagent(item, shape.run)
@@ -106,6 +116,7 @@ public object ToolGrouping {
         AccountSwitch.sentence(item.text)?.let { return ToolShape.Switch(it) }
         ContextCompaction.parse(item.text)?.let { return ToolShape.Compaction(it) }
         PipelineRun.parse(item.text)?.let { return ToolShape.Pipeline(it) }
+        CiRun.parse(item.text)?.let { return ToolShape.Ci(it) }
         SubagentRun.parse(item.text)?.let { return ToolShape.Subagent(it) }
         return if (ToolText.isPatch(item.text)) ToolShape.Alone else ToolShape.Ordinary
     }
@@ -121,6 +132,7 @@ public sealed interface ToolShape {
     public data class Switch(val sentence: String) : ToolShape
     public data class Compaction(val compaction: ContextCompaction) : ToolShape
     public data class Pipeline(val run: PipelineRun) : ToolShape
+    public data class Ci(val run: CiRun) : ToolShape
     public data class Subagent(val run: SubagentRun) : ToolShape
 }
 

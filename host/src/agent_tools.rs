@@ -23,6 +23,7 @@ pub const START: &str = "start_agent";
 pub const LIST: &str = "list_agents";
 pub const MESSAGE: &str = "message_agent";
 pub const STOP: &str = "stop_agent";
+pub const WATCH_CI: &str = "watch_ci";
 /// The browser tools, each the action the desktop runs (see `browser_tools`).
 const BROWSER_TOOLS: [(&str, &str); 8] = [
     ("browser_navigate", "navigate"),
@@ -34,12 +35,13 @@ const BROWSER_TOOLS: [(&str, &str); 8] = [
     ("browser_evaluate", "evaluate"),
     ("browser_screenshot", "screenshot"),
 ];
-const TOOLS: [&str; 13] = [
+const TOOLS: [&str; 14] = [
     TOOL,
     START,
     LIST,
     MESSAGE,
     STOP,
+    WATCH_CI,
     BROWSER_TOOLS[0].0,
     BROWSER_TOOLS[1].0,
     BROWSER_TOOLS[2].0,
@@ -58,7 +60,10 @@ const TOOLS: [&str; 13] = [
 /// covering it.
 const HINT: &str = "When you open, take over, or push to a pull request \
 other than by running gh pr create here, link it to this chat with xd's \
-link_pull_requests tool. To hand work to another agent that works in \
+link_pull_requests tool. To wait for a pull request's CI, call xd's watch_ci \
+tool instead of running gh run watch, gh pr checks --watch or a polling loop: \
+xd watches the checks on a CI card in this chat and reports here once they \
+finish, so carry on or end your turn. To hand work to another agent that works in \
 parallel, runs in the background or should outlive this turn, start it with \
 xd's start_agent tool. Do not use your built-in Agent or subagent tool for \
 that work, forks and background agents included, nor codex exec, claude -p \
@@ -72,8 +77,11 @@ rest): they drive the Chromium browser beside this chat, which the user sees.";
 /// The same for an agent another agent started, which cannot start its own.
 const STARTED_HINT: &str = "When you open, take over, or push to a pull request \
 other than by running gh pr create here, link it to this chat with xd's \
-link_pull_requests tool. Another agent started you through xd and reads \
-your final reply, so end each turn with what it needs to know. To open or use \
+link_pull_requests tool. To wait for a pull request's CI, call xd's watch_ci \
+tool instead of running gh run watch, gh pr checks --watch or a polling loop: \
+xd watches the checks on a CI card in this chat and reports here once they finish. Another agent \
+started you through xd and reads your final reply, so end each turn with what \
+it needs to know. To open or use \
 a web page, use xd's browser tools (browser_navigate, browser_snapshot, \
 browser_click and the rest): they drive the Chromium browser beside this chat.";
 
@@ -321,6 +329,31 @@ fn tools() -> Value {
                 "openWorldHint": false,
             },
         },
+        {
+            "name": WATCH_CI,
+            "title": "Watch CI",
+            "description": "Watch the CI checks of a pull request on GitHub until they all \
+                finish. This returns at once; xd keeps watching the pull request's head commit, \
+                following it when you push again, and sends you one message here when the \
+                checks are done: whether they passed, which failed, and the end of each failed \
+                job's log. Use this instead of gh run watch, gh pr checks --watch or a polling \
+                loop, then carry on with other work or end your turn. Checks that already \
+                finished are reported straight away.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pull_request": {"type": "string", "description": "The pull request's full \
+                        URL. Defaults to the pull request of this chat's branch."},
+                },
+                "additionalProperties": false,
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true,
+            },
+        },
     ]);
     if let Some(tools) = tools.as_array_mut() {
         tools.extend(browser_tools());
@@ -492,6 +525,7 @@ pub fn answer_mcp(
                 Some(LIST) => reply(Ok(list(arguments, ask))),
                 Some(MESSAGE) => reply(Ok(message_agent(arguments, ask))),
                 Some(STOP) => reply(Ok(stop(arguments, ask))),
+                Some(WATCH_CI) => reply(Ok(watch_ci(arguments, ask))),
                 Some(name) => match BROWSER_TOOLS.iter().find(|(tool, _)| *tool == name) {
                     Some((_, action)) => reply(Ok(browser(action, arguments, ask))),
                     None => reply(Err((-32602, "No such tool."))),
@@ -672,6 +706,63 @@ fn stop(arguments: &Value, ask: impl FnOnce(Value) -> Result<Value, String>) -> 
             false,
         )
     })
+}
+
+fn watch_ci(arguments: &Value, ask: impl FnOnce(Value) -> Result<Value, String>) -> Value {
+    let mut request = json!({"op": "watch-ci"});
+    if let Some(url) = text(arguments, "pull_request") {
+        request["pull_request"] = json!(url);
+    }
+    ask_daemon(ask, request, |answer| {
+        if answer["finished"] == true {
+            let report = answer["report"].as_str().unwrap_or_default();
+            return tool_result(report.strip_prefix("[xd] ").unwrap_or(report), false);
+        }
+        let number = answer["number"].as_u64().unwrap_or_default();
+        let head = answer["head"].as_str().unwrap_or_default();
+        let head = &head[..head.len().min(7)];
+        let (checks, pending) = (
+            answer["checks"].as_u64().unwrap_or_default(),
+            answer["pending"].as_u64().unwrap_or_default(),
+        );
+        let progress = if checks == 0 || pending == checks {
+            "Its checks have not finished yet".to_owned()
+        } else {
+            format!("{pending} of {checks} checks are still running")
+        };
+        tool_result(
+            &format!(
+                "Watching CI on pull request #{number} at {head}. {progress}. xd will message \
+                 you here once they finish, so there is no need to poll: carry on with other \
+                 work or end your turn."
+            ),
+            false,
+        )
+    })
+}
+
+/// How a call to `watch_ci` reads in the transcript: what it does and the
+/// pull request it watches, rather than the tool's MCP name. `arguments` are
+/// the call's; `result` is the tool's answer, when it has one.
+pub(crate) fn watch_ci_summary(arguments: Option<&Value>, result: Option<&str>) -> String {
+    let target = arguments
+        .and_then(|arguments| arguments.get("pull_request"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .map_or_else(
+            || "this chat's pull request".to_owned(),
+            |target| target.chars().take(200).collect(),
+        );
+    match result.map(str::trim).filter(|result| !result.is_empty()) {
+        Some(result) => format!("Watch CI  {target}\n{result}"),
+        None => format!("Watch CI  {target}"),
+    }
+}
+
+/// Whether `server` and `tool` name xd's `watch_ci`.
+pub(crate) fn is_watch_ci(server: &str, tool: &str) -> bool {
+    server == SERVER && tool == WATCH_CI
 }
 
 /// Hands a browser tool's call to the desktop, through the daemon. The
@@ -859,7 +950,8 @@ mod tests {
             [
                 "--allowedTools",
                 "mcp__xd__link_pull_requests,mcp__xd__start_agent,mcp__xd__list_agents,\
-                 mcp__xd__message_agent,mcp__xd__stop_agent,mcp__xd__browser_navigate,\
+                 mcp__xd__message_agent,mcp__xd__stop_agent,mcp__xd__watch_ci,\
+                 mcp__xd__browser_navigate,\
                  mcp__xd__browser_history,mcp__xd__browser_snapshot,mcp__xd__browser_click,\
                  mcp__xd__browser_type,mcp__xd__browser_press_key,mcp__xd__browser_evaluate,\
                  mcp__xd__browser_screenshot"
@@ -1066,6 +1158,48 @@ mod tests {
     fn an_agent_another_started_is_not_told_to_start_its_own() {
         assert!(hint(false).contains("start_agent"));
         assert!(!hint(true).contains("start_agent"));
+        // Both watch CI through xd rather than from their shell.
+        assert!(hint(false).contains("watch_ci"));
+        assert!(hint(true).contains("watch_ci"));
+    }
+
+    #[test]
+    fn watching_ci_names_the_pull_request_and_says_what_happens_next() {
+        let (asked, watching) = call(
+            WATCH_CI,
+            json!({"pull_request": "https://github.com/o/r/pull/7", "chat": "someone-else"}),
+            json!({"ok": true, "url": "https://github.com/o/r/pull/7", "number": 7,
+                "head": "1e3d4a495f0a", "checks": 4, "pending": 3, "finished": false}),
+        );
+        assert_eq!(
+            asked.unwrap(),
+            json!({"op": "watch-ci", "pull_request": "https://github.com/o/r/pull/7"})
+        );
+        assert_eq!(watching["isError"], false);
+        assert_eq!(
+            watching["content"][0]["text"],
+            "Watching CI on pull request #7 at 1e3d4a4. 3 of 4 checks are still running. xd \
+             will message you here once they finish, so there is no need to poll: carry on with \
+             other work or end your turn."
+        );
+        let (asked, _) = call(WATCH_CI, json!({}), json!({"ok": true, "checks": 0}));
+        assert_eq!(asked.unwrap(), json!({"op": "watch-ci"}));
+        let (_, finished) = call(
+            WATCH_CI,
+            json!({}),
+            json!({"ok": true, "finished": true,
+                "report": "[xd] CI passed on https://github.com/o/r/pull/7 at 1e3d4a4.\n\n4 checks passed."}),
+        );
+        assert_eq!(
+            finished["content"][0]["text"],
+            "CI passed on https://github.com/o/r/pull/7 at 1e3d4a4.\n\n4 checks passed."
+        );
+        let (_, refused) = call(
+            WATCH_CI,
+            json!({}),
+            json!({"ok": false, "error": "This chat's branch has no pull request."}),
+        );
+        assert_eq!(refused["isError"], true);
     }
 
     #[test]

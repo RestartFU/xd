@@ -1718,6 +1718,14 @@ fn claude_tool_summary(name: &str, arguments: Option<&Value>) -> String {
     if let Some(workflow) = workflow_marker(arguments) {
         return workflow;
     }
+    // xd's own CI watch reads as what it does, not as the MCP tool's name.
+    if let Some((server, tool)) = name
+        .strip_prefix("mcp__")
+        .and_then(|name| name.split_once("__"))
+        && crate::agent_tools::is_watch_ci(server, tool)
+    {
+        return crate::agent_tools::watch_ci_summary(arguments, None);
+    }
     if matches!(name, "Task" | "Agent") {
         let mut identity = vec!["Claude".to_owned()];
         for key in ["subagent_type", "model"] {
@@ -3210,6 +3218,22 @@ mod tests {
             "Read  src/main.rs"
         );
         assert_eq!(claude_tool_summary("Bash", None), "Bash");
+        // xd's CI watch reads as what it does; other servers' tools do not.
+        assert_eq!(
+            claude_tool_summary(
+                "mcp__xd__watch_ci",
+                Some(&json!({"pull_request": "https://github.com/o/r/pull/7"}))
+            ),
+            "Watch CI  https://github.com/o/r/pull/7"
+        );
+        assert_eq!(
+            claude_tool_summary("mcp__xd__watch_ci", Some(&json!({}))),
+            "Watch CI  this chat's pull request"
+        );
+        assert_eq!(
+            claude_tool_summary("mcp__other__watch_ci", None),
+            "mcp__other__watch_ci"
+        );
     }
 
     #[test]

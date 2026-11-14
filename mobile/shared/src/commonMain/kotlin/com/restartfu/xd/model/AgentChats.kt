@@ -41,6 +41,45 @@ public data class AgentReport(
     }
 }
 
+/** How a CI watch xd ran for the chat's agent ended. */
+public enum class CiOutcome { PASSED, FAILED, STOPPED }
+
+/**
+ * The message xd sends a chat when a CI watch its agent asked for with xd's
+ * watch_ci tool ends: `[xd] CI passed on <url> at <head>.`, `[xd] CI failed
+ * on …`, or `[xd] Stopped watching CI on <url>.`, then the details. See
+ * docs/protocol.md.
+ */
+public data class CiReport(
+    val url: String,
+    val number: String,
+    val outcome: CiOutcome,
+) {
+    public companion object {
+        /** The CI report [text] is, when xd sent it. */
+        public fun parse(text: String): CiReport? {
+            val first = text.lineSequence().firstOrNull()?.removePrefix("[xd] ")
+                ?.takeIf { text.startsWith("[xd] ") } ?: return null
+            val (outcome, rest) = when {
+                first.startsWith("CI passed on ") -> CiOutcome.PASSED to first.removePrefix("CI passed on ")
+                first.startsWith("CI failed on ") -> CiOutcome.FAILED to first.removePrefix("CI failed on ")
+                first.startsWith("Stopped watching CI on ") ->
+                    CiOutcome.STOPPED to first.removePrefix("Stopped watching CI on ")
+                else -> return null
+            }
+            val url = when (outcome) {
+                CiOutcome.STOPPED -> rest.takeIf { it.endsWith(".") }?.dropLast(1)
+                else -> rest.indexOf(" at ").takeIf { it >= 0 }?.let { rest.substring(0, it) }
+            } ?: return null
+            if (!url.startsWith("https://") || ' ' in url) return null
+            val split = url.lastIndexOf("/pull/").takeIf { it >= 0 } ?: return null
+            val number = url.substring(split + "/pull/".length)
+            if (number.isEmpty() || !number.all { it in '0'..'9' }) return null
+            return CiReport(url, number, outcome)
+        }
+    }
+}
+
 /**
  * This chat as its parent shows it when its turn [asking] waits on an
  * approval or answer from the user: waiting on the user rather than working,

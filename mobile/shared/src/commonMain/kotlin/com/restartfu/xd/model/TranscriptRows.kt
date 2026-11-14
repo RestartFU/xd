@@ -29,6 +29,7 @@ public val TranscriptRow.key: String
         is TranscriptRow.AccountSwitch -> "account-switch-${item.id}"
         is TranscriptRow.Compaction -> "compaction-${item.id}"
         is TranscriptRow.Pipeline -> "pipeline-${item.id}"
+        is TranscriptRow.Ci -> "ci-${item.id}"
         is TranscriptRow.Subagent -> "subagent-${item.id}"
     }
 
@@ -108,6 +109,7 @@ private fun TranscriptRow.renamed(keys: MutableSet<String>): TranscriptRow {
             is TranscriptRow.AccountSwitch -> copy(item = item.copy(id = "${item.id}#$suffix"))
             is TranscriptRow.Compaction -> copy(item = item.copy(id = "${item.id}#$suffix"))
             is TranscriptRow.Pipeline -> copy(item = item.copy(id = "${item.id}#$suffix"))
+            is TranscriptRow.Ci -> copy(item = item.copy(id = "${item.id}#$suffix"))
             is TranscriptRow.Subagent -> copy(item = item.copy(id = "${item.id}#$suffix"))
         }
         if (keys.add(renamed.key)) return renamed
