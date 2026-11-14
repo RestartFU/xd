@@ -228,7 +228,10 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ("New chat tab", format!("{m} T")),
                 ("Close the chat or agent tab in front", format!("{m} W")),
                 ("Go to the message box", format!("{m} L / Shift Escape")),
-                ("Stop the running turn", format!("{m} .")),
+                (
+                    "Stop the running turn, or the agent whose tab is in front",
+                    format!("{m} ."),
+                ),
                 ("Show or hide the side pane", format!("{m} B")),
                 ("Show or hide the terminal under the chat", "Ctrl `".into()),
                 ("The Terminal page", format!("{m} Shift T")),
@@ -244,7 +247,7 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ("Scroll to the top / bottom", ends.into()),
                 ("Undo the last settle, discard or removal", format!("{m} Z")),
                 (
-                    "Close a dialog or menu, clear a search, or leave the chat",
+                    "Close a dialog, menu, banner or notice, clear a search, or leave the chat",
                     "Escape".into(),
                 ),
             ],
@@ -285,7 +288,7 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                     "Enter".into(),
                 ),
                 (
-                    "Through the tabs' close buttons, the header's pull requests, each message's Copy, the queue and the terminal's tabs",
+                    "Through the tabs' close buttons, the header's pull requests, each message's Copy and pictures, the queue, the background tasks, an agent tab's Background and Stop, and the terminal's tabs",
                     "Tab / Shift Tab".into(),
                 ),
             ],
@@ -320,6 +323,14 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ),
                 ("Open the option Tab is on", "Enter or Space".into()),
                 ("Back to the message box from its options", "Escape".into()),
+                (
+                    "From the message box back through its attachments: Enter opens a picture, and each has its Remove",
+                    "Shift Tab".into(),
+                ),
+                (
+                    "Remove the last attachment, with the caret at the very start of the message box",
+                    "Backspace".into(),
+                ),
                 ("Indent, inside a ``` code block", "Tab".into()),
                 (
                     "Copy a message, from the menu of the message whose Copy Tab is on",

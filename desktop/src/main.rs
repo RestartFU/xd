@@ -16221,6 +16221,7 @@ impl XdDesktop {
             .child(
                 div()
                     .id("native-background-tasks")
+                    .debug_selector(|| "native-background-tasks".into())
                     .w_full()
                     .min_h(px(ROW_HEIGHT_COMPACT))
                     .px(px(2.0))
@@ -16228,9 +16229,18 @@ impl XdDesktop {
                     .items_center()
                     .justify_center()
                     .gap(px(8.0))
+                    .rounded(px(RADIUS_CONTROL))
                     .cursor_pointer()
                     .hover(|row| row.text_color(rgb(colors.text)))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_background_tasks(cx)))
+                    // A Tab stop: its output shows no other way.
+                    .key_stop(
+                        &self.key_targets,
+                        KeyLayer::Page,
+                        "native-background-tasks",
+                        colors,
+                        cx,
+                        |this, _, cx| this.toggle_background_tasks(cx),
+                    )
                     .child(background_ring(7.0, colors.muted))
                     .child(background_label(count))
                     .child(icon(
@@ -18334,16 +18344,33 @@ impl XdDesktop {
             .when(has_terminal && !self.native_session(), |toolbar| {
                 toolbar
                     .child(
-                        ui_button("minimal-context-terminal", ButtonKind::Secondary, colors)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_minimal_terminal_tab(None, window, cx);
-                            }))
-                            .child(icon(TERMINAL_ICON, 15.0, colors.text)),
+                        icon_button(
+                            "minimal-context-terminal",
+                            "New terminal tab",
+                            TERMINAL_ICON,
+                            colors,
+                        )
+                        .build()
+                        .debug_selector(|| "minimal-context-terminal".into())
+                        .key_stop_named(
+                            &self.key_targets,
+                            KeyLayer::Page,
+                            "minimal-context-terminal",
+                            "New terminal tab",
+                            colors,
+                            cx,
+                            |this, window, cx| this.open_minimal_terminal_tab(None, window, cx),
+                        ),
                     )
                     .child(
                         ui_button("minimal-stop-terminal", ButtonKind::Danger, colors)
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.send_terminal_input(&[3], cx)),
+                            .key_stop(
+                                &self.key_targets,
+                                KeyLayer::Page,
+                                "minimal-stop-terminal",
+                                colors,
+                                cx,
+                                |this, _, cx| this.send_terminal_input(&[3], cx),
                             )
                             .child(div().size(px(9.0)).rounded(px(1.5)).bg(rgb(colors.danger)))
                             .child("Stop"),
@@ -20502,6 +20529,7 @@ impl XdDesktop {
                         colors,
                         &project.id,
                         project_index,
+                        row.depth + 1,
                         cx,
                     ));
                 }
@@ -21614,6 +21642,7 @@ impl XdDesktop {
         index: usize,
         images: &MessageImages,
         max_width: f32,
+        keys: Option<&KeyTargets>,
     ) -> gpui::AnyElement {
         fn note(colors: ThemeColors, text: String) -> gpui::AnyElement {
             div()
@@ -21638,14 +21667,35 @@ impl XdDesktop {
                 // reuses the measurement made at the narrowest, where every line
                 // of text wrapped to nothing, and the row claims thousands of
                 // pixels of empty space.
+                let name = Path::new(&path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                // A Tab stop: Enter opens the picture in the viewer, as a
+                // click does.
+                let open = div().id(("message-image", index));
+                let open = match keys {
+                    Some(keys) => key_reach(
+                        open,
+                        keys,
+                        KeyLayer::Page,
+                        format!("message-image:{index}"),
+                        Some(format!("Open {name}").into()),
+                        RADIUS_PANEL + FOCUS_RING_GAP,
+                        colors,
+                        {
+                            let path = path.clone();
+                            move |this, window, cx| this.open_image_viewer(path.clone(), window, cx)
+                        },
+                    ),
+                    None => open,
+                };
                 div()
                     .relative()
                     .w_full()
                     .h(px(height))
                     .child(
-                        img(ready.image.image.clone())
-                            .id(("message-image", index))
-                            .absolute()
+                        open.absolute()
                             .top_0()
                             .left_0()
                             .w(px(width))
@@ -21660,7 +21710,12 @@ impl XdDesktop {
                                     }),
                                     cx,
                                 );
-                            }),
+                            })
+                            .child(
+                                img(ready.image.image.clone())
+                                    .size_full()
+                                    .rounded(px(RADIUS_PANEL)),
+                            ),
                     )
                     .into_any_element()
             }
@@ -21677,10 +21732,11 @@ impl XdDesktop {
         index: usize,
         images: &MessageImages,
         image_width: f32,
+        keys: Option<&KeyTargets>,
     ) -> gpui::AnyElement {
         match block {
             markdown::Block::Image(path) => {
-                Self::render_message_image(colors, path, index, images, image_width)
+                Self::render_message_image(colors, path, index, images, image_width, keys)
             }
             markdown::Block::Heading { level, content } => div()
                 .id(("native-heading", index))
@@ -21851,6 +21907,7 @@ impl XdDesktop {
                                 child_index,
                                 images,
                                 image_width,
+                                keys,
                             )
                         })
                         .collect::<Vec<_>>(),
@@ -23112,6 +23169,7 @@ impl XdDesktop {
                                         scoped_element_id(&scope, block_index) as usize,
                                         &MessageImages::default(),
                                         0.0,
+                                        None,
                                     )
                                 }),
                         )
@@ -23307,6 +23365,7 @@ impl XdDesktop {
                             scoped_element_id(&block_scope, block_index) as usize,
                             images,
                             image_width,
+                            copy_keys,
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -23323,6 +23382,7 @@ impl XdDesktop {
                                 as usize,
                             images,
                             image_width,
+                            copy_keys,
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -23917,6 +23977,7 @@ impl XdDesktop {
                             scoped_element_id(&scope, index) as usize,
                             &MessageImages::default(),
                             0.0,
+                            None,
                         )
                     }))
                     .into_any_element(),
@@ -28251,6 +28312,10 @@ impl XdDesktop {
                     // The banner stays until it is closed; Escape closes it
                     // before it leaves the chat.
                     this.dismiss_error(cx);
+                } else if this.startup_notice.take().is_some() {
+                    // The notice of a crashed last run goes next, as its
+                    // Dismiss does.
+                    cx.notify();
                 } else if matches!(
                     this.minimal_route,
                     MinimalRoute::Sessions { .. } | MinimalRoute::Cli { .. }
@@ -29326,9 +29391,16 @@ impl XdDesktop {
             let row: SharedString = id.split('\t').next().unwrap_or_default().to_owned().into();
             (row.starts_with(SIDEBAR_ROW_STOP) && listed(&row)).then_some(row)
         });
+        // The open session's row, or the draft row of the new chat open.
+        let draft = self
+            .creating_chat_folder
+            .as_ref()
+            .filter(|_| self.creating_chat_session.is_none())
+            .map(|project| SharedString::from(format!("{SIDEBAR_ROW_STOP}d:{project}")));
         let selected = active_chat
             .map(|chat| SharedString::from(format!("{SIDEBAR_ROW_STOP}s:{chat}")))
-            .filter(|key| listed(key));
+            .filter(|key| listed(key))
+            .or(draft.filter(|key| listed(key)));
         self.tree_roving = ringed
             .or_else(|| self.tree_cursor.clone().filter(|key| listed(key)))
             .or(selected);

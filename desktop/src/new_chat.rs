@@ -2006,19 +2006,22 @@ impl XdDesktop {
             } else {
                 stamp("Draft", colors.muted, colors)
             })
-            .child(
-                div().ml_2().flex_none().child(
-                    icon_button(
-                        "toggle-side-pane",
-                        "Show or hide the side pane",
-                        SIDE_LAYOUT_ICON,
-                        colors,
-                    )
+            .child(div().ml_2().flex_none().child({
+                let label = format!("Show or hide the side pane ({MOD_KEY}+B)");
+                icon_button("toggle-side-pane", label.clone(), SIDE_LAYOUT_ICON, colors)
                     .active(self.browser_is_open())
                     .build()
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
-                ),
-            )
+                    .debug_selector(|| "toggle-side-pane".into())
+                    .key_stop_named(
+                        &self.key_targets,
+                        KeyLayer::Page,
+                        "toggle-side-pane",
+                        label,
+                        colors,
+                        cx,
+                        |this, _, cx| this.toggle_browser(cx),
+                    )
+            }))
             .into_any_element()
     }
 
@@ -2029,6 +2032,7 @@ impl XdDesktop {
         colors: ThemeColors,
         project_id: &str,
         project_index: usize,
+        depth: usize,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let mut rows = Vec::new();
@@ -2044,6 +2048,8 @@ impl XdDesktop {
             rows.push(self.render_starting_row(
                 colors,
                 ("starting-chat-open", project_index),
+                format!("{SIDEBAR_ROW_STOP}t:open:{project_id}").into(),
+                depth,
                 label,
                 self.minimal_new_session_agent,
                 true,
@@ -2061,6 +2067,8 @@ impl XdDesktop {
             rows.push(self.render_starting_row(
                 colors,
                 ("starting-chat", token as usize),
+                format!("{SIDEBAR_ROW_STOP}t:{token}").into(),
+                depth,
                 label,
                 agent,
                 false,
@@ -2073,8 +2081,28 @@ impl XdDesktop {
                 && self.creating_chat_session.is_none()
                 && !self.chat_create_submitting
                 && self.new_chat_started.is_none();
-            let open_project = project_id.to_owned();
+            let open: KeyRun = {
+                let project = project_id.to_owned();
+                Rc::new(move |this, window, cx| {
+                    if this.creating_chat_folder.as_deref() != Some(project.as_str())
+                        || this.creating_chat_session.is_some()
+                        || this.chat_create_submitting
+                        || this.new_chat_started.is_some()
+                    {
+                        this.begin_chat_create(project.clone(), window, cx);
+                    }
+                })
+            };
+            // A row of the sidebar's tree, which the arrow keys reach, with
+            // its Discard draft a Tab stop after it.
+            let stop = self.tree_row(TreeKeyRow::new(
+                format!("{SIDEBAR_ROW_STOP}d:{project_id}").into(),
+                depth,
+                PROJECT_LIST,
+            ));
+            let tree_marks = self.tree_marks(&stop, open.clone());
             let discard_project = project_id.to_owned();
+            let key_discard = project_id.to_owned();
             let agent = if selected {
                 self.minimal_new_session_agent
             } else {
@@ -2100,20 +2128,18 @@ impl XdDesktop {
                     .items_center()
                     .gap(px(8.0))
                     .rounded(px(RADIUS_TAB))
-                    .when(selected, |row| row.bg(rgb(colors.selected_surface)))
+                    .when(selected, |row| {
+                        row.bg(rgb(colors.selected_surface)).child(
+                            selection_marker(MarkerEdge::Leading, colors)
+                                .left(px(-SIDEBAR_MARKER_GUTTER)),
+                        )
+                    })
                     .cursor_pointer()
                     .when(!selected, |row| {
                         row.hover(|style| style.bg(rgb(colors.surface_high)))
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.creating_chat_folder.as_deref() != Some(open_project.as_str())
-                            || this.creating_chat_session.is_some()
-                            || this.chat_create_submitting
-                            || this.new_chat_started.is_some()
-                        {
-                            this.begin_chat_create(open_project.clone(), window, cx);
-                        }
-                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
+                    .children(tree_marks)
                     .child(assistant_icon(
                         agent_icon(agent),
                         13.0,
@@ -2135,18 +2161,31 @@ impl XdDesktop {
                             .child("Draft"),
                     )
                     .child(
-                        session_row_action(
-                            ("discard-draft-chat", project_index),
+                        self.tree_action(
+                            session_row_action(
+                                ("discard-draft-chat", project_index),
+                                "Discard draft",
+                                TRASH_ICON,
+                                selected || stop.keyed,
+                                colors,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.discard_project_draft(&discard_project, cx);
+                                },
+                            )),
+                            &stop,
+                            "discard",
                             "Discard draft",
-                            TRASH_ICON,
-                            selected,
                             colors,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.discard_project_draft(&discard_project, cx);
-                        })),
+                            move |this, window, cx| {
+                                this.leave_key_stop(window);
+                                this.discard_project_draft(&key_discard, cx);
+                            },
+                        ),
                     )
+                    .when(stop.ringed, |row| row.child(tree_ring(colors)))
                     .into_any_element(),
             );
         }
@@ -2158,15 +2197,27 @@ impl XdDesktop {
         &mut self,
         colors: ThemeColors,
         id: impl Into<gpui::ElementId>,
+        key: SharedString,
+        depth: usize,
         label: String,
         agent: AgentCli,
         selected: bool,
         token: Option<u64>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // A row of the sidebar's tree, which the arrow keys reach: Enter
+        // opens the chat once it has started; the view's own is open.
+        let stop = self.tree_row(TreeKeyRow::new(key, depth, PROJECT_LIST));
+        let open: KeyRun = Rc::new(move |this, window, cx| {
+            if let Some(token) = token {
+                this.open_starting_chat(token, window, cx);
+            }
+        });
+        let tree_marks = self.tree_marks(&stop, open);
         div()
             .id(id)
             .debug_selector(|| "starting-chat-row".into())
+            .relative()
             .w_full()
             .h(px(CARD_HEIGHT))
             .flex_none()
@@ -2176,7 +2227,11 @@ impl XdDesktop {
             .items_center()
             .gap(px(8.0))
             .rounded(px(RADIUS_TAB))
-            .when(selected, |row| row.bg(rgb(colors.selected_surface)))
+            .when(selected, |row| {
+                row.bg(rgb(colors.selected_surface)).child(
+                    selection_marker(MarkerEdge::Leading, colors).left(px(-SIDEBAR_MARKER_GUTTER)),
+                )
+            })
             .cursor_pointer()
             .when(!selected, |row| {
                 row.hover(|style| style.bg(rgb(colors.surface_high)))
@@ -2186,6 +2241,7 @@ impl XdDesktop {
                     this.open_starting_chat(token, window, cx);
                 }))
             })
+            .children(tree_marks)
             .child(assistant_icon(
                 agent_icon(agent),
                 13.0,
@@ -2210,6 +2266,7 @@ impl XdDesktop {
                     .child(pulse_dot(7.0, colors.working, true))
                     .child("Starting"),
             )
+            .when(stop.ringed, |row| row.child(tree_ring(colors)))
             .into_any_element()
     }
 }
