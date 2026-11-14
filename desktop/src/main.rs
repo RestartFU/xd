@@ -33450,7 +33450,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
                 Message::new(
                     Some(2),
                     "tool",
-                    &format!("context_compaction\n{state}\nCompacting context"),
+                    format!("context_compaction\n{state}\nCompacting context"),
                     None,
                 ),
             ]);
