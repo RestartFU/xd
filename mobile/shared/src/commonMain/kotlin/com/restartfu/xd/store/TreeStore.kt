@@ -136,6 +136,7 @@ internal class TreeStore(
                     snapshotSequence = maxOf(snapshotSequence, result.sequence)
                     val authoritativeSequence = snapshotSequence
                     _state.value = TreeSnapshot(
+                        loaded = true,
                         folders = reply.folders.map {
                             Folder(
                                 id = it.id,

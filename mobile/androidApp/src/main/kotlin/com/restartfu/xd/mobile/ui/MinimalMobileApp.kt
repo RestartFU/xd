@@ -313,13 +313,16 @@ private fun MinimalMobileWorkspace(
     val openChats = sessionChats.filterNot { it.id in hiddenChatIds }
     val activeChat = openChats.firstOrNull { it.id == chatSelections[activeSessionId] } ?: openChats.firstOrNull()
 
-    LaunchedEffect(tree.chats, tree.loading, tree.error) {
+    LaunchedEffect(tree.chats, tree.loading, tree.error, tree.loaded) {
         if (!tree.loading && tree.error == null) {
             stores.retain(tree.chats.map { it.id }.toSet(), sessions.map { it.id }.toSet())
-            // Only once the host has listed sessions: the tree is empty while the
-            // app starts, and that must not drop the edits it is about to bring back.
-            if (sessions.isNotEmpty()) unsavedFiles.retain(sessions.map { it.id }.toSet())
-            if (tree.chats.isNotEmpty()) unsentDrafts.retain(tree.chats.map { it.id }.toSet())
+            // Only once the host's tree has arrived: the tree is empty while the
+            // app starts, and that must not drop the edits it is about to bring
+            // back. A tree that arrived empty does drop them: those chats are gone.
+            if (tree.loaded) {
+                unsavedFiles.retain(sessions.map { it.id }.toSet())
+                unsentDrafts.retain(tree.chats.map { it.id }.toSet())
+            }
         }
     }
     val place = listOf(mobileDestination, activeSessionId, chatSelections, hiddenChatIds)

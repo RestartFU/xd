@@ -44,6 +44,28 @@ class TreeStoreTest {
     }
 
     @Test
+    fun anEmptyTreeFromTheHostIsLoadedUnlikeOneNotYetRead() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(testCredentials()), backgroundScope)
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
+        val store = TreeStore(actor)
+        // Nothing read yet: empty, and not loaded.
+        assertFalse(store.state.value.loaded)
+        val refresh = async { store.refresh() }
+        runCurrent()
+        factory.latest.receive("""{"ok":true,"folders":[],"chats":[],"sessions":[],"_xd_request":2}""")
+        runCurrent()
+        refresh.await()
+        // The host has nothing: still empty, but now that is the host's answer.
+        assertTrue(store.state.value.loaded)
+        assertTrue(store.state.value.chats.isEmpty())
+    }
+
+    @Test
     fun linkedPullRequestsReachEachChat() = runTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(testCredentials()), backgroundScope)
