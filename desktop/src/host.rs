@@ -2558,6 +2558,9 @@ fn spawn_reader(
         .name("xd-host-reader".into())
         .spawn(move || {
             let mut reader = BufReader::new(stream);
+            // Until the host has said something in its own protocol, what
+            // arrives may be whatever started it explaining why it could not.
+            let mut answered = false;
             loop {
                 let mut line = Vec::new();
                 let read = reader
@@ -2600,10 +2603,21 @@ fn spawn_reader(
                     Ok(Some(frame)) => frame,
                     Ok(None) => continue,
                     Err(error) => {
-                        close_connection(&updates, &requests, error.to_string());
+                        let message = (!answered)
+                            .then(|| launcher_output(&line))
+                            .flatten()
+                            .map(|output| {
+                                with_process_errors(
+                                    &launcher_failure(&output),
+                                    process_errors.as_ref(),
+                                )
+                            })
+                            .unwrap_or_else(|| error.to_string());
+                        close_connection(&updates, &requests, message);
                         return;
                     }
                 };
+                answered = true;
                 if requests.closed.load(Ordering::Acquire) {
                     return;
                 }
@@ -2696,12 +2710,60 @@ fn with_process_errors(message: &str, errors: Option<&Arc<Mutex<Vec<u8>>>>) -> S
     let Some(error) = errors
         .and_then(|errors| errors.lock().ok())
         .filter(|errors| !errors.is_empty())
-        .map(|errors| String::from_utf8_lossy(&errors).trim().to_owned())
+        .map(|errors| console_text(&errors))
         .filter(|error| !error.is_empty())
     else {
         return message.to_owned();
     };
     format!("{message}: {error}")
+}
+
+/// Text a program wrote for a person to read, in whichever encoding it used.
+///
+/// `wsl.exe` writes its own messages as UTF-16, where every other byte of
+/// plain text is zero. Read as UTF-8 that is one unreadable character per
+/// letter, which is how "no distribution is installed" used to be shown.
+fn console_text(bytes: &[u8]) -> String {
+    let wide = bytes.len() >= 2
+        && bytes
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .filter(|byte| **byte == 0)
+            .count()
+            * 2
+            >= bytes.len() / 2;
+    let text = if wide {
+        let units = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    text.chars()
+        .filter(|character| !matches!(character, '\0' | '\u{feff}'))
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// The first thing a host process printed, when it is prose and not protocol:
+/// the program asked to start the host saying why it did not.
+fn launcher_output(line: &[u8]) -> Option<String> {
+    let text = console_text(line);
+    (!text.is_empty() && !text.starts_with('{')).then_some(text)
+}
+
+fn launcher_failure(output: &str) -> String {
+    if cfg!(windows) {
+        format!(
+            "WSL could not start xd's Linux host: {output} Install a Linux distribution with \"wsl --install\", finish its first-time setup, and install git and tmux inside it."
+        )
+    } else {
+        format!("The xd host could not start: {output}")
+    }
 }
 
 fn take_draft_attachments(body: &mut Map<String, Value>) -> Option<Vec<Attachment>> {
@@ -2783,6 +2845,43 @@ fn launcher_candidates() -> Vec<PathBuf> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn wsl_messages_are_read_in_the_encoding_wsl_wrote_them() {
+        let message = "Windows Subsystem for Linux has no installed distributions.\r\n";
+        let wide = message
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            super::console_text(&wide),
+            "Windows Subsystem for Linux has no installed distributions."
+        );
+        // A line is cut at the newline's first byte, leaving half a character.
+        assert_eq!(
+            super::console_text(&wide[..wide.len() - 1]),
+            "Windows Subsystem for Linux has no installed distributions."
+        );
+        assert_eq!(super::console_text(message.as_bytes()), message.trim());
+        assert_eq!(
+            super::console_text("xd: Install git ünd tmux\n".as_bytes()),
+            "xd: Install git ünd tmux"
+        );
+        assert_eq!(super::console_text(b""), "");
+    }
+
+    #[test]
+    fn prose_before_the_first_frame_is_the_launcher_explaining_itself() {
+        assert_eq!(
+            super::launcher_output(b"The system cannot find the file specified.\r\n").as_deref(),
+            Some("The system cannot find the file specified.")
+        );
+        // A frame that fails to parse is a protocol error, not a message.
+        assert_eq!(super::launcher_output(b"{\"ok\":tru\n"), None);
+        assert_eq!(super::launcher_output(b"\r\n"), None);
+        let failure = super::launcher_failure("No distribution.");
+        assert!(failure.contains("No distribution."));
+    }
+
     use super::*;
     use crate::local_socket::UnixListener;
     use std::{

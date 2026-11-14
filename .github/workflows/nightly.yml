@@ -296,8 +296,8 @@ jobs:
             xd-nightly-linux-x86_64.tar.gz.sha256
             xd-nightly-macos-*.zip
             xd-nightly-macos-*.zip.sha256
-            xd-nightly-windows-x86_64.zip
-            xd-nightly-windows-x86_64.zip.sha256
+            xd-nightly-windows-x86_64.msi
+            xd-nightly-windows-x86_64.msi.sha256
             scripts/install.sh
             scripts/install-macos.sh
           )
@@ -333,9 +333,10 @@ jobs:
 
           Windows x86_64:
 
-          Extract \`xd-nightly-windows-x86_64.zip\` and run \`xd.exe\`.
-          Local sessions require WSL with git and tmux installed. The included
-          README covers setup; the browser uses Microsoft's WebView2 Runtime.
+          Download and run \`xd-nightly-windows-x86_64.msi\`. It installs xd
+          Nightly for your account, beside a stable xd if you have one.
+          Local sessions require WSL with git and tmux installed; the README
+          covers setup. The browser uses Microsoft's WebView2 Runtime.
 
           Or unpack it yourself:
 

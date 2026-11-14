@@ -2016,7 +2016,7 @@ impl StateStore {
         let quota = read_chat_quota(&transaction, chat_id)?;
         if !quota.reached && quota.spent() && !working {
             transaction.execute(
-                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                "UPDATE chats SET quota_reached = 1, quota_paused = CASE WHEN quota_reached = 1 THEN quota_paused ELSE paused = 0 END, paused = 1 WHERE id = ?",
                 [chat_id],
             )?;
             paused = true;
@@ -3024,7 +3024,7 @@ impl StateStore {
         let quota = read_chat_quota(&transaction, chat_id)?;
         if !paused && !quota.reached && quota.spent() {
             transaction.execute(
-                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                "UPDATE chats SET quota_reached = 1, quota_paused = CASE WHEN quota_reached = 1 THEN quota_paused ELSE paused = 0 END, paused = 1 WHERE id = ?",
                 [chat_id],
             )?;
             paused = true;
@@ -3290,9 +3290,10 @@ impl StateStore {
             // A lower default applies at once: an idle chat that has used it
             // already waits for a new quota. The meter stops one at work.
             transaction.execute(
-                "UPDATE chats SET quota_reached = 1, paused = 1 \
+                "UPDATE chats SET quota_reached = 1, quota_paused = CASE WHEN quota_reached = 1 THEN quota_paused ELSE paused = 0 END, paused = 1 \
                  WHERE quota_own = 0 AND quota_reached = 0 AND host_working = 0 \
-                 AND quota_used + 1e-9 >= ?",
+                 AND quota_used + 1e-9 >= ? AND NOT EXISTS \
+                 (SELECT 1 FROM chats AS parent WHERE parent.id = chats.parent_chat_id)",
                 [percent as f64],
             )?;
         }
@@ -3307,10 +3308,11 @@ impl StateStore {
     }
 
     /// Counts `amount` percentage points of a usage limit, used since
-    /// `since_ms`, against the chat's quota. Nothing is counted for a chat
-    /// without a quota, one already stopped at it, or one whose count started
-    /// again after `since_ms`, which that use belongs before. Returns the
-    /// quota as it now stands when it counted.
+    /// `since_ms`, against the chat's quota, which for an agent another chat
+    /// started is that chat's. Nothing is counted for a chat without a quota,
+    /// one already stopped at it, or one whose count started again after
+    /// `since_ms`, which that use belongs before. Returns the quota as it now
+    /// stands when it counted.
     pub fn add_quota_use(
         &self,
         chat_id: &str,
@@ -3323,17 +3325,18 @@ impl StateStore {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let quota = read_chat_quota(&transaction, chat_id)?;
-        let counted_from = transaction.query_row(
-            "SELECT quota_since_ms FROM chats WHERE id = ?",
-            [chat_id],
-            |row| row.get::<_, i64>(0),
+        let owner = quota_owner(&transaction, chat_id)?;
+        let (counted_from, owner_reached) = transaction.query_row(
+            "SELECT quota_since_ms, quota_reached FROM chats WHERE id = ?",
+            [&owner],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
         )?;
-        if quota.percent.is_none() || quota.reached || counted_from > since_ms {
+        if quota.percent.is_none() || quota.reached || owner_reached || counted_from > since_ms {
             return Ok(None);
         }
         transaction.execute(
             "UPDATE chats SET quota_used = quota_used + ? WHERE id = ?",
-            params![amount, chat_id],
+            params![amount, owner],
         )?;
         let quota = read_chat_quota(&transaction, chat_id)?;
         transaction.commit()?;
@@ -3342,9 +3345,12 @@ impl StateStore {
 
     /// Gives a chat its own quota, `percent: null` for none, or with
     /// `inherit: true` hands it back to the host's default. Either way its
-    /// count starts again. Returns whether the chat had stopped at its quota,
-    /// in which case it is left paused for the caller to continue.
-    pub fn set_chat_quota(&self, request: &Value) -> Result<bool, StorageError> {
+    /// count starts again. An agent another chat started shares that chat's
+    /// quota, so asking for one of its agents changes that chat's. Returns
+    /// the chats sharing the quota that stopping at it had paused, `chat`
+    /// first, each left paused for the caller to continue. One the user had
+    /// paused before is no longer stopped, but stays paused.
+    pub fn set_chat_quota(&self, request: &Value) -> Result<Vec<String>, StorageError> {
         let chat_id = required_string(request, "chat", "set-chat-quota needs a chat id")?;
         let (own, percent) = if request.get("inherit").and_then(Value::as_bool) == Some(true) {
             (false, None)
@@ -3358,21 +3364,45 @@ impl StateStore {
         };
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let reached = transaction
-            .query_row(
-                "SELECT quota_reached FROM chats WHERE id = ?",
-                [chat_id],
+        let owner = quota_owner(&transaction, chat_id)?;
+        let mut stopped = Vec::new();
+        for member in quota_family(&transaction, &owner)? {
+            // A chat the user paused before it stopped at its quota stays
+            // paused: the new quota only lifts the stop.
+            let paused_by_quota = transaction.query_row(
+                "SELECT quota_reached AND quota_paused FROM chats WHERE id = ?",
+                [&member],
                 |row| row.get::<_, bool>(0),
-            )
-            .optional()?
-            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+            )?;
+            if paused_by_quota {
+                stopped.push(member);
+            }
+        }
+        if let Some(at) = stopped.iter().position(|member| member == chat_id) {
+            let requested = stopped.remove(at);
+            stopped.insert(0, requested);
+        }
         transaction.execute(
             "UPDATE chats SET quota_own = ?, quota_percent = ?, quota_used = 0, \
              quota_reached = 0, quota_since_ms = ? WHERE id = ?",
-            params![own, percent, crate::accounts::now_ms(), chat_id],
+            params![own, percent, crate::accounts::now_ms(), owner],
+        )?;
+        // Its agents stopped with it go on with it; they stay paused until
+        // the caller continues them.
+        transaction.execute(
+            "UPDATE chats SET quota_reached = 0 WHERE parent_chat_id = ?",
+            [&owner],
         )?;
         transaction.commit()?;
-        Ok(reached)
+        Ok(stopped)
+    }
+
+    /// The chats that share `chat_id`'s quota: the chat that owns it, then
+    /// every agent it started.
+    pub fn quota_family(&self, chat_id: &str) -> Result<Vec<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let owner = quota_owner(&database, chat_id)?;
+        quota_family(&database, &owner)
     }
 
     /// Marks a chat stopped at its quota, which holds it like a paused chat.
@@ -3390,7 +3420,7 @@ impl StateStore {
             return Ok(false);
         }
         transaction.execute(
-            "UPDATE chats SET quota_reached = 1, paused = 1, \
+            "UPDATE chats SET quota_reached = 1, quota_paused = CASE WHEN quota_reached = 1 THEN quota_paused ELSE paused = 0 END, paused = 1, \
              turn_resumable = CASE WHEN host_working = 1 OR ? THEN 1 ELSE turn_resumable END \
              WHERE id = ?",
             params![background, chat_id],
@@ -3416,7 +3446,7 @@ impl StateStore {
         for chat_id in candidates {
             if read_chat_quota(&transaction, &chat_id)?.spent() {
                 transaction.execute(
-                    "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                    "UPDATE chats SET quota_reached = 1, quota_paused = CASE WHEN quota_reached = 1 THEN quota_paused ELSE paused = 0 END, paused = 1 WHERE id = ?",
                     [&chat_id],
                 )?;
                 marked.push(chat_id);
@@ -3831,7 +3861,7 @@ impl StateStore {
         let quota = read_chat_quota(&transaction, chat_id)?;
         if !quota.reached && quota.spent() && !working {
             transaction.execute(
-                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                "UPDATE chats SET quota_reached = 1, quota_paused = CASE WHEN quota_reached = 1 THEN quota_paused ELSE paused = 0 END, paused = 1 WHERE id = ?",
                 [chat_id],
             )?;
             paused = true;
@@ -3888,7 +3918,7 @@ impl StateStore {
         let quota = read_chat_quota(&transaction, chat_id)?;
         if free && !quota.reached && quota.spent() {
             transaction.execute(
-                "UPDATE chats SET quota_reached = 1, paused = 1 WHERE id = ?",
+                "UPDATE chats SET quota_reached = 1, quota_paused = CASE WHEN quota_reached = 1 THEN quota_paused ELSE paused = 0 END, paused = 1 WHERE id = ?",
                 [chat_id],
             )?;
             free = false;
@@ -7528,6 +7558,17 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
             [],
         )?;
     }
+    // Whether stopping at its quota is what paused a chat stopped there,
+    // rather than the user before it. Only such a chat goes on by itself
+    // once it has a new quota; one the user paused stays paused. Set each
+    // time a chat stops at its quota. Chats stopped before this was kept
+    // were all taken up by a new quota, so it starts as set.
+    if !columns.contains("quota_paused") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN quota_paused INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
     // The chat whose agent started this one through xd's start_agent tool.
     if !columns.contains("parent_chat_id") {
         database.execute("ALTER TABLE chats ADD COLUMN parent_chat_id TEXT", [])?;
@@ -7865,13 +7906,19 @@ pub struct ChatQuota {
     /// The chat has its own quota rather than the host's default.
     pub own: bool,
     pub reached: bool,
+    /// The chat whose quota this agent shares has stopped at it, so the
+    /// agent has nothing left either, whatever the numbers say now: a raised
+    /// default does not let the lead go on, nor its agents beside it.
+    pub shared_reached: bool,
 }
 
 impl ChatQuota {
     /// The chat has used all of its quota.
     pub fn spent(&self) -> bool {
-        self.percent
-            .is_some_and(|percent| self.used + 1e-9 >= percent as f64)
+        self.shared_reached
+            || self
+                .percent
+                .is_some_and(|percent| self.used + 1e-9 >= percent as f64)
     }
 }
 
@@ -7904,22 +7951,62 @@ fn read_default_quota(database: &Connection) -> Result<Option<i64>, StorageError
         .filter(|percent| (1..=100).contains(percent)))
 }
 
-fn read_chat_quota(database: &Connection, chat_id: &str) -> Result<ChatQuota, StorageError> {
-    let (own, percent, used, reached) = database
+/// The chat whose quota `chat_id` counts against: the chat that started it
+/// as an agent, while that chat is still there, or else itself. Agents start
+/// no agents of their own, so this is never more than one step.
+fn quota_owner(database: &Connection, chat_id: &str) -> Result<String, StorageError> {
+    let parent = database
         .query_row(
-            "SELECT quota_own, quota_percent, quota_used, quota_reached FROM chats WHERE id = ?",
+            "SELECT parent.id FROM chats AS child \
+             LEFT JOIN chats AS parent ON parent.id = child.parent_chat_id \
+             WHERE child.id = ?",
             [chat_id],
-            |row| {
-                Ok((
-                    row.get::<_, bool>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, bool>(3)?,
-                ))
-            },
+            |row| row.get::<_, Option<String>>(0),
         )
         .optional()?
         .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+    Ok(parent.unwrap_or_else(|| chat_id.to_owned()))
+}
+
+/// `owner` and every agent it started, which share its quota.
+fn quota_family(database: &Connection, owner: &str) -> Result<Vec<String>, StorageError> {
+    let mut statement = database
+        .prepare("SELECT id FROM chats WHERE parent_chat_id = ? ORDER BY created_at, rowid")?;
+    let mut family = vec![owner.to_owned()];
+    family.extend(
+        statement
+            .query_map([owner], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(family)
+}
+
+/// The quota that applies to a chat. An agent another chat started shares
+/// that chat's quota, and its use counts there; whether it stopped at the
+/// quota is its own.
+fn read_chat_quota(database: &Connection, chat_id: &str) -> Result<ChatQuota, StorageError> {
+    let reached = database
+        .query_row(
+            "SELECT quota_reached FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+    let owner = quota_owner(database, chat_id)?;
+    let (own, percent, used, owner_reached) = database.query_row(
+        "SELECT quota_own, quota_percent, quota_used, quota_reached FROM chats WHERE id = ?",
+        [&owner],
+        |row| {
+            Ok((
+                row.get::<_, bool>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        },
+    )?;
+    let shared_reached = owner != chat_id && owner_reached;
     let percent = if own {
         percent
     } else {
@@ -7930,6 +8017,7 @@ fn read_chat_quota(database: &Connection, chat_id: &str) -> Result<ChatQuota, St
         used,
         own,
         reached,
+        shared_reached,
     })
 }
 
@@ -17803,10 +17891,11 @@ mod tests {
                 .set_chat_quota(&json!({"chat": "chat", "percent": 0}))
                 .is_err()
         );
-        assert!(
+        assert_eq!(
             store
                 .set_chat_quota(&json!({"chat": "chat", "percent": 20}))
-                .unwrap()
+                .unwrap(),
+            ["chat"]
         );
         let chat = store.chat("chat").unwrap();
         assert!(chat.get("quota_reached").is_none());
@@ -17821,9 +17910,10 @@ mod tests {
 
         // No limit for this chat, then the host's default again.
         assert!(
-            !store
+            store
                 .set_chat_quota(&json!({"chat": "chat", "percent": null}))
                 .unwrap()
+                .is_empty()
         );
         assert!(store.chat("chat").unwrap().get("quota").is_none());
         assert_eq!(store.add_quota_use("chat", 50.0, i64::MAX).unwrap(), None);
@@ -17845,6 +17935,101 @@ mod tests {
         assert!(store.stop_for_quota("chat", false).unwrap());
         assert_eq!(store.chat("chat").unwrap()["resumable"], false);
         assert_eq!(store.chat("chat").unwrap()["quota_reached"], true);
+    }
+
+    #[test]
+    fn agents_count_against_the_quota_of_the_chat_that_started_them() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        for chat in ["lead", "agent", "other-agent"] {
+            fixture.insert_chat(&database, chat, "folder");
+        }
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let run = |sql: &str| {
+            store.database.lock().unwrap().execute(sql, []).unwrap();
+        };
+        run("UPDATE chats SET parent_chat_id = 'lead' WHERE id IN ('agent', 'other-agent')");
+        store
+            .set_chat_quota(&json!({"chat": "lead", "percent": 10}))
+            .unwrap();
+        assert_eq!(
+            store.quota_family("agent").unwrap(),
+            ["lead", "agent", "other-agent"]
+        );
+
+        // What an agent uses is the lead's, and every agent sees the total.
+        store.add_quota_use("lead", 3.0, i64::MAX).unwrap();
+        let quota = store
+            .add_quota_use("agent", 4.0, i64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!((quota.percent, quota.used), (Some(10), 7.0));
+        assert_eq!(store.chat_quota("lead").unwrap().used, 7.0);
+        assert_eq!(
+            store.chat("other-agent").unwrap()["quota"],
+            json!({"percent": 10, "used": 7.0, "own": true})
+        );
+        assert!(
+            store
+                .add_quota_use("other-agent", 3.0, i64::MAX)
+                .unwrap()
+                .unwrap()
+                .spent()
+        );
+
+        // The shared quota spent, each of them stops at it.
+        assert!(store.stop_for_quota("agent", false).unwrap());
+        assert!(store.stop_for_quota("lead", false).unwrap());
+        assert!(store.chat_quota("agent").unwrap().reached);
+        assert!(!store.chat_quota("other-agent").unwrap().reached);
+        assert_eq!(
+            store.add_quota_use("other-agent", 1.0, i64::MAX).unwrap(),
+            None
+        );
+        // A raised quota does not let the stopped lead go on by itself, nor
+        // its agents beside it, which would work uncounted.
+        run("UPDATE chats SET quota_percent = 90 WHERE id = 'lead'");
+        assert!(!store.chat_quota("lead").unwrap().spent());
+        assert!(store.chat_quota("other-agent").unwrap().spent());
+        // One the user paused first stops at the quota too, but its pause
+        // stays the user's.
+        assert!(store.pause_chat("other-agent", true).unwrap());
+        assert!(store.stop_for_quota("other-agent", false).unwrap());
+        assert!(store.chat_quota("other-agent").unwrap().reached);
+
+        // A new quota given from an agent is the lead's, and lets every chat
+        // that stopped at it go on, the one asked for first.
+        run("UPDATE chats SET turn_resumable = 1 WHERE id IN ('lead', 'agent')");
+        assert_eq!(
+            store
+                .set_chat_quota(&json!({"chat": "agent", "percent": 20}))
+                .unwrap(),
+            ["agent", "lead"]
+        );
+        assert_eq!(
+            store.chat("lead").unwrap()["quota"],
+            json!({"percent": 20, "used": 0.0, "own": true})
+        );
+        assert!(!store.chat_quota("agent").unwrap().reached);
+        assert!(store.chat_is_paused("agent").unwrap());
+        let other = store.chat_quota("other-agent").unwrap();
+        assert!(!other.reached && !other.spent());
+        assert!(store.chat_is_paused("other-agent").unwrap());
+        // Each of them, not only the one asked for, can continue its turn.
+        for chat in ["lead", "agent"] {
+            store
+                .prepare_resume(&json!({"chat": chat, "text": CONTINUE_PROMPT}))
+                .unwrap();
+            assert!(!store.chat_is_paused(chat).unwrap());
+        }
+
+        // An agent whose lead is gone keeps a quota of its own.
+        run("DELETE FROM chats WHERE id = 'lead'");
+        assert_eq!(store.quota_family("agent").unwrap(), ["agent"]);
+        assert_eq!(store.chat_quota("agent").unwrap().percent, None);
     }
 
     /// Sessions from before accounts were kept are filed once, under the login

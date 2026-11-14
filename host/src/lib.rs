@@ -81,7 +81,7 @@ use repository_monitor::RepositoryMonitor;
 use runtime::{LiveTurn, TurnRuntime};
 use secrets::SecretsStore;
 use self_update::SelfUpdate;
-pub use self_update::installed_host_executable;
+pub use self_update::{CANNOT_RESTART, installed_host_executable};
 use settlement::AutoSettler;
 pub use storage::ChatToResume;
 use storage::{Continuation, SendDisposition};
@@ -2015,7 +2015,9 @@ impl Engine {
     }
 
     /// Gives a chat a quota of its own, or hands it back to the default, and
-    /// continues it if it had stopped at its quota.
+    /// continues it if it had stopped at its quota. An agent another chat
+    /// started shares that chat's quota, so every chat sharing it that
+    /// stopped at it goes on too.
     fn set_chat_quota(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
@@ -2032,17 +2034,25 @@ impl Engine {
             Ok(gate) => gate,
             Err(error) => return error_reply(error),
         };
-        let Ok(_execution) = gate.lock() else {
+        let Ok(execution) = gate.lock() else {
             return error_reply("This session's agent state is unavailable.");
         };
-        let reached = match store.set_chat_quota(request) {
-            Ok(reached) => reached,
+        let stopped = match store.set_chat_quota(request) {
+            Ok(stopped) => stopped,
             Err(error) => return error_reply(error),
         };
-        self.events
-            .publish(json!({"event": "changed", "chat": chat_id}));
+        for chat in std::iter::once(chat_id).chain(stopped.iter().map(String::as_str)) {
+            self.events
+                .publish(json!({"event": "changed", "chat": chat}));
+        }
         self.events.publish(json!({"event": "tree"}));
+        let reached = stopped.first().is_some_and(|first| first == chat_id);
         let resumed = reached && self.resume_paused_chat(chat_id, &|_| true, true);
+        drop(execution);
+        // The others each under their own gate, taken one at a time.
+        for other in stopped.iter().filter(|other| *other != chat_id) {
+            self.resume_paused_chat(other, &|_| true, false);
+        }
         self.wake_quota_meter();
         json!({"ok": true, "resumed": resumed})
     }
@@ -4592,6 +4602,86 @@ read next
         assert_eq!(store.chat(&chat).unwrap()["queue"], json!([]));
 
         engine.runtime.as_ref().unwrap().discard_chat(&chat);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An agent's chat can steer one of its agents mid-turn, as the user
+    /// steers a queued message, instead of waiting for the turn to end.
+    #[cfg(unix)]
+    #[test]
+    fn a_steered_agent_message_goes_into_the_running_turn() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("xd-steer-agent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = root.join("claude");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+case "$*" in *--strict-mcp-config*) exit 0;; esac
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Begun."}}}'
+read steer
+echo '{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}'
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Paused."}]}}'
+echo '{"type":"result","terminal_reason":"completed","result":"Paused."}'
+read next
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+        let (engine, parent) = steer_engine(&root);
+        let store = engine.store.as_ref().unwrap();
+        let wait_for = |what: &str, ready: &dyn Fn() -> bool| {
+            for _ in 0..400 {
+                if ready() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            panic!("timed out waiting for {what}");
+        };
+        let started = engine.dispatch(json!({"op": "start-agent", "chat": parent,
+            "prompt": "Long job", "workspace": "this_worktree", "notify": false}));
+        assert_eq!(started["ok"], true, "{started}");
+        let child = started["agent"].as_str().unwrap().to_owned();
+        wait_for("the agent to begin", &|| {
+            engine
+                .runtime
+                .as_ref()
+                .unwrap()
+                .live_turn(&child)
+                .is_some_and(|turn| turn.segment == "Begun.")
+        });
+
+        let reply = engine.dispatch(json!({"op": "message-agent", "chat": parent,
+            "agent": child, "text": "Pause now", "steer": true}));
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["steered"], true, "{reply}");
+        wait_for("the turn to end", &|| {
+            store.chat(&child).unwrap()["working"] == false
+        });
+        let messages = store.messages(&json!({"chat": child})).unwrap();
+        let rows = messages["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["role"] != "duration")
+            .map(|row| row["content"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, ["Long job", "Begun.", "Pause now", "Paused."]);
+        assert_eq!(store.chat(&child).unwrap()["queue"], json!([]));
+
+        for chat in [&parent, &child] {
+            engine.runtime.as_ref().unwrap().discard_chat(chat);
+        }
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
         unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
         let _ = std::fs::remove_dir_all(root);

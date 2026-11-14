@@ -1746,6 +1746,299 @@ fn an_app_bridge_holds_a_busy_daemon_while_it_waits_to_restart_it() {
     );
 }
 
+/// What the daemon the Windows app left in WSL answers when asked to restart.
+#[derive(Clone, Copy, PartialEq)]
+enum AppDaemon {
+    /// A version from before it could: it refuses, having checked it is idle.
+    CannotRestart,
+    /// Any version with chats, agents or terminals at work.
+    Busy,
+    /// This version, idle: it restarts into the copy the app replaced.
+    Restarts,
+}
+
+/// The daemon the Windows app's previous version left running inside WSL: it
+/// belongs to no installation, so it supports no update of its own.
+struct StaleAppDaemon {
+    root: PathBuf,
+    socket: PathBuf,
+    requests: Arc<Mutex<Vec<Value>>>,
+    legacy: Child,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+impl StaleAppDaemon {
+    fn start(daemon: AppDaemon) -> Self {
+        Self::start_as(daemon, true)
+    }
+    /// `stops_with_app` is whether the app started the daemon.
+    fn start_as(daemon: AppDaemon, stops_with_app: bool) -> Self {
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("xd-stale-app-{}", uuid::Uuid::new_v4()));
+        let data = root.join("data");
+        fs::create_dir_all(data.join("Workspaces")).unwrap();
+        fs::create_dir_all(data.join("runtime/v1")).unwrap();
+        let data = fs::canonicalize(data).unwrap();
+        // Where the Windows app copies its host before running it.
+        let host = data.join("runtime/v1/xd-host");
+        fs::hard_link(env!("CARGO_BIN_EXE_xd-host"), &host).unwrap();
+        // A real process started from that path stands in for the old
+        // daemon's command line. Its own database keeps it out of the way.
+        let other = root.join("other");
+        fs::create_dir_all(other.join("Workspaces")).unwrap();
+        let legacy = Command::new(&host)
+            .arg("daemon")
+            .arg("--database")
+            .arg(other.join("chats.db"))
+            .arg("--workspaces")
+            .arg(other.join("Workspaces"))
+            .env("HOME", &root)
+            .env("XD_DISABLE_AUTO_UPDATE", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(data.join("chats.db").as_os_str().as_encoded_bytes())
+        );
+        let runtime = PathBuf::from(format!("/tmp/xd-{}", unsafe { libc::geteuid() }));
+        fs::create_dir_all(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = runtime.join(format!("daemon-{}.sock", &digest[..24]));
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let info = json!({
+            "ok": true,
+            "version": "0.0.0-stale",
+            "protocol": 2,
+            "build": "stale",
+            "pid": legacy.id(),
+            "workspaces": data.join("Workspaces"),
+            // Earlier versions name no executable outside an installation.
+            "executable": (daemon == AppDaemon::Restarts).then(|| host.clone()),
+            "stops_with_app": stops_with_app,
+        });
+        let thread = {
+            let (requests, stop, socket) = (requests.clone(), stop.clone(), socket.clone());
+            thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    let Ok((stream, _)) = listener.accept() else {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut writer = stream.try_clone().unwrap();
+                    for line in BufReader::new(stream).lines() {
+                        let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
+                        requests.lock().unwrap().push(request.clone());
+                        let restart = request["action"] == "restart";
+                        let restarting = restart && daemon == AppDaemon::Restarts;
+                        let stopping = request["op"] == "daemon-stop";
+                        let mut reply = match request["op"].as_str() {
+                            Some("daemon-info") => info.clone(),
+                            Some("app-client") | Some("daemon-stop") => json!({"ok": true}),
+                            Some("host-update") if restart && daemon == AppDaemon::Busy => json!({
+                                "ok": false,
+                                "error": "Close terminal tabs and wait for active chats and their background agents and shells to finish before restarting for an update.",
+                            }),
+                            // The text released daemons answer with, spelled
+                            // out: the bridge has to recognise exactly this.
+                            Some("host-update") if restart && !restarting => json!({
+                                "ok": false,
+                                "error": "This host's installation cannot restart itself.",
+                            }),
+                            Some("host-update") => {
+                                json!({"ok": true, "supported": false, "state": "idle"})
+                            }
+                            _ => json!({"ok": false}),
+                        };
+                        reply["_xd_request"] = request["_xd_request"].clone();
+                        writeln!(writer, "{reply}").unwrap();
+                        if stopping || restarting {
+                            stop.store(true, Ordering::Release);
+                            let _ = fs::remove_file(&socket);
+                            return;
+                        }
+                    }
+                }
+            })
+        };
+        Self {
+            root,
+            socket,
+            requests,
+            legacy,
+            stop,
+            thread: Some(thread),
+        }
+    }
+    fn host(&self) -> PathBuf {
+        fs::canonicalize(self.root.join("data/runtime/v1/xd-host")).unwrap()
+    }
+    /// The bridge the Windows app runs from the copy it has just replaced.
+    fn bridge(&self) -> Child {
+        Command::new(self.host())
+            .args(["stdio", "--data"])
+            .arg(self.root.join("data"))
+            .env("HOME", &self.root)
+            .env("SHELL", "/bin/sh")
+            .env("XD_DISABLE_AUTO_UPDATE", "1")
+            .env("XD_APP_BRIDGE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+    fn asked(&self, operation: &str) -> usize {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request["op"] == operation)
+            .count()
+    }
+}
+impl Drop for StaleAppDaemon {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.thread.take().unwrap().join();
+        let _ = self.legacy.kill();
+        let _ = self.legacy.wait();
+        let _ = fs::remove_file(&self.socket);
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Runs the app's bridge against the stale daemon until this build's daemon
+/// answers through it, and returns that daemon's description.
+fn app_bridge_reaches_this_build(stale: &StaleAppDaemon) -> Value {
+    let mut bridge = stale.bridge();
+    let mut stdin = bridge.stdin.take().unwrap();
+    let mut stdout = BufReader::new(bridge.stdout.take().unwrap());
+    writeln!(stdin, "{}", json!({"op":"daemon-info","_xd_request":1})).unwrap();
+    let info = loop {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).unwrap() == 0 {
+            let mut error = String::new();
+            bridge
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut error)
+                .unwrap();
+            panic!("bridge closed: {error}");
+        }
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        if frame["_xd_request"] == 1 {
+            break frame;
+        }
+    };
+    // This build's daemon answers now, and still stops with the app.
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"), "{info}");
+    assert_eq!(info["stops_with_app"], true, "{info}");
+    // It runs from the copy the app replaced, and can restart from it later.
+    assert_eq!(info["executable"], json!(stale.host()), "{info}");
+    writeln!(stdin, "{}", json!({"op":"daemon-stop"})).unwrap();
+    bridge.wait().unwrap();
+    info
+}
+
+#[test]
+fn the_windows_apps_bridge_replaces_the_idle_daemon_its_last_version_left_in_wsl() {
+    let stale = StaleAppDaemon::start(AppDaemon::CannotRestart);
+    app_bridge_reaches_this_build(&stale);
+    // The old daemon was asked to stop, once, after saying it was idle.
+    assert_eq!(stale.asked("daemon-stop"), 1);
+}
+
+#[test]
+fn a_daemon_of_this_version_left_in_wsl_restarts_itself_and_is_never_stopped() {
+    let stale = StaleAppDaemon::start(AppDaemon::Restarts);
+    app_bridge_reaches_this_build(&stale);
+    assert_eq!(stale.asked("daemon-stop"), 0);
+}
+
+#[test]
+fn a_daemon_the_windows_app_started_restarts_from_the_apps_copy() {
+    // The real daemon this time: the stand-in only gets out of the way.
+    let stale = StaleAppDaemon::start(AppDaemon::Restarts);
+    let ask = |bridge: &mut Child, request: Value| -> Value {
+        let stdin = bridge.stdin.as_mut().unwrap();
+        writeln!(stdin, "{request}").unwrap();
+        let mut stdout = BufReader::new(bridge.stdout.as_mut().unwrap());
+        loop {
+            let mut line = String::new();
+            assert_ne!(stdout.read_line(&mut line).unwrap(), 0, "bridge closed");
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            if frame["_xd_request"] == request["_xd_request"] {
+                break frame;
+            }
+        }
+    };
+    let mut bridge = stale.bridge();
+    let before = ask(&mut bridge, json!({"op":"daemon-info","_xd_request":1}));
+    assert_eq!(before["version"], env!("CARGO_PKG_VERSION"), "{before}");
+    let restart = ask(
+        &mut bridge,
+        json!({"op":"host-update","action":"restart","_xd_request":2}),
+    );
+    assert_eq!(restart["ok"], true, "{restart}");
+    // The daemon re-executes, which ends this connection and the bridge.
+    bridge.wait().unwrap();
+
+    let mut bridge = stale.bridge();
+    let after = ask(&mut bridge, json!({"op":"daemon-info","_xd_request":1}));
+    // Re-executed in place: the same process, started as it was before.
+    assert_eq!(after["pid"], before["pid"], "{after}");
+    assert_eq!(after["executable"], json!(stale.host()), "{after}");
+    assert_eq!(after["stops_with_app"], true, "{after}");
+    ask(&mut bridge, json!({"op":"daemon-stop","_xd_request":2}));
+    bridge.wait().unwrap();
+}
+
+#[test]
+fn the_windows_apps_bridge_leaves_a_busy_daemon_in_wsl_to_finish_its_work() {
+    let stale = StaleAppDaemon::start(AppDaemon::Busy);
+    let output = stale.bridge().wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("chats, their background agents and shells, or terminals are active"),
+        "{error}"
+    );
+    assert_eq!(
+        stale.asked("daemon-stop"),
+        0,
+        "a busy daemon is never stopped"
+    );
+}
+
+#[test]
+fn the_windows_apps_bridge_never_stops_a_daemon_someone_started_by_hand() {
+    // Idle, and running from the app's own copy, but not the app's to stop.
+    let stale = StaleAppDaemon::start_as(AppDaemon::CannotRestart, false);
+    let output = stale.bridge().wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("different xd daemon version"), "{error}");
+    assert_eq!(stale.asked("daemon-stop"), 0);
+    assert_eq!(
+        stale
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request["action"] == "restart")
+            .count(),
+        0,
+        "nor is it asked to restart"
+    );
+}
+
 fn assert_bridge_leaves_running(stale: &StaleDaemon, host: &Path) {
     let error = stale.rejection(host);
     assert_eq!(stale.restart_requests(), 0);

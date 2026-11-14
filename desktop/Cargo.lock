@@ -8795,12 +8795,13 @@ checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
 
 [[package]]
 name = "xd-desktop"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "arboard",
  "async-channel 2.5.0",
  "base64 0.22.1",
  "cef",
+ "embed-resource",
  "futures-util",
  "gpui",
  "iana-time-zone",
@@ -8813,6 +8814,7 @@ dependencies = [
  "thiserror 2.0.20",
  "unicode-segmentation",
  "url",
+ "windows 0.61.3",
  "wry",
  "x11rb",
  "xd-terminal",
@@ -8829,7 +8831,7 @@ dependencies = [
 
 [[package]]
 name = "xd-transport"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "base64 0.22.1",
  "rustls",
