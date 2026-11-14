@@ -3337,6 +3337,84 @@ fn key_action_stop(
         })
 }
 
+/// What a delegated agent's Background or Stop asks of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentVerb {
+    Background,
+    Stop,
+}
+
+impl AgentVerb {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Background => "Background",
+            Self::Stop => "Stop",
+        }
+    }
+
+    /// Its name under the pointer and the ring.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Background => "Let this agent run in the background",
+            Self::Stop => "Stop this agent",
+        }
+    }
+
+    fn action(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+/// A delegated agent's Background or Stop, built once for its transcript
+/// card and its tab: a Tab stop (where `keys` are at hand) that sends the
+/// same `ControlSubagent` as a click, named under the pointer and the ring.
+fn agent_action_button(
+    id: gpui::ElementId,
+    stop: SharedString,
+    verb: AgentVerb,
+    key: String,
+    keys: Option<&KeyTargets>,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    let control = ControlSubagent {
+        key,
+        action: verb.action().to_owned(),
+    };
+    key_action_stop(
+        div().id(id),
+        keys,
+        stop,
+        verb.name(),
+        RingAt::Around(FOCUS_RING_RADIUS),
+        colors,
+        control.clone(),
+    )
+    .flex_none()
+    .h(hit_px(HIT_MIN))
+    .px(px(8.0))
+    .flex()
+    .items_center()
+    .rounded(px(RADIUS_CONTROL))
+    .border_1()
+    .border_color(rgb(colors.control_border))
+    .cursor_pointer()
+    .text_size(text_px(TEXT_LABEL))
+    .font_weight(FontWeight::MEDIUM)
+    .text_color(rgb(match verb {
+        AgentVerb::Background => colors.muted,
+        AgentVerb::Stop => colors.danger,
+    }))
+    .hover(|style| style.bg(rgb(colors.surface_high)))
+    .on_click(move |_, window, cx| {
+        cx.stop_propagation();
+        window.dispatch_action(Box::new(control.clone()), cx);
+    })
+    .child(verb.label())
+}
+
 /// What a card's disclosure says it does, under the pointer and the ring.
 fn details_label(expanded: bool) -> &'static str {
     if expanded {
@@ -22840,66 +22918,22 @@ impl XdDesktop {
         .when(
             pending.is_none() && (view.can_stop() || view.can_background()),
             |header| {
-                let action =
-                    |id: &'static str, label: &'static str, verb: &'static str, tone: u32| {
-                        let key = view.key.clone();
-                        key_action_stop(
-                            div().id((id, index)),
-                            keys,
-                            format!("{id}:{index}"),
-                            if verb == "stop" {
-                                "Stop this agent"
-                            } else {
-                                "Let this agent run in the background"
-                            },
-                            RingAt::Around(FOCUS_RING_RADIUS),
-                            colors,
-                            ControlSubagent {
-                                key: key.clone(),
-                                action: verb.to_owned(),
-                            },
-                        )
-                        .flex_none()
-                        .h(hit_px(HIT_MIN))
-                        .px(px(8.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(RADIUS_CONTROL))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .cursor_pointer()
-                        .text_size(text_px(TEXT_LABEL))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(tone))
-                        .hover(|style| style.bg(rgb(colors.surface_high)))
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            window.dispatch_action(
-                                Box::new(ControlSubagent {
-                                    key: key.clone(),
-                                    action: verb.to_owned(),
-                                }),
-                                cx,
-                            );
-                        })
-                        .child(label)
-                    };
+                let action = |id: &'static str, verb: AgentVerb| {
+                    agent_action_button(
+                        (id, index).into(),
+                        format!("{id}:{index}").into(),
+                        verb,
+                        view.key.clone(),
+                        keys,
+                        colors,
+                    )
+                };
                 header
                     .when(view.can_background(), |header| {
-                        header.child(action(
-                            "native-subagent-background",
-                            "Background",
-                            "background",
-                            colors.muted,
-                        ))
+                        header.child(action("native-subagent-background", AgentVerb::Background))
                     })
                     .when(view.can_stop(), |header| {
-                        header.child(action(
-                            "native-subagent-stop",
-                            "Stop",
-                            "stop",
-                            colors.danger,
-                        ))
+                        header.child(action("native-subagent-stop", AgentVerb::Stop))
                     })
             },
         )
@@ -23715,33 +23749,17 @@ impl XdDesktop {
             "codex" => Some(CODEX_ICON),
             _ => None,
         };
-        let action = |id: &'static str, label: &'static str, verb: &'static str, tone: u32| {
-            let key = view.key.clone();
-            div()
-                .id(id)
-                .flex_none()
-                .h(hit_px(HIT_MIN))
-                .px(px(9.0))
-                .flex()
-                .items_center()
-                .rounded(px(RADIUS_CONTROL))
-                .border_1()
-                .border_color(rgb(colors.control_border))
-                .cursor_pointer()
-                .text_size(text_px(TEXT_LABEL))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(tone))
-                .hover(|style| style.bg(rgb(colors.surface_high)))
-                .on_click(move |_, window, cx| {
-                    window.dispatch_action(
-                        Box::new(ControlSubagent {
-                            key: key.clone(),
-                            action: verb.to_owned(),
-                        }),
-                        cx,
-                    );
-                })
-                .child(label)
+        let keys = self.key_targets.clone();
+        // The card's own Background and Stop, Tab stops here as there.
+        let action = |id: &'static str, verb: AgentVerb| {
+            agent_action_button(
+                id.into(),
+                id.into(),
+                verb,
+                view.key.clone(),
+                Some(&keys),
+                colors,
+            )
         };
         let status = match view.status {
             SubagentState::Running => div()
@@ -23787,15 +23805,10 @@ impl XdDesktop {
                     )
                     .when(running && pending.is_none(), |row| {
                         row.when(view.can_background(), |row| {
-                            row.child(action(
-                                "agent-view-background",
-                                "Background",
-                                "background",
-                                colors.muted,
-                            ))
+                            row.child(action("agent-view-background", AgentVerb::Background))
                         })
                         .when(view.can_stop(), |row| {
-                            row.child(action("agent-view-stop", "Stop", "stop", colors.danger))
+                            row.child(action("agent-view-stop", AgentVerb::Stop))
                         })
                     })
                     .child(status),
@@ -28703,23 +28716,42 @@ impl XdDesktop {
         }
     }
 
-    /// Stops the open chat's running turn, as its Stop button does.
+    /// Stops the open chat's running turn, as its Stop button does; or, with
+    /// an agent's tab in front of the chat, that agent, as the tab's Stop
+    /// does, and never the chat behind it.
     fn stop_turn(&mut self, cx: &mut Context<Self>) {
         if self.shortcuts_blocked()
             || self.creating_chat_folder.is_some()
             || !self.native_side_tools_enabled()
-            || !self.model.working
         {
+            return;
+        }
+        if let Some(key) = self.open_agent_key().map(str::to_owned) {
+            let stoppable = self.find_agent(&key).is_some_and(|view| {
+                view.status == SubagentState::Running
+                    && view.can_stop()
+                    && !self.subagent_actions.contains_key(view.key.as_str())
+            });
+            if stoppable {
+                self.control_subagent(key, AgentVerb::Stop.action(), cx);
+            }
+            return;
+        }
+        if !self.model.working {
             return;
         }
         self.cancel_turn(cx);
     }
 
+    /// Shows or hides the side pane, as the toolbar's button does: in a
+    /// session, and on the new chat page, whose toolbar has the same button.
     fn toggle_side_pane(&mut self, cx: &mut Context<Self>) {
-        if self.shortcuts_blocked() || self.creating_chat_folder.is_some() {
+        if self.shortcuts_blocked() {
             return;
         }
-        if matches!(self.minimal_route, MinimalRoute::Cli { .. }) {
+        if self.creating_chat_folder.is_some()
+            || matches!(self.minimal_route, MinimalRoute::Cli { .. })
+        {
             self.toggle_browser(cx);
         }
     }
@@ -29191,8 +29223,12 @@ impl XdDesktop {
         if self.shortcuts_blocked() || self.menu_open() {
             return false;
         }
+        // An agent's tab in front of the chat has a box of its own, whose
+        // Tab goes on to the tab's Background and Stop.
         let input = if self.creating_chat_folder.is_some() {
             &self.new_chat_input
+        } else if self.open_agent_key().is_some() {
+            &self.agent_input
         } else {
             &self.composer_input
         };
