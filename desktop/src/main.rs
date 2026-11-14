@@ -29319,9 +29319,10 @@ impl XdDesktop {
             (None, true) => stops.len() - 1,
         };
         match &stops[next] {
-            (KeyStop::Field(field), _) => {
+            (KeyStop::Field(field), bounds) => {
                 self.key_stop = None;
                 window.focus(field);
+                self.reveal_key_stop(*bounds);
             }
             (KeyStop::Control(id, _), bounds) => {
                 if !ringed {
@@ -29409,24 +29410,29 @@ impl XdDesktop {
         }
     }
 
-    /// Scrolls the Settings page so the control Tab moved to is in view.
+    /// Scrolls the Settings page, or the Model prices table, so the control
+    /// or field Tab moved to is in view.
     fn reveal_key_stop(&mut self, bounds: Bounds<Pixels>) {
-        if !self.minimal_theme_open {
+        let scroll = if self.usage_open && self.usage.price_dialog_open() {
+            scroll_handle_for(usage_view::PRICE_BODY_SCROLL)
+        } else if self.minimal_theme_open {
+            self.settings_scroll.clone()
+        } else {
             return;
-        }
-        let view = self.settings_scroll.bounds();
+        };
+        let view = scroll.bounds();
         if bounds.left() < view.left() || bounds.size.height > view.size.height {
             return;
         }
         let margin = px(24.0);
-        let mut offset = self.settings_scroll.offset();
+        let mut offset = scroll.offset();
         if bounds.top() < view.top() + margin {
             offset.y += view.top() + margin - bounds.top();
         } else if bounds.bottom() > view.bottom() - margin {
             offset.y -= bounds.bottom() - (view.bottom() - margin);
         }
-        offset.y = offset.y.min(px(0.0));
-        self.settings_scroll.set_offset(offset);
+        offset.y = offset.y.min(px(0.0)).max(-scroll.max_offset().height);
+        scroll.set_offset(offset);
     }
 
     /// Tab in a message box moves to the options under it, as Shift+Tab

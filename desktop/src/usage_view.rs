@@ -49,6 +49,23 @@ const FLYOUT_WIDTH: f32 = 348.0;
 const FLYOUT_LEFT: f32 = 8.0;
 const FLYOUT_BOTTOM: f32 = 46.0;
 const FLYOUT_BARS_HEIGHT: f32 = 44.0;
+/// The scroll area of the Model prices dialog, which Tab scrolls to the
+/// field it moves to.
+pub(super) const PRICE_BODY_SCROLL: &str = "usage-price-body";
+
+/// The narrowest the prices table is with a column for each price: below
+/// it, a price field would be too narrow to read, and each row takes two
+/// lines.
+const PRICE_TABLE_ONE_LINE: f32 = 600.0;
+
+/// Whether the prices table is too narrow for one line a row in a window
+/// `width` wide: its room is the dialog at its widest, inside the window's
+/// margin, less the dialog's sides and the table's frame and padding.
+pub(super) fn price_table_narrow(width: f32) -> bool {
+    let dialog = (width - 2.0 * 24.0).min(DIALOG_TABLE_WIDTH);
+    dialog - 2.0 * 24.0 - 2.0 - 2.0 * 8.0 < PRICE_TABLE_ONE_LINE
+}
+
 const PRICE_FIELDS: [(&str, bool); 4] = [
     ("Input", false),
     ("Output", false),
@@ -289,6 +306,11 @@ type MergedKey = (
 );
 
 impl UsagePage {
+    /// Whether the Model prices dialog is open.
+    pub(super) fn price_dialog_open(&self) -> bool {
+        self.price.is_some()
+    }
+
     pub(super) fn new(focus: FocusHandle) -> Self {
         Self {
             environments: Default::default(),
@@ -3954,8 +3976,11 @@ impl XdDesktop {
         let has_changes = dialog.rows.iter().any(PriceRow::changed);
         let saving = !dialog.saving.is_empty();
         let error = dialog.error.clone();
+        // Each field is a Tab stop, in the order the table reads.
         let field = |input: Entity<ComposerInput>| {
+            let focus = input.read(cx).focus_handle(cx);
             div()
+                .relative()
                 .h(px(CONTROL_HEIGHT_COMPACT))
                 .w_full()
                 .min_w_0()
@@ -3968,9 +3993,32 @@ impl XdDesktop {
                 .bg(rgb(colors.background))
                 .text_size(text_px(TEXT_CONTROL))
                 .child(input)
+                .child(keys.mark(KeyLayer::Dialog, KeyStop::Field(focus)))
         };
+        // Too narrow for a column per price, as in a small window or at a
+        // large Interface size, a row takes two lines: its model and mapping,
+        // then its prices, each under its name.
+        let narrow = price_table_narrow(FRAME_VIEWPORT.with(Cell::get).0);
         let head =
             |label: &'static str, width: f32| div().w(relative(width)).min_w_0().child(label);
+        let price_cell = |label: &'static str, input: Entity<ComposerInput>| {
+            div()
+                .debug_selector(|| "usage-price-cell".into())
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .when(narrow, |cell| {
+                    cell.child(
+                        div()
+                            .text_size(text_px(TEXT_CAPTION))
+                            .text_color(rgb(colors.muted))
+                            .child(label),
+                    )
+                })
+                .child(field(input))
+        };
         let rows: Vec<AnyElement> = dialog
             .rows
             .iter()
@@ -4007,6 +4055,88 @@ impl XdDesktop {
                 } else {
                     "Reset to automatic"
                 };
+                let note = |text: String| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(text_px(TEXT_LABEL))
+                        .text_color(rgb(colors.muted))
+                        .child(text)
+                };
+                // What follows the model and its mapping: a note, or the
+                // prices, beside them or on a line of their own.
+                let rest = if removed {
+                    vec![note("Automatic pricing after saving".into()).into_any_element()]
+                } else if !alias.is_empty() {
+                    vec![note(format!("Counted as {alias}")).into_any_element()]
+                } else {
+                    row.cell_inputs
+                        .iter()
+                        .zip(PRICE_FIELDS)
+                        .map(|(input, (label, _))| {
+                            price_cell(label, input.clone()).into_any_element()
+                        })
+                        .collect()
+                };
+                let reset = icon_button(
+                    ("usage-price-reset", id as usize),
+                    tooltip,
+                    if is_new { CLOSE_ICON } else { ROTATE_CCW_ICON },
+                    colors,
+                )
+                .size(HIT_MIN)
+                .build()
+                .key_stop_named(
+                    &keys,
+                    KeyLayer::Dialog,
+                    format!("usage-price-reset-{id}"),
+                    tooltip,
+                    colors,
+                    cx,
+                    move |this, _, cx| {
+                        if let Some(dialog) = &mut this.usage.price {
+                            if is_new {
+                                dialog.rows.retain(|row| row.id != id);
+                            } else if let Some(row) =
+                                dialog.rows.iter_mut().find(|row| row.id == id)
+                            {
+                                row.removed = !row.removed;
+                            }
+                            dialog.error = None;
+                        }
+                        cx.notify();
+                    },
+                );
+                let model_line = div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .when(narrow, |cell| cell.flex_1())
+                            .when(!narrow, |cell| cell.w(relative(0.22)))
+                            .min_w_0()
+                            .child(model_cell),
+                    )
+                    .when(!removed, |line| {
+                        line.child(
+                            div()
+                                .when(narrow, |cell| cell.flex_1())
+                                .when(!narrow, |cell| cell.w(relative(0.18)))
+                                .min_w_0()
+                                .child(field(row.alias_input.clone())),
+                        )
+                    });
+                let lines = if narrow {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(model_line.child(reset))
+                        .child(div().flex().items_end().gap_2().children(rest))
+                } else {
+                    div().child(model_line.children(rest).child(reset))
+                };
                 div()
                     .flex()
                     .flex_col()
@@ -4015,70 +4145,7 @@ impl XdDesktop {
                     .py_2()
                     .border_t_1()
                     .border_color(rgb(colors.border))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().w(relative(0.22)).min_w_0().child(model_cell))
-                            .when(removed, |line| {
-                                line.child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(text_px(TEXT_LABEL))
-                                        .text_color(rgb(colors.muted))
-                                        .child("Automatic pricing after saving"),
-                                )
-                            })
-                            .when(!removed, |line| {
-                                line.child(
-                                    div()
-                                        .w(relative(0.18))
-                                        .min_w_0()
-                                        .child(field(row.alias_input.clone())),
-                                )
-                                .when(!alias.is_empty(), |line| {
-                                    line.child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(text_px(TEXT_LABEL))
-                                            .text_color(rgb(colors.muted))
-                                            .child(format!("Counted as {alias}")),
-                                    )
-                                })
-                                .when(alias.is_empty(), |line| {
-                                    line.children(row.cell_inputs.iter().map(|input| {
-                                        div().flex_1().min_w_0().child(field(input.clone()))
-                                    }))
-                                })
-                            })
-                            .child(
-                                icon_button(
-                                    ("usage-price-reset", id as usize),
-                                    tooltip,
-                                    if is_new { CLOSE_ICON } else { ROTATE_CCW_ICON },
-                                    colors,
-                                )
-                                .size(HIT_MIN)
-                                .build()
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        if let Some(dialog) = &mut this.usage.price {
-                                            if is_new {
-                                                dialog.rows.retain(|row| row.id != id);
-                                            } else if let Some(row) =
-                                                dialog.rows.iter_mut().find(|row| row.id == id)
-                                            {
-                                                row.removed = !row.removed;
-                                            }
-                                            dialog.error = None;
-                                        }
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
-                    )
+                    .child(lines)
                     .when_some(invalid, |line, message| {
                         line.child(
                             div()
@@ -4105,34 +4172,53 @@ impl XdDesktop {
                     .gap_2()
                     .text_size(text_px(TEXT_LABEL))
                     .text_color(rgb(colors.muted))
-                    .child(head("Model ID", 0.22))
-                    .child(head("Map to", 0.18))
-                    .children(PRICE_FIELDS.map(|(label, _)| div().flex_1().min_w_0().child(label)))
+                    .when(!narrow, |header| {
+                        header
+                            .child(head("Model ID", 0.22))
+                            .child(head("Map to", 0.18))
+                            .children(
+                                PRICE_FIELDS
+                                    .map(|(label, _)| div().flex_1().min_w_0().child(label)),
+                            )
+                    })
+                    .when(narrow, |header| {
+                        header
+                            .child(div().flex_1().min_w_0().child("Model ID"))
+                            .child(div().flex_1().min_w_0().child("Map to"))
+                    })
                     .child(
                         icon_button("usage-price-add", "Add model price", PLUS_ICON, colors)
                             .size(HIT_MIN)
                             .build()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.usage_add_price_row(
-                                    "",
-                                    true,
-                                    "",
-                                    Default::default(),
-                                    colors,
-                                    cx,
-                                );
-                                let focus = this
-                                    .usage
-                                    .price
-                                    .as_ref()
-                                    .and_then(|dialog| dialog.rows.last())
-                                    .and_then(|row| row.model_input.as_ref())
-                                    .map(|input| input.read(cx).focus_handle(cx));
-                                if let Some(focus) = focus {
-                                    window.focus(&focus);
-                                }
-                                cx.notify();
-                            })),
+                            .key_stop_named(
+                                &keys,
+                                KeyLayer::Dialog,
+                                "usage-price-add",
+                                "Add model price",
+                                colors,
+                                cx,
+                                move |this, window, cx| {
+                                    this.usage_add_price_row(
+                                        "",
+                                        true,
+                                        "",
+                                        Default::default(),
+                                        colors,
+                                        cx,
+                                    );
+                                    let focus = this
+                                        .usage
+                                        .price
+                                        .as_ref()
+                                        .and_then(|dialog| dialog.rows.last())
+                                        .and_then(|row| row.model_input.as_ref())
+                                        .map(|input| input.read(cx).focus_handle(cx));
+                                    if let Some(focus) = focus {
+                                        window.focus(&focus);
+                                    }
+                                    cx.notify();
+                                },
+                            ),
                     ),
             )
             .children(rows)
@@ -4176,7 +4262,7 @@ impl XdDesktop {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .thumbed("usage-price-body", colors)
+                        .thumbed(PRICE_BODY_SCROLL, colors)
                         .px_6()
                         .pb_4()
                         .flex()
