@@ -4438,6 +4438,11 @@ struct TerminalRow {
     text: SharedString,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     cursor: Option<Range<usize>>,
+    /// The cursor's fill and ink where its cell has a background of its
+    /// own, such as a selection in inverse video: the cell's colours the
+    /// other way round, so the cursor shows on it. Elsewhere it is drawn in
+    /// the theme's text colour on the ground.
+    cursor_colors: Option<(u32, u32)>,
     links: Vec<(Range<usize>, String)>,
 }
 
@@ -4458,27 +4463,47 @@ impl TerminalRow {
             .collect::<Vec<_>>();
         links.extend(detected);
         links.sort_by_key(|(range, _)| range.start);
+        let cursor_colors = rendered.cursor.as_ref().and_then(|cursor| {
+            let span = rendered
+                .spans
+                .iter()
+                .find(|span| span.range.start <= cursor.start && cursor.start < span.range.end)?;
+            Some((span.style.foreground?, span.style.background?))
+        });
         let highlights = rendered
             .spans
             .into_iter()
-            .map(|span| {
-                (
-                    span.range,
-                    HighlightStyle {
-                        color: span.style.foreground.map(|color| rgb(color).into()),
-                        background_color: span.style.background.map(|color| rgb(color).into()),
-                        font_weight: span.style.bold.then_some(FontWeight::BOLD),
-                        ..Default::default()
-                    },
-                )
-            })
+            .map(|span| (span.range, terminal_highlight(span.style)))
             .collect();
         Self {
             text: rendered.text.into(),
             highlights,
             cursor: rendered.cursor,
+            cursor_colors,
             links,
         }
+    }
+}
+
+/// How a run of the terminal's cells is drawn. Inverse video, dim and
+/// hidden text come worked into the colours. The bundled JetBrains Mono has
+/// no italic, so italic text stays upright rather than fall back to another
+/// face out of the grid.
+fn terminal_highlight(style: xd_terminal::TerminalStyle) -> HighlightStyle {
+    HighlightStyle {
+        color: style.foreground.map(|color| rgb(color).into()),
+        background_color: style.background.map(|color| rgb(color).into()),
+        font_weight: style.bold.then_some(FontWeight::BOLD),
+        underline: style.underline.then(|| gpui::UnderlineStyle {
+            thickness: px(1.0),
+            color: None,
+            wavy: false,
+        }),
+        strikethrough: style.strikethrough.then(|| gpui::StrikethroughStyle {
+            thickness: px(1.0),
+            color: None,
+        }),
+        ..Default::default()
     }
 }
 
@@ -17636,6 +17661,11 @@ impl XdDesktop {
                                 return line;
                             };
                             let cursor = row.cursor.clone().filter(|_| cursor_shown);
+                            // On a cell with a background of its own, such
+                            // as a selection, the cursor takes the cell's
+                            // colours the other way round.
+                            let (cursor_fill, cursor_ink) =
+                                row.cursor_colors.unwrap_or((cursor_fill, cursor_ink));
                             // Built as the frame is laid out, before the
                             // blink that reads it.
                             this.terminal_cursor_drawn |= cursor.is_some();
@@ -42557,6 +42587,63 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             assert!(desktop.browser_panes.contains_key(&remote_key));
             assert!(desktop.settings.browser_sessions.contains_key(&remote_key));
         });
+    }
+
+    #[test]
+    fn the_terminal_draws_its_text_attributes_and_inverse_video() {
+        let mut screen = TerminalScreen::new(60, 3);
+        screen.feed(
+            b"\x1b[2mdim\x1b[22m \x1b[4munder\x1b[24m \x1b[9mstrike\x1b[29m \x1b[8mpw\x1b[28m \x1b[7msel",
+        );
+        for theme in ThemePreset::ALL {
+            let colors = theme.colors();
+            let palette = theme.terminal_palette();
+            let row = TerminalRow::new(screen.rendered_line_in(0, true, palette).unwrap());
+            let style = |text: &str| {
+                let start = row.text.find(text).unwrap();
+                row.highlights
+                    .iter()
+                    .find(|(range, _)| range.start == start)
+                    .map(|(_, style)| *style)
+                    .unwrap_or_default()
+            };
+            assert!(style("under").underline.is_some(), "{theme:?}");
+            assert!(style("strike").strikethrough.is_some(), "{theme:?}");
+            assert!(style("dim").color.is_some(), "{theme:?}");
+            assert_ne!(style("dim").color, Some(rgb(colors.text).into()));
+            // Hidden text is still in the row, for a selection to copy, and
+            // drawn in the ground's colour.
+            assert!(row.text.contains("pw"));
+            assert_eq!(style("pw").color, Some(rgb(colors.background).into()));
+            // Inverse video with no colours set: the theme's text colour
+            // behind the ground's.
+            assert_eq!(
+                style("sel").background_color,
+                Some(rgb(colors.text).into()),
+                "{theme:?}"
+            );
+            assert_eq!(style("sel").color, Some(rgb(colors.background).into()));
+            // The cursor sits on the selection's last cell, after "sel": it
+            // takes the cell's colours the other way round to show there.
+            let mut on_selection = TerminalScreen::new(60, 3);
+            on_selection.feed(b"\x1b[7msel\x1b[D");
+            let row = TerminalRow::new(on_selection.rendered_line_in(0, true, palette).unwrap());
+            assert_eq!(row.cursor, Some(2..3));
+            assert_eq!(
+                row.cursor_colors,
+                Some((colors.background, colors.text)),
+                "{theme:?}"
+            );
+        }
+        // The plain cursor keeps the theme's colours.
+        let mut plain = TerminalScreen::new(60, 3);
+        plain.feed(b"$ ");
+        let row = TerminalRow::new(
+            plain
+                .rendered_line_in(0, true, TerminalPalette::Dark)
+                .unwrap(),
+        );
+        assert_eq!(row.cursor_colors, None);
     }
 
     #[cfg(unix)]

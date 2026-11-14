@@ -84,7 +84,7 @@ impl TerminalPalette {
         match self {
             Self::Dark => &[
                 0x1f2329, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xd7dae0,
-                0x5c6370, 0xff7a85, 0xb3e180, 0xffd68a, 0x7dbaff, 0xd99bff, 0x75d5e0, 0xffffff,
+                0x828997, 0xff7a85, 0xb3e180, 0xffd68a, 0x7dbaff, 0xd99bff, 0x75d5e0, 0xffffff,
             ],
             Self::Light => &[
                 0x1b1e2c, 0xb3202f, 0x1a6b3c, 0x7a5200, 0x2a52be, 0x8a2da5, 0x0e6471, 0x4b5165,
@@ -96,13 +96,45 @@ impl TerminalPalette {
     fn ansi(self, index: usize) -> u32 {
         self.colors()[index.min(15)]
     }
+
+    /// The ink of text that sets no colour, as `0xRRGGBB`: the theme's text
+    /// colour, which a cell in inverse video takes for its background.
+    pub const fn foreground(self) -> u32 {
+        match self {
+            Self::Dark => 0xf2f2f2,
+            Self::Light => 0x1b1e2c,
+        }
+    }
+
+    /// The ground the terminal is drawn on, as `0xRRGGBB`: the theme's
+    /// background, which a cell in inverse video takes for its ink.
+    pub const fn background(self) -> u32 {
+        match self {
+            Self::Dark => 0x0b0b0b,
+            Self::Light => 0xeef0f9,
+        }
+    }
 }
 
+/// How a run of cells is drawn. A colour left `None` is the theme's own:
+/// [`TerminalPalette::foreground`] for the ink and the ground for the
+/// background. Inverse video, dim and hidden text are already worked into
+/// the two colours, so they are drawn as they are.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TerminalStyle {
     pub foreground: Option<u32>,
     pub background: Option<u32>,
     pub bold: bool,
+    /// SGR 2: the ink is mixed toward the background, still 3:1 on it.
+    pub dim: bool,
+    /// SGR 3.
+    pub italic: bool,
+    /// SGR 4, and the other underlines.
+    pub underline: bool,
+    /// SGR 9.
+    pub strikethrough: bool,
+    /// SGR 8: drawn in the background's colour, and still copied.
+    pub hidden: bool,
     inverse: bool,
 }
 
@@ -948,15 +980,11 @@ fn render_line(
         }
         style_run.get_or_insert((text.len(), style));
         let start = text.len();
-        text.push(if cell.flags.contains(Flags::HIDDEN) {
-            ' '
-        } else {
-            cell.c
-        });
-        if !cell.flags.contains(Flags::HIDDEN) {
-            for character in cell.zerowidth().into_iter().flatten() {
-                text.push(*character);
-            }
+        // Hidden text is drawn in the background's colour, so a selection
+        // still copies it.
+        text.push(cell.c);
+        for character in cell.zerowidth().into_iter().flatten() {
+            text.push(*character);
         }
         let range = start..text.len();
         if cursor_column == Some(column) {
@@ -1026,6 +1054,11 @@ fn terminal_style(cell: &Cell, palette: TerminalPalette) -> TerminalStyle {
         foreground: color_rgb(cell.fg, true, palette),
         background: color_rgb(cell.bg, false, palette),
         bold: cell.flags.contains(Flags::BOLD),
+        dim: cell.flags.contains(Flags::DIM),
+        italic: cell.flags.contains(Flags::ITALIC),
+        underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+        strikethrough: cell.flags.contains(Flags::STRIKEOUT),
+        hidden: cell.flags.contains(Flags::HIDDEN),
         inverse: cell.flags.contains(Flags::INVERSE),
     }
     .resolved(palette)
@@ -1132,28 +1165,65 @@ fn read_u64(bytes: &[u8], offset: &mut usize) -> Option<u64> {
 impl TerminalStyle {
     fn resolved(mut self, palette: TerminalPalette) -> Self {
         if self.inverse {
-            std::mem::swap(&mut self.foreground, &mut self.background);
+            // A colour the program left to the theme swaps for the theme's
+            // other one, so a bar or a selection in inverse video shows even
+            // where neither colour was set.
+            let ink = self.foreground.unwrap_or(palette.foreground());
+            let ground = self.background.unwrap_or(palette.background());
+            self.foreground = Some(ground);
+            self.background = Some(ink);
             self.inverse = false;
         }
+        if self.hidden {
+            self.foreground = Some(self.background.unwrap_or(palette.background()));
+            return self;
+        }
         if let Some(background) = self.background {
-            // The light set has no light colour: its white and bright white are
-            // dark, so they read on the light ground. A program that sets both
-            // colours (black on white, white on blue) would get dark on dark,
-            // so text too close to its own background takes a readable colour.
+            // A program that sets both colours (black on white, white on
+            // blue) can ask for text too close to its own background, and
+            // the light set has no light colour at all: its white and bright
+            // white are dark, to read on the light ground. Text under 3:1 on
+            // its own background takes a readable colour, in either theme.
             let unreadable = self.foreground.is_none_or(|foreground| {
-                palette == TerminalPalette::Light
-                    && contrast_ratio(foreground, background) < MIN_CELL_CONTRAST
+                contrast_ratio(foreground, background) < MIN_CELL_CONTRAST
             });
             if unreadable {
                 self.foreground = Some(readable_foreground(background, palette));
             }
         }
+        if self.dim {
+            let ground = self.background.unwrap_or(palette.background());
+            let ink = self.foreground.unwrap_or(palette.foreground());
+            self.foreground = Some(dimmed(ink, ground));
+        }
         self
     }
 }
 
-/// Below this, text on its own cell background is replaced in the light set.
+/// Below this, text on its own cell background is replaced, and dim text
+/// is mixed no further toward its background.
 const MIN_CELL_CONTRAST: f32 = 3.0;
+
+/// How far dim text is mixed toward its background, at most.
+const DIM_MIX: f32 = 0.45;
+
+/// `ink` mixed toward `ground` for dim text: as far as [`DIM_MIX`], and no
+/// further than keeps it at 3:1 on the ground. Ink already under 3:1 stays.
+fn dimmed(ink: u32, ground: u32) -> u32 {
+    let mix = |amount: f32| {
+        let channel = |shift: u32| {
+            let from = ((ink >> shift) & 0xff) as f32;
+            let to = ((ground >> shift) & 0xff) as f32;
+            ((from + (to - from) * amount).round() as u32).min(0xff) << shift
+        };
+        channel(16) | channel(8) | channel(0)
+    };
+    (0..=9)
+        .rev()
+        .map(|step| mix(DIM_MIX * step as f32 / 9.0))
+        .find(|color| contrast_ratio(*color, ground) >= MIN_CELL_CONTRAST)
+        .unwrap_or(ink)
+}
 
 /// Whichever of white and the palette's darkest colour reads better on
 /// `background`. One of the two always clears 4:1, whatever the background.
@@ -1306,12 +1376,120 @@ mod tests {
         assert_eq!(style_of(&light, "bar").background, Some(0x4b5165));
         assert_eq!(style_of(&light, "rgb").foreground, Some(0xffffff));
 
-        // The dark set keeps what the program asked for.
+        // The dark set follows the same rule: a pair that reads is left as
+        // the program asked, and one that does not takes a readable ink.
         let dark = screen.rendered_with_cursor_in(TerminalPalette::Dark);
+        for text in ["bar", "dir", "bad", "rgb"] {
+            let style = style_of(&dark, text);
+            let (foreground, background) = (style.foreground.unwrap(), style.background.unwrap());
+            assert!(
+                contrast_ratio(foreground, background) >= MIN_CELL_CONTRAST,
+                "dark {text}: {foreground:06x} on {background:06x}"
+            );
+        }
+        // Black on white already reads, and keeps its colours.
         assert_eq!(style_of(&dark, "bar").foreground, Some(0x1f2329));
         assert_eq!(style_of(&dark, "bar").background, Some(0xd7dae0));
-        assert_eq!(style_of(&dark, "dir").foreground, Some(0xd7dae0));
+        // White on blue was 1.69:1; it takes the palette's black.
+        assert_eq!(style_of(&dark, "dir").background, Some(0x61afef));
+        assert_eq!(style_of(&dark, "dir").foreground, Some(0x1f2329));
         assert_eq!(style_of(&dark, "bad").foreground, Some(0x1f2329));
+        assert_eq!(style_of(&dark, "rgb").foreground, Some(0xffffff));
+    }
+
+    #[test]
+    fn every_dark_colour_but_black_reads_on_the_dark_ground() {
+        let ground = TerminalPalette::Dark.background();
+        // Black is a ground of its own, for text set on it.
+        for (index, color) in TerminalPalette::Dark.colors().iter().enumerate().skip(1) {
+            let ratio = contrast_ratio(*color, ground);
+            assert!(ratio >= 4.5, "colour {index} #{color:06x} is {ratio:.2}:1");
+        }
+        assert_eq!(TerminalPalette::Dark.colors()[8], 0x828997);
+    }
+
+    #[test]
+    fn inverse_with_the_default_colours_swaps_the_themes_two() {
+        let mut screen = TerminalScreen::new(40, 2);
+        screen.feed(b"\x1b[7minverse\x1b[27m plain \x1b[7;31mred\x1b[0m \x1b[7;44mblue\x1b[0m");
+        for palette in [TerminalPalette::Dark, TerminalPalette::Light] {
+            let rendered = screen.rendered_with_cursor_in(palette);
+            let inverse = style_of(&rendered, "inverse");
+            assert_eq!(inverse.foreground, Some(palette.background()), "{palette:?}");
+            assert_eq!(inverse.background, Some(palette.foreground()), "{palette:?}");
+            // SGR 27 ends it.
+            assert_eq!(style_of(&rendered, " plain "), TerminalStyle::default());
+            // A colour the program set swaps with the theme's other one.
+            let red = style_of(&rendered, "red");
+            assert_eq!(red.background, Some(palette.ansi(1)), "{palette:?}");
+            assert!(contrast_ratio(red.foreground.unwrap(), red.background.unwrap()) >= 3.0);
+            // The blue background becomes the ink, on the theme's text
+            // colour, and takes a readable ink where it does not read there.
+            let blue = style_of(&rendered, "blue");
+            assert_eq!(blue.background, Some(palette.foreground()), "{palette:?}");
+            assert!(contrast_ratio(blue.foreground.unwrap(), palette.foreground()) >= 3.0);
+        }
+    }
+
+    #[test]
+    fn the_text_attributes_are_drawn_and_reset() {
+        let mut screen = TerminalScreen::new(80, 2);
+        screen.feed(
+            b"\x1b[2mdim\x1b[22m \x1b[3mitalic\x1b[23m \x1b[4munder\x1b[24m \x1b[9mstrike\x1b[29m \x1b[8msecret\x1b[28m \x1b[1;2mboth\x1b[22m end",
+        );
+        for palette in [TerminalPalette::Dark, TerminalPalette::Light] {
+            let rendered = screen.rendered_with_cursor_in(palette);
+            // Hidden text is still there to select and copy.
+            assert_eq!(
+                rendered.text.trim_end(),
+                "dim italic under strike secret both end",
+                "{palette:?}"
+            );
+            let dim = style_of(&rendered, "dim");
+            assert!(dim.dim, "{palette:?}");
+            let ink = dim.foreground.unwrap();
+            assert_ne!(ink, palette.foreground());
+            let ratio = contrast_ratio(ink, palette.background());
+            assert!(ratio >= 3.0, "{palette:?} dim is {ratio:.2}:1");
+            assert!(ratio < contrast_ratio(palette.foreground(), palette.background()));
+            assert!(style_of(&rendered, "italic").italic);
+            assert!(style_of(&rendered, "under").underline);
+            assert!(style_of(&rendered, "strike").strikethrough);
+            let secret = style_of(&rendered, "secret");
+            assert!(secret.hidden);
+            assert_eq!(secret.foreground, Some(palette.background()));
+            let both = style_of(&rendered, "both");
+            assert!(both.bold && both.dim);
+            // 22, 23, 24, 29 and 28 end each: what follows is plain.
+            for plain in [" ", " end"] {
+                assert!(
+                    rendered.spans.iter().all(|span| {
+                        &rendered.text[span.range.clone()] != plain
+                            || span.style == TerminalStyle::default()
+                    }),
+                    "{palette:?} {plain:?}"
+                );
+            }
+            assert_eq!(
+                rendered
+                    .spans
+                    .iter()
+                    .map(|span| &rendered.text[span.range.clone()])
+                    .collect::<Vec<_>>(),
+                ["dim", "italic", "under", "strike", "secret", "both"],
+                "{palette:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dim_text_on_a_dark_ink_stops_at_three_to_one() {
+        // Grey on black reads at about 3.4:1; dim takes it no lower than 3:1.
+        assert!(contrast_ratio(dimmed(0x6e6e6e, 0x0b0b0b), 0x0b0b0b) >= 3.0);
+        // Ink already under 3:1 is left as it is.
+        assert_eq!(dimmed(0x333333, 0x0b0b0b), 0x333333);
+        // A light ink on a dark ground moves toward it.
+        assert!(dimmed(0xf2f2f2, 0x0b0b0b) < 0xf2f2f2);
     }
 
     #[test]
@@ -1327,12 +1505,11 @@ mod tests {
                 let style = style_of(&rendered, text);
                 let (foreground, background) =
                     (style.foreground.unwrap(), style.background.unwrap());
-                if palette == TerminalPalette::Light || text == "blue" {
-                    assert!(
-                        contrast_ratio(foreground, background) >= 4.0,
-                        "{palette:?} {text}: {foreground:06x} on {background:06x}"
-                    );
-                }
+                // Both themes take the readable ink now.
+                assert!(
+                    contrast_ratio(foreground, background) >= 4.0,
+                    "{palette:?} {text}: {foreground:06x} on {background:06x}"
+                );
             }
         }
     }

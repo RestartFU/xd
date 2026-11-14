@@ -348,6 +348,32 @@ mod tests {
     }
 
     #[test]
+    fn dark_terminal_colours_read_on_every_dark_ground() {
+        let dark = ThemePreset::Dark;
+        let colors = dark.colors();
+        // Black is a ground for text set on it, not ink for the dark ground.
+        for (index, color) in dark.terminal_palette().colors().iter().enumerate().skip(1) {
+            for ground in [colors.background, colors.surface, colors.surface_high] {
+                let ratio = xd_terminal::contrast_ratio(*color, ground);
+                assert!(
+                    ratio >= 4.5,
+                    "colour {index} #{color:06x} is {ratio:.2}:1 on #{ground:06x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_terminal_inverts_with_the_themes_own_text_and_ground() {
+        for theme in ThemePreset::ALL {
+            let colors = theme.colors();
+            let palette = theme.terminal_palette();
+            assert_eq!(palette.foreground(), colors.text, "{theme:?}");
+            assert_eq!(palette.background(), colors.background, "{theme:?}");
+        }
+    }
+
+    #[test]
     fn syntax_colours_read_on_the_editor_ground_in_both_themes() {
         for theme in ThemePreset::ALL {
             let colors = theme.colors();
