@@ -78,6 +78,8 @@ internal fun HostUpdateDialog(
                         status?.available == true -> "An update is available."
                         else -> "This machine is up to date."
                     },
+                    // It moves on by itself (checking, installing, failed), so each step is said.
+                    modifier = Modifier.announced(),
                 )
                 status?.let { current ->
                     Spacer(Modifier.height(8.dp))

@@ -156,6 +156,7 @@ internal fun BackgroundTasksRow(
                 if (error != null || current == null || current.isEmpty()) {
                     Text(
                         error ?: if (current == null) "Loading background tasks…" else "No background tasks running.",
+                        modifier = Modifier.announced(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

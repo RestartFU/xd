@@ -77,6 +77,7 @@ internal fun ChatQuotaSection(model: MainViewModel) {
     if (current == null) {
         Text(
             error ?: "Reading the chat quota…",
+            modifier = Modifier.announced(),
             color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -131,7 +132,7 @@ internal fun ChatQuotaSection(model: MainViewModel) {
     }
     error?.let {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(it, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(it, modifier = Modifier.weight(1f).announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = model::loadChatQuota) { Text("Try again") }
         }
     }
@@ -201,13 +202,13 @@ internal fun QuotaAsk(
         if (chosen == null) {
             Text(
                 "Enter a whole number from 1 to 100.",
-                modifier = Modifier.padding(horizontal = AskInset),
+                modifier = Modifier.padding(horizontal = AskInset).announced(),
                 color = MaterialTheme.colorScheme.error,
                 style = small,
             )
         }
         error?.let {
-            Text(it, modifier = Modifier.padding(horizontal = AskInset), color = MaterialTheme.colorScheme.error, style = small)
+            Text(it, modifier = Modifier.padding(horizontal = AskInset).announced(), color = MaterialTheme.colorScheme.error, style = small)
         }
     }
 }

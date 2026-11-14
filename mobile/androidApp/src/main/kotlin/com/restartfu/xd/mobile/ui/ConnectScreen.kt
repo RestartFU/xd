@@ -187,7 +187,7 @@ internal fun FatalScreen(
         )
         operationError?.let {
             Spacer(Modifier.height(12.dp))
-            Text(it, color = MaterialTheme.colorScheme.error)
+            Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error)
         }
         Spacer(Modifier.height(24.dp))
         if (fatal.retryable) {

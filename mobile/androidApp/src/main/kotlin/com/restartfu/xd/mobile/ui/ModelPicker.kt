@@ -86,7 +86,7 @@ internal fun ModelPicker(
                 effortBackendId != null && !modelReady && selectionError != null -> Column(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Text(selectionError.orEmpty(), color = MaterialTheme.colorScheme.error)
+                    Text(selectionError.orEmpty(), modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error)
                     TextButton(onClick = { effortModelId?.let(model::selectModel) }) { Text("Try again") }
                 }
 
@@ -126,7 +126,7 @@ internal fun ModelPicker(
                 error != null && catalog.isEmpty() -> Column(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
+                    Text(error.orEmpty(), modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error)
                     TextButton(onClick = model::loadCatalog) { Text("Try again") }
                 }
 

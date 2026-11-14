@@ -275,7 +275,7 @@ private fun GitSummary(git: GitStatusReply, state: DiffPane, model: DiffViewMode
             }
         }
         state.commitError?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
     }
 }

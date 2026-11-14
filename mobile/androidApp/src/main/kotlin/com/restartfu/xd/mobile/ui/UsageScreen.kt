@@ -209,7 +209,7 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
 @Composable
 private fun ErrorLine(message: String, retry: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(message, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        Text(message, modifier = Modifier.weight(1f).announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         TextButton(onClick = retry) { Text("Try again") }
     }
 }
@@ -239,6 +239,7 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
             Text(
                 "Some ${if (source.provider == "claude") "Claude" else "Codex"} transcripts could not be read, " +
                     "so these totals may be incomplete." + (source.message?.let { " $it" } ?: ""),
+                modifier = Modifier.announced(),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -569,7 +570,7 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
                 if (rows != null && !hostKeepsAliases) {
                     Text(OLDER_HOST_PRICES, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                error?.let { Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
         confirmButton = {

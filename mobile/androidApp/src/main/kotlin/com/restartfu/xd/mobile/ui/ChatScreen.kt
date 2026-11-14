@@ -1081,7 +1081,7 @@ private fun Composer(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     message,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).announced(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -1204,7 +1204,7 @@ private fun Composer(
             }
         }
         queueNotice?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
         if (state.queue.isNotEmpty()) {
             Row(

@@ -2852,6 +2852,7 @@ internal fun AutoSettleSettings(model: MainViewModel) {
     if (current == null) {
         Text(
             error ?: "Reading auto-settle rules…",
+            modifier = Modifier.announced(),
             color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -2909,7 +2910,7 @@ internal fun AutoSettleSettings(model: MainViewModel) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 error ?: "These rules changed on the host and could not be read again.",
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).announced(),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )

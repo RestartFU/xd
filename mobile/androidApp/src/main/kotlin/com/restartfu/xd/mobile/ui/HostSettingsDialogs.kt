@@ -87,7 +87,7 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
                             } else {
                                 "This may be out of date: the host could not be asked again."
                             },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.weight(1f).announced(),
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -263,7 +263,7 @@ internal fun AgentSecretsDialog(
                         TextButton(onClick = { added = added + AddedSecret("", "") }, enabled = !saving) { Text("Add secret") }
                     }
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                error?.let { Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
         confirmButton = {
@@ -406,7 +406,7 @@ internal fun ProjectContextDialog(
                         colors = xdFieldColors(),
                     )
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                error?.let { Text(it, modifier = Modifier.announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
         confirmButton = {
@@ -440,6 +440,7 @@ internal fun ChatTitleSettings(model: MainViewModel) {
     if (current == null) {
         Text(
             error ?: "Reading chat title settings…",
+            modifier = Modifier.announced(),
             color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -468,7 +469,7 @@ internal fun ChatTitleSettings(model: MainViewModel) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 catalogError.orEmpty(),
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).announced(),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -489,7 +490,7 @@ internal fun ChatTitleSettings(model: MainViewModel) {
     }
     error?.let {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(it, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(it, modifier = Modifier.weight(1f).announced(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = model::retryChatTitles) { Text("Try again") }
         }
     }

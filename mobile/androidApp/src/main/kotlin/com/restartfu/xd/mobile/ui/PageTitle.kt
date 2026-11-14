@@ -7,7 +7,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 
@@ -34,3 +36,10 @@ internal fun Modifier.pageHeading(key: Any? = Unit): Modifier {
     }
     return semantics { heading() }.focusRequester(focus).focusable()
 }
+
+/**
+ * Text that appears or changes on its own, such as an error after a tap or a
+ * notice from the host: a screen reader says it when it does, after whatever
+ * it is reading, without moving the focus.
+ */
+internal fun Modifier.announced(): Modifier = semantics { liveRegion = LiveRegionMode.Polite }
