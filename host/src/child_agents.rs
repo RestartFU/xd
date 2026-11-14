@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::{
     Engine, error_reply, required_string,
     runtime::{SettledTurn, TurnNews},
-    storage::{AgentOrigin, ChildAgent, ReportDelivery},
+    storage::{AgentOrigin, ChildAgent, OtherChat, ReportDelivery},
 };
 
 /// Agents one chat may have at work at once.
@@ -29,6 +29,9 @@ static STARTING: Mutex<()> = Mutex::new(());
 /// How much of an agent's reply its parent is sent, or `list_agents` shows.
 const REPORT_CHARS: usize = 6_000;
 const SUMMARY_CHARS: usize = 600;
+/// How many chats `list_chats` shows at once, and how much of each one's reply.
+const LISTED_CHATS: usize = 50;
+const LISTED_CHAT_CHARS: usize = 200;
 
 impl Engine {
     /// `start-agent`: starts a chat under `chat` and gives it `prompt`.
@@ -168,15 +171,68 @@ impl Engine {
         json!({"ok": true, "agents": agents})
     }
 
-    /// `message-agent`: sends one of `chat`'s agents a message, queued behind
-    /// its turn when it is at work. With `steer` it redirects that turn instead,
-    /// as the user steering a queued message does: the turn takes the message
-    /// when its agent can, otherwise it stops and the message goes first.
-    pub(crate) fn message_agent(&self, request: &Value) -> Value {
-        let child = match self.own_agent(request) {
-            Ok(child) => child,
+    /// `list-chats`: every other chat `chat`'s agent may message, at work
+    /// first, or only the one `target` names with its whole latest reply.
+    pub(crate) fn list_chats(&self, request: &Value) -> Value {
+        let asker = match required_string(request, "chat", "list-chats needs a chat id") {
+            Ok(asker) => asker,
             Err(error) => return error_reply(error),
         };
+        let only = request
+            .get("target")
+            .and_then(Value::as_str)
+            .filter(|target| !target.trim().is_empty());
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        if only == Some(asker) {
+            return error_reply("That is this chat.");
+        }
+        let chats = match store.other_chats(asker, only, LISTED_CHATS) {
+            Ok(chats) => chats,
+            Err(error) => return error_reply(error),
+        };
+        if only.is_some() && chats.is_empty() {
+            return error_reply("There is no chat with that id.");
+        }
+        let limit = if only.is_some() {
+            REPORT_CHARS
+        } else {
+            LISTED_CHAT_CHARS
+        };
+        let chats = chats
+            .iter()
+            .map(|other| self.describe_other(asker, other, limit))
+            .collect::<Vec<_>>();
+        json!({"ok": true, "chats": chats})
+    }
+
+    fn describe_other(&self, asker: &str, other: &OtherChat, limit: usize) -> Value {
+        let background = self
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.background_tasks(&other.chat.id) > 0);
+        let mut described = describe(&other.chat, limit, background);
+        described["project"] = json!(other.project);
+        if let Some(workdir) = &other.workdir {
+            described["workdir"] = json!(workdir);
+        }
+        if let Some(parent) = &other.parent {
+            described["started_by"] = json!(parent);
+            if parent == asker {
+                described["yours"] = json!(true);
+            }
+        }
+        described
+    }
+
+    /// `message-agent`: sends one of `chat`'s agents, or any other chat, a
+    /// message, queued behind its turn when it is at work. With `steer` it
+    /// redirects that turn instead, as the user steering a queued message
+    /// does: the turn takes the message when its agent can, otherwise it
+    /// stops and the message goes first. A chat `chat` did not start is told
+    /// who sent it, so it can answer.
+    pub(crate) fn message_agent(&self, request: &Value) -> Value {
         let text = request
             .get("text")
             .and_then(Value::as_str)
@@ -185,6 +241,20 @@ impl Engine {
         if text.is_empty() {
             return error_reply("Give the message some text.");
         }
+        let child = match self.own_agent(request) {
+            Ok(child) => child,
+            Err(error) => {
+                return match self.other_chat(request) {
+                    Ok(Some((sender, target))) => {
+                        self.message_other(request, &sender, &target, text)
+                    }
+                    Ok(None) => {
+                        error_reply(format!("{error} There is no other chat with it either."))
+                    }
+                    Err(error) => error_reply(error),
+                };
+            }
+        };
         // Waking an agent that finished counts against the agents at work.
         let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
         if let Err(error) = self.room_for_another(request, &child) {
@@ -242,6 +312,72 @@ impl Engine {
             ));
         }
         Ok(())
+    }
+
+    /// Sends `target`, a chat `sender` did not start, the message `text`,
+    /// headed with who sent it. It counts against no chat's agents, and a
+    /// paused chat refuses it rather than waking.
+    fn message_other(&self, request: &Value, sender: &str, target: &str, text: &str) -> Value {
+        let title = self
+            .store
+            .as_ref()
+            .and_then(|store| store.chat(sender).ok())
+            .and_then(|chat| chat["title"].as_str().map(str::trim).map(str::to_owned))
+            .filter(|title| !title.is_empty());
+        let text = from_another_chat(sender, title.as_deref(), text);
+        let steer = request.get("steer").and_then(Value::as_bool) == Some(true);
+        // Asked under the chat's gate, which pausing holds too, so the chat
+        // cannot be paused between the check and the send.
+        let gate = match self.chat_execution_gate(target) {
+            Ok(gate) => gate,
+            Err(error) => return error_reply(error),
+        };
+        let Ok(_execution) = gate.lock() else {
+            return error_reply("This session's agent state is unavailable.");
+        };
+        // The user paused it so nothing goes on there, and only they resume it.
+        if self
+            .store
+            .as_ref()
+            .is_some_and(|store| store.chat_is_paused(target).unwrap_or(false))
+        {
+            return error_reply(
+                "That chat is paused, so it takes no messages from other chats until the user \
+                 resumes it.",
+            );
+        }
+        let reply = self.send_message_gated(
+            &json!({"op": "send", "chat": target, "text": text, "steer": steer}),
+            None,
+        );
+        if reply["ok"] == true {
+            self.events
+                .publish(json!({"event": "changed", "chat": target}));
+        }
+        reply
+    }
+
+    /// The asking chat and the chat `request`'s `agent` names, when that is
+    /// another chat that exists, or `None` when it names no chat.
+    fn other_chat(&self, request: &Value) -> Result<Option<(String, String)>, String> {
+        let sender = required_string(request, "chat", "That needs a chat id.")?;
+        let target = required_string(request, "agent", "Name the chat by its id.")?;
+        if sender == target {
+            return Err("That is this chat. Message another chat, or just go on.".into());
+        }
+        let store = self
+            .store
+            .as_ref()
+            .ok_or("Rust host state storage is not configured.")?;
+        store
+            .agent_origin(sender)
+            .map_err(|error| error.to_string())?;
+        Ok(store
+            .other_chats(sender, Some(target), 1)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .map(|other| (sender.to_owned(), other.chat.id)))
     }
 
     /// The agent `request` names, when `request`'s chat started it.
@@ -709,6 +845,20 @@ fn report(id: &str, title: &str, settled: &SettledTurn) -> String {
          list_agents.",
     );
     text
+}
+
+/// The message chat `sender`, called `title`, sends a chat it did not start:
+/// `text` headed with who sent it, so the agent there can answer it.
+fn from_another_chat(sender: &str, title: Option<&str>, text: &str) -> String {
+    let name = match title {
+        Some(title) => format!("chat \"{title}\" ({sender})"),
+        None => format!("chat {sender}"),
+    };
+    format!(
+        "[xd] A message from the agent in {name}, another xd chat:\n\n{text}\n\n\
+         To answer it, use xd's message_agent tool with agent \"{sender}\". Answer only \
+         when it asks for something; do not reply just to acknowledge it."
+    )
 }
 
 /// The end of `text`, where an agent's final answer is, within `limit`

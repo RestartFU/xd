@@ -1359,15 +1359,16 @@ agent's instructions say when to use them.
 
 ### Agents an agent starts
 
-The same `xd` MCP server gives an agent four more tools, each sent to the daemon
+The same `xd` MCP server gives an agent five more tools, each sent to the daemon
 as a request for the server's chat:
 
 | Tool | Request | Does |
 | --- | --- | --- |
 | `start_agent` | `start-agent` | Starts a chat under this one and sends it `prompt`. |
 | `list_agents` | `list-agents` | Lists this chat's agents, or the one named by `agent`. |
-| `message_agent` | `message-agent` | Sends one of them `text`, queued behind a running turn. |
+| `message_agent` | `message-agent` | Sends one of them, or any other chat, `text`, queued behind a running turn unless `steer`. |
 | `stop_agent` | `stop-agent` | Throws one of them away, as `delete-chat` would. |
+| `list_chats` | `list-chats` | Lists every other chat, or the one named by `target`. |
 
 ```json
 {"op":"start-agent","chat":"lead","prompt":"Fix CI on #12","title":"CI","assistant":"codex","workspace":"new_worktree"}
@@ -1439,6 +1440,31 @@ whose tree entry has `parent` shows a link back to that chat.
 Starting an agent creates its chat and starts its first turn before answering,
 so the server waits up to 300 seconds for the daemon, and Codex is started with
 `mcp_servers.xd.tool_timeout_sec=300` so it waits as long for the tool.
+
+#### Other chats
+
+An agent can also reach chats it did not start, in any project, to ask them
+something or steer them. `list-chats` lists every chat but the asking one, at
+most 50, those `working` first and then the most recently active, each with the
+`list-agents` fields plus `project` (the folder's path in the workspace),
+`workdir` when it has one, `started_by` with the chat that started it, if any,
+and `yours` when that is the asking chat. Replies are clipped to 200
+characters; naming one chat in `target` returns only that chat with its whole
+latest reply, as `list-agents` does for one agent.
+
+```json
+{"op":"list-chats","chat":"lead"}
+{"ok":true,"chats":[{"id":"other","title":"Docs","assistant":"claude","status":"working","project":"xd","workdir":"/…/worktrees/xd/docs"}]}
+```
+
+`message-agent` takes any chat's id as `agent`. For a chat the asking chat did
+not start, the message is an ordinary `send` (with `steer` when asked), so it
+counts against no chat's agents, and its text begins `[xd] A message from the
+agent in chat "<title>" (<chat id>), another xd chat:` followed by the message
+and a line telling the agent there how to answer with `message_agent`. Its
+answer, if any, arrives the same way. A paused chat refuses such a message
+rather than waking, since only the user resumes it. A chat cannot message itself, and
+`stop-agent` still only takes the asking chat's own agents.
 
 `move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
 to move the folder to the workspace root. A folder cannot be moved into itself
