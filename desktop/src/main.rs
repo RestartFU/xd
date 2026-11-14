@@ -32,7 +32,6 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use gpui::AnimationExt as _;
 use gpui::{
     App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
     Decorations, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, HighlightStyle, Image,
@@ -1214,6 +1213,19 @@ fn frame_colors() -> ThemeColors {
         .unwrap_or(ThemePreset::Dark.colors())
 }
 
+/// `text` on one line. GPUI shapes no line break, so a title that has one,
+/// such as a chat named from a pasted message, reads on with a space instead.
+fn one_line(text: SharedString) -> SharedString {
+    if !text.contains(['\n', '\r']) {
+        return text;
+    }
+    text.split(['\n', '\r'])
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .into()
+}
+
 /// One line of text as wide as it needs, down to whatever room its row leaves,
 /// ending in an ellipsis when that is too little. Size it from the outside.
 /// While it is cut short, the pointer over it shows the whole of it.
@@ -1227,7 +1239,7 @@ fn frame_colors() -> ThemeColors {
 /// over that once the label has its place, cut to the room it really has.
 #[track_caller]
 fn truncating_label(text: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
-    let text = text.into();
+    let text = one_line(text.into());
     let site = std::panic::Location::caller();
     let mut hasher = DefaultHasher::new();
     (text.as_ref(), site.file(), site.line(), site.column()).hash(&mut hasher);
@@ -1334,6 +1346,7 @@ fn line_width(
     size: f32,
     window: &Window,
 ) -> f32 {
+    let text = one_line(text.to_owned().into());
     if text.is_empty() {
         return 0.0;
     }
@@ -1350,7 +1363,7 @@ fn line_width(
     };
     let line = window
         .text_system()
-        .shape_line(text.to_owned().into(), px(size), &[run], None);
+        .shape_line(text, px(size), &[run], None);
     logical(line.width).ceil()
 }
 
@@ -2252,6 +2265,16 @@ fn menu_shell(colors: ThemeColors) -> gpui::Div {
 
 /// One choice in a menu. It grows for a second line.
 fn menu_row(id: impl Into<gpui::ElementId>, colors: ThemeColors) -> gpui::Stateful<gpui::Div> {
+    menu_row_shape(id, colors).hover(|style| style.bg(rgb(colors.surface_high)))
+}
+
+/// A [`menu_row`] with no hover of its own, for a row that lights in another
+/// fill, such as a destructive one, or not at all, as one that cannot be
+/// picked now. GPUI takes one hover per element.
+fn menu_row_shape(
+    id: impl Into<gpui::ElementId>,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .w_full()
@@ -2265,7 +2288,6 @@ fn menu_row(id: impl Into<gpui::ElementId>, colors: ThemeColors) -> gpui::Statef
         .text_size(text_px(TEXT_CONTROL))
         .text_color(rgb(colors.text))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(colors.surface_high)))
 }
 
 /// The room a menu row keeps for its check mark, and the mark on the choice
@@ -2423,7 +2445,7 @@ fn render_compaction_notice(
         .flex()
         .items_center()
         .gap(px(6.0))
-        .text_size(px(12.0))
+        .text_size(text_px(TEXT_LABEL))
         .text_color(rgb(tone))
         .child(icon(
             if failed { ALERT_ICON } else { COMPACT_ICON },
@@ -2431,18 +2453,11 @@ fn render_compaction_notice(
             tone,
         ))
         .child(div().min_w_0().truncate().child(label.to_owned()));
+    // It breathes with the shared pulse, not a per-frame animation.
     let content = if state == activity::CompactionState::Running {
-        content
-            .with_animation(
-                "compaction-running",
-                gpui::Animation::new(Duration::from_millis(1600))
-                    .repeat()
-                    .with_easing(gpui::pulsating_between(0.45, 1.0)),
-                |content, delta| content.opacity(delta),
-            )
-            .into_any_element()
+        content.opacity(pulse_opacity())
     } else {
-        content.into_any_element()
+        content
     };
     div()
         .w_full()
@@ -27763,12 +27778,10 @@ impl XdDesktop {
                     &keys,
                     KeyLayer::Menu,
                     "sidebar-menu",
-                    menu_row(id, colors)
+                    menu_row_shape(id, colors)
                         .debug_selector(move || id.into())
-                        .when(danger, |row| {
-                            row.text_color(rgb(colors.danger))
-                                .hover(|style| style.bg(rgb(colors.danger_surface)))
-                        }),
+                        .text_color(rgb(if danger { colors.danger } else { colors.text }))
+                        .hover(move |style| style.bg(rgb(fill))),
                     fill,
                     cx,
                     run,
@@ -27905,11 +27918,10 @@ impl XdDesktop {
                                     this.apply_row_move(step.clone(), cx);
                                 }),
                             ),
-                            None => menu_row(id, colors)
+                            None => menu_row_shape(id, colors)
                                 .debug_selector(move || id.into())
                                 .cursor_default()
                                 .text_color(rgb(disabled_ink(colors)))
-                                .hover(|style| style.bg(gpui::transparent_black()))
                                 .child(label)
                                 .into_any_element(),
                         });
@@ -28404,15 +28416,14 @@ impl XdDesktop {
                 .enumerate()
                 .map(|(index, (value, label))| {
                     let selected = current == value;
-                    let row = menu_row(("native-setting-choice", index), colors)
+                    let row = menu_row_shape(("native-setting-choice", index), colors)
                         .debug_selector(move || format!("native-setting-choice-{index}"));
                     let row = if disabled {
                         // Not to be picked now: in the ink of a disabled
                         // control, with nothing that reacts.
-                        row.cursor_default()
-                            .text_color(rgb(disabled_ink(colors)))
-                            .hover(|style| style.bg(gpui::transparent_black()))
+                        row.cursor_default().text_color(rgb(disabled_ink(colors)))
                     } else {
+                        let row = row.hover(|style| style.bg(rgb(colors.surface_high)));
                         let row = key_row(
                             &keys,
                             KeyLayer::Menu,
@@ -33247,6 +33258,29 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         });
     }
 
+    #[gpui::test]
+    fn a_header_title_with_a_line_break_is_measured_on_one_line(cx: &mut gpui::TestAppContext) {
+        // The header measures its session's title before drawing it, and
+        // GPUI shapes no line break: both read it on one line.
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model.apply_tree(&serde_json::json!({
+                "folders":[{"id":"atlas","name":"Atlas"}],
+                "chats":[{"id":"broken","folder":"atlas","title":"First line\nsecond line","backend":"codex"}],
+                "sessions":[{"id":"workspace","folder":"atlas","title":"Pasted\r\ntitle","chats":["broken"],"terminal_chat":"session:workspace"}]
+            })).unwrap();
+            desktop.model.select_chat("broken");
+            desktop.minimal_route = MinimalRoute::Cli { project_id:"atlas".into(), chat_id:"broken".into(), agent:AgentCli::Codex };
+        });
+        cx.simulate_resize(size(px(1180.0), px(560.0)));
+        redraw(cx);
+        assert_eq!(one_line("Pasted\r\ntitle".into()).as_ref(), "Pasted title");
+        assert!(
+            DRAWN_LABELS.with(|labels| labels.borrow().iter().any(|label| label == "Pasted title")),
+            "the header draws the title on one line"
+        );
+    }
+
     #[test]
     fn chat_tabs_build_their_titles_with_the_truncating_label() {
         let source = include_str!("main.rs");
@@ -33426,6 +33460,57 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         let caption = cx.debug_bounds("native-answered-question").unwrap();
         let composer = cx.debug_bounds("chat-composer").unwrap();
         assert!(caption.bottom() < composer.top());
+    }
+
+    #[gpui::test]
+    fn a_running_compaction_asks_the_pulse_to_redraw_the_window(cx: &mut gpui::TestAppContext) {
+        // The divider breathes with the shared pulse: drawing it while it
+        // runs notes the frame as animated, so each pulse step redraws the
+        // window, and a finished one asks for nothing.
+        install_embedded_fonts(cx.text_system()).unwrap();
+        set_reduce_motion(false);
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        let show = |state: &str, desktop: &mut XdDesktop| {
+            desktop.transcript_snapshot.messages = Arc::new(vec![
+                Message::new(Some(1), "user", "Tidy the history", None),
+                Message::new(
+                    Some(2),
+                    "tool",
+                    format!("context_compaction\n{state}\nCompacting context"),
+                    None,
+                ),
+            ]);
+            desktop.transcript_snapshot.sync_derived_rows();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        };
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "claude".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Claude,
+            };
+            desktop.settings.browser_sessions.clear();
+            show("completed", desktop);
+        });
+        cx.simulate_resize(size(px(1100.0), px(800.0)));
+        cx.run_until_parked();
+        redraw(cx);
+        let finished = ANIMATION_DRAWN.with(Cell::get);
+        desktop.update(cx, |desktop, cx| {
+            show("running", desktop);
+            cx.notify();
+        });
+        redraw(cx);
+        assert!(
+            ANIMATION_DRAWN.with(Cell::get),
+            "a running compaction pulses"
+        );
+        assert!(!finished, "a finished compaction holds still");
     }
 
     #[gpui::test]
@@ -40851,9 +40936,14 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             desktop.begin_workspace_create_in(WorkspaceCreateKind::Project, None, window, cx);
         });
         redraw(cx);
+        let repository = if cfg!(target_os = "windows") {
+            "dialog-field-label:Linux repository path"
+        } else {
+            "dialog-field-label:Repository path (optional)"
+        };
         for label in [
             "dialog-field-label:Project name",
-            "dialog-field-label:Repository path (optional)",
+            repository,
             "dialog-field-label:Clone URL (optional)",
         ] {
             let name = cx

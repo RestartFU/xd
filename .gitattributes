@@ -1,0 +1,3 @@
+# Source tests read their own files with include_str! and match "\n" in
+# them, so Rust sources keep LF line endings on every checkout, Windows too.
+*.rs text eol=lf
