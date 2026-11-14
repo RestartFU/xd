@@ -33437,6 +33437,57 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
     }
 
     #[gpui::test]
+    fn a_running_compaction_asks_the_pulse_to_redraw_the_window(cx: &mut gpui::TestAppContext) {
+        // The divider breathes with the shared pulse: drawing it while it
+        // runs notes the frame as animated, so each pulse step redraws the
+        // window, and a finished one asks for nothing.
+        install_embedded_fonts(cx.text_system()).unwrap();
+        set_reduce_motion(false);
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        let show = |state: &str, desktop: &mut XdDesktop| {
+            desktop.transcript_snapshot.messages = Arc::new(vec![
+                Message::new(Some(1), "user", "Tidy the history", None),
+                Message::new(
+                    Some(2),
+                    "tool",
+                    &format!("context_compaction\n{state}\nCompacting context"),
+                    None,
+                ),
+            ]);
+            desktop.transcript_snapshot.sync_derived_rows();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        };
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "claude".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Claude,
+            };
+            desktop.settings.browser_sessions.clear();
+            show("completed", desktop);
+        });
+        cx.simulate_resize(size(px(1100.0), px(800.0)));
+        cx.run_until_parked();
+        redraw(cx);
+        let finished = ANIMATION_DRAWN.with(Cell::get);
+        desktop.update(cx, |desktop, cx| {
+            show("running", desktop);
+            cx.notify();
+        });
+        redraw(cx);
+        assert!(
+            ANIMATION_DRAWN.with(Cell::get),
+            "a running compaction pulses"
+        );
+        assert!(!finished, "a finished compaction holds still");
+    }
+
+    #[gpui::test]
     fn dragging_across_a_code_block_selects_its_text(cx: &mut gpui::TestAppContext) {
         let code = "first line of code\nsecond line of code";
         let cx = table_transcript(cx, 1100.0, &format!("Run this:\n\n```sh\n{code}\n```"));
