@@ -44,6 +44,8 @@ const MAX_CLIENTS: usize = 64;
 /// socket until its `exec` closes them, so a busy lock can outlive the daemon.
 const LOCK_WAIT: Duration = Duration::from_secs(2);
 const LOCK_HOLDER_ANSWER_WAIT: Duration = Duration::from_millis(200);
+/// How often the daemon checks that its socket and lock files still exist.
+const FILE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 static STOP: AtomicBool = AtomicBool::new(false);
 extern "C" fn stop_signal(_: libc::c_int) {
     STOP.store(true, Ordering::Release);
@@ -100,12 +102,83 @@ fn private_directory(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 struct Singleton {
-    _lock: File,
+    lock: File,
+    lock_path: PathBuf,
     socket: PathBuf,
+    /// The socket file this daemon listens on, once it listens.
+    listening: Option<(u64, u64)>,
+}
+fn identity(metadata: &fs::Metadata) -> (u64, u64) {
+    (metadata.dev(), metadata.ino())
+}
+fn names(path: &Path, expected: Option<(u64, u64)>) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| Some(identity(&metadata)) == expected)
+}
+impl Singleton {
+    fn listen(&mut self) -> io::Result<UnixListener> {
+        let listener = UnixListener::bind(&self.socket)?;
+        fs::set_permissions(&self.socket, fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+        self.listening = Some(identity(&fs::symlink_metadata(&self.socket)?));
+        Ok(listener)
+    }
+    /// Clearing `/tmp` removes the socket and lock files while the daemon
+    /// keeps running. Clients could no longer reach it, and the next one to
+    /// start a daemon would serve the same database a second time. This puts
+    /// both back and returns the listener on the new socket. It returns
+    /// nothing when both are intact.
+    fn restore(&mut self) -> io::Result<Option<UnixListener>> {
+        let lock = self
+            .lock
+            .metadata()
+            .map(|metadata| identity(&metadata))
+            .ok();
+        let lock_intact = names(&self.lock_path, lock);
+        if lock_intact && names(&self.socket, self.listening) {
+            return Ok(None);
+        }
+        if let Some(runtime) = self.socket.parent() {
+            private_directory(runtime)?;
+        }
+        if !lock_intact {
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&self.lock_path)?;
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return Err(io::Error::other(
+                    "another daemon took over this database's lock after its files were removed",
+                ));
+            }
+            self.lock = lock;
+        }
+        // Holding the lock, anything left at the socket path is stale.
+        match fs::symlink_metadata(&self.socket) {
+            Ok(metadata) => {
+                use std::os::unix::fs::FileTypeExt;
+                if !metadata.file_type().is_socket() {
+                    return Err(io::Error::other(
+                        "Daemon socket path is occupied by a non-socket file.",
+                    ));
+                }
+                fs::remove_file(&self.socket)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        self.listen().map(Some)
+    }
 }
 impl Drop for Singleton {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.socket);
+        // Never another daemon's socket, after this one's was removed.
+        if self.listening.is_none() || names(&self.socket, self.listening) {
+            let _ = fs::remove_file(&self.socket);
+        }
     }
 }
 fn singleton(paths: &Paths, wait: Duration) -> io::Result<Option<Singleton>> {
@@ -145,8 +218,10 @@ fn singleton(paths: &Paths, wait: Duration) -> io::Result<Option<Singleton>> {
         Err(error) => return Err(error),
     }
     Ok(Some(Singleton {
-        _lock: lock,
+        lock,
+        lock_path: paths.lock.clone(),
         socket: paths.socket.clone(),
+        listening: None,
     }))
 }
 
@@ -187,7 +262,7 @@ fn app_close_grace() -> Duration {
 }
 fn run_inner(options: HostOptions, stop_with_app: bool) -> io::Result<()> {
     let paths = paths(&options)?;
-    let Some(_singleton) = singleton(&paths, LOCK_WAIT)? else {
+    let Some(mut singleton) = singleton(&paths, LOCK_WAIT)? else {
         return Ok(());
     };
     // Read now, while the path names this binary: an update replaces it there.
@@ -215,9 +290,7 @@ fn run_inner(options: HostOptions, stop_with_app: bool) -> io::Result<()> {
     if stop_with_app {
         engine.stop_with_app();
     }
-    let listener = UnixListener::bind(&paths.socket)?;
-    fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
+    let mut listener = singleton.listen()?;
     let peers = Arc::new(PeerServer::new(&paths.data, Arc::downgrade(&engine))?);
     let peer_server = peers.clone();
     engine
@@ -240,8 +313,28 @@ fn run_inner(options: HostOptions, stop_with_app: bool) -> io::Result<()> {
     let mut clients = Vec::<thread::JoinHandle<()>>::new();
     let app_grace = app_close_grace();
     let mut installed_at = None::<Instant>;
+    let mut checked_files = Instant::now();
+    let mut restore_error = None::<String>;
     while !STOP.load(Ordering::Acquire) && !engine.shutdown_requested() {
         clients.retain(|client| !client.is_finished());
+        if checked_files.elapsed() >= FILE_CHECK_INTERVAL {
+            checked_files = Instant::now();
+            match singleton.restore() {
+                Ok(None) => restore_error = None,
+                Ok(Some(restored)) => {
+                    eprintln!("xd-host: its socket was removed, so it listens on a new one");
+                    listener = restored;
+                    restore_error = None;
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    if restore_error.as_ref() != Some(&error) {
+                        eprintln!("xd-host: cannot restore its removed socket: {error}");
+                        restore_error = Some(error);
+                    }
+                }
+            }
+        }
         if stop_with_app {
             // An update the app asked for finishes before the host stops.
             if engine.installing_update() {
@@ -781,6 +874,56 @@ mod tests {
         );
         release.join().unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn running_daemon() -> (PathBuf, Paths, Singleton, UnixListener) {
+        let (root, paths, holder) = lock_fixture();
+        drop(holder);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut singleton = singleton(&paths, Duration::ZERO).unwrap().unwrap();
+        let listener = singleton.listen().unwrap();
+        (root, paths, singleton, listener)
+    }
+
+    #[test]
+    fn a_daemon_whose_files_were_removed_can_be_reached_again() {
+        let (root, paths, mut singleton, _old) = running_daemon();
+        assert!(singleton.restore().unwrap().is_none());
+        fs::remove_dir_all(&root).unwrap();
+        assert!(UnixStream::connect(&paths.socket).is_err());
+
+        let listener = singleton.restore().unwrap().unwrap();
+        let _client = UnixStream::connect(&paths.socket).unwrap();
+        listener.set_nonblocking(false).unwrap();
+        listener.accept().unwrap();
+        assert!(singleton.restore().unwrap().is_none());
+        // The lock is back too, so no second daemon can start.
+        assert!(singleton_now(&paths).is_none());
+        drop(singleton);
+        assert!(!paths.socket.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_daemon_leaves_the_files_of_one_that_took_over() {
+        let (root, paths, mut singleton, _old) = running_daemon();
+        fs::remove_file(&paths.lock).unwrap();
+        fs::remove_file(&paths.socket).unwrap();
+        let (_other, _other_listener) = {
+            let mut other = singleton_now(&paths).unwrap();
+            let listener = other.listen().unwrap();
+            // Kept alive by forgetting it, as if it were another process.
+            (std::mem::ManuallyDrop::new(other), listener)
+        };
+
+        assert!(singleton.restore().is_err());
+        drop(singleton);
+        assert!(UnixStream::connect(&paths.socket).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn singleton_now(paths: &Paths) -> Option<Singleton> {
+        singleton(paths, Duration::ZERO).unwrap()
     }
 
     #[test]
