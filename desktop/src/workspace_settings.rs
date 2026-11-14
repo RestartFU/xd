@@ -234,6 +234,18 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ),
                 ("Show or hide the side pane", format!("{m} B")),
                 ("Show or hide the terminal under the chat", "Ctrl `".into()),
+                (
+                    "Narrow / widen the sidebar",
+                    format!("{m} Alt Left / {m} Alt Right"),
+                ),
+                (
+                    "Widen / narrow the side pane",
+                    format!("{m} Alt Shift Left / {m} Alt Shift Right"),
+                ),
+                (
+                    "Taller / shorter terminal under the chat",
+                    format!("{m} Alt Up / {m} Alt Down"),
+                ),
                 ("The Terminal page", format!("{m} Shift T")),
                 ("Settings", format!("{m} ,")),
                 ("Usage", format!("{m} U")),

@@ -2541,7 +2541,13 @@ gpui::actions!(
         ScrollPageDown,
         ScrollToTop,
         ScrollToBottom,
-        UndoLast
+        UndoLast,
+        SidebarNarrower,
+        SidebarWider,
+        SidePaneWider,
+        SidePaneNarrower,
+        TerminalTaller,
+        TerminalShorter
     ]
 );
 
@@ -2614,6 +2620,21 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         // box and the terminal bind these keys deeper and keep them.
         KeyBinding::new("ctrl-z", UndoLast, context),
         KeyBinding::new("cmd-z", UndoLast, context),
+        // The window's dividers, from the keyboard: each pair moves one
+        // the way its arrows point, as a drag would, and is kept the same.
+        // Nothing else binds Ctrl and Alt with an arrow.
+        KeyBinding::new("ctrl-alt-left", SidebarNarrower, context),
+        KeyBinding::new("cmd-alt-left", SidebarNarrower, context),
+        KeyBinding::new("ctrl-alt-right", SidebarWider, context),
+        KeyBinding::new("cmd-alt-right", SidebarWider, context),
+        KeyBinding::new("ctrl-alt-shift-left", SidePaneWider, context),
+        KeyBinding::new("cmd-alt-shift-left", SidePaneWider, context),
+        KeyBinding::new("ctrl-alt-shift-right", SidePaneNarrower, context),
+        KeyBinding::new("cmd-alt-shift-right", SidePaneNarrower, context),
+        KeyBinding::new("ctrl-alt-up", TerminalTaller, context),
+        KeyBinding::new("cmd-alt-up", TerminalTaller, context),
+        KeyBinding::new("ctrl-alt-down", TerminalShorter, context),
+        KeyBinding::new("cmd-alt-down", TerminalShorter, context),
     ];
     if cfg!(target_os = "macos") {
         bindings.push(KeyBinding::new("cmd-up", ScrollToTop, context));
@@ -12960,6 +12981,52 @@ impl XdDesktop {
         let in_session = self.creating_chat_folder.is_some()
             || matches!(self.minimal_route, MinimalRoute::Cli { .. });
         in_session && width < CATALOG_MIN_WIDTH + CATALOG_SESSION_MIN_WIDTH
+    }
+
+    /// A divider moved from the keyboard: the pane it bounds grows by
+    /// `grow`, or shrinks for less than nothing, within the same bounds a
+    /// drag keeps, and the size is saved as a drag's is. A pane that is not
+    /// showing keeps its size.
+    fn move_divider(
+        &mut self,
+        divider: Divider,
+        grow: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shortcuts_blocked() {
+            return;
+        }
+        let width = logical(window.viewport_size().width);
+        let requested = |size: f32| (size + grow).round().clamp(0.0, f32::from(u16::MAX)) as u16;
+        match divider {
+            Divider::Sidebar => {
+                if self.sidebar_hidden || self.sidebar_compacted(window) {
+                    return;
+                }
+                let room = self.catalog_room(window);
+                self.settings.catalog_width =
+                    catalog_pane_width(requested(self.catalog_width(window)), room) as u16;
+            }
+            Divider::SidePane => {
+                if !self.browser_is_open() {
+                    return;
+                }
+                let now = browser_pane_width(self.settings.browser_width, width);
+                self.settings.browser_width = browser_pane_width(requested(now), width) as u16;
+            }
+            Divider::Terminal => {
+                if !self.bottom_terminal_open || !self.native_session() {
+                    return;
+                }
+                let available = logical(window.viewport_size().height) - TERMINAL_PANEL_CHROME;
+                let now = bottom_terminal_height(self.settings.terminal_height, available);
+                self.settings.terminal_height =
+                    bottom_terminal_height(requested(now), available) as u16;
+            }
+        }
+        let _ = self.settings.save();
+        cx.notify();
     }
 
     fn finish_dock_resize(&mut self, cx: &mut Context<Self>) {
@@ -26418,7 +26485,7 @@ impl XdDesktop {
             .then(|| self.render_minimal_terminal(colors, window, cx));
         let height = bottom_terminal_height(
             self.settings.terminal_height,
-            logical(window.viewport_size().height) - 86.0,
+            logical(window.viewport_size().height) - TERMINAL_PANEL_CHROME,
         );
         div()
             .size_full()
@@ -28098,7 +28165,7 @@ impl XdDesktop {
                                     .round()
                                     .clamp(0.0, u16::MAX as f32)
                                     as u16,
-                                logical(window.viewport_size().height) - 86.0,
+                                logical(window.viewport_size().height) - TERMINAL_PANEL_CHROME,
                             ) as u16;
                             cx.notify();
                         } else {
@@ -28220,6 +28287,24 @@ impl XdDesktop {
             }))
             .on_action(cx.listener(|this, _: &ToggleTerminalPanel, window, cx| {
                 this.toggle_terminal_panel(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SidebarNarrower, window, cx| {
+                this.move_divider(Divider::Sidebar, -PANE_KEY_STEP, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SidebarWider, window, cx| {
+                this.move_divider(Divider::Sidebar, PANE_KEY_STEP, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SidePaneWider, window, cx| {
+                this.move_divider(Divider::SidePane, PANE_KEY_STEP, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SidePaneNarrower, window, cx| {
+                this.move_divider(Divider::SidePane, -PANE_KEY_STEP, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TerminalTaller, window, cx| {
+                this.move_divider(Divider::Terminal, PANE_KEY_STEP, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TerminalShorter, window, cx| {
+                this.move_divider(Divider::Terminal, -PANE_KEY_STEP, window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(window, cx);
