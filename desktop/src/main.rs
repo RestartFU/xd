@@ -706,6 +706,67 @@ enum Divider {
     Terminal,
 }
 
+impl Divider {
+    /// Its Tab stop's id.
+    const fn stop(self) -> &'static str {
+        match self {
+            Self::Sidebar => "divider:sidebar",
+            Self::SidePane => "divider:side-pane",
+            Self::Terminal => "divider:terminal",
+        }
+    }
+
+    /// What the name under its ring says.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Sidebar => "Sidebar's edge: Left / Right moves it, Home / End to either end",
+            Self::SidePane => "Side pane's edge: Left / Right moves it, Home / End to either end",
+            Self::Terminal => "Terminal's edge: Up / Down moves it, Home / End to either end",
+        }
+    }
+
+    fn from_stop(id: &str) -> Option<Self> {
+        [Self::Sidebar, Self::SidePane, Self::Terminal]
+            .into_iter()
+            .find(|divider| divider.stop() == id)
+    }
+
+    /// How far a key moves the pane it bounds: Left and Right for the two
+    /// upright dividers, Up and Down for the terminal's, each the way it
+    /// points, and Home and End all the way to the left or top and to the
+    /// right or bottom. `None` for a key across the divider.
+    fn grow_for(self, key: ArrowKey) -> Option<f32> {
+        const ALL_THE_WAY: f32 = 100_000.0;
+        let (toward_start, toward_end) = match (self, key) {
+            (Self::Sidebar | Self::SidePane, ArrowKey::Left) | (Self::Terminal, ArrowKey::Up) => {
+                (PANE_KEY_STEP, 0.0)
+            }
+            (Self::Sidebar | Self::SidePane, ArrowKey::Right)
+            | (Self::Terminal, ArrowKey::Down) => (0.0, PANE_KEY_STEP),
+            (_, ArrowKey::Home) => (ALL_THE_WAY, 0.0),
+            (_, ArrowKey::End) => (0.0, ALL_THE_WAY),
+            _ => return None,
+        };
+        // The sidebar grows as its edge moves right; the side pane and the
+        // terminal grow as theirs moves left or up.
+        Some(match self {
+            Self::Sidebar => toward_end - toward_start,
+            Self::SidePane | Self::Terminal => toward_start - toward_end,
+        })
+    }
+}
+
+/// An arrow key, Home or End, as the control the ring is on reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArrowKey {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
 /// How far one press of a divider's keys moves it.
 const PANE_KEY_STEP: f32 = 16.0;
 
@@ -2549,7 +2610,12 @@ gpui::actions!(
         SidePaneWider,
         SidePaneNarrower,
         TerminalTaller,
-        TerminalShorter
+        TerminalShorter,
+        LeaveToMessageBox,
+        NextRegion,
+        PreviousRegion,
+        MoveRowUp,
+        MoveRowDown
     ]
 );
 
@@ -2573,6 +2639,10 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("alt-shift-down", NextWaitingSession, context),
         KeyBinding::new("ctrl-.", StopTurn, context),
         KeyBinding::new("cmd-.", StopTurn, context),
+        // A second Stop key: GNOME's input methods can take Ctrl+. for
+        // emoji. No text box, editor or terminal binds this one.
+        KeyBinding::new("ctrl-shift-backspace", StopTurn, context),
+        KeyBinding::new("cmd-shift-backspace", StopTurn, context),
         KeyBinding::new("ctrl-b", ToggleSidePane, context),
         KeyBinding::new("cmd-b", ToggleSidePane, context),
         KeyBinding::new("ctrl-`", ToggleTerminalPanel, context),
@@ -2580,7 +2650,12 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-,", OpenSettings, context),
         KeyBinding::new("ctrl-l", FocusComposer, context),
         KeyBinding::new("cmd-l", FocusComposer, context),
-        KeyBinding::new("shift-escape", FocusComposer, context),
+        // Keys the terminal and the text boxes never take, so the keyboard
+        // can always leave them: Shift+Escape for the message box, or the
+        // sidebar where there is none, and F6 through the window's regions.
+        KeyBinding::new("shift-escape", LeaveToMessageBox, context),
+        KeyBinding::new("f6", NextRegion, context),
+        KeyBinding::new("shift-f6", PreviousRegion, context),
         KeyBinding::new("ctrl-k", FocusFind, context),
         KeyBinding::new("cmd-k", FocusFind, context),
         // The Terminal page. Ctrl+Shift+T reaches it from the terminal too,
@@ -2609,6 +2684,11 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("right", KeyRight, Some(KEY_STOP_CONTEXT)),
         KeyBinding::new("home", KeyHome, Some(KEY_STOP_CONTEXT)),
         KeyBinding::new("end", KeyEnd, Some(KEY_STOP_CONTEXT)),
+        // A row of the sidebar's tree the ring is on moves among its
+        // siblings, as a drag would. Anywhere else these go on to the
+        // window's keys: Alt+Shift+Down is the next session waiting on you.
+        KeyBinding::new("alt-shift-up", MoveRowUp, Some(KEY_STOP_CONTEXT)),
+        KeyBinding::new("alt-shift-down", MoveRowDown, Some(KEY_STOP_CONTEXT)),
         KeyBinding::new("shift-f10", OpenContextMenu, context),
         KeyBinding::new("menu", OpenContextMenu, context),
         // The reading pane: the transcript, the Changes patch, an open file,
@@ -5324,6 +5404,62 @@ enum SidebarTarget {
     Chat(String),
 }
 
+/// A sidebar row moved beside its sibling with Move up or Move down.
+#[derive(Clone, Debug, PartialEq)]
+enum RowMove {
+    Session {
+        project: String,
+        chat: String,
+        index: usize,
+        anchor: String,
+        anchor_index: usize,
+    },
+    Project(ProjectReorder),
+}
+
+/// The sibling above (or, `down`, below) item `at` of a list laid out as a
+/// tree, each item at its `depth`: the nearest at the same depth, passing
+/// over what sits deeper, and none past the start of its parent.
+fn sibling_beside<T>(
+    items: &[T],
+    at: usize,
+    down: bool,
+    depth: impl Fn(&T) -> usize,
+) -> Option<usize> {
+    let own = depth(&items[at]);
+    let mut index = at;
+    loop {
+        index = if down {
+            index + 1
+        } else {
+            index.checked_sub(1)?
+        };
+        let item = items.get(index)?;
+        match depth(item) {
+            deeper if deeper > own => continue,
+            same if same == own => return Some(index),
+            _ => return None,
+        }
+    }
+}
+
+/// The parts of the window F6 moves the keyboard between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Region {
+    /// The sidebar's tree of projects and sessions.
+    Sidebar,
+    /// The terminal: the Terminal page's, or the one under the chat.
+    Session,
+    /// The side pane: Files, Changes or the browser.
+    SidePane,
+    /// The message box.
+    Composer,
+}
+
+impl Region {
+    const ORDER: [Self; 4] = [Self::Sidebar, Self::Session, Self::SidePane, Self::Composer];
+}
+
 #[derive(Clone)]
 struct SidebarEdit {
     target: SidebarTarget,
@@ -5886,6 +6022,11 @@ struct XdDesktop {
     tree_roving: Option<SharedString>,
     /// The tree row the keys were last on, which Tab comes back to.
     tree_cursor: Option<SharedString>,
+    /// A key sent the keyboard to the sidebar while it was folded away: the
+    /// ring goes on its row once the sidebar shown over the session has
+    /// drawn its rows (`ready`).
+    tree_ring_pending: bool,
+    tree_ring_ready: bool,
     /// The sidebar's rows, kept while nothing they come from changes, and
     /// how many times they were worked out, which the tests count.
     sidebar_rows: Option<Rc<SidebarRows>>,
@@ -6823,6 +6964,8 @@ impl XdDesktop {
             tree_rows_next: Vec::new(),
             tree_roving: None,
             tree_cursor: None,
+            tree_ring_pending: false,
+            tree_ring_ready: false,
             sidebar_rows: None,
             sidebar_row_builds: 0,
             key_scroll: ScrollHandle::new(),
@@ -13140,6 +13283,44 @@ impl XdDesktop {
         }
         let _ = self.settings.save();
         cx.notify();
+    }
+
+    /// A divider's grab strip as a Tab stop: the ring shows around it with
+    /// its name under it, and the arrows, Home and End move it while the ring
+    /// is on it. Enter and Space do nothing; there is nothing to press.
+    fn divider_stop(
+        &self,
+        strip: gpui::Stateful<gpui::Div>,
+        divider: Divider,
+        colors: ThemeColors,
+    ) -> gpui::Stateful<gpui::Div> {
+        key_reach(
+            strip,
+            &self.key_targets,
+            KeyLayer::Page,
+            divider.stop(),
+            Some(divider.name().into()),
+            RADIUS_CONTROL,
+            colors,
+            |_, _, _| {},
+        )
+    }
+
+    /// The arrows, Home and End while the Tab ring is on a divider: it
+    /// moves 16 pixels the way the arrow points, or to its end, as a drag
+    /// would. Says whether the ring was on a divider; an arrow across it
+    /// does nothing and is still its.
+    fn divider_key(&mut self, key: ArrowKey, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.stop_focus.is_focused(window) {
+            return false;
+        }
+        let Some(divider) = self.key_stop.as_ref().and_then(|id| Divider::from_stop(id)) else {
+            return false;
+        };
+        if let Some(grow) = divider.grow_for(key) {
+            self.move_divider(divider, grow, window, cx);
+        }
+        true
     }
 
     fn finish_dock_resize(&mut self, cx: &mut Context<Self>) {
@@ -26706,22 +26887,30 @@ impl XdDesktop {
                             .flex_none()
                             .bg(rgb(colors.border))
                             .child(
-                                div()
-                                    .id("bottom-terminal-resize")
-                                    .absolute()
-                                    .top(px(-4.0))
-                                    .h(px(9.0))
-                                    .w_full()
-                                    .cursor(CursorStyle::ResizeUpDown)
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.dock_drag =
-                                                Some((logical(event.position.y), height as u16));
-                                            cx.notify();
-                                        }),
-                                    ),
+                                self.divider_stop(
+                                    div()
+                                        .id("bottom-terminal-resize")
+                                        .absolute()
+                                        .top(px(-4.0))
+                                        .h(px(9.0))
+                                        .w_full()
+                                        .cursor(CursorStyle::ResizeUpDown)
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                move |this, event: &MouseDownEvent, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.dock_drag = Some((
+                                                        logical(event.position.y),
+                                                        height as u16,
+                                                    ));
+                                                    cx.notify();
+                                                },
+                                            ),
+                                        ),
+                                    Divider::Terminal,
+                                    colors,
+                                ),
                             ),
                     )
                     .child(
@@ -26944,22 +27133,27 @@ impl XdDesktop {
         // Drawn after the session so its whole strip stays grabbable and keeps
         // the resize cursor over the session's edge as well as the catalog's.
         let catalog_resize = catalog.is_some().then(|| {
-            div()
-                .id("catalog-resize")
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left(px(catalog_width - 5.0))
-                .w(px(9.0))
-                .cursor(CursorStyle::ResizeLeftRight)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.catalog_drag = Some((logical(event.position.x), catalog_width as u16));
-                        cx.notify();
-                    }),
-                )
+            self.divider_stop(
+                div()
+                    .id("catalog-resize")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(catalog_width - 5.0))
+                    .w(px(9.0))
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.catalog_drag =
+                                Some((logical(event.position.x), catalog_width as u16));
+                            cx.notify();
+                        }),
+                    ),
+                Divider::Sidebar,
+                colors,
+            )
         });
         let toolbar = if self.creating_chat_folder.is_some() {
             Some(self.render_new_chat_toolbar(colors, cx))
@@ -27071,6 +27265,25 @@ impl XdDesktop {
                 _ => None,
             };
             let folder_group = group.is_some();
+            // Where Move up and Move down take the row, when it moves at all.
+            let row_moves = {
+                let steps = [false, true].map(|down| self.row_move(&menu.target, down));
+                let movable = steps.iter().any(Option::is_some)
+                    || match &menu.target {
+                        SidebarTarget::Folder(_) => self.model.folder_reorder_supported,
+                        target => self.sidebar_rows.as_ref().is_some_and(|rows| {
+                            rows.sessions.values().flatten().any(|card| match target {
+                                SidebarTarget::Chat(chat) => card.id == *chat,
+                                SidebarTarget::Session(session) => self
+                                    .model
+                                    .session_for_chat(&card.id)
+                                    .is_some_and(|group| group.id == *session),
+                                SidebarTarget::Folder(_) => false,
+                            })
+                        }),
+                    };
+                movable.then_some(steps)
+            };
             let settlement = match &menu.target {
                 SidebarTarget::Session(session_id) => self
                     .session_settlement(session_id)
@@ -27226,6 +27439,36 @@ impl XdDesktop {
                         );
                     }),
                 ));
+                // Move up and Move down do what a drag of the row does, a
+                // step at a time; at either end the way out is shown, off.
+                if let Some(steps) = row_moves.clone() {
+                    for ((id, label), step) in [
+                        ("catalog-move-up", "Move up"),
+                        ("catalog-move-down", "Move down"),
+                    ]
+                    .into_iter()
+                    .zip(steps)
+                    {
+                        rows.push(match step {
+                            Some(step) => row(
+                                id,
+                                label,
+                                false,
+                                Box::new(move |this, window, cx| {
+                                    this.close_sidebar_context_menu(window, cx);
+                                    this.apply_row_move(step.clone(), cx);
+                                }),
+                            ),
+                            None => menu_row(id, colors)
+                                .debug_selector(move || id.into())
+                                .cursor_default()
+                                .text_color(rgb(disabled_ink(colors)))
+                                .hover(|style| style.bg(gpui::transparent_black()))
+                                .child(label)
+                                .into_any_element(),
+                        });
+                    }
+                }
                 if destinations.is_some() {
                     rows.push(row(
                         "catalog-move-to",
@@ -28522,18 +28765,37 @@ impl XdDesktop {
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 this.focus_composer(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &LeaveToMessageBox, window, cx| {
+                this.leave_to_message_box(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextRegion, window, cx| {
+                this.step_region(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousRegion, window, cx| {
+                this.step_region(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MoveRowUp, window, cx| {
+                if !this.move_tree_row(false, window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &MoveRowDown, window, cx| {
+                if !this.move_tree_row(true, window, cx) {
+                    cx.propagate();
+                }
+            }))
             .on_action(cx.listener(|this, _: &FocusFind, window, cx| {
                 this.focus_find(window, cx);
             }))
             // A key no list, dialog or field takes goes on to whatever else
             // listens for it, as it did before these were bound.
-            .on_action(cx.listener(|this, _: &KeyUp, _, cx| {
-                if !this.key_move(false, cx) {
+            .on_action(cx.listener(|this, _: &KeyUp, window, cx| {
+                if !this.divider_key(ArrowKey::Up, window, cx) && !this.key_move(false, cx) {
                     cx.propagate();
                 }
             }))
-            .on_action(cx.listener(|this, _: &KeyDown, _, cx| {
-                if !this.key_move(true, cx) {
+            .on_action(cx.listener(|this, _: &KeyDown, window, cx| {
+                if !this.divider_key(ArrowKey::Down, window, cx) && !this.key_move(true, cx) {
                     cx.propagate();
                 }
             }))
@@ -28550,13 +28812,19 @@ impl XdDesktop {
             .on_action(cx.listener(|this, _: &OpenContextMenu, window, cx| {
                 this.open_context_menu_from_keys(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &KeyLeft, _, cx| {
-                if !this.tree_ring_step(TreeStep::Out, cx) && !this.step_draft_provider(false, cx) {
+            .on_action(cx.listener(|this, _: &KeyLeft, window, cx| {
+                if !this.divider_key(ArrowKey::Left, window, cx)
+                    && !this.tree_ring_step(TreeStep::Out, cx)
+                    && !this.step_draft_provider(false, cx)
+                {
                     cx.propagate();
                 }
             }))
-            .on_action(cx.listener(|this, _: &KeyRight, _, cx| {
-                if !this.tree_ring_step(TreeStep::In, cx) && !this.step_draft_provider(true, cx) {
+            .on_action(cx.listener(|this, _: &KeyRight, window, cx| {
+                if !this.divider_key(ArrowKey::Right, window, cx)
+                    && !this.tree_ring_step(TreeStep::In, cx)
+                    && !this.step_draft_provider(true, cx)
+                {
                     cx.propagate();
                 }
             }))
@@ -28573,13 +28841,17 @@ impl XdDesktop {
                     cx.stop_propagation();
                 }
             }))
-            .on_action(cx.listener(|this, _: &KeyHome, _, cx| {
-                if !this.tree_ring_step(TreeStep::First, cx) {
+            .on_action(cx.listener(|this, _: &KeyHome, window, cx| {
+                if !this.divider_key(ArrowKey::Home, window, cx)
+                    && !this.tree_ring_step(TreeStep::First, cx)
+                {
                     cx.propagate();
                 }
             }))
-            .on_action(cx.listener(|this, _: &KeyEnd, _, cx| {
-                if !this.tree_ring_step(TreeStep::Last, cx) {
+            .on_action(cx.listener(|this, _: &KeyEnd, window, cx| {
+                if !this.divider_key(ArrowKey::End, window, cx)
+                    && !this.tree_ring_step(TreeStep::Last, cx)
+                {
                     cx.propagate();
                 }
             }))
@@ -28825,26 +29097,30 @@ impl XdDesktop {
                                     colors.border
                                 }))
                                 .child(
-                                    div()
-                                        .id("browser-resize")
-                                        .absolute()
-                                        .left(px(-4.0))
-                                        .w(px(9.0))
-                                        .h_full()
-                                        .cursor(CursorStyle::ResizeLeftRight)
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(
-                                                move |this, event: &MouseDownEvent, _, cx| {
-                                                    cx.stop_propagation();
-                                                    this.browser_drag = Some((
-                                                        logical(event.position.x),
-                                                        browser_width as u16,
-                                                    ));
-                                                    cx.notify();
-                                                },
+                                    self.divider_stop(
+                                        div()
+                                            .id("browser-resize")
+                                            .absolute()
+                                            .left(px(-4.0))
+                                            .w(px(9.0))
+                                            .h_full()
+                                            .cursor(CursorStyle::ResizeLeftRight)
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(
+                                                    move |this, event: &MouseDownEvent, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.browser_drag = Some((
+                                                            logical(event.position.x),
+                                                            browser_width as u16,
+                                                        ));
+                                                        cx.notify();
+                                                    },
+                                                ),
                                             ),
-                                        ),
+                                        Divider::SidePane,
+                                        colors,
+                                    ),
                                 ),
                         )
                         .child(
@@ -29350,17 +29626,351 @@ impl XdDesktop {
         if self.shortcuts_blocked() {
             return;
         }
-        let focus = if self.creating_chat_folder.is_some() {
-            self.new_chat_input.read(cx).focus_handle(cx)
-        } else if !self.native_side_tools_enabled() {
+        let Some(focus) = self.message_box_focus(cx) else {
             return;
-        } else if self.open_agent_key().is_some() {
-            self.agent_input.read(cx).focus_handle(cx)
-        } else {
-            self.composer_input.read(cx).focus_handle(cx)
         };
         window.focus(&focus);
         cx.notify();
+    }
+
+    /// The box a message is typed in where the page has one: the new
+    /// chat's, the open agent tab's, or the chat's.
+    fn message_box_focus(&self, cx: &App) -> Option<FocusHandle> {
+        if self.creating_chat_folder.is_some() {
+            Some(self.new_chat_input.read(cx).focus_handle(cx))
+        } else if !self.native_side_tools_enabled() {
+            None
+        } else if self.open_agent_key().is_some() {
+            Some(self.agent_input.read(cx).focus_handle(cx))
+        } else {
+            Some(self.composer_input.read(cx).focus_handle(cx))
+        }
+    }
+
+    /// Shift+Escape: out of the terminal, a field or a control, to the
+    /// message box, or to the sidebar's tree on a page without one, such as
+    /// the Terminal page. Neither the terminal nor a text box takes the key,
+    /// so the keyboard can always leave them.
+    fn leave_to_message_box(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.minimal_theme_open || self.usage_open || self.dialog_over_page() {
+            return;
+        }
+        match self.message_box_focus(cx) {
+            Some(focus) => {
+                if self.sidebar_overlay.is_some() {
+                    self.close_sidebar_overlay(window, cx);
+                }
+                self.key_stop = None;
+                window.focus(&focus);
+                cx.notify();
+            }
+            None => {
+                self.focus_tree_row(window, cx);
+            }
+        }
+    }
+
+    /// Puts the Tab ring on the sidebar tree's current row: the one Tab
+    /// reaches, which is the open session's, or the row the keys were last
+    /// on. A window too narrow for the sidebar shows it over the session
+    /// first, and the ring goes on once its rows are drawn. Says whether
+    /// there is a tree to go to.
+    fn focus_tree_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.minimal_theme_open || self.usage_open || self.dialog_over_page() {
+            return false;
+        }
+        if self.sidebar_compacted(window) && self.sidebar_overlay.is_none() {
+            self.open_sidebar_overlay(window, cx);
+            self.tree_ring_pending = true;
+            self.tree_ring_ready = false;
+            cx.notify();
+            return true;
+        }
+        self.ring_tree_row(window, cx)
+    }
+
+    /// The ring on the tree row Tab reaches, among the rows the last frame
+    /// drew. Says whether there was one.
+    fn ring_tree_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let listed = |key: &SharedString| self.tree_rows.iter().any(|row| row.key == *key);
+        let Some(key) = self
+            .tree_roving
+            .clone()
+            .filter(listed)
+            .or_else(|| self.tree_rows.first().map(|row| row.key.clone()))
+        else {
+            return false;
+        };
+        if !self.stop_focus.is_focused(window) {
+            let back = window.focused(cx).map(|focus| focus.downgrade());
+            // Escape from the ring goes back where the keyboard was, unless
+            // that was the sidebar shown over the session.
+            if !self.minimal_popup_focus.is_focused(window) {
+                self.key_stop_return = back;
+            }
+            window.focus(&self.stop_focus);
+        }
+        self.key_stop = Some(key.clone());
+        self.tree_cursor = Some(key);
+        // The row is a Tab stop of the frame before; it stays one.
+        self.key_stop_scrolling = true;
+        cx.notify();
+        true
+    }
+
+    /// Puts the ring on the tree's row once the sidebar shown over the
+    /// session has drawn it. Called before a frame is drawn.
+    fn settle_tree_ring(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tree_ring_pending {
+            return;
+        }
+        if self.sidebar_overlay.is_none() && self.sidebar_compacted(window) {
+            self.tree_ring_pending = false;
+            self.tree_ring_ready = false;
+            return;
+        }
+        if !std::mem::take(&mut self.tree_ring_ready) {
+            // Its rows are drawn in this frame; the ring goes on in the next.
+            window.request_animation_frame();
+            return;
+        }
+        self.tree_ring_pending = false;
+        self.ring_tree_row(window, cx);
+    }
+
+    /// The regions F6 moves between that the window shows now, in order.
+    fn regions(&self, window: &Window, cx: &App) -> Vec<Region> {
+        let mut regions = vec![Region::Sidebar];
+        if self.terminal_drawn && self.terminal_panel.is_some() {
+            regions.push(Region::Session);
+        }
+        if self.first_side_pane_stop(window).is_some() {
+            regions.push(Region::SidePane);
+        }
+        if self.message_box_focus(cx).is_some() {
+            regions.push(Region::Composer);
+        }
+        regions
+    }
+
+    /// Where the side pane starts, in logical pixels, while it shows.
+    fn side_pane_left(&self, window: &Window) -> Option<f32> {
+        let width = logical(window.viewport_size().width);
+        (self.browser_is_open() && !self.shortcuts_blocked())
+            .then(|| width - browser_pane_width(self.settings.browser_width, width))
+    }
+
+    /// The first Tab stop of the last frame inside the side pane.
+    fn first_side_pane_stop(&self, window: &Window) -> Option<(KeyStop, Bounds<Pixels>)> {
+        let left = self.side_pane_left(window)?;
+        let frame = self.key_targets.0.borrow();
+        if frame.stops_layer != Some(KeyLayer::Page) {
+            return None;
+        }
+        frame
+            .stops
+            .iter()
+            .find(|(_, bounds)| logical(bounds.left()) >= left)
+            .cloned()
+    }
+
+    /// The region the keyboard is in, if it is in one.
+    fn current_region(&self, window: &Window, cx: &App) -> Option<Region> {
+        if self.sidebar_overlay.is_some() {
+            return Some(Region::Sidebar);
+        }
+        let focused = |focus: FocusHandle| focus.is_focused(window);
+        if focused(self.terminal_input.read(cx).focus_handle(cx)) {
+            return Some(Region::Session);
+        }
+        if focused(self.composer_input.read(cx).focus_handle(cx))
+            || focused(self.new_chat_input.read(cx).focus_handle(cx))
+            || focused(self.agent_input.read(cx).focus_handle(cx))
+        {
+            return Some(Region::Composer);
+        }
+        if focused(self.catalog_find_input.read(cx).focus_handle(cx)) {
+            return Some(Region::Sidebar);
+        }
+        if focused(self.file_editor.read(cx).focus_handle(cx))
+            || focused(self.git_commit_input.read(cx).focus_handle(cx))
+        {
+            return Some(Region::SidePane);
+        }
+        let at = if self.stop_focus.is_focused(window) {
+            self.key_stop.as_ref().and_then(|id| self.stop_bounds(id))
+        } else {
+            let frame = self.key_targets.0.borrow();
+            frame.stops.iter().find_map(|(stop, bounds)| match stop {
+                KeyStop::Field(field) if field.is_focused(window) => Some(*bounds),
+                _ => None,
+            })
+        }?;
+        let x = logical(at.left());
+        if !self.sidebar_hidden && x < self.catalog_width(window) {
+            Some(Region::Sidebar)
+        } else if self.side_pane_left(window).is_some_and(|left| x >= left) {
+            Some(Region::SidePane)
+        } else {
+            None
+        }
+    }
+
+    /// F6 and Shift+F6: the keyboard to the next or previous region of the
+    /// window, going round: the sidebar's tree, the terminal, the side pane
+    /// and the message box, each where the window shows it.
+    fn step_region(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.minimal_theme_open || self.usage_open || self.dialog_over_page() || self.menu_open()
+        {
+            return;
+        }
+        let regions = self.regions(window, cx);
+        let current = self.current_region(window, cx);
+        let at = current.and_then(|current| Region::ORDER.iter().position(|r| *r == current));
+        let count = Region::ORDER.len();
+        let next = (1..=count)
+            .map(|step| match (at, forward) {
+                (Some(at), true) => (at + step) % count,
+                (Some(at), false) => (at + count - step) % count,
+                (None, true) => step - 1,
+                (None, false) => count - step,
+            })
+            .map(|index| Region::ORDER[index])
+            .find(|region| regions.contains(region) && Some(*region) != current);
+        let Some(next) = next else {
+            return;
+        };
+        if next != Region::Sidebar && self.sidebar_overlay.is_some() {
+            self.close_sidebar_overlay(window, cx);
+        }
+        match next {
+            Region::Sidebar => {
+                self.focus_tree_row(window, cx);
+            }
+            Region::Session => {
+                self.key_stop = None;
+                let focus = self.terminal_input.read(cx).focus_handle(cx);
+                window.focus(&focus);
+            }
+            Region::SidePane => {
+                if let Some((stop, _)) = self.first_side_pane_stop(window) {
+                    self.reading_side = true;
+                    match stop {
+                        KeyStop::Field(field) => {
+                            self.key_stop = None;
+                            window.focus(&field);
+                        }
+                        KeyStop::Control(id, _) => {
+                            if !self.stop_focus.is_focused(window) {
+                                self.key_stop_return =
+                                    window.focused(cx).map(|focus| focus.downgrade());
+                                window.focus(&self.stop_focus);
+                            }
+                            self.key_stop = Some(id);
+                        }
+                    }
+                }
+            }
+            Region::Composer => {
+                if let Some(focus) = self.message_box_focus(cx) {
+                    self.key_stop = None;
+                    self.reading_side = false;
+                    window.focus(&focus);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Alt+Shift+Up and Down with the ring on a row of the sidebar's tree:
+    /// the session or project moves above or below its neighbour, as a drag
+    /// there would, and the ring goes with it. Says whether the ring was on
+    /// such a row; at either end the row stays and the key is still its.
+    fn move_tree_row(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.stop_focus.is_focused(window) || self.dialog_over_page() || self.menu_open() {
+            return false;
+        }
+        let Some(target) = self.key_stop.as_ref().and_then(|id| {
+            let row = self.tree_rows.iter().find(|row| row.key == *id)?;
+            row.menu.as_ref().map(|(target, _)| target.clone())
+        }) else {
+            return false;
+        };
+        if let Some(step) = self.row_move(&target, down) {
+            self.apply_row_move(step, cx);
+        }
+        true
+    }
+
+    /// Where Move up or Move down takes a sidebar row: beside the sibling
+    /// above or below it, among the same project's sessions or the same
+    /// folder's projects. `None` at that end, or where the host cannot move
+    /// it.
+    fn row_move(&self, target: &SidebarTarget, down: bool) -> Option<RowMove> {
+        match target {
+            SidebarTarget::Folder(item) => {
+                if !self.model.folder_reorder_supported {
+                    return None;
+                }
+                let folders = &self.model.folders;
+                let order = folder_tree(folders)
+                    .into_iter()
+                    .map(|row| (folders[row.index].id.as_str(), row.depth))
+                    .collect::<Vec<_>>();
+                let at = order.iter().position(|(id, _)| *id == item)?;
+                let anchor = sibling_beside(&order, at, down, |(_, depth)| *depth)?;
+                project_reorder_for_drop(folders, item, order[anchor].0)
+                    .filter(|reorder| !reorder.moves)
+                    .map(RowMove::Project)
+            }
+            SidebarTarget::Session(_) | SidebarTarget::Chat(_) => {
+                let rows = self.sidebar_rows.as_ref()?;
+                let is_row = |card: &SessionCard| match target {
+                    SidebarTarget::Chat(chat) => card.id == *chat,
+                    SidebarTarget::Session(session) => self
+                        .model
+                        .session_for_chat(&card.id)
+                        .is_some_and(|group| group.id == *session),
+                    SidebarTarget::Folder(_) => false,
+                };
+                rows.sessions.iter().find_map(|(project, cards)| {
+                    let at = cards.iter().position(is_row)?;
+                    let anchor = sibling_beside(cards, at, down, |card| card.depth)?;
+                    Some(RowMove::Session {
+                        project: project.clone(),
+                        chat: cards[at].id.clone(),
+                        index: at,
+                        anchor: cards[anchor].id.clone(),
+                        anchor_index: anchor,
+                    })
+                })
+            }
+        }
+    }
+
+    /// Moves a sidebar row with the host operation its drag uses.
+    fn apply_row_move(&mut self, step: RowMove, cx: &mut Context<Self>) {
+        match step {
+            RowMove::Session {
+                project,
+                chat,
+                index,
+                anchor,
+                anchor_index,
+            } => self.reorder_session_from_drop(
+                &SessionDragPayload {
+                    chat_id: chat,
+                    project_id: project.clone(),
+                    source_index: index,
+                    title: String::new(),
+                },
+                &project,
+                anchor_index,
+                &anchor,
+                cx,
+            ),
+            RowMove::Project(reorder) => self.reorder_project_from_drop(reorder, cx),
+        }
     }
 
     /// Puts the keyboard in the sidebar's find field, with what it holds
@@ -29862,6 +30472,7 @@ impl XdDesktop {
 
     fn end_tree_rows(&mut self) {
         self.tree_rows = std::mem::take(&mut self.tree_rows_next);
+        self.tree_ring_ready |= self.tree_ring_pending;
     }
 
     /// Notes a row of the sidebar's tree, and says what it is as a Tab stop.
@@ -30265,6 +30876,7 @@ impl Render for XdDesktop {
         // What the keyboard can reach is noted again as this frame is drawn.
         self.settle_key_cursor();
         self.settle_key_stop(window);
+        self.settle_tree_ring(window, cx);
         self.settle_docked_field(window, cx);
         self.key_title = self.keyed_cut_label();
         self.key_title_stacked = self
@@ -36257,6 +36869,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             "alt-shift-down",
             "ctrl-.",
             "cmd-.",
+            "ctrl-shift-backspace",
+            "cmd-shift-backspace",
             "ctrl-b",
             "cmd-b",
             "ctrl-`",
@@ -36265,6 +36879,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             "ctrl-l",
             "cmd-l",
             "shift-escape",
+            "f6",
+            "shift-f6",
             "ctrl-k",
             "cmd-k",
             "ctrl-shift-t",
@@ -36313,11 +36929,56 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             ("home", "xd::KeyHome"),
             ("end", "xd::KeyEnd"),
         ];
+        // Alt+Shift+Up and Down move the tree row the ring is on, and are
+        // the window's keys everywhere else.
+        let ring_moves = [
+            ("alt-shift-up", "xd::MoveRowUp"),
+            ("alt-shift-down", "xd::MoveRowDown"),
+        ];
         assert_eq!(
-            keys.len() + ring_keys.len(),
+            keys.len() + ring_keys.len() + ring_moves.len(),
             app_key_bindings().len(),
             "every shortcut of the window is checked here"
         );
+        let unmoved = gpui::Keymap::new(
+            all_key_bindings()
+                .into_iter()
+                .filter(|binding| !binding.action().name().starts_with("xd::MoveRow"))
+                .collect(),
+        );
+        for (key, action) in ring_moves {
+            assert_eq!(
+                key_action(&after, key, &["XdDesktop", KEY_STOP_CONTEXT]).as_deref(),
+                Some(action)
+            );
+            for context in [
+                vec!["XdDesktop"],
+                vec!["XdDesktop", "TerminalInput"],
+                vec!["XdDesktop", "ComposerInput"],
+                vec!["XdDesktop", "FileEditor"],
+                vec!["XdDesktop", "MessageEditor"],
+            ] {
+                assert_eq!(
+                    key_action(&after, key, &context),
+                    key_action(&unmoved, key, &context),
+                    "{key} in {context:?}"
+                );
+            }
+        }
+        // Off a tree row, the ring's Alt+Shift+Down goes on to the next
+        // session waiting on you.
+        let keystroke = gpui::Keystroke::parse("alt-shift-down").unwrap();
+        let ringed = [
+            gpui::KeyContext::parse("XdDesktop").unwrap(),
+            gpui::KeyContext::parse(KEY_STOP_CONTEXT).unwrap(),
+        ];
+        let reached = after
+            .bindings_for_input(&[keystroke], &ringed)
+            .0
+            .iter()
+            .map(|binding| binding.action().name().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(reached, ["xd::MoveRowDown", "xd::NextWaitingSession"]);
         for (key, action) in ring_keys {
             assert_eq!(
                 key_action(&after, key, &["XdDesktop", KEY_STOP_CONTEXT]).as_deref(),
@@ -36388,16 +37049,41 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         for key in [
             "ctrl-tab",
             "ctrl-.",
+            "ctrl-shift-backspace",
             "ctrl-`",
             "ctrl-,",
             "ctrl-shift-t",
             "shift-escape",
+            "f6",
+            "shift-f6",
             "ctrl-=",
             "ctrl--",
             "ctrl-0",
         ] {
             let is = key_action(&after, key, &["XdDesktop", "TerminalInput"]).unwrap();
             assert!(is.starts_with("xd::"), "{key} in the terminal reaches {is}");
+        }
+        // The keys that always leave the terminal, and the second Stop key,
+        // reach the same action from every text box as well.
+        for (key, action) in [
+            ("shift-escape", "xd::LeaveToMessageBox"),
+            ("f6", "xd::NextRegion"),
+            ("shift-f6", "xd::PreviousRegion"),
+            ("ctrl-shift-backspace", "xd::StopTurn"),
+        ] {
+            for inner in [
+                "TerminalInput",
+                "ComposerInput",
+                "FileEditor",
+                "MessageEditor",
+                KEY_STOP_CONTEXT,
+            ] {
+                assert_eq!(
+                    key_action(&after, key, &["XdDesktop", inner]).as_deref(),
+                    Some(action),
+                    "{key} in {inner}"
+                );
+            }
         }
     }
 
@@ -37056,8 +37742,9 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
 
     /// The calls that make a control a Tab stop: in a control's builder
     /// chain, beside its `.on_click(`, or around it.
-    const KEY_PATH_CALLS: [&str; 6] = [
+    const KEY_PATH_CALLS: [&str; 7] = [
         "key_reach",
+        "divider_stop",
         "key_stop_in_view",
         "key_action_stop",
         "tree_action",
@@ -37232,6 +37919,134 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         assert!(
             missing.is_empty(),
             "a click with no Tab stop: make it a key_stop, or say why in POINTER_ONLY:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    /// The pointer gestures that need no keyboard path in their builder
+    /// chain, each known by what its chain holds, and why. Every one still
+    /// excuses a gesture, or it goes from the list.
+    const POINTER_GESTURES: [(&[&str], &str); 10] = [
+        (
+            &[".track_focus("],
+            "holds the keyboard itself: a text field, where a press places the caret and a \
+             drag selects as its keys do, or the layer of a menu, a dialog or a page, where a \
+             press outside closes it as Escape does",
+        ),
+        (
+            &[".occlude()", ".inset_0()"],
+            "a popover's backdrop: a press on it closes the popover, as Escape does",
+        ),
+        (
+            &["dialog_layer("],
+            "a dialog's backdrop: a press on it closes the dialog, as Escape does",
+        ),
+        (
+            &["menu.take()"],
+            "a press beside an open menu closes it, as Escape does",
+        ),
+        (
+            &["preview.press("],
+            "the picture viewer: a press zooms and a drag pans, as +, - and the arrows do",
+        ),
+        (
+            &["ExternalPaths"],
+            "files dropped in from outside the app: Attach takes them from the keyboard",
+        ),
+        (
+            &["DragPayload"],
+            "where a dragged sidebar row lands: Move up, Move down and Move to… in its menu, \
+             and Alt+Shift+Up and Down, move rows from the keyboard",
+        ),
+        (
+            &["start_window_resize"],
+            "the window's edges: the window manager's keys size the window",
+        ),
+        (
+            &["titlebar_double_click"],
+            "the title bar's drag: the window manager's keys move the window",
+        ),
+        (
+            &["window.focus(&focus)"],
+            "a field's name: a press puts the keyboard in its field, which is a Tab stop",
+        ),
+    ];
+
+    /// A drag, a drop, a press of the left button or the right one: a
+    /// gesture on the pointer that does something. Each has a keyboard path
+    /// in its builder chain as a click does (a Tab stop, a row the arrows
+    /// reach, a field), or is one of the few in [`POINTER_GESTURES`]: a
+    /// drag that moves a sidebar row has Move up and Move down and
+    /// Alt+Shift+Up and Down, a divider's drag its Tab stop and keys.
+    #[test]
+    fn every_drag_drop_and_press_has_a_keyboard_path_too() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .collect::<Vec<_>>();
+        files.sort();
+        let mut excused = [0usize; POINTER_GESTURES.len()];
+        let mut missing = Vec::new();
+        let mut found_any = 0;
+        for path in files {
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            let source = std::fs::read_to_string(&path).unwrap();
+            let code = code_only(&source);
+            for needle in [&b".on_drag("[..], b".on_drop(", b".on_mouse_down("] {
+                let mut from = 0;
+                while let Some(found) = code[from..]
+                    .windows(needle.len())
+                    .position(|window| window == needle)
+                {
+                    let at = from + found;
+                    from = at + needle.len();
+                    let open = at + needle.len() - 1;
+                    let close = matching_bracket(&code, open);
+                    let arguments: String = String::from_utf8_lossy(&code[open + 1..close])
+                        .split_whitespace()
+                        .collect();
+                    // A press of the middle button, or any button, is not
+                    // one of these; one that only stops there presses nothing.
+                    if needle == b".on_mouse_down("
+                        && !(arguments.starts_with("MouseButton::Left,")
+                            || arguments.starts_with("MouseButton::Right,"))
+                    {
+                        continue;
+                    }
+                    if arguments.ends_with("|_,_,cx|cx.stop_propagation()") {
+                        continue;
+                    }
+                    found_any += 1;
+                    let function = enclosing_fn(&code, at);
+                    // Built inside a call that is a keyboard path.
+                    let Some((start, end)) = click_chain(&code, at) else {
+                        continue;
+                    };
+                    let own = own_part_of_chain(&code[start..end]);
+                    if KEY_PATH_MARKS.iter().any(|mark| own.contains(mark)) {
+                        continue;
+                    }
+                    if let Some(at) = POINTER_GESTURES
+                        .iter()
+                        .position(|(marks, _)| marks.iter().all(|mark| own.contains(mark)))
+                    {
+                        excused[at] += 1;
+                        continue;
+                    }
+                    let line = source[..at].matches('\n').count() + 1;
+                    missing.push(format!("{file}:{line} in {function}"));
+                }
+            }
+        }
+        assert!(found_any > 20, "the scan found the gestures: {found_any}");
+        for ((_, why), count) in POINTER_GESTURES.iter().zip(excused) {
+            assert!(count > 0, "nothing is excused any more as {why}");
+        }
+        assert!(
+            missing.is_empty(),
+            "a pointer gesture with no keyboard path: give it one, or say why in POINTER_GESTURES:\n{}",
             missing.join("\n")
         );
     }
@@ -37453,10 +38268,11 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         };
         open_menu(cx);
         desktop.read_with(cx, |desktop, _| {
-            // Rename chat, Delete chat.
+            // Rename chat, Move up (it is the project's second session;
+            // Move down is shown off and the arrows pass it), Delete chat.
             assert_eq!(
                 desktop.key_rows(),
-                Some((KeyLayer::Menu, "sidebar-menu", 2))
+                Some((KeyLayer::Menu, "sidebar-menu", 3))
             );
             assert_eq!(desktop.key_row_at(), None);
         });
@@ -37473,7 +38289,7 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         open_menu(cx);
         desktop.read_with(cx, |desktop, _| assert_eq!(desktop.key_row_at(), None));
         cx.simulate_keystrokes("up");
-        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.key_row_at(), Some(1)));
+        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.key_row_at(), Some(2)));
         cx.simulate_keystrokes("enter");
         redraw(cx);
         desktop.read_with(cx, |desktop, _| {
@@ -38849,14 +39665,15 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             );
         });
         redraw(cx);
-        // Rename project, Move to…, Delete project.
+        // Rename project, Move down (Move up is off at the top, and the
+        // arrows pass it), Move to…, Delete project.
         desktop.read_with(cx, |desktop, _| {
             assert_eq!(
                 desktop.key_rows(),
-                Some((KeyLayer::Menu, "sidebar-menu", 3))
+                Some((KeyLayer::Menu, "sidebar-menu", 4))
             );
         });
-        cx.simulate_keystrokes("down down enter");
+        cx.simulate_keystrokes("down down down enter");
         redraw(cx);
         // The menu now lists where it can go: the top level, where it is,
         // and the folder.
@@ -38891,6 +39708,208 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         });
     }
 
+    #[gpui::test]
+    fn from_the_terminal_page_the_keyboard_reaches_the_sidebar_and_opens_a_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.simulate_keystrokes("ctrl-shift-t");
+        redraw(cx);
+        let terminal = desktop.read_with(cx, |desktop, cx| {
+            assert!(matches!(desktop.minimal_route, MinimalRoute::Terminal));
+            desktop.terminal_input.read(cx).focus_handle(cx)
+        });
+        let in_terminal = |cx: &mut gpui::VisualTestContext| {
+            cx.update_window_entity(&desktop, |_, window, _| terminal.is_focused(window))
+        };
+        assert!(in_terminal(cx));
+        // The shell keeps Tab, Escape and its Ctrl keys: none of them leaves.
+        cx.simulate_keystrokes("tab escape ctrl-k ctrl-l");
+        redraw(cx);
+        assert!(in_terminal(cx));
+        // The page has no message box, so Shift+Escape goes to the sidebar's
+        // tree, on its first row.
+        cx.simulate_keystrokes("shift-escape");
+        redraw(cx);
+        assert!(!in_terminal(cx));
+        assert_eq!(
+            ring(&desktop, cx),
+            Some(format!("{SIDEBAR_ROW_STOP}f:atlas"))
+        );
+        // The arrows walk the tree, and Enter opens the session the ring is on.
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        assert_eq!(
+            ring(&desktop, cx),
+            Some(format!("{SIDEBAR_ROW_STOP}s:implementation"))
+        );
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        assert_eq!(shown_chat(&desktop, cx).as_deref(), Some("implementation"));
+
+        // F6 leaves the terminal too, and comes back to it.
+        cx.simulate_keystrokes("ctrl-shift-t");
+        redraw(cx);
+        assert!(in_terminal(cx));
+        cx.simulate_keystrokes("f6");
+        redraw(cx);
+        assert!(!in_terminal(cx));
+        assert!(
+            ring(&desktop, cx).is_some_and(|on| on.starts_with(SIDEBAR_ROW_STOP)),
+            "F6 goes to the sidebar"
+        );
+        cx.simulate_keystrokes("f6");
+        redraw(cx);
+        assert!(in_terminal(cx), "and on round to the terminal");
+        cx.simulate_keystrokes("shift-f6");
+        redraw(cx);
+        assert!(ring(&desktop, cx).is_some_and(|on| on.starts_with(SIDEBAR_ROW_STOP)));
+    }
+
+    #[gpui::test]
+    fn f6_goes_round_the_windows_regions_and_shift_escape_to_the_message_box(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        let (composer, terminal) = desktop.read_with(cx, |desktop, cx| {
+            (
+                desktop.composer_input.read(cx).focus_handle(cx),
+                desktop.terminal_input.read(cx).focus_handle(cx),
+            )
+        });
+        let focused = |cx: &mut gpui::VisualTestContext, focus: &FocusHandle| {
+            cx.update_window_entity(&desktop, |_, window, _| focus.is_focused(window))
+        };
+        cx.update_window_entity(&desktop, |_, window, _| window.focus(&composer));
+        redraw(cx);
+        // The message box, the sidebar on the open session's row, and round.
+        cx.simulate_keystrokes("f6");
+        redraw(cx);
+        assert_eq!(
+            ring(&desktop, cx),
+            Some(format!("{SIDEBAR_ROW_STOP}s:implementation"))
+        );
+        cx.simulate_keystrokes("f6");
+        redraw(cx);
+        assert!(focused(cx, &composer));
+        cx.simulate_keystrokes("shift-f6");
+        redraw(cx);
+        assert!(ring(&desktop, cx).is_some());
+        // Shift+Escape from the ring: the page has a message box.
+        cx.simulate_keystrokes("shift-escape");
+        redraw(cx);
+        assert!(focused(cx, &composer));
+        // With the terminal under the chat open it is a region of its own,
+        // between the sidebar and the message box.
+        cx.simulate_keystrokes("ctrl-`");
+        redraw(cx);
+        assert!(focused(cx, &terminal));
+        cx.simulate_keystrokes("f6");
+        redraw(cx);
+        assert!(focused(cx, &composer));
+        cx.simulate_keystrokes("f6 f6");
+        redraw(cx);
+        assert!(focused(cx, &terminal));
+        cx.simulate_keystrokes("shift-escape");
+        redraw(cx);
+        assert!(focused(cx, &composer), "Shift+Escape leaves the terminal");
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn move_up_and_move_down_reorder_sessions_and_projects_from_the_keyboard(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = keyboard_window(cx);
+        let (host, mut requests) = socket_host("move-rows-test");
+        desktop.update(cx, |desktop, _| {
+            desktop.host = Some(host.clone());
+            desktop.model.folder_reorder_supported = true;
+        });
+        redraw(cx);
+        let row = |key: &str| format!("{SIDEBAR_ROW_STOP}{key}");
+        // The second session of Atlas, from the ring: Alt+Shift+Up moves it
+        // above the first, as a drag would.
+        tab_to(&desktop, cx, &row("f:atlas"));
+        cx.simulate_keystrokes("down down");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), Some(row("s:palette")));
+        cx.simulate_keystrokes("alt-shift-up");
+        let request = next_request_with_op(&mut requests, "move-chat");
+        assert_eq!(request["chat"], "palette");
+        assert_eq!(request["before"], "implementation");
+        redraw(cx);
+        // The ring goes with the row.
+        assert_eq!(ring(&desktop, cx), Some(row("s:palette")));
+        // At the top of its project it stays, and the key is still the row's:
+        // it does not go on to the next session waiting on you.
+        cx.simulate_keystrokes("alt-shift-up");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), Some(row("s:palette")));
+        // A project moves among its siblings: Atlas below Website.
+        cx.simulate_keystrokes("home");
+        redraw(cx);
+        assert_eq!(ring(&desktop, cx), Some(row("f:atlas")));
+        cx.simulate_keystrokes("alt-shift-down");
+        let request = next_request_with_op(&mut requests, "move-folder");
+        assert_eq!(request["folder"], "atlas");
+        assert_eq!(request["keep_parent"], true);
+        assert_eq!(request["after"], "website");
+
+        // The menu offers the same: Move up is off at the top, Move down
+        // takes the row below its neighbour.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model = keyboard_fixture();
+            desktop.model.connected = true;
+            desktop.model.folder_reorder_supported = true;
+            desktop.leave_key_stop(window);
+            desktop.open_sidebar_context_menu(
+                SidebarTarget::Session("workspace".into()),
+                "Workspace switcher".into(),
+                point(px(200.0), px(200.0)),
+                window,
+                cx,
+            );
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("catalog-move-up").is_some());
+        let rows = desktop.read_with(cx, |desktop, _| desktop.key_rows());
+        // Rename session, Move down, settle and auto-settle where the host
+        // has them, Delete session: Move up is shown, off.
+        let labels = desktop.read_with(cx, |desktop, _| {
+            [false, true].map(|down| {
+                desktop
+                    .row_move(&SidebarTarget::Session("workspace".into()), down)
+                    .is_some()
+            })
+        });
+        assert_eq!(labels, [false, true]);
+        assert!(rows.is_some_and(|(layer, owner, _)| layer == KeyLayer::Menu
+            && owner == "sidebar-menu"));
+        cx.simulate_keystrokes("down down enter");
+        let request = next_request_with_op(&mut requests, "move-chat");
+        assert_eq!(request["chat"], "implementation");
+        assert_eq!(request["after"], "palette");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.sidebar_context_menu.is_none())
+        });
+    }
+
+    #[test]
+    fn a_rows_sibling_passes_over_what_sits_under_it() {
+        let depths = [0, 1, 1, 0, 1, 0];
+        let beside = |at, down| sibling_beside(&depths, at, down, |depth| *depth);
+        assert_eq!(beside(0, true), Some(3));
+        assert_eq!(beside(3, false), Some(0));
+        assert_eq!(beside(5, true), None);
+        assert_eq!(beside(0, false), None);
+        // A row under another moves only among its own siblings.
+        assert_eq!(beside(1, true), Some(2));
+        assert_eq!(beside(2, true), None);
+        assert_eq!(beside(1, false), None);
+    }
+
     /// The open chat of [`keyboard_window`]'s first session, with its two
     /// tabs and a short conversation.
     fn keyboard_chat(desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext) {
@@ -38908,6 +39927,57 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             cx.notify();
         });
         redraw(cx);
+    }
+
+    #[gpui::test]
+    fn a_divider_is_a_tab_stop_its_arrows_home_and_end_move(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        keyboard_chat(&desktop, cx);
+        let width = |cx: &mut gpui::VisualTestContext| {
+            cx.update_window_entity(&desktop, |desktop, window, _| desktop.catalog_width(window))
+        };
+        tab_to(&desktop, cx, Divider::Sidebar.stop());
+        assert!(named_under_ring(&desktop, cx));
+        let before = width(cx);
+        cx.simulate_keystrokes("right");
+        redraw(cx);
+        assert_eq!(width(cx), before + PANE_KEY_STEP);
+        cx.simulate_keystrokes("left left");
+        redraw(cx);
+        assert_eq!(width(cx), before - PANE_KEY_STEP);
+        // Up and Down cross an upright divider: nothing moves, and the ring
+        // stays on it.
+        cx.simulate_keystrokes("up down");
+        redraw(cx);
+        assert_eq!(width(cx), before - PANE_KEY_STEP);
+        assert_eq!(ring(&desktop, cx).as_deref(), Some(Divider::Sidebar.stop()));
+        cx.simulate_keystrokes("home");
+        redraw(cx);
+        assert_eq!(width(cx), CATALOG_MIN_WIDTH);
+        cx.simulate_keystrokes("end");
+        redraw(cx);
+        let widest = width(cx);
+        assert!(widest > before, "{widest}");
+        cx.simulate_keystrokes("right");
+        redraw(cx);
+        assert_eq!(width(cx), widest, "End is as far as it goes");
+
+        // The terminal's divider moves with Up and Down.
+        cx.simulate_keystrokes("ctrl-`");
+        redraw(cx);
+        let height = |cx: &mut gpui::VisualTestContext| {
+            desktop.read_with(cx, |desktop, _| desktop.settings.terminal_height)
+        };
+        cx.simulate_keystrokes("shift-escape");
+        redraw(cx);
+        tab_to(&desktop, cx, Divider::Terminal.stop());
+        let before = height(cx);
+        cx.simulate_keystrokes("up");
+        redraw(cx);
+        assert_eq!(height(cx), before + PANE_KEY_STEP as u16);
+        cx.simulate_keystrokes("down down");
+        redraw(cx);
+        assert_eq!(height(cx), before - PANE_KEY_STEP as u16);
     }
 
     #[gpui::test]

@@ -835,6 +835,10 @@ pub(super) fn app_shortcut(windows_key_code: i32, modifiers: u32) -> Option<&'st
     let held = modifiers & (SHIFT | CONTROL | ALT | COMMAND);
     Some(match (held, windows_key_code) {
         (SHIFT, 0x1b) => "shift-escape",
+        // F6 and Shift+F6 move between the window's regions.
+        (0, 0x75) => "f6",
+        (SHIFT, 0x75) => "shift-f6",
+        (held, 0x08) if held == CONTROL | SHIFT => "ctrl-shift-backspace",
         (CONTROL, 0x4c) => "ctrl-l",
         (CONTROL, 0x4b) => "ctrl-k",
         (CONTROL, 0xbc) => "ctrl-,",
@@ -1772,6 +1776,15 @@ mod tests {
         assert_eq!(app_shortcut(0x4b, CONTROL), Some("ctrl-k"));
         assert_eq!(app_shortcut(0xbc, CONTROL), Some("ctrl-,"));
         assert_eq!(app_shortcut(0x09, CONTROL | SHIFT), Some("ctrl-shift-tab"));
+        // F6 goes on to the next region, Shift+F6 back; the second Stop key.
+        assert_eq!(app_shortcut(0x75, 0), Some("f6"));
+        assert_eq!(app_shortcut(0x75, SHIFT), Some("shift-f6"));
+        assert_eq!(
+            app_shortcut(0x08, CONTROL | SHIFT),
+            Some("ctrl-shift-backspace")
+        );
+        // Backspace alone is the page's.
+        assert_eq!(app_shortcut(0x08, 0), None);
         // Caps Lock and Num Lock make no difference.
         assert_eq!(app_shortcut(0x4c, CONTROL | 1 | 1 << 8), Some("ctrl-l"));
         // The page keeps Escape, typing, Ctrl+C and anything with more keys.

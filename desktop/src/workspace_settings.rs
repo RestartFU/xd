@@ -227,15 +227,23 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                 ),
                 ("New chat tab", format!("{m} T")),
                 ("Close the chat or agent tab in front", format!("{m} W")),
-                ("Go to the message box", format!("{m} L / Shift Escape")),
+                ("Go to the message box", format!("{m} L")),
                 (
-                    "Stop the running turn, or the agent whose tab is in front",
-                    format!("{m} ."),
+                    "Leave the terminal or a field: to the message box, or to the sidebar on a page without one",
+                    "Shift Escape".into(),
+                ),
+                (
+                    "Next / previous part of the window: the sidebar, the terminal, the side pane, the message box",
+                    "F6 / Shift F6".into(),
+                ),
+                (
+                    "Stop the running turn, or the agent whose tab is in front. The desktop's emoji key may take the first",
+                    format!("{m} . or {m} Shift Backspace"),
                 ),
                 ("Show or hide the side pane", format!("{m} B")),
                 ("Show or hide the terminal under the chat", "Ctrl `".into()),
                 (
-                    "Narrow / widen the sidebar",
+                    "Narrow / widen the sidebar. The desktop may take these keys for its workspaces; Tab to a divider instead",
                     format!("{m} Alt Left / {m} Alt Right"),
                 ),
                 (
@@ -300,6 +308,14 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
                     "Enter".into(),
                 ),
                 (
+                    "Move the session or project the sidebar's ring is on above or below its neighbour",
+                    "Alt Shift Up / Alt Shift Down".into(),
+                ),
+                (
+                    "On a divider, which Tab reaches: move it, or all the way to either end",
+                    "Left / Right or Up / Down, Home / End".into(),
+                ),
+                (
                     "Through the tabs' close buttons, the header's pull requests, each message's Copy and pictures, the queue, the background tasks, an agent tab's Background and Stop, and the terminal's tabs",
                     "Tab / Shift Tab".into(),
                 ),
@@ -358,6 +374,10 @@ pub(super) fn keyboard_shortcuts() -> Vec<(&'static str, Vec<(&'static str, Stri
         (
             "Terminal",
             vec![
+                (
+                    "Leave the terminal for the message box or the sidebar, or for the next part of the window",
+                    "Shift Escape, or F6 / Shift F6".into(),
+                ),
                 ("Interrupt command", "Ctrl C".into()),
                 ("Copy selection", "Ctrl Shift C".into()),
                 ("Paste", paste.into()),
