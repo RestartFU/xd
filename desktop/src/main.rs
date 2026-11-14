@@ -17840,6 +17840,11 @@ impl XdDesktop {
             rows.built.clear();
             rows.palette = palette;
         }
+        if rows.terminal.as_deref() != Some(session.id.as_str()) {
+            // Rows are kept by what their line holds, which another terminal's
+            // line can match while drawing differently (its cursor, say).
+            rows.built.clear();
+        }
         if rows.revision != revision || rows.terminal.as_deref() != Some(session.id.as_str()) {
             rows.revision = revision;
             rows.terminal = Some(session.id.clone());
@@ -24317,7 +24322,8 @@ impl XdDesktop {
         if self.agent_input_key.as_deref() == Some(key) {
             self.agent_input_key = None;
         }
-        self.agent_drafts.remove(key);
+        // The tab only goes out of sight: a message typed to the agent and not
+        // sent is still there when it is opened again.
         cx.notify();
     }
 
@@ -33480,7 +33486,12 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         cx.run_until_parked();
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             assert!(desktop.agent_view_focus.is_focused(window));
+            desktop
+                .agent_drafts
+                .insert("toolu_gone".into(), "half a thought".into());
             desktop.close_agent_tab("toolu_gone", cx);
+            // Closing a tab keeps what was typed to its agent.
+            assert_eq!(desktop.agent_drafts["toolu_gone"], "half a thought");
             desktop.open_agent_tab("toolu_1".into(), window, cx);
         });
         cx.run_until_parked();
@@ -43033,6 +43044,34 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             below.contains("second") && below.contains("third"),
             "{below:?}"
         );
+    }
+
+    #[gpui::test]
+    fn switching_terminals_starts_their_rows_afresh(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            let mut panel = XdDesktop::new_terminal_panel("switch-test".into());
+            panel.auto_open = false;
+            panel.loading = false;
+            for id in ["first", "second"] {
+                let mut shell = XdDesktop::terminal_tab_from_snapshot(
+                    &serde_json::json!({"id": id, "columns": 40, "rows": 4}),
+                )
+                .unwrap();
+                shell.screen.feed(b"same line\r\n");
+                panel.sessions.push(shell);
+            }
+            panel.selected = Some("first".into());
+            desktop.terminal_panel = Some(panel);
+            desktop.sync_terminal_rows();
+            desktop.terminal_row(0);
+            assert!(!desktop.terminal_rows.built.is_empty());
+            // Another terminal's lines can hold the same text and still draw
+            // differently, so none of the first one's rows are kept for it.
+            desktop.terminal_panel.as_mut().unwrap().selected = Some("second".into());
+            desktop.sync_terminal_rows();
+            assert!(desktop.terminal_rows.built.is_empty());
+        });
     }
 
     #[gpui::test]
