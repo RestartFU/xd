@@ -3071,9 +3071,10 @@ impl KeyTargets {
     }
 }
 
-/// A row the keyboard can reach as well as the pointer: it takes `fill`, the
-/// row's own hover fill, while the arrow keys are on it, and Enter does what
-/// a click does.
+/// A row the keyboard can reach as well as the pointer: while the arrow keys
+/// are on it, it takes `fill`, the row's own hover fill, and [`key_row_ring`]
+/// inside its edge, which the pointer never draws; Enter does what a click
+/// does.
 fn key_row(
     keys: &KeyTargets,
     layer: KeyLayer,
@@ -3085,8 +3086,27 @@ fn key_row(
 ) -> gpui::Stateful<gpui::Div> {
     let run: KeyRun = Rc::new(run);
     let on = keys.row(layer, owner, run.clone());
-    row.when(on, |row| row.bg(rgb(fill)).child(keys.mark_cursor()))
-        .on_click(cx.listener(move |this, _, window, cx| run(this, window, cx)))
+    row.when(on, |row| {
+        row.bg(rgb(fill))
+            .child(keys.mark_cursor())
+            .child(key_row_ring(frame_colors()))
+    })
+    .on_click(cx.listener(move |this, _, window, cx| run(this, window, cx)))
+}
+
+/// What marks the row of a menu, picker or list the arrow keys are on: a
+/// 2px ring in the selection colour just inside its edge, at 3:1 or more on
+/// the menu and on the row's lit fill. Hover lights a row with its fill
+/// alone, so the two never look alike, and the ring stays inside a list
+/// that clips at its edges.
+fn key_row_ring(colors: ThemeColors) -> gpui::Div {
+    div()
+        .debug_selector(|| "key-row-ring".into())
+        .absolute()
+        .inset_0()
+        .rounded(px(RADIUS_CONTROL))
+        .border_2()
+        .border_color(rgb(colors.selected_border))
 }
 
 /// [`key_row`] for a row built as one chain, and the note of where the row

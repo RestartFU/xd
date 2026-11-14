@@ -167,8 +167,12 @@ pub(super) fn ask_choice(
         } else {
             disabled_ink(colors)
         }))
+        // The arrow keys' choice also takes the ring a menu's row takes,
+        // which hover never draws.
         .when(enabled && focused, |row| {
-            row.bg(rgb(colors.selected_surface))
+            row.relative()
+                .bg(rgb(colors.selected_surface))
+                .child(key_row_ring(colors).rounded(px(RADIUS_PANEL)))
         })
         .when(enabled, |row| {
             row.cursor_pointer()
