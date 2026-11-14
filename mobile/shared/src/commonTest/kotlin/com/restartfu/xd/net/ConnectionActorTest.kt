@@ -16,6 +16,10 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -396,6 +400,88 @@ class ConnectionActorTest {
 
         assertTrue(factory.latest.closed)
         assertIs<Link.Down>(actor.link.value)
+    }
+
+    @Test
+    fun largeReplyPausesTheReaderUntilTheMailboxDrains() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = connectedActor(factory)
+        val call = async { actor.call(com.restartfu.xd.protocol.Ops.ping()) }
+        runCurrent()
+
+        val payload = "x".repeat(2 * 1024 * 1024)
+        val reply = """{"ok":true,"payload":"$payload","_xd_request":2}""" + "\n"
+        val chunks = reply.encodeToByteArray().asList().chunked(16 * 1024)
+        var delivered = 0
+        val reader = launch(start = CoroutineStart.UNDISPATCHED) {
+            for (chunk in chunks) {
+                factory.latest.listener!!.onBytes(chunk.toByteArray())
+                delivered += 1
+            }
+        }
+
+        assertFalse(factory.latest.closed)
+        assertTrue(delivered in 1 until chunks.size)
+        assertFalse(reader.isCompleted)
+        runCurrent()
+
+        assertTrue(reader.isCompleted)
+        assertEquals(chunks.size, delivered)
+        assertEquals(payload, call.await().getValue("payload").jsonPrimitive.content)
+        assertIs<Link.Up>(actor.link.value)
+        assertFalse(factory.latest.closed)
+    }
+
+    @Test
+    fun burstsKeepEventsAndRepliesInOrder() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = connectedActor(factory)
+        val events = mutableListOf<Int>()
+        backgroundScope.launch {
+            actor.events.collect { events += it.value.getValue("index").jsonPrimitive.content.toInt() }
+        }
+        val call = async { actor.call(com.restartfu.xd.protocol.Ops.ping()) }
+        runCurrent()
+
+        val reader = launch(start = CoroutineStart.UNDISPATCHED) {
+            repeat(200) { index ->
+                factory.latest.receive("""{"event":"changed","index":$index}""")
+            }
+            factory.latest.receive("""{"ok":true,"answer":"pong","_xd_request":2}""")
+            factory.latest.fail(message = "end of burst")
+        }
+        assertFalse(reader.isCompleted)
+        runCurrent()
+
+        assertTrue(reader.isCompleted)
+        assertEquals((0 until 200).toList(), events)
+        assertEquals("pong", call.await().getValue("answer").jsonPrimitive.content)
+        assertEquals("end of burst", assertIs<Link.Down>(actor.link.value).message)
+    }
+
+    @Test
+    fun cancellingTheActorReleasesABlockedReader() = runTest {
+        val factory = FakeSocketFactory()
+        val actorScope = CoroutineScope(backgroundScope.coroutineContext + Job(backgroundScope.coroutineContext[Job]))
+        val actor = ConnectionActor(factory, MemoryCredentialStore(credentials()), actorScope)
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receive(treeReply())
+        runCurrent()
+        assertIs<Link.Up>(actor.link.value)
+
+        val reader = async(start = CoroutineStart.UNDISPATCHED) {
+            runCatching {
+                repeat(200) { factory.latest.listener!!.onBytes(byteArrayOf(' '.code.toByte())) }
+            }
+        }
+        assertFalse(reader.isCompleted)
+        actorScope.cancel()
+        runCurrent()
+
+        assertTrue(reader.await().isFailure)
+        assertTrue(factory.latest.closed)
     }
 
     @Test
