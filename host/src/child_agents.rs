@@ -347,7 +347,8 @@ impl Engine {
             );
         }
         let reply = self.send_message_gated(
-            &json!({"op": "send", "chat": target, "text": text, "steer": steer}),
+            &json!({"op": "send", "chat": target, "text": text, "steer": steer,
+                "from_chat": true}),
             None,
         );
         if reply["ok"] == true {

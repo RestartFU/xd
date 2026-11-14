@@ -1462,7 +1462,8 @@ not start, the message is an ordinary `send` (with `steer` when asked), so it
 counts against no chat's agents, and its text begins `[xd] A message from the
 agent in chat "<title>" (<chat id>), another xd chat:` followed by the message
 and a line telling the agent there how to answer with `message_agent`. Its
-answer, if any, arrives the same way. A paused chat refuses such a message
+answer, if any, arrives the same way. Such a message, like one a chat sends its
+own agent, leaves the receiving chat's unsent draft alone. A paused chat refuses such a message
 rather than waking, since only the user resumes it. A chat cannot message itself, and
 `stop-agent` still only takes the asking chat's own agents.
 

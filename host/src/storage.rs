@@ -2361,7 +2361,11 @@ impl StateStore {
                 params![user_message_at, chat_id],
             )?;
         }
-        if continues.is_some() {
+        // A message another chat's agent sent did not come from the composer
+        // either, so like a continuation it leaves the user's draft alone.
+        let from_composer = request.get("from_chat").and_then(Value::as_bool) != Some(true)
+            && request.get("from_parent").and_then(Value::as_bool) != Some(true);
+        if continues.is_some() || !from_composer {
             transaction.execute(
                 "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ?",
                 params![now_seconds(), chat_id],
@@ -4032,7 +4036,8 @@ impl StateStore {
              WHERE chats.id != ?1 AND chats.session_mode = 'chat' \
              AND (?2 IS NULL OR chats.id = ?2) \
              ORDER BY chats.host_working DESC, \
-             MAX(chats.updated_at, chats.last_user_message_at) DESC, chats.rowid DESC \
+             MAX(chats.updated_at * 1000000, chats.last_user_message_at) DESC, \
+             chats.rowid DESC \
              LIMIT ?3"
         ))?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);

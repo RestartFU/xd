@@ -4707,6 +4707,65 @@ read next
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A message from another chat that starts an idle chat's turn did not
+    /// come from that chat's composer, so the user's unsent draft stays.
+    #[cfg(unix)]
+    #[test]
+    fn another_chats_message_leaves_the_users_draft_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("xd-other-draft-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = root.join("claude");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+case "$*" in *--strict-mcp-config*) exit 0;; esac
+while read message; do
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}'
+echo '{"type":"result","terminal_reason":"completed","result":"Done."}'
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+        let (engine, sender) = steer_engine(&root);
+        let store = engine.store.as_ref().unwrap();
+        let folder = store.agent_origin(&sender).unwrap().folder;
+        let target = engine
+            .dispatch(json!({"op": "new-chat", "folder": folder, "backend": "claude"}))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let drafted =
+            engine.dispatch(json!({"op": "set-draft", "chat": target, "text": "Half typed"}));
+        assert_eq!(drafted["ok"], true, "{drafted}");
+
+        let reply = engine.dispatch(json!({"op": "message-agent", "chat": sender,
+            "agent": target, "text": "What branch are you on?"}));
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["queued"], false, "{reply}");
+        assert_eq!(store.chat(&target).unwrap()["draft"], "Half typed");
+        for _ in 0..400 {
+            if store.chat(&target).unwrap()["working"] == false {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(store.chat(&target).unwrap()["draft"], "Half typed");
+
+        for chat in [&sender, &target] {
+            engine.runtime.as_ref().unwrap().discard_chat(chat);
+        }
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn steer_engine(root: &std::path::Path) -> (Engine, String) {
         std::fs::create_dir_all(root.join("Workspaces")).unwrap();
         let engine = Engine::with_store(
