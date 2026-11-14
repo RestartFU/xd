@@ -2151,6 +2151,7 @@ impl HostHandle {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn send_message(
         &self,
         chat_id: &str,
@@ -3550,9 +3551,9 @@ mod tests {
             HostUpdate::Connected { .. }
         ));
         let report = Attachment::from_file("Report.pdf", b"%PDF".to_vec());
-        host.send_message("chat-1", "read it", &[report], None, None, false)
+        host.send_message("chat-1", "read it", &[report], None, None, false, false)
             .unwrap();
-        host.send_message("chat-1", "a shortcut", &[], None, None, false)
+        host.send_message("chat-1", "a shortcut", &[], None, None, false, false)
             .unwrap();
         // The clear after a send claims the whole list, files included.
         host.set_draft("chat-1", "", Some(&[]), Some(7)).unwrap();
@@ -4060,6 +4061,8 @@ mod tests {
             assert_eq!(request["generate_worktree_name"], true);
             assert_eq!(request["worktree_backend"], "claude");
             assert_eq!(request["worktree_model"], "claude-sonnet-5");
+            assert_eq!(request["compact_first"], true);
+            assert!(request.get("steer").is_none());
             let request_id = request["_xd_request"].as_u64().unwrap();
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
@@ -4076,6 +4079,7 @@ mod tests {
             Some("claude"),
             Some("claude-sonnet-5"),
             false,
+            true,
         )
         .unwrap();
         assert!(matches!(
