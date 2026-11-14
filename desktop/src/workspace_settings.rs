@@ -2100,13 +2100,15 @@ impl XdDesktop {
         }
         let next = stepped_section(self.settings_section, SETTINGS_SECTIONS.len(), down);
         self.open_settings_section(next, cx);
-        // The ring on the section list goes along to the section opened.
+        // The ring on the section list goes along to the section opened,
+        // which is a Tab stop only from the next frame on.
         if self
             .key_stop
             .as_ref()
             .is_some_and(|id| id.starts_with(SECTION_STOP))
         {
             self.key_stop = Some(format!("{SECTION_STOP}{next}").into());
+            self.key_stop_scrolling = true;
         }
         true
     }

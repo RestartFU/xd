@@ -4287,10 +4287,13 @@ impl XdDesktop {
                         }),
                 )
                 .child(
+                    // Where it is too narrow for both, the buttons go
+                    // under the note, still at the right.
                     div()
                         .px_6()
                         .py_3()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .justify_between()
                         .gap_3()
@@ -4306,6 +4309,7 @@ impl XdDesktop {
                         ))
                         .child(
                             div()
+                                .ml_auto()
                                 .flex()
                                 .gap_2()
                                 .child(dialog_button(

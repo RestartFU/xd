@@ -36666,6 +36666,33 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
     }
 
     #[gpui::test]
+    fn the_settings_section_open_is_a_tab_stop_the_arrows_move(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = keyboard_window(cx);
+        cx.simulate_keystrokes("ctrl-,");
+        redraw(cx);
+        // Back, the search field, then the section open.
+        let passed = tab_to(&desktop, cx, "workspace-settings-section-0");
+        assert_eq!(
+            passed.first().map(String::as_str),
+            Some("workspace-settings-close")
+        );
+        // Down opens the next section, and the ring goes along to it.
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        redraw(cx);
+        assert_eq!(
+            ring(&desktop, cx).as_deref(),
+            Some("workspace-settings-section-1")
+        );
+        desktop.read_with(cx, |desktop, _| assert_eq!(desktop.settings_section, 1));
+        // Enter on Back leaves Settings.
+        tab_to(&desktop, cx, "workspace-settings-close");
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        desktop.read_with(cx, |desktop, _| assert!(!desktop.minimal_theme_open));
+    }
+
+    #[gpui::test]
     fn the_browsers_empty_page_offers_its_servers_to_the_keyboard(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = long_chat_window(cx);
         cx.update_window_entity(&desktop, |desktop, window, _| {
