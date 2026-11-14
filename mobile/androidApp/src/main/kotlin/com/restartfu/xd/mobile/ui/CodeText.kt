@@ -160,12 +160,28 @@ internal fun CodeText(
  * every keystroke, so only the newest few are kept, apart from the finished
  * code blocks in [CodeColours].
  */
-internal val EditorColours = PreparedCache<CodeKey, AnnotatedString>(
+internal val EditorColours = PreparedCache<EditorKey, AnnotatedString>(
     capacity = 4,
     maxWeight = CACHED_CHARACTERS,
     weigh = { it.code.length },
 ) {
     highlight(it.code, it.language, it.ink)
+}
+
+/**
+ * A text in the file editor and the ink it is coloured in: the key of its
+ * colouring. The editor gives every text it holds its own [revision] (see
+ * [EditorText]), so the key is told apart by that number, never by reading or
+ * hashing the text, which a keystroke in a long file would otherwise do on
+ * the main thread every time.
+ */
+internal class EditorKey(val code: String, val revision: Long, val language: SyntaxLanguage, val ink: CodeInk) {
+    private val hash = 31 * (31 * (31 * revision.hashCode() + code.length) + language.hashCode()) + ink.hashCode()
+
+    override fun hashCode(): Int = hash
+
+    override fun equals(other: Any?): Boolean = other is EditorKey && other.revision == revision &&
+        other.code.length == code.length && other.language == language && other.ink == ink
 }
 
 /**

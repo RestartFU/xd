@@ -65,8 +65,18 @@ import kotlinx.coroutines.withContext
 
 /** How far one level of nesting shifts a row. */
 private val INDENT = 12.dp
-private const val LARGE_FILE_CHARACTERS = 128 * 1024
-private const val LARGE_FILE_LINES = 4_000
+/**
+ * Past this size a file opens in the line-by-line view and is edited plain.
+ * The editing field lays out its whole text on every keystroke, and coloured
+ * text costs far more to lay out than plain: measured under Robolectric on a
+ * desktop CPU, a coloured field took about 10 ms at 8K characters, 19 ms at
+ * 16K, 46 ms at 32K, 160 ms at 64K and 600 ms at 128K, where plain text stayed
+ * near 8 to 16 ms throughout. A phone is slower still, so colouring stops at 16K.
+ */
+internal const val LARGE_FILE_CHARACTERS = 16 * 1024
+
+/** As many lines as 16K characters of ordinary code fill, give or take; many short lines cost as much. */
+internal const val LARGE_FILE_LINES = 600
 
 /** How long typing pauses before the file is coloured again: each keystroke would be wasted work. */
 private const val EDITOR_COLOUR_PAUSE_MILLIS = 150L
@@ -356,11 +366,21 @@ private fun FileEditor(
 ) {
     val language = remember(path) { Syntax.languageForPath(path) }
     val ink = codeInk()
-    val large = remember(text) { isLargeFile(text) }
+    // What a keystroke costs here is what it typed: the line count and the
+    // colour key follow each edit instead of reading the whole file again.
+    val editor = remember(path) { EditorText(text) }
+    editor.sync(text)
+    val large = isLargeFile(editor.value.text.length, editor.newlines)
     var editingLargeFile by rememberSaveable(path) { mutableStateOf(false) }
+    // Typed past the limit: the field stays, plain, rather than turning into the read-only view.
+    var wasLarge by remember(path) { mutableStateOf(large) }
+    if (large != wasLarge) {
+        if (large && editor.edited) editingLargeFile = true
+        wasLarge = large
+    }
     // Coloured away from the main thread, once typing pauses; until then the
     // last colouring is kept round what changed (see [EditorColouring]).
-    val key = remember(text, language, ink) { CodeKey(text, language, ink) }
+    val key = remember(editor.revision, language, ink) { EditorKey(editor.value.text, editor.revision, language, ink) }
     var coloured by remember(path, language, ink) { mutableStateOf(EditorColours.peek(key)) }
     if (!large) {
         LaunchedEffect(key) {
@@ -429,8 +449,8 @@ private fun FileEditor(
             )
         } else {
             OutlinedTextField(
-                value = text,
-                onValueChange = onChange,
+                value = editor.value,
+                onValueChange = { next -> editor.edit(next)?.let(onChange) },
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
@@ -498,8 +518,8 @@ private fun LargeFileView(
     }
 }
 
-private fun isLargeFile(text: String): Boolean =
-    text.length >= LARGE_FILE_CHARACTERS || text.count { it == '\n' } >= LARGE_FILE_LINES
+internal fun isLargeFile(characters: Int, newlines: Int): Boolean =
+    characters >= LARGE_FILE_CHARACTERS || newlines >= LARGE_FILE_LINES
 
 /** Said over an edit too large to keep if Android ends the app before it is saved. */
 internal const val UNKEPT_EDIT_NOTICE =
