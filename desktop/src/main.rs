@@ -138,7 +138,8 @@ use minimal::{
     resumable_session, settled_cards, started_below, tree_descendants,
 };
 use selection::{
-    SelectionColor, TextSelection, selectable_in_document, selectable_links_in_document,
+    LineRow, SelectionColor, TextSelection, lines_text, selectable_in_document,
+    selectable_line_in_document, selectable_links_in_document,
 };
 use settings::{AppSettings, BrowserState, ThemePreset};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
@@ -4165,20 +4166,17 @@ fn parsed_report(report: &str) -> Rc<markdown::Document> {
     })
 }
 
-/// The shown terminal's text, colours and links, kept until its screen or the
-/// theme's palette changes. Rebuilding them walks the whole scrollback, so a
-/// redraw for anything else (a blink, a token in the chat) reuses them instead.
-struct TerminalRenderCache {
-    revision: u64,
-    palette: TerminalPalette,
+/// One line of the shown terminal as it is drawn: its text, colours, cursor
+/// and links, ranges counted from the line's start.
+struct TerminalRow {
     text: SharedString,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     cursor: Option<Range<usize>>,
     links: Vec<(Range<usize>, String)>,
 }
 
-impl TerminalRenderCache {
-    fn new(revision: u64, palette: TerminalPalette, rendered: TerminalText) -> Self {
+impl TerminalRow {
+    fn new(rendered: TerminalText) -> Self {
         let mut links = rendered
             .links
             .into_iter()
@@ -4210,14 +4208,34 @@ impl TerminalRenderCache {
             })
             .collect();
         Self {
-            revision,
-            palette,
             text: rendered.text.into(),
             highlights,
             cursor: rendered.cursor,
             links,
         }
     }
+}
+
+/// How many built rows the shown terminal keeps before it starts again.
+const TERMINAL_ROW_CACHE: usize = 1024;
+
+/// The shown terminal's rows, built only as they come into view. A row is
+/// kept by its fingerprint, what it draws, so new output or a scroll builds
+/// only the rows that changed or came into view, never the whole
+/// scrollback; a new palette builds them again.
+#[derive(Default)]
+struct TerminalRows {
+    /// The terminal and screen revision `count` was taken at.
+    terminal: Option<String>,
+    revision: u64,
+    palette: TerminalPalette,
+    count: usize,
+    built: HashMap<u64, Rc<TerminalRow>>,
+}
+
+thread_local! {
+    /// How many terminal rows were built, which the tests count.
+    static TERMINAL_ROWS_BUILT: Cell<usize> = const { Cell::new(0) };
 }
 
 fn insert_terminal_cursor_highlight(
@@ -5722,7 +5740,7 @@ struct XdDesktop {
     terminal_cursor_drawn: bool,
     /// Whether the last frame drew the terminal panel at all.
     terminal_drawn: bool,
-    terminal_render_cache: Option<Rc<TerminalRenderCache>>,
+    terminal_rows: TerminalRows,
     diff_generation: u64,
     /// The working directory as a folding tree, in the sidebar.
     file_tree: files::FileTree,
@@ -6592,7 +6610,7 @@ impl XdDesktop {
             terminal_cursor_visible: true,
             terminal_cursor_drawn: false,
             terminal_drawn: false,
-            terminal_render_cache: None,
+            terminal_rows: TerminalRows::default(),
             diff_generation: 0,
             file_tree: files::FileTree::default(),
             open_files: files::OpenFiles::default(),
@@ -17112,25 +17130,61 @@ impl XdDesktop {
         }
     }
 
-    /// The selected terminal's rendering, rebuilt only once its screen or the
-    /// theme has changed since the last frame.
-    fn selected_terminal_render(&mut self) -> Option<Rc<TerminalRenderCache>> {
+    /// How many lines the selected terminal draws, worked out again only once
+    /// its screen has changed. A new palette forgets the rows built in the old.
+    fn sync_terminal_rows(&mut self) -> Option<usize> {
         let session = self.terminal_panel.as_ref()?.selected()?;
         let revision = session.screen.revision();
         let palette = self.settings.theme.terminal_palette();
-        if let Some(cached) = &self.terminal_render_cache
-            && cached.revision == revision
-            && cached.palette == palette
-        {
-            return Some(cached.clone());
+        let rows = &mut self.terminal_rows;
+        if rows.palette != palette {
+            rows.built.clear();
+            rows.palette = palette;
         }
-        let cached = Rc::new(TerminalRenderCache::new(
-            revision,
-            palette,
-            session.screen.rendered_with_cursor_in(palette),
-        ));
-        self.terminal_render_cache = Some(cached.clone());
-        Some(cached)
+        if rows.revision != revision || rows.terminal.as_deref() != Some(session.id.as_str()) {
+            rows.revision = revision;
+            rows.terminal = Some(session.id.clone());
+            rows.count = session.screen.line_count(true);
+        }
+        Some(rows.count)
+    }
+
+    /// Line `index` of the selected terminal as drawn, built only when no
+    /// line drawing the same was built before.
+    fn terminal_row(&mut self, index: usize) -> Option<Rc<TerminalRow>> {
+        let session = self.terminal_panel.as_ref()?.selected()?;
+        let fingerprint = session.screen.line_fingerprint(index, true)?;
+        let rows = &mut self.terminal_rows;
+        if let Some(row) = rows.built.get(&fingerprint) {
+            return Some(row.clone());
+        }
+        let row = Rc::new(TerminalRow::new(session.screen.rendered_line_in(
+            index,
+            true,
+            rows.palette,
+        )?));
+        TERMINAL_ROWS_BUILT.with(|built| built.set(built.get() + 1));
+        if rows.built.len() >= TERMINAL_ROW_CACHE {
+            rows.built.clear();
+        }
+        rows.built.insert(fingerprint, row.clone());
+        Some(row)
+    }
+
+    /// The text a selection in the selected terminal covers, read from its
+    /// lines when it is copied: the lines as drawn, joined by newlines.
+    fn terminal_selection_text(&self, terminal_id: &str, range: Range<usize>) -> Option<String> {
+        let session = self.terminal_panel.as_ref()?.selected()?;
+        if session.id != terminal_id {
+            return None;
+        }
+        let palette = self.terminal_rows.palette;
+        Some(lines_text(range, |index| {
+            session
+                .screen
+                .rendered_line_in(index, true, palette)
+                .map(|line| line.text)
+        }))
     }
 
     fn render_minimal_terminal(
@@ -17143,7 +17197,7 @@ impl XdDesktop {
         let terminal_focus = self.terminal_input.read(cx).focus_handle(cx);
         let desktop = cx.entity();
         self.terminal_drawn |= self.terminal_panel.is_some();
-        let rendered = self.selected_terminal_render();
+        let line_count = self.sync_terminal_rows().unwrap_or(0);
         let Some(panel) = self.terminal_panel.as_ref() else {
             return div()
                 .size_full()
@@ -17174,124 +17228,167 @@ impl XdDesktop {
         let panel_loading = panel.loading;
         let panel_is_empty = panel.sessions.is_empty();
         let panel_error = panel.error.clone();
-        let (output_text, highlights, output_cursor, terminal_links) = rendered
-            .map(|rendered| {
-                (
-                    rendered.text.clone(),
-                    rendered.highlights.clone(),
-                    rendered.cursor.clone(),
-                    rendered.links.clone(),
-                )
-            })
-            .unwrap_or_default();
-        let cursor_shown = output_cursor.is_some() && terminal_focus.is_focused(window);
-        self.terminal_cursor_drawn |= cursor_shown;
+        let cursor_shown = selected_id.is_some() && terminal_focus.is_focused(window);
         // The layer over the window blinks the cursor where there is one;
         // with motion reduced it holds steady.
         let cursor_layered = cursor_shown && layered();
         let cursor_lit = reduce_motion() || self.terminal_cursor_visible;
-        let cursor_mark = output_cursor
-            .clone()
-            .filter(|_| cursor_layered)
-            .map(|cursor| {
-                let glyph = output_text
-                    .get(cursor.clone())
-                    .filter(|glyph| !glyph.is_empty() && *glyph != "\n")
-                    .unwrap_or(" ")
-                    .to_owned();
-                (cursor, SharedString::from(glyph))
-            });
-        let cursor_highlight = if cursor_lit && cursor_shown && !cursor_layered {
-            output_cursor.map(|cursor| {
-                (
-                    cursor,
-                    HighlightStyle {
-                        color: Some(rgb(colors.background).into()),
-                        background_color: Some(rgb(colors.text).into()),
-                        ..Default::default()
-                    },
-                )
-            })
-        } else {
-            None
-        };
-        let highlights = insert_terminal_cursor_highlight(highlights, cursor_highlight);
-        let output_range = 0..output_text.len();
-        let output = StyledText::new(output_text.clone()).with_highlights(highlights);
-        let output_layout = output.layout().clone();
-        let cursor_place = cursor_mark.map(|(cursor, glyph)| {
-            let layout = output_layout.clone();
-            let (fill, ink) = (colors.text, colors.background);
-            canvas(
-                move |_, window, _| {
-                    let Some(start) = layout.position_for_index(cursor.start) else {
-                        return;
-                    };
-                    let text = TextLook::here(window);
-                    let width = layout
-                        .position_for_index(cursor.end)
-                        .filter(|end| end.y == start.y && end.x > start.x)
-                        .map(|end| end.x - start.x)
-                        .unwrap_or_else(|| {
-                            let run = window.text_style().to_run(glyph.len());
-                            window
-                                .text_system()
-                                .shape_line(glyph.clone(), text.size, &[run], None)
-                                .width
-                        });
-                    let mark = AnimatedMark {
-                        bounds: Bounds::new(start, size(width, layout.line_height())),
-                        mask: window.content_mask(),
-                        kind: AnimatedKind::Cursor {
-                            glyph: glyph.clone(),
-                            fill,
-                            ink,
-                            text,
-                        },
-                    };
-                    ANIMATED.with(|animated| animated.borrow_mut().marks.push(mark));
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .inset_0()
+        let (cursor_fill, cursor_ink) = (colors.text, colors.background);
+        // Only the lines in view are built and laid out, each a row of one
+        // selectable document, however long the scrollback is.
+        let document = selected_id.as_deref().map(|terminal_id| {
+            scoped_element_id(&format!("minimal-terminal-output:{terminal_id}"), 0)
         });
-        let output = if let Some(terminal_id) = selected_id.as_deref() {
-            let scope = format!("minimal-terminal-output:{terminal_id}");
-            let document = scoped_element_id(&scope, 0);
-            if terminal_links.is_empty() {
-                selectable_in_document(
-                    document,
-                    document,
-                    output_text,
-                    output_range,
-                    output_layout,
-                    output,
-                )
-                .with_selection_scroll(self.terminal_scroll.clone())
-                .into_any_element()
-            } else {
-                let (ranges, urls) = terminal_links.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
-                selectable_links_in_document(
-                    document,
-                    document,
-                    output_text,
-                    output_range,
-                    output_layout,
-                    output,
-                    ranges,
-                    move |index, window, cx| {
-                        if let Some(url) = urls.get(index) {
-                            open_clicked_link(url, window, cx);
-                        }
-                    },
-                )
-                .with_selection_scroll(self.terminal_scroll.clone())
-                .into_any_element()
-            }
-        } else {
-            output.into_any_element()
-        };
+        let source: Option<selection::LineSource> = selected_id.clone().map(|terminal_id| {
+            let desktop = desktop.downgrade();
+            Rc::new(move |range: Range<usize>, cx: &App| {
+                desktop
+                    .upgrade()?
+                    .read(cx)
+                    .terminal_selection_text(&terminal_id, range)
+            }) as selection::LineSource
+        });
+        let scroll = self.terminal_scroll.clone();
+        let rows_list = uniform_list(
+            "minimal-terminal-rows",
+            line_count,
+            cx.processor({
+                move |this, range: Range<usize>, _, _| {
+                    let (first, last) = (range.start, range.end.saturating_sub(1));
+                    range
+                        .map(|index| {
+                            let row = this.terminal_row(index);
+                            let line = div()
+                                .debug_selector(move || format!("terminal-row-{index}"))
+                                .relative()
+                                .w_full()
+                                .h(px(LINE_MONO))
+                                .whitespace_nowrap();
+                            let (Some(row), Some(document), Some(source)) =
+                                (row, document, source.clone())
+                            else {
+                                return line;
+                            };
+                            let cursor = row.cursor.clone().filter(|_| cursor_shown);
+                            // Built as the frame is laid out, before the
+                            // blink that reads it.
+                            this.terminal_cursor_drawn |= cursor.is_some();
+                            let cursor_highlight = cursor
+                                .clone()
+                                .filter(|_| cursor_lit && !cursor_layered)
+                                .map(|cursor| {
+                                    (
+                                        cursor,
+                                        HighlightStyle {
+                                            color: Some(rgb(cursor_ink).into()),
+                                            background_color: Some(rgb(cursor_fill).into()),
+                                            ..Default::default()
+                                        },
+                                    )
+                                });
+                            let highlights = insert_terminal_cursor_highlight(
+                                row.highlights.clone(),
+                                cursor_highlight,
+                            );
+                            let output =
+                                StyledText::new(row.text.clone()).with_highlights(highlights);
+                            let layout = output.layout().clone();
+                            // On the layer over the window, which blinks it.
+                            let cursor_place = cursor.filter(|_| cursor_layered).map(|cursor| {
+                                let glyph = SharedString::from(
+                                    row.text
+                                        .get(cursor.clone())
+                                        .filter(|glyph| !glyph.is_empty())
+                                        .unwrap_or(" ")
+                                        .to_owned(),
+                                );
+                                let layout = layout.clone();
+                                canvas(
+                                    move |_, window, _| {
+                                        let Some(start) = layout.position_for_index(cursor.start)
+                                        else {
+                                            return;
+                                        };
+                                        let text = TextLook::here(window);
+                                        let width = layout
+                                            .position_for_index(cursor.end)
+                                            .filter(|end| end.y == start.y && end.x > start.x)
+                                            .map(|end| end.x - start.x)
+                                            .unwrap_or_else(|| {
+                                                let run = window.text_style().to_run(glyph.len());
+                                                window
+                                                    .text_system()
+                                                    .shape_line(
+                                                        glyph.clone(),
+                                                        text.size,
+                                                        &[run],
+                                                        None,
+                                                    )
+                                                    .width
+                                            });
+                                        let mark = AnimatedMark {
+                                            bounds: Bounds::new(
+                                                start,
+                                                size(width, layout.line_height()),
+                                            ),
+                                            mask: window.content_mask(),
+                                            kind: AnimatedKind::Cursor {
+                                                glyph: glyph.clone(),
+                                                fill: cursor_fill,
+                                                ink: cursor_ink,
+                                                text,
+                                            },
+                                        };
+                                        ANIMATED.with(|animated| {
+                                            animated.borrow_mut().marks.push(mark)
+                                        });
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .inset_0()
+                            });
+                            let (ranges, urls) =
+                                row.links.iter().cloned().unzip::<_, _, Vec<_>, Vec<_>>();
+                            line.child(
+                                selectable_line_in_document(
+                                    document
+                                        ^ (index as u64)
+                                            .wrapping_add(1)
+                                            .wrapping_mul(0x9e37_79b9_7f4a_7c15),
+                                    document,
+                                    index,
+                                    row.text.clone(),
+                                    layout,
+                                    output,
+                                    ranges,
+                                    move |link, window, cx| {
+                                        if let Some(url) = urls.get(link) {
+                                            open_clicked_link(url, window, cx);
+                                        }
+                                    },
+                                    LineRow {
+                                        first: index == first,
+                                        last: index == last,
+                                        source,
+                                    },
+                                )
+                                .with_selection_scroll(scroll.clone()),
+                            )
+                            .children(cursor_place)
+                        })
+                        .collect::<Vec<_>>()
+                }
+            }),
+        )
+        .track_scroll(UniformListScrollHandle(Rc::new(RefCell::new(
+            gpui::UniformListScrollState {
+                base_handle: self.terminal_scroll.clone(),
+                ..Default::default()
+            },
+        ))))
+        .size_full()
+        .p(px(TERMINAL_OUTPUT_PADDING));
         let active = selected_id.is_some();
         let keys = self.key_targets.clone();
         let tabs = panel
@@ -17357,11 +17454,9 @@ impl XdDesktop {
 
         let output_scroller = div()
             .id("minimal-terminal-output")
+            .relative()
             .size_full()
             .whitespace_nowrap()
-            .overflow_y_scroll()
-            .child(scroll_thumb(self.terminal_scroll.clone(), colors))
-            .track_scroll(&self.terminal_scroll)
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 let delta = event.delta.pixel_delta(px(19.0)).y;
                 let bytes = terminal_mouse_scroll_bytes(logical(delta));
@@ -17370,7 +17465,6 @@ impl XdDesktop {
                     cx.stop_propagation();
                 }
             }))
-            .p(px(TERMINAL_OUTPUT_PADDING))
             .track_focus(&terminal_focus)
             .when(active, |output| {
                 output
@@ -17380,9 +17474,8 @@ impl XdDesktop {
                         window.focus(&focus);
                     }))
             })
-            .child(output)
-            // After the output, whose layout places the cursor.
-            .children(cursor_place);
+            .child(rows_list)
+            .child(scroll_thumb(self.terminal_scroll.clone(), colors));
         let measurement_canvas = canvas(
             {
                 let desktop = desktop.clone();
@@ -27846,11 +27939,13 @@ impl XdDesktop {
                 }
                 cx.notify();
             }))
-            .on_action(cx.listener(|_, _: &CopyRenderedSelection, _, cx| {
+            // Not the window's own listener: a terminal selection reads its
+            // lines from the window as it is copied.
+            .on_action(|_: &CopyRenderedSelection, _, cx: &mut App| {
                 if let Some(text) = TextSelection::selected(cx) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
-            }))
+            })
             .on_action(cx.listener(|this, _: &NewChatTab, window, cx| {
                 this.new_chat_tab(window, cx);
             }))
@@ -39485,17 +39580,22 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             desktop.show_native_pane(NativePane::Terminal, cx);
             let mut shell =
                 XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({"id": "shell"})).unwrap();
-            shell.screen.feed(b"first line https://example.com");
+            // The cursor waits on the next line, so this one stays as it is.
+            shell.screen.feed(b"first line https://example.com\r\n");
             let panel = desktop.terminal_panel.as_mut().unwrap();
             panel.loading = false;
             panel.sessions.push(shell);
             panel.selected = Some("shell".into());
         });
         cx.run_until_parked();
-        let first = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
+        let row = |desktop: &mut XdDesktop, index| {
+            desktop.sync_terminal_rows();
+            desktop.terminal_row(index).unwrap()
+        };
+        let first = desktop.update(cx, |desktop, _| row(desktop, 0));
         assert!(first.text.contains("first line"));
         assert_eq!(first.links.len(), 1, "found the link once");
-        let again = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
+        let again = desktop.update(cx, |desktop, _| row(desktop, 0));
         assert!(
             Rc::ptr_eq(&first, &again),
             "an unchanged screen is not rebuilt"
@@ -39518,9 +39618,139 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
         });
         cx.run_until_parked();
         assert!(redraws.get() > 0);
-        let changed = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
-        assert!(!Rc::ptr_eq(&first, &changed));
-        assert!(changed.text.contains("second") && changed.text.contains("third"));
+        // The line that did not change is kept; the new ones are built.
+        let (kept, below) = desktop.update(cx, |desktop, _| {
+            let below = (1..4)
+                .map(|index| row(desktop, index).text.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            (row(desktop, 0), below)
+        });
+        assert!(Rc::ptr_eq(&first, &kept));
+        assert!(
+            below.contains("second") && below.contains("third"),
+            "{below:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_long_scrollback_builds_only_the_rows_in_view(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1180.0), px(780.0)));
+        desktop.update(cx, |desktop, cx| {
+            let mut panel = XdDesktop::new_terminal_panel("scrollback-test".into());
+            panel.auto_open = false;
+            panel.loading = false;
+            let mut shell = XdDesktop::terminal_tab_from_snapshot(
+                &serde_json::json!({"id": "shell", "columns": 100, "rows": 30}),
+            )
+            .unwrap();
+            let output = (1..=6000)
+                .map(|line| format!("line {line}\r\n"))
+                .collect::<String>();
+            shell.screen.feed(output.as_bytes());
+            panel.sessions.push(shell);
+            panel.selected = Some("shell".into());
+            desktop.terminal_panel = Some(panel);
+            desktop.minimal_route = MinimalRoute::Terminal;
+            desktop.terminal_scroll.scroll_to_bottom();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // Once the terminal has taken the window's size, a frame drawn from
+        // nothing builds the rows it shows.
+        redraw(cx);
+        redraw(cx);
+        let built = || TERMINAL_ROWS_BUILT.with(Cell::get);
+        let before = built();
+        desktop.update(cx, |desktop, cx| {
+            desktop.terminal_rows.built.clear();
+            cx.notify();
+        });
+        redraw(cx);
+        // A full scrollback, of which only the rows in view, at its foot,
+        // are built: some 40 of more than 5,000.
+        let (count, newest) = desktop.read_with(cx, |desktop, _| {
+            (
+                desktop.terminal_rows.count,
+                desktop
+                    .terminal_rows
+                    .built
+                    .values()
+                    .any(|row| row.text.as_ref() == "line 6000"),
+            )
+        });
+        assert!(count > 5000, "{count}");
+        let first = built() - before;
+        assert!((20..=60).contains(&first), "built {first} rows of {count}");
+        assert!(newest, "the newest line is in view");
+        // Another frame builds nothing.
+        let before = built();
+        redraw(cx);
+        assert_eq!(built() - before, 0);
+        // New output builds only its own line, though every line moved up
+        // one place as the oldest left the scrollback.
+        let before = built();
+        desktop.update(cx, |desktop, cx| {
+            let shell = desktop
+                .terminal_panel
+                .as_mut()
+                .unwrap()
+                .selected_mut()
+                .unwrap();
+            shell.screen.feed(b"line 6001\r\n");
+            desktop.terminal_scroll.scroll_to_bottom();
+            cx.notify();
+        });
+        redraw(cx);
+        redraw(cx);
+        assert!(built() - before <= 3, "built {} rows", built() - before);
+        // A drag from one row to the next selects across them, and the
+        // window's copy reads the lines joined by a newline.
+        let count = desktop.read_with(cx, |desktop, _| desktop.terminal_rows.count);
+        let from = cx
+            .debug_bounds(Box::leak(
+                format!("terminal-row-{}", count - 3).into_boxed_str(),
+            ))
+            .expect("the line before last is in view");
+        let to = cx
+            .debug_bounds(Box::leak(
+                format!("terminal-row-{}", count - 2).into_boxed_str(),
+            ))
+            .expect("the last line is in view");
+        let start = point(from.left() + px(1.0), from.center().y);
+        let end = point(to.left() + px(200.0), to.center().y);
+        cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
+        redraw(cx);
+        cx.dispatch_action(CopyRenderedSelection);
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(copied.as_deref(), Some("line 6000\nline 6001"));
+        // A selection across lines copies them as drawn, joined by newlines.
+        desktop.read_with(cx, |desktop, _| {
+            let line = |index: usize| {
+                desktop
+                    .terminal_panel
+                    .as_ref()
+                    .unwrap()
+                    .selected()
+                    .unwrap()
+                    .screen
+                    .rendered_line_in(index, true, TerminalPalette::Dark)
+                    .unwrap()
+                    .text
+            };
+            let stride = selection::LINE_STRIDE;
+            let copied = desktop
+                .terminal_selection_text("shell", 10 * stride + 2..12 * stride + 4)
+                .unwrap();
+            assert_eq!(
+                copied,
+                format!("{}\n{}\n{}", &line(10)[2..], line(11), &line(12)[..4])
+            );
+        });
     }
 
     #[gpui::test]
@@ -39539,12 +39769,16 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             panel.selected = Some("shell".into());
         });
         cx.run_until_parked();
-        let red = |render: &TerminalRenderCache| render.highlights[0].1.color;
-        let dark = desktop.update(cx, |desktop, _| desktop.selected_terminal_render().unwrap());
+        let red = |render: &TerminalRow| render.highlights[0].1.color;
+        let row = |desktop: &mut XdDesktop| {
+            desktop.sync_terminal_rows();
+            desktop.terminal_row(0).unwrap()
+        };
+        let dark = desktop.update(cx, |desktop, _| row(desktop));
         assert_eq!(red(&dark), Some(rgb(0xe06c75).into()));
         let light = desktop.update(cx, |desktop, _| {
             desktop.settings.theme = ThemePreset::Light;
-            desktop.selected_terminal_render().unwrap()
+            row(desktop)
         });
         assert!(!Rc::ptr_eq(&dark, &light), "the same screen, new colours");
         assert_eq!(red(&light), Some(rgb(0xb3202f).into()));
@@ -42932,7 +43166,8 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             .expect("end of minimal terminal renderer")
             .0;
 
-        assert!(terminal.contains("with_selection_scroll(self.terminal_scroll.clone())"));
+        assert!(terminal.contains("let scroll = self.terminal_scroll.clone();"));
+        assert!(terminal.contains(".with_selection_scroll(scroll.clone())"));
     }
 
     #[test]
@@ -43040,16 +43275,16 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             .0;
 
         let cache = source
-            .split_once("impl TerminalRenderCache {")
-            .expect("terminal rendering cache")
+            .split_once("impl TerminalRow {")
+            .expect("terminal row rendering")
             .1
             .split_once("fn insert_terminal_cursor_highlight(")
             .expect("end of terminal rendering cache")
             .0;
 
         assert!(cache.contains("markdown::web_links("));
-        assert!(terminal.contains("self.selected_terminal_render()"));
-        assert!(terminal.contains("selectable_links_in_document("));
+        assert!(terminal.contains("this.terminal_row(index)"));
+        assert!(terminal.contains("selectable_line_in_document("));
         assert!(terminal.contains("open_clicked_link(url, window, cx)"));
     }
 
@@ -43065,14 +43300,14 @@ diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n+b\n",
             .0;
 
         let cache = source
-            .split_once("impl TerminalRenderCache {")
-            .expect("terminal rendering cache")
+            .split_once("impl TerminalRow {")
+            .expect("terminal row rendering")
             .1
             .split_once("fn insert_terminal_cursor_highlight(")
             .expect("end of terminal rendering cache")
             .0;
 
-        assert!(terminal.contains("self.selected_terminal_render()"));
+        assert!(terminal.contains("this.terminal_row(index)"));
         assert!(cache.contains(".links"));
         assert!(cache.contains("let detected = markdown::web_links("));
         assert!(cache.contains("links.extend(detected)"));

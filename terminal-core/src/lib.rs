@@ -384,6 +384,38 @@ impl TerminalScreen {
     }
 
     fn rendered_inner(&self, include_cursor: bool, palette: TerminalPalette) -> TerminalText {
+        let shown = self.shown_lines(include_cursor);
+        let grid = self.term.grid();
+        let mut text = String::new();
+        let mut spans = Vec::new();
+        let mut links = Vec::new();
+        let mut cursor = None;
+        for line_index in 0..shown.count {
+            if line_index > 0 {
+                text.push('\n');
+            }
+            render_line(
+                &grid[Line(shown.top + line_index as i32)],
+                shown.cursor_column(line_index),
+                palette,
+                &mut text,
+                &mut spans,
+                &mut links,
+                &mut cursor,
+            );
+        }
+        TerminalText {
+            text,
+            spans,
+            links,
+            cursor,
+        }
+    }
+
+    /// Which lines [`Self::rendered_with_cursor_in`] draws: every line of the
+    /// scrollback and the screen, less the blank ones at the foot, and the
+    /// cursor's place when it is shown.
+    fn shown_lines(&self, include_cursor: bool) -> ShownLines {
         let grid = self.term.grid();
         let include_cursor = include_cursor
             && self.term.mode().contains(TermMode::SHOW_CURSOR)
@@ -392,112 +424,95 @@ impl TerminalScreen {
         let bottom = grid.bottommost_line().0;
         let cursor_line = grid.history_size() as i32 + grid.cursor.point.line.0;
         let cursor_column = grid.cursor.point.column.0.min(self.columns - 1);
-        let mut lines = (top..=bottom).map(Line).collect::<Vec<_>>();
-        while lines.len() > 1 {
-            let index = lines.len() - 1;
-            if !(&grid[lines[index]])
+        let mut count = (bottom - top + 1).max(1) as usize;
+        while count > 1 {
+            let index = count - 1;
+            if !(&grid[Line(top + index as i32)])
                 .into_iter()
                 .all(cell_is_visually_blank)
                 || (include_cursor && index as i32 == cursor_line)
             {
                 break;
             }
-            lines.pop();
+            count -= 1;
         }
+        ShownLines {
+            top,
+            count,
+            cursor: include_cursor
+                .then_some((cursor_line, cursor_column))
+                .filter(|(line, _)| *line >= 0)
+                .map(|(line, column)| (line as usize, column)),
+        }
+    }
 
-        let mut text = String::new();
-        let mut spans = Vec::new();
-        let mut links = Vec::new();
-        let mut cursor = None;
-        for (line_index, line) in lines.into_iter().enumerate() {
-            if line_index > 0 {
-                text.push('\n');
+    /// How many lines [`Self::rendered_with_cursor_in`] draws, one per row:
+    /// the scrollback and the screen, less the blank lines at the foot.
+    pub fn line_count(&self, include_cursor: bool) -> usize {
+        self.shown_lines(include_cursor).count
+    }
+
+    /// Line `index` of [`Self::rendered_with_cursor_in`] (or of
+    /// [`Self::rendered`] without the cursor) on its own, its ranges counted
+    /// from its own start. Drawing only the lines in view costs only them,
+    /// however long the scrollback is.
+    pub fn rendered_line_in(
+        &self,
+        index: usize,
+        include_cursor: bool,
+        palette: TerminalPalette,
+    ) -> Option<TerminalText> {
+        let shown = self.shown_lines(include_cursor);
+        if index >= shown.count {
+            return None;
+        }
+        let mut line = TerminalText {
+            text: String::new(),
+            spans: Vec::new(),
+            links: Vec::new(),
+            cursor: None,
+        };
+        render_line(
+            &self.term.grid()[Line(shown.top + index as i32)],
+            shown.cursor_column(index),
+            palette,
+            &mut line.text,
+            &mut line.spans,
+            &mut line.links,
+            &mut line.cursor,
+        );
+        Some(line)
+    }
+
+    /// A fingerprint of line `index` as [`Self::rendered_line_in`] draws it
+    /// in any palette: lines with the same fingerprint draw the same, so a
+    /// line drawn before need not be built again. It reads the line's cells
+    /// without building its text.
+    pub fn line_fingerprint(&self, index: usize, include_cursor: bool) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let shown = self.shown_lines(include_cursor);
+        if index >= shown.count {
+            return None;
+        }
+        let row = &self.term.grid()[Line(shown.top + index as i32)];
+        let cursor_column = shown.cursor_column(index);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        cursor_column.hash(&mut hasher);
+        let end = line_end(row, cursor_column);
+        for cell in row[..Column(end)].iter() {
+            cell.c.hash(&mut hasher);
+            cell.flags.bits().hash(&mut hasher);
+            hash_color(cell.fg, &mut hasher);
+            hash_color(cell.bg, &mut hasher);
+            if let Some(zerowidth) = cell.zerowidth() {
+                zerowidth.hash(&mut hasher);
             }
-            let row = &grid[line];
-            let content_end = row
-                .into_iter()
-                .rposition(cell_has_visible_content)
-                .map_or(0, |i| i + 1);
-            let end = if include_cursor && line_index as i32 == cursor_line {
-                content_end.max(cursor_column + 1)
-            } else {
-                content_end
-            };
-            let mut style_run: Option<(usize, TerminalStyle)> = None;
-            let mut link_run: Option<(usize, String)> = None;
-            let mut previous_cell_range = None;
-            for (column, cell) in row[..Column(end)].iter().enumerate() {
-                if cell
-                    .flags
-                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    if include_cursor && line_index as i32 == cursor_line && column == cursor_column
-                    {
-                        cursor = previous_cell_range.clone();
-                    }
-                    continue;
-                }
-                let link = cell
-                    .hyperlink()
-                    .and_then(|link| safe_link_url(link.uri()).map(str::to_owned));
-                if link_run.as_ref().map(|(_, url)| url) != link.as_ref() {
-                    if let Some((start, url)) = link_run.take() {
-                        links.push(TerminalLink {
-                            range: start..text.len(),
-                            url,
-                        });
-                    }
-                    link_run = link.map(|url| (text.len(), url));
-                }
-                let style = terminal_style(cell, palette);
-                if style_run.is_some_and(|(_, current)| current != style) {
-                    let (start, current) = style_run.take().expect("terminal style run exists");
-                    if current != TerminalStyle::default() {
-                        spans.push(TerminalSpan {
-                            range: start..text.len(),
-                            style: current,
-                        });
-                    }
-                }
-                style_run.get_or_insert((text.len(), style));
-                let start = text.len();
-                text.push(if cell.flags.contains(Flags::HIDDEN) {
-                    ' '
-                } else {
-                    cell.c
-                });
-                if !cell.flags.contains(Flags::HIDDEN) {
-                    for character in cell.zerowidth().into_iter().flatten() {
-                        text.push(*character);
-                    }
-                }
-                let range = start..text.len();
-                if include_cursor && line_index as i32 == cursor_line && column == cursor_column {
-                    cursor = Some(range.clone());
-                }
-                previous_cell_range = Some(range);
-            }
-            if let Some((start, style)) = style_run
-                && style != TerminalStyle::default()
-            {
-                spans.push(TerminalSpan {
-                    range: start..text.len(),
-                    style,
-                });
-            }
-            if let Some((start, url)) = link_run {
-                links.push(TerminalLink {
-                    range: start..text.len(),
-                    url,
-                });
+            if let Some(link) = cell.hyperlink() {
+                link.uri().hash(&mut hasher);
             }
         }
-        TerminalText {
-            text,
-            spans,
-            links,
-            cursor,
-        }
+        end.hash(&mut hasher);
+        Some(hasher.finish())
     }
 
     fn total_history(&self) -> usize {
@@ -851,6 +866,126 @@ fn append_cell_character(bytes: &mut Vec<u8>, cell: &Cell) {
     bytes.extend_from_slice(cell.c.encode_utf8(&mut encoded).as_bytes());
     for character in cell.zerowidth().into_iter().flatten() {
         bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+    }
+}
+
+/// The lines a screen draws: the first one's place in the grid, how many,
+/// and the cursor's line (counted from the first) and column when shown.
+struct ShownLines {
+    top: i32,
+    count: usize,
+    cursor: Option<(usize, usize)>,
+}
+
+impl ShownLines {
+    fn cursor_column(&self, line_index: usize) -> Option<usize> {
+        self.cursor
+            .filter(|(line, _)| *line == line_index)
+            .map(|(_, column)| column)
+    }
+}
+
+/// Where a drawn line ends: after its last visible cell, or after the cursor
+/// when the cursor is on it and further right.
+fn line_end(row: &alacritty_terminal::grid::Row<Cell>, cursor_column: Option<usize>) -> usize {
+    let content_end = row
+        .into_iter()
+        .rposition(cell_has_visible_content)
+        .map_or(0, |i| i + 1);
+    match cursor_column {
+        Some(column) => content_end.max(column + 1),
+        None => content_end,
+    }
+}
+
+/// Appends one line's text, colours, links and cursor, their ranges counted
+/// from where `text` stood, as [`TerminalScreen::rendered_with_cursor_in`]
+/// draws it. `cursor_column` is the cursor's column when it is on this line.
+fn render_line(
+    row: &alacritty_terminal::grid::Row<Cell>,
+    cursor_column: Option<usize>,
+    palette: TerminalPalette,
+    text: &mut String,
+    spans: &mut Vec<TerminalSpan>,
+    links: &mut Vec<TerminalLink>,
+    cursor: &mut Option<Range<usize>>,
+) {
+    let end = line_end(row, cursor_column);
+    let mut style_run: Option<(usize, TerminalStyle)> = None;
+    let mut link_run: Option<(usize, String)> = None;
+    let mut previous_cell_range = None;
+    for (column, cell) in row[..Column(end)].iter().enumerate() {
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            if cursor_column == Some(column) {
+                *cursor = previous_cell_range.clone();
+            }
+            continue;
+        }
+        let link = cell
+            .hyperlink()
+            .and_then(|link| safe_link_url(link.uri()).map(str::to_owned));
+        if link_run.as_ref().map(|(_, url)| url) != link.as_ref() {
+            if let Some((start, url)) = link_run.take() {
+                links.push(TerminalLink {
+                    range: start..text.len(),
+                    url,
+                });
+            }
+            link_run = link.map(|url| (text.len(), url));
+        }
+        let style = terminal_style(cell, palette);
+        if style_run.is_some_and(|(_, current)| current != style) {
+            let (start, current) = style_run.take().expect("terminal style run exists");
+            if current != TerminalStyle::default() {
+                spans.push(TerminalSpan {
+                    range: start..text.len(),
+                    style: current,
+                });
+            }
+        }
+        style_run.get_or_insert((text.len(), style));
+        let start = text.len();
+        text.push(if cell.flags.contains(Flags::HIDDEN) {
+            ' '
+        } else {
+            cell.c
+        });
+        if !cell.flags.contains(Flags::HIDDEN) {
+            for character in cell.zerowidth().into_iter().flatten() {
+                text.push(*character);
+            }
+        }
+        let range = start..text.len();
+        if cursor_column == Some(column) {
+            *cursor = Some(range.clone());
+        }
+        previous_cell_range = Some(range);
+    }
+    if let Some((start, style)) = style_run
+        && style != TerminalStyle::default()
+    {
+        spans.push(TerminalSpan {
+            range: start..text.len(),
+            style,
+        });
+    }
+    if let Some((start, url)) = link_run {
+        links.push(TerminalLink {
+            range: start..text.len(),
+            url,
+        });
+    }
+}
+
+fn hash_color(color: Color, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    match color {
+        Color::Named(name) => (0u8, name as usize).hash(hasher),
+        Color::Spec(Rgb { r, g, b }) => (1u8, r, g, b).hash(hasher),
+        Color::Indexed(index) => (2u8, index).hash(hasher),
     }
 }
 
@@ -1309,5 +1444,134 @@ mod tests {
         assert!(screen.rendered_with_cursor().cursor.is_none());
         screen.feed(b"\x1b[?2026l");
         assert!(screen.text().contains("world"));
+    }
+
+    /// Every line of the whole rendering, on its own: its text, and its
+    /// spans, links and cursor moved to start at the line.
+    fn split_lines(whole: &TerminalText) -> Vec<TerminalText> {
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for text in whole.text.split('\n') {
+            let end = start + text.len();
+            let inside = |range: &Range<usize>| range.start >= start && range.end <= end;
+            let local = |range: &Range<usize>| range.start - start..range.end - start;
+            lines.push(TerminalText {
+                text: text.to_owned(),
+                spans: whole
+                    .spans
+                    .iter()
+                    .filter(|span| inside(&span.range))
+                    .map(|span| TerminalSpan {
+                        range: local(&span.range),
+                        style: span.style,
+                    })
+                    .collect(),
+                links: whole
+                    .links
+                    .iter()
+                    .filter(|link| inside(&link.range))
+                    .map(|link| TerminalLink {
+                        range: local(&link.range),
+                        url: link.url.clone(),
+                    })
+                    .collect(),
+                cursor: whole
+                    .cursor
+                    .as_ref()
+                    .filter(|cursor| inside(cursor))
+                    .map(local),
+            });
+            start = end + 1;
+        }
+        lines
+    }
+
+    #[test]
+    fn a_line_on_its_own_is_drawn_as_in_the_whole_screen() {
+        let mut screen = TerminalScreen::new(20, 4);
+        screen.feed(
+            b"plain\r\n\x1b[31mred\x1b[0m and \x1b[1mbold\x1b[0m\r\n\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ \xe4\xbd\xa0\xe5\xa5\xbd\r\nfour\r\nfive\r\nsix \x1b[7minverse\x1b[0m",
+        );
+        for palette in [TerminalPalette::Dark, TerminalPalette::Light] {
+            for with_cursor in [false, true] {
+                let whole = screen.rendered_inner(with_cursor, palette);
+                let expected = split_lines(&whole);
+                assert_eq!(screen.line_count(with_cursor), expected.len());
+                for (index, line) in expected.iter().enumerate() {
+                    assert_eq!(
+                        screen
+                            .rendered_line_in(index, with_cursor, palette)
+                            .as_ref(),
+                        Some(line),
+                        "line {index}"
+                    );
+                }
+                assert_eq!(
+                    screen.rendered_line_in(expected.len(), with_cursor, palette),
+                    None
+                );
+            }
+        }
+        // The cursor's line carries it, at its column past the text.
+        let cursor_line = screen.line_count(true) - 1;
+        let line = screen
+            .rendered_line_in(cursor_line, true, TerminalPalette::Dark)
+            .unwrap();
+        assert_eq!(line.cursor, Some(line.text.len() - 1..line.text.len()));
+    }
+
+    #[test]
+    fn a_lines_fingerprint_changes_only_with_what_it_draws() {
+        let mut screen = TerminalScreen::new(20, 4);
+        screen.feed(b"one\r\ntwo\r\n");
+        let one = screen.line_fingerprint(0, true).unwrap();
+        let two = screen.line_fingerprint(1, true).unwrap();
+        assert_ne!(one, two);
+        // More output below leaves the lines above as they were.
+        screen.feed(b"three");
+        assert_eq!(screen.line_fingerprint(0, true), Some(one));
+        assert_eq!(screen.line_fingerprint(1, true), Some(two));
+        // A colour is part of it, and so is the cursor standing on a line.
+        let mut coloured = TerminalScreen::new(20, 4);
+        coloured.feed(b"\x1b[31mone\x1b[0m\r\ntwo\r\n");
+        assert_ne!(coloured.line_fingerprint(0, true), Some(one));
+        let cursor_line = screen.line_count(true) - 1;
+        assert_ne!(
+            screen.line_fingerprint(cursor_line, true),
+            screen.line_fingerprint(cursor_line, false)
+        );
+        assert_eq!(screen.line_fingerprint(screen.line_count(true), true), None);
+    }
+
+    /// Prints how long the whole screen takes to draw against the lines in
+    /// view, with a full scrollback. Run with `--nocapture` to read it.
+    #[test]
+    fn drawing_the_lines_in_view_does_not_cost_the_scrollback() {
+        let mut screen = TerminalScreen::new(120, 40);
+        let mut output = Vec::new();
+        for line in 1..=6000 {
+            output.extend_from_slice(
+                format!("\x1b[32m{line:>6}\x1b[0m output line with some text\r\n").as_bytes(),
+            );
+        }
+        screen.feed(&output);
+        let count = screen.line_count(true);
+        assert!(count >= 5000, "{count}");
+        let rounds = 20;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            std::hint::black_box(screen.rendered_with_cursor_in(TerminalPalette::Dark));
+        }
+        let whole = started.elapsed() / rounds;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            for index in count - 40..count {
+                std::hint::black_box(screen.line_fingerprint(index, true));
+                std::hint::black_box(screen.rendered_line_in(index, true, TerminalPalette::Dark));
+            }
+        }
+        let in_view = started.elapsed() / rounds;
+        eprintln!("{count} lines: whole screen {whole:?}, the 40 in view {in_view:?}");
+        assert!(in_view < whole, "{in_view:?} against {whole:?}");
     }
 }
