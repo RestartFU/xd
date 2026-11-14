@@ -85,6 +85,9 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
     PredictiveBack(details, enabled = selectedModel != null, back = null) { selectedModel = null; selectedProvider = null }
     val still = reducedMotion()
     val returns = LocalReturnFocus.current
+    // By model or by day: one choice for the overview and a model's detail,
+    // kept as either comes and goes.
+    var byTime by rememberSaveable { mutableStateOf(false) }
     var pricesOpen by rememberSaveable { mutableStateOf(false) }
     // Saved by account, so turning the device keeps the question open.
     var confirmingResetKey by rememberSaveable { mutableStateOf<String?>(null) }
@@ -155,7 +158,7 @@ internal fun UsageContent(model: UsageViewModel, bottomInset: Dp = 0.dp) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Text("Reading usage…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                else -> SummarySection(summary, state.summaryLoading, model, metric, shownModel != null) { backend, name ->
+                else -> SummarySection(summary, state.summaryLoading, model, metric, shownModel != null, byTime, { byTime = it }) { backend, name ->
                     // Back to the overview puts the focus on this row again.
                     returns?.open(usageRowKey(backend, name))
                     selectedProvider = backend
@@ -237,8 +240,16 @@ private fun ErrorLine(message: String, retry: () -> Unit) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: UsageViewModel, metric: String, detail: Boolean, onModel: (String, String) -> Unit) {
-    var byTime by rememberSaveable { mutableStateOf(false) }
+private fun SummarySection(
+    summary: UsageSummaryReply,
+    loading: Boolean,
+    model: UsageViewModel,
+    metric: String,
+    detail: Boolean,
+    byTime: Boolean,
+    onByTime: (Boolean) -> Unit,
+    onModel: (String, String) -> Unit,
+) {
     val signals = LocalXdSignals.current
     val cost = summary.buckets.sumOf(UsageBucketReply::costUsd)
     val tokens = summary.buckets.sumOf { it.totals.all }
@@ -287,8 +298,8 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
         }
         Text("Breakdown", style = MaterialTheme.typography.titleSmall)
         Row(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            ChoiceChip(selected = !byTime, onClick = { byTime = false }, label = { Text("Model") })
-            ChoiceChip(selected = byTime, onClick = { byTime = true }, label = { Text(if (summary.resolution == "hour") "Hour" else "Day") })
+            ChoiceChip(selected = !byTime, onClick = { onByTime(false) }, label = { Text("Model") })
+            ChoiceChip(selected = byTime, onClick = { onByTime(true) }, label = { Text(if (summary.resolution == "hour") "Hour" else "Day") })
         }
         if (byTime) {
             summary.periods.forEach { period ->

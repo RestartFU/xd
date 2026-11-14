@@ -87,11 +87,14 @@ class ThemeTest {
         }
     }
 
-    /** The desktop's sixteen ANSI colours for each theme, colour for colour. */
+    /**
+     * The desktop's sixteen ANSI colours for each theme, colour for colour.
+     * Dark's bright black is the lighter grey both clients took in round 7.
+     */
     @Test fun theTerminalPaletteIsTheDesktopsForEachTheme() {
         val expected = mapOf(
             MinimalThemePreset.DARK to "1f2329 e06c75 98c379 e5c07b 61afef c678dd 56b6c2 d7dae0 " +
-                "5c6370 ff7a85 b3e180 ffd68a 7dbaff d99bff 75d5e0 ffffff",
+                "828997 ff7a85 b3e180 ffd68a 7dbaff d99bff 75d5e0 ffffff",
             MinimalThemePreset.LIGHT to "1b1e2c b3202f 1a6b3c 7a5200 2a52be 8a2da5 0e6471 4b5165 " +
                 "5a6074 c4283a 1f7440 855600 3558d6 9c36b5 0b6f80 1b1e2c",
         )

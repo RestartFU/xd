@@ -287,7 +287,11 @@ class UxFinishTest {
         click("Appearance")
         page("Appearance")
         pressBack()
-        page("Settings")
+        // Back on the home, which says its name; the focus goes back to the
+        // section that was opened, not the heading (see UxSeventhTest).
+        await { exists(SemanticsMatcher.expectValue(SemanticsProperties.PaneTitle, "Settings")) }
+        idle()
+        assertTrue(compose.onAllNodes(isFocused()).fetchSemanticsNodes().single().texts().any { it.startsWith("Appearance") })
         pressBack()
         // Back under Settings, the page beneath is found again.
         await { exists(SemanticsMatcher.expectValue(SemanticsProperties.PaneTitle, "Projects")) }
