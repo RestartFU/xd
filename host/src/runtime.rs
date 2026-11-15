@@ -287,6 +287,10 @@ struct Router {
     /// A background task has finished, and the agent has not yet begun the turn
     /// in which it may report on it.
     report_due: bool,
+    /// Claude is between the start of a turn and its result. A task that
+    /// ends meanwhile and is followed by tool results of the turn was handed
+    /// to the model in it: see [`owes_report_after`].
+    answering: bool,
     /// Its process has ended, so no turn it owes will come.
     ended: bool,
     /// It was stopped for being idle, so what it said last has nowhere to go.
@@ -468,6 +472,57 @@ fn report_due_after(line: &str, due: bool, tasks: &crate::background_tasks::Task
         }
         (Some("system"), Some("init")) => false,
         _ => due,
+    }
+}
+
+/// [`report_due_after`] for a process that is `answering` a turn, or not,
+/// before the line. Claude hands a task that ends while it answers to the
+/// model with the next tool results of that turn, such as one it stops
+/// itself or one that finishes while another command runs, and then takes no
+/// turn of its own on it. Only a task that ends after the turn's last tool
+/// results, or between turns, gets a turn of its own. An agent waiting for
+/// one that never comes would hold its report back until its process goes.
+fn owes_report_after(
+    line: &str,
+    due: bool,
+    answering: bool,
+    tasks: &crate::background_tasks::Tasks,
+) -> bool {
+    let after = report_due_after(line, due, tasks);
+    after && !(answering && hands_over_tool_results(line))
+}
+
+/// Whether this line of Claude's output gives the model the results of its
+/// own tool calls, not those of an agent of its.
+fn hands_over_tool_results(line: &str) -> bool {
+    if !line.contains("\"tool_result\"") {
+        return false;
+    }
+    let Ok(root) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    root["type"] == "user"
+        && root["parent_tool_use_id"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        && root["message"]["content"]
+            .as_array()
+            .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_result"))
+}
+
+/// Whether Claude is answering a turn after this line of output, given
+/// whether it was before: from the turn's start to its result.
+fn answering_after(line: &str, answering: bool) -> bool {
+    if !line.contains("\"init\"") && !line.contains("\"result\"") {
+        return answering;
+    }
+    let Ok(root) = serde_json::from_str::<Value>(line) else {
+        return answering;
+    };
+    match (root["type"].as_str(), root["subtype"].as_str()) {
+        (Some("system"), Some("init")) => true,
+        (Some("result"), _) => false,
+        _ => answering,
     }
 }
 
@@ -1993,8 +2048,13 @@ impl TurnRuntime {
                         };
                         router.quiet_since = Instant::now();
                         router.wakes_itself |= schedules_a_wakeup(&text);
-                        router.report_due =
-                            report_due_after(&text, router.report_due, &router.tasks);
+                        router.report_due = owes_report_after(
+                            &text,
+                            router.report_due,
+                            router.answering,
+                            &router.tasks,
+                        );
+                        router.answering = answering_after(&text, router.answering);
                         let tasks_before = router.tasks.len();
                         router.tasks.track(&text);
                         router.backlog.push_back(text);
@@ -2352,6 +2412,7 @@ impl TurnRuntime {
             quiet_since: Instant::now(),
             wakes_itself: false,
             report_due: false,
+            answering: false,
             ended: false,
             released: false,
             tasks: crate::background_tasks::Tasks::default(),
@@ -6134,6 +6195,68 @@ echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_i
             1,
             "{told:?}"
         );
+    }
+
+    /// A background shell the agent stops itself, or one that finishes while
+    /// another command runs, is handed to the model with that turn's next tool
+    /// results: Claude takes no turn of its own on it, so the turn is not held
+    /// while the process stays up. Lines as Claude Code 2.1.319 sent them.
+    #[cfg(unix)]
+    #[test]
+    fn a_task_that_ends_before_its_turns_tool_results_does_not_hold_the_turn() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_loop","description":"Wait for tests","task_type":"local_bash","is_backgrounded":true}}'
+echo '{{"type":"system","subtype":"task_updated","task_id":"t1","patch":{{"status":"killed","end_time":1}}}}'
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_loop","status":"stopped"}}'
+echo '{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"toolu_stop","type":"tool_result","content":"Successfully stopped task: t1"}}]}},"parent_tool_use_id":null}}'
+echo '{{"type":"system","subtype":"task_started","task_id":"t2","tool_use_id":"toolu_tests","description":"Run tests","task_type":"local_bash","is_backgrounded":true}}'
+echo '{{"type":"system","subtype":"task_started","task_id":"t3","tool_use_id":"toolu_sleep","description":"Sleep","task_type":"local_bash","is_backgrounded":false}}'
+echo '{{"type":"system","subtype":"task_updated","task_id":"t2","patch":{{"status":"completed","end_time":2}}}}'
+echo '{{"type":"system","subtype":"task_notification","task_id":"t2","tool_use_id":"toolu_tests","status":"completed"}}'
+echo '{{"type":"system","subtype":"task_notification","task_id":"t3","tool_use_id":"toolu_sleep","status":"completed"}}'
+echo '{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"toolu_sleep","type":"tool_result","content":"(Bash completed with no output)"}}]}}}}'
+{}
+read poke"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        let told = settled_turns(&agent.runtime);
+        agent.send_and_finish("first");
+        wait_for("the turn to be told of", || {
+            !told.lock().unwrap().is_empty()
+        });
+        let told = told.lock().unwrap();
+        assert!(!told[0].background, "{told:?}");
+        assert_eq!(told[0].reply, "Answer.");
+        assert!(!agent.runtime.waits_on_background(&agent.chat));
+    }
+
+    #[test]
+    fn a_task_ending_mid_turn_owes_no_report_once_tool_results_follow() {
+        let tasks = crate::background_tasks::Tasks::default();
+        let begun = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let ended = r#"{"type":"result","subtype":"success","result":"Done."}"#;
+        let finished = r#"{"type":"system","subtype":"task_notification","task_id":"t1","status":"completed"}"#;
+        let results = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"x","type":"tool_result","content":"ok"}]},"parent_tool_use_id":null}"#;
+        let agents = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"y","type":"tool_result","content":"ok"}]},"parent_tool_use_id":"toolu_agent"}"#;
+        assert!(!answering_after(r#"{"type":"assistant"}"#, false));
+        assert!(answering_after(begun, false));
+        assert!(answering_after(finished, true));
+        assert!(!answering_after(ended, true));
+
+        // A task that ends mid-turn owes a report until tool results follow.
+        let due = owes_report_after(finished, false, true, &tasks);
+        assert!(due, "one that ends after the last tool results gets a turn");
+        assert!(
+            owes_report_after(agents, due, true, &tasks),
+            "an agent's results are its own"
+        );
+        assert!(!owes_report_after(results, due, true, &tasks));
+        // Between turns, only the next turn's start clears it.
+        assert!(owes_report_after(results, true, false, &tasks));
+        assert!(!owes_report_after(begun, true, false, &tasks));
     }
 
     /// When the process goes with its background work, no turn will report
