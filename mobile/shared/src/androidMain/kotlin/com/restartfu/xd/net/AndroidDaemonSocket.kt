@@ -2,6 +2,7 @@ package com.restartfu.xd.net
 
 import com.restartfu.xd.credentials.SshAuthentication
 import com.restartfu.xd.credentials.SshConnection
+import kotlinx.coroutines.runBlocking
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.MessageDigest
@@ -61,7 +62,7 @@ internal class AndroidDaemonSocket : PlatformSocket {
                 while (!closed) {
                     val count = tls.inputStream.read(buffer)
                     if (count < 0) break
-                    if (count > 0) listener.onBytes(buffer.copyOf(count))
+                    if (count > 0) runBlocking { listener.onBytes(buffer.copyOf(count)) }
                 }
                 if (!closed) listener.onClosed(SocketFailure(SocketFailureKind.IO, "Host disconnected"))
             } catch (error: Throwable) {

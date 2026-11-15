@@ -22,7 +22,11 @@ public interface PlatformSocket {
 
 public interface PlatformSocketListener {
     public fun onConnected()
-    public fun onBytes(chunk: ByteArray)
+    /**
+     * Delivers chunks in order, suspending when the consumer is busy. The
+     * reader must await this callback before reading the next chunk.
+     */
+    public suspend fun onBytes(chunk: ByteArray)
     public fun onClosed(reason: SocketFailure?)
 }
 
