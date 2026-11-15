@@ -482,6 +482,12 @@ fn report_due_after(line: &str, due: bool, tasks: &crate::background_tasks::Task
 /// turn of its own on it. Only a task that ends after the turn's last tool
 /// results, or between turns, gets a turn of its own. An agent waiting for
 /// one that never comes would hold its report back until its process goes.
+///
+/// One case is still missed: Claude can write out a tool result before the
+/// model has finished its message, and a task that ends after that last
+/// result is handed to the model's next call all the same. Nothing in the
+/// output tells that apart from a task Claude will take a turn on, so the
+/// report stays held until the process goes, as it was before.
 fn owes_report_after(
     line: &str,
     due: bool,
@@ -6243,7 +6249,6 @@ read poke"#,
         let agents = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"y","type":"tool_result","content":"ok"}]},"parent_tool_use_id":"toolu_agent"}"#;
         assert!(!answering_after(r#"{"type":"assistant"}"#, false));
         assert!(answering_after(begun, false));
-        assert!(answering_after(finished, true));
         assert!(!answering_after(ended, true));
 
         // A task that ends mid-turn owes a report until tool results follow.
@@ -6254,6 +6259,19 @@ read poke"#,
             "an agent's results are its own"
         );
         assert!(!owes_report_after(results, due, true, &tasks));
+        let unnamed = results.replace(r#""parent_tool_use_id":null"#, r#""parent_tool_use_id":"""#);
+        assert!(!owes_report_after(&unnamed, due, true, &tasks));
+
+        // One that ends after the turn's last tool results is still owed a
+        // turn of Claude's own once the turn ends.
+        let mut due = false;
+        let mut answering = false;
+        for line in [begun, results, finished, ended] {
+            due = owes_report_after(line, due, answering, &tasks);
+            answering = answering_after(line, answering);
+        }
+        assert!(due && !answering);
+
         // Between turns, only the next turn's start clears it.
         assert!(owes_report_after(results, true, false, &tasks));
         assert!(!owes_report_after(begun, true, false, &tasks));
