@@ -1176,8 +1176,8 @@ impl TranscriptRoots {
     fn discover() -> Self {
         let values = crate::user_environment::values();
         Self {
-            claude: provider_home("claude", values),
-            codex: provider_home("codex", values),
+            claude: provider_home("claude", &values),
+            codex: provider_home("codex", &values),
         }
     }
 }

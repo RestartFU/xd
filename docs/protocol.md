@@ -1326,6 +1326,36 @@ works in that chat's checkout:
   answers `url`, empty when there is none or GitHub could not say. A pull request it
   finds is linked to the chat.
 
+### Origin profiles (experimental)
+
+A runner keeps the environment of each device that sends it work: its agent
+configuration, sign-ins, Git and GitHub CLI setup, SSH identity and
+login-shell variables. See [runners](runners.md). A paired device's origin is
+its device id. On the local socket, `origin` names it.
+
+```json
+{"op":"origin-profile-offer","origin":"laptop","manifest":{"origin_home":"/home/me","os":"linux","arch":"x86_64","files":[{"path":".claude/CLAUDE.md","mode":420,"sha256":"…","size":12,"secret":false,"merge":"replace"}],"env":{"LANG":"C.UTF-8"}}}
+{"ok":true,"origin":"laptop","missing":["…"]}
+{"op":"origin-profile-push","origin":"laptop","manifest":{…},"blobs":{"<sha256>":"base64…"},"activate":true}
+{"ok":true,"origin":"laptop","home":"/data/origins/laptop/home","written":[…],"removed":[…],"kept_runner_changes":[…],"conflicts":[…],"active":true}
+{"op":"origin-profile-pull","origin":"laptop"}
+{"ok":true,"origin":"laptop","changed":[{"path":".claude/.credentials.json","sha256":"…","data":"base64…"}]}
+{"op":"origin-profile-status"}
+{"ok":true,"active":"laptop","origins":[{"origin":"laptop","origin_home":"/home/me","files":4890,"variables":2,"pushed_at_ms":0,"active":true}]}
+```
+
+`offer` lists the hashes whose path the runner doesn't hold at that hash.
+`push` must carry those bodies. If any are missing, it replies `ok:false` with
+`missing`. Paths are relative to the origin's home. Unsafe paths are refused.
+Secret files (sign-ins, private keys) are written mode 0600 and never
+rewritten. In every other text file, the origin's home is rewritten to the
+profile's home. `merge:"json-keys"` writes the origin's top-level keys over the
+runner's JSON object. A sign-in the runner's CLI refreshed since the last push
+is kept and listed in `kept_runner_changes`. If the origin changed it too, the
+origin's version wins and the path is listed in `conflicts`. `pull` returns
+those refreshed sign-ins. For now, the active origin's environment applies to
+every process the host starts.
+
 ### Linked pull requests
 
 A chat can have any number of pull requests linked to it. Clients list them

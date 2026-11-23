@@ -38,6 +38,7 @@ mod local_socket;
 #[cfg(target_os = "linux")]
 mod memory_guard;
 mod model_catalog;
+pub mod origin_profile;
 mod owner_icon;
 mod pairing;
 mod private_fs;
@@ -334,6 +335,11 @@ impl Engine {
         );
         let self_update = SelfUpdate::new(events.clone());
         let repository_monitor = RepositoryMonitor::new(store.clone(), events.clone());
+        // Profiles other devices push for the work they send here; see
+        // docs/runners.md. Unit tests keep to the user's own environment.
+        if let Some(data) = data_directory.as_deref().filter(|_| cfg!(not(test))) {
+            origin_profile::install(data.join("origins"));
+        }
         let engine = Self {
             shutdown: AtomicBool::new(false),
             app_clients: Mutex::default(),
@@ -410,6 +416,12 @@ impl Engine {
             Some("peer-pairing") => self.peer_pairing(owner, &request),
             Some("tree") => self.tree(),
             Some("devices") => self.devices(),
+            Some(
+                "origin-profile-offer"
+                | "origin-profile-push"
+                | "origin-profile-pull"
+                | "origin-profile-status",
+            ) => self.origin_profile(owner, &request),
             Some("rename-device") => self.read(|store| store.rename_device(&request)),
             Some("revoke-device") => self.revoke_device(&request),
             Some("chat") => match required_string(&request, "chat", "chat needs a chat id") {
@@ -950,6 +962,44 @@ impl Engine {
         {
             let _ = connection.set_read_timeout(None);
         }
+    }
+
+    /// Origin profiles: another device's environment, pushed here so the
+    /// work it sends runs as if on that device. A paired device can only push
+    /// its own profile; the local socket names the origin it pushes for.
+    fn origin_profile(&self, owner: u64, request: &Value) -> Value {
+        let Some(profiles) = origin_profile::installed() else {
+            return error_reply("This host keeps no origin profiles.");
+        };
+        let operation = request["op"].as_str().unwrap_or_default();
+        if operation == "origin-profile-status" {
+            return profiles.status();
+        }
+        let origin = match self.pairing.device_for(owner) {
+            Some(device) => device,
+            None if self.pairing.is_local(owner) => match request["origin"].as_str() {
+                Some(origin) => origin.to_owned(),
+                None => return error_reply("origin-profile needs an origin."),
+            },
+            None => return error_reply("Only a paired device can push its profile."),
+        };
+        if !origin_profile::valid_origin(&origin) {
+            return error_reply("That origin id is not valid.");
+        }
+        let empty = serde_json::Map::new();
+        let result = match operation {
+            "origin-profile-offer" => profiles
+                .missing(&origin, &request["manifest"])
+                .map(|missing| json!({"ok": true, "origin": origin, "missing": missing})),
+            "origin-profile-push" => profiles.apply(
+                &origin,
+                &request["manifest"],
+                request["blobs"].as_object().unwrap_or(&empty),
+                request["activate"].as_bool().unwrap_or(true),
+            ),
+            _ => profiles.pull(&origin),
+        };
+        result.unwrap_or_else(error_reply)
     }
 
     fn devices(&self) -> Value {

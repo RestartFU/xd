@@ -131,6 +131,16 @@ impl PairingService {
         Ok(())
     }
 
+    /// The paired device a connection authenticated as, if it is remote.
+    pub(crate) fn device_for(&self, owner: u64) -> Option<String> {
+        let connections = self.connections.lock().ok()?;
+        let connection = connections.get(&owner)?;
+        if connection.transport != Transport::Remote {
+            return None;
+        }
+        connection.device_id.lock().ok()?.clone()
+    }
+
     pub(crate) fn connected_devices(&self) -> HashSet<String> {
         self.connections
             .lock()
