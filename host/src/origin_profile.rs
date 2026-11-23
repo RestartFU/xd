@@ -29,6 +29,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+pub use crate::origin_hosting::Hosted;
+use crate::origin_hosting;
+
 /// One file is carried only up to this size.
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// A whole profile is refused past this size.
@@ -196,6 +199,13 @@ pub struct Collected {
     pub env: BTreeMap<String, String>,
     /// What was left out and why, for the person pushing.
     pub notes: Vec<String>,
+    /// Programs the runner starts on the origin, by id. Only ids and labels
+    /// reach the runner; the origin keeps the commands.
+    pub hosted: BTreeMap<String, Hosted>,
+    /// Codex hook trust keys the origin's own config honours.
+    pub codex_trusted_hooks: Vec<String>,
+    /// The origin's login environment, which hosted programs run with.
+    pub login_env: HashMap<String, String>,
 }
 
 impl Collected {
@@ -213,6 +223,11 @@ impl Collected {
                 "merge": match file.merge { Merge::Replace => "replace", Merge::JsonKeys => "json-keys" },
             })).collect::<Vec<_>>(),
             "env": self.env,
+            "origin_hosted": self.hosted.iter().map(|(id, hosted)| json!({
+                "id": id,
+                "label": hosted.label,
+            })).collect::<Vec<_>>(),
+            "codex_trusted_hooks": self.codex_trusted_hooks,
         })
     }
 
@@ -258,6 +273,8 @@ pub fn collect(
         },
         seen: HashSet::new(),
         visited: HashSet::new(),
+        incomplete: HashSet::new(),
+        codex_home: codex_home.to_path_buf(),
     };
     for entry in CLAUDE_ENTRIES {
         collector.add_tree(&claude_home.join(entry), &format!(".claude/{entry}"))?;
@@ -270,6 +287,7 @@ pub fn collect(
     }
     collector.add_claude_json(claude_json)?;
     collector.add_referenced()?;
+    collector.host_unportable()?;
     if collector.collected.total_bytes() > MAX_PROFILE_BYTES {
         return Err(io::Error::other(format!(
             "the profile is {} MiB, over the {} MiB limit",
@@ -326,6 +344,7 @@ pub fn collect_local() -> io::Result<Collected> {
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".codex"));
     let mut collected = collect(&home, &claude_home, &codex_home, &claude_json, &variables)?;
+    collected.login_env = variables;
     if cfg!(target_os = "macos") && !collected.files.iter().any(|f| f.path == ".claude/.credentials.json") {
         collected
             .notes
@@ -340,6 +359,10 @@ struct Collector {
     seen: HashSet<String>,
     /// Linked folders being read, so a link loop ends.
     visited: HashSet<PathBuf>,
+    /// Files carried without the folder they need, which cannot run on a
+    /// runner as they are.
+    incomplete: HashSet<String>,
+    codex_home: PathBuf,
 }
 
 impl Collector {
@@ -559,10 +582,11 @@ impl Collector {
                             .map(|path| path.to_string_lossy().into_owned())
                             .unwrap_or_default();
                         self.collected.notes.push(format!(
-                            "carried only ~/{relative}: the rest of ~/{root_relative} is over {} MiB or {} files, so it may not work on a runner",
+                            "carried only ~/{relative}: the rest of ~/{root_relative} is over {} MiB or {} files",
                             MAX_BUNDLE_BYTES / (1024 * 1024),
                             MAX_BUNDLE_FILES
                         ));
+                        self.incomplete.insert(relative.clone());
                         self.add_file_within(
                             &source,
                             &relative,
@@ -593,6 +617,268 @@ impl Collector {
         }
         Ok(())
     }
+}
+
+impl Collector {
+    /// Whether everything `text` names in the origin's home came along whole,
+    /// along with what those files name in turn (a wrapper that starts a
+    /// Python environment). Paths that do not exist are not counted.
+    fn portable(&self, text: &str) -> bool {
+        let home = &self.collected.origin_home;
+        let carried = |relative: &str, directory: bool| {
+            if directory {
+                let prefix = format!("{relative}/");
+                self.seen.iter().any(|path| path.starts_with(&prefix))
+            } else {
+                self.seen.contains(relative) && !self.incomplete.contains(relative)
+            }
+        };
+        let relative = |absolute: &str| {
+            absolute
+                .strip_prefix(home.as_str())
+                .map(|rest| rest.trim_start_matches('/').to_owned())
+                .filter(|rest| !rest.is_empty())
+        };
+        for absolute in home_paths(text, home) {
+            let Some(path) = relative(&absolute) else {
+                continue;
+            };
+            let Ok(metadata) = fs::metadata(self.home.join(&path)) else {
+                continue;
+            };
+            if !carried(&path, metadata.is_dir()) {
+                return false;
+            }
+            if metadata.is_file()
+                && metadata.len() <= 1024 * 1024
+                && let Ok(inner) = fs::read_to_string(self.home.join(&path))
+            {
+                for named in home_paths(&inner, home) {
+                    let Some(named) = relative(&named) else {
+                        continue;
+                    };
+                    if let Ok(metadata) = fs::metadata(self.home.join(&named))
+                        && !carried(&named, metadata.is_dir())
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn file_text(&self, path: &str) -> io::Result<Option<String>> {
+        let Some(file) = self.collected.files.iter().find(|file| file.path == path) else {
+            return Ok(None);
+        };
+        Ok(String::from_utf8(file.source.read()?).ok())
+    }
+
+    fn replace_file(&mut self, path: &str, bytes: Vec<u8>) {
+        if let Some(file) = self.collected.files.iter_mut().find(|file| file.path == path) {
+            file.sha256 = sha256(&bytes);
+            file.size = bytes.len() as u64;
+            file.source = Source::Bytes(bytes);
+        }
+    }
+
+    /// Hosts `hosted` on the origin unless `portable`, returning the command
+    /// line the runner's configuration uses instead.
+    fn host(&mut self, hosted: Hosted) -> (String, String) {
+        let id = hosted.id();
+        self.collected.notes.push(format!(
+            "runs on the origin: {} (its files cannot run on a runner)",
+            hosted.label
+        ));
+        self.collected.hosted.insert(id.clone(), hosted);
+        (format!("{}/.xd/origin-exec", self.collected.origin_home), id)
+    }
+
+    /// Points every MCP server and hook that cannot run on a runner at the
+    /// origin, and notes which Codex hooks the origin trusts.
+    fn host_unportable(&mut self) -> io::Result<()> {
+        // Claude's MCP servers.
+        if let Some(text) = self.file_text(".claude/.claude.json")? {
+            let mut settings: Value = serde_json::from_str(&text).map_err(io::Error::other)?;
+            let mut changed = false;
+            if let Some(servers) = settings["mcpServers"].as_object_mut() {
+                for (name, server) in servers.iter_mut() {
+                    if let Some(hosted) = json_server(server, &format!("Claude MCP server {name}"))
+                        && !self.portable(&hosted_text(&hosted))
+                    {
+                        let (command, id) = self.host(hosted);
+                        point_json_server(server, command, id);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.replace_file(
+                    ".claude/.claude.json",
+                    serde_json::to_vec_pretty(&settings).map_err(io::Error::other)?,
+                );
+            }
+        }
+        // Codex's trust is read from the hooks as the origin wrote them.
+        let codex_hooks_file = self.codex_home.join("hooks.json");
+        if let (Some(config), Some(hooks)) = (
+            self.file_text(".codex/config.toml")?,
+            self.file_text(".codex/hooks.json")?,
+        ) {
+            self.collected.codex_trusted_hooks = origin_hosting::trusted_codex_hooks(
+                &config,
+                &hooks,
+                &codex_hooks_file.to_string_lossy(),
+            );
+        }
+        // Hooks, which Claude and Codex both run through the shell.
+        for (path, tool) in [(".claude/settings.json", "Claude"), (".codex/hooks.json", "Codex")] {
+            let Some(text) = self.file_text(path)? else {
+                continue;
+            };
+            let Ok(mut settings) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            let mut changed = false;
+            if let Some(events) = settings["hooks"].as_object_mut() {
+                for (event, groups) in events.iter_mut() {
+                    for group in groups.as_array_mut().into_iter().flatten() {
+                        for handler in group["hooks"].as_array_mut().into_iter().flatten() {
+                            let Some(command) = handler["command"].as_str().map(str::to_owned) else {
+                                continue;
+                            };
+                            if handler["type"].as_str().unwrap_or("command") != "command"
+                                || self.portable(&command)
+                            {
+                                continue;
+                            }
+                            let (program, id) = self.host(Hosted {
+                                program: "/bin/sh".into(),
+                                args: vec!["-c".into(), command],
+                                env: BTreeMap::new(),
+                                cwd: None,
+                                label: format!("{tool} {event} hook"),
+                            });
+                            handler["command"] = json!(format!("{program} {id}"));
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                self.replace_file(path, serde_json::to_vec_pretty(&settings).map_err(io::Error::other)?);
+            }
+        }
+        // Codex's MCP servers.
+        if let Some(config) = self.file_text(".codex/config.toml")?
+            && let Ok(mut document) = config.parse::<toml_edit::DocumentMut>()
+        {
+            let mut changed = false;
+            let names = document
+                .get("mcp_servers")
+                .and_then(toml_edit::Item::as_table_like)
+                .map(|servers| servers.iter().map(|(name, _)| name.to_owned()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for name in names {
+                let server = &document["mcp_servers"][name.as_str()];
+                let Some(program) = server.get("command").and_then(toml_edit::Item::as_str) else {
+                    continue;
+                };
+                let strings = |key: &str| {
+                    server
+                        .get(key)
+                        .and_then(toml_edit::Item::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str().map(str::to_owned))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                };
+                let env = server
+                    .get("env")
+                    .and_then(toml_edit::Item::as_table_like)
+                    .map(|env| {
+                        env.iter()
+                            .filter_map(|(key, value)| Some((key.to_owned(), value.as_str()?.to_owned())))
+                            .collect::<BTreeMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                let hosted = Hosted {
+                    program: program.to_owned(),
+                    args: strings("args"),
+                    env,
+                    cwd: server.get("cwd").and_then(toml_edit::Item::as_str).map(str::to_owned),
+                    label: format!("Codex MCP server {name}"),
+                };
+                if self.portable(&hosted_text(&hosted)) {
+                    continue;
+                }
+                let (command, id) = self.host(hosted);
+                let server = &mut document["mcp_servers"][name.as_str()];
+                server["command"] = toml_edit::value(command);
+                let mut args = toml_edit::Array::new();
+                args.push(id);
+                server["args"] = toml_edit::value(args);
+                if let Some(table) = server.as_table_like_mut() {
+                    // They are the origin's to give the program, not the runner's.
+                    table.remove("env");
+                    table.remove("env_vars");
+                    table.remove("cwd");
+                }
+                changed = true;
+            }
+            if changed {
+                self.replace_file(".codex/config.toml", document.to_string().into_bytes());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A stdio MCP server in Claude's JSON settings, as a hosted program.
+fn json_server(server: &Value, label: &str) -> Option<Hosted> {
+    if !matches!(server["type"].as_str(), None | Some("stdio")) {
+        return None;
+    }
+    Some(Hosted {
+        program: server["command"].as_str()?.to_owned(),
+        args: server["args"]
+            .as_array()
+            .map(|args| args.iter().filter_map(|arg| arg.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default(),
+        env: server["env"]
+            .as_object()
+            .map(|env| {
+                env.iter()
+                    .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        cwd: server["cwd"].as_str().map(str::to_owned),
+        label: label.to_owned(),
+    })
+}
+
+fn point_json_server(server: &mut Value, command: String, id: String) {
+    if let Some(server) = server.as_object_mut() {
+        server.remove("env");
+        server.remove("cwd");
+        server.insert("type".into(), json!("stdio"));
+        server.insert("command".into(), json!(command));
+        server.insert("args".into(), json!([id]));
+    }
+}
+
+/// Everything a hosted program names, for checking what it needs.
+fn hosted_text(hosted: &Hosted) -> String {
+    let mut parts = vec![hosted.program.clone()];
+    parts.extend(hosted.args.iter().cloned());
+    parts.extend(hosted.env.values().cloned());
+    parts.extend(hosted.cwd.iter().cloned());
+    parts.join("\n")
 }
 
 /// The folder a referenced script belongs to: the nearest one above it that
@@ -1118,6 +1404,30 @@ impl Profiles {
                 removed.push(path.clone());
             }
         }
+        // What starts an origin's hosted programs, and Codex's trust in the
+        // hooks as rewritten here.
+        self.write_origin_exec(origin, &home).map_err(|e| e.to_string())?;
+        let trusted = manifest["codex_trusted_hooks"]
+            .as_array()
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(Value::as_str)
+                    .map(|key| rewrite_home(key, &origin_home, &target))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !trusted.is_empty()
+            && let Some(managed) = files.get_mut(".codex/config.toml")
+            && let (Ok(config), Ok(hooks)) = (
+                fs::read_to_string(home.join(".codex/config.toml")),
+                fs::read_to_string(home.join(".codex/hooks.json")),
+            )
+            && let Some(updated) = origin_hosting::retrust_codex_hooks(&config, &hooks, &trusted)
+        {
+            write_atomic(&home.join(".codex/config.toml"), updated.as_bytes(), 0o600)
+                .map_err(|e| e.to_string())?;
+            managed.applied = sha256(updated.as_bytes());
+        }
         state.files = files;
         state.origin_home = origin_home;
         state.env = manifest["env"]
@@ -1149,6 +1459,27 @@ impl Profiles {
             "conflicts": conflicts,
             "active": active.as_deref() == Some(origin),
         }))
+    }
+
+    /// `home/.xd/origin-exec`, which hosted MCP servers and hooks start in
+    /// place of their real command: it asks this runner to run the program
+    /// on the origin.
+    fn write_origin_exec(&self, origin: &str, home: &Path) -> io::Result<()> {
+        let executable = std::env::current_exe()?;
+        let data = self.root.parent().unwrap_or(&self.root);
+        let script = format!(
+            "#!/bin/sh\nexec {} origin-exec --data {} --origin {} \"$@\"\n",
+            shell_quote(&executable.to_string_lossy()),
+            shell_quote(&data.to_string_lossy()),
+            shell_quote(origin),
+        );
+        let directory = home.join(".xd");
+        fs::create_dir_all(&directory)?;
+        let path = directory.join("origin-exec");
+        if fs::read_to_string(&path).ok().as_deref() != Some(script.as_str()) {
+            write_atomic(&path, script.as_bytes(), 0o700)?;
+        }
+        Ok(())
     }
 
     fn render(
@@ -1494,6 +1825,109 @@ mod tests {
         assert!(settings["mcpServers"]["lens"].is_object());
         assert!(settings.get("numStartups").is_none());
         assert!(settings.get("projects").is_none());
+    }
+
+    #[test]
+    fn hosts_what_cannot_run_on_a_runner_on_the_origin() {
+        let home = origin_home();
+        // A wrapper in bin that starts a Python environment, as an MCP server
+        // and as a Codex hook, and a hook whose folder stays behind.
+        write(
+            &home.join(".local/bin/wrapped"),
+            &format!("#!/bin/sh\nexec {}/Projects/py/.venv/bin/py-mcp\n", home.display()),
+        );
+        write(
+            &home.join(".codex/config.toml"),
+            &format!(
+                "[mcp_servers.wrapped]\ncommand = \"{h}/.local/bin/wrapped\"\nenv = {{ TOKEN = \"t\" }}\n\n\
+                 [mcp_servers.web]\nurl = \"https://x\"\n",
+                h = home.display()
+            ),
+        );
+        write(
+            &home.join(".codex/hooks.json"),
+            &format!(
+                r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"{}/.local/bin/wrapped --stop"}}]}}]}}}}"#,
+                home.display()
+            ),
+        );
+        let collected = collect_from(&home);
+        let file = |path: &str| {
+            let file = collected.files.iter().find(|file| file.path == path).unwrap();
+            String::from_utf8(file.source.read().unwrap()).unwrap()
+        };
+        let exec = format!("{}/.xd/origin-exec", home.display());
+
+        let claude: Value = serde_json::from_str(&file(".claude/.claude.json")).unwrap();
+        let py = &claude["mcpServers"]["py"];
+        assert_eq!(py["command"], exec.as_str());
+        let id = py["args"][0].as_str().unwrap();
+        let hosted = &collected.hosted[id];
+        assert!(hosted.program.ends_with("/Projects/py/.venv/bin/py-mcp"));
+        // Servers that came along whole, and remote ones, stay as they were.
+        assert!(claude["mcpServers"]["chat"]["command"].as_str().unwrap().ends_with("/.local/bin/chat-mcp"));
+        assert_eq!(claude["mcpServers"]["lens"]["url"], "https://x");
+
+        let codex = file(".codex/config.toml");
+        assert!(codex.contains(&format!("command = \"{exec}\"")), "{codex}");
+        assert!(!codex.contains("TOKEN"), "the origin keeps the server's variables");
+        let wrapped = collected
+            .hosted
+            .values()
+            .find(|hosted| hosted.label == "Codex MCP server wrapped")
+            .unwrap();
+        assert_eq!(wrapped.env.get("TOKEN").map(String::as_str), Some("t"));
+        assert!(codex.contains("[mcp_servers.web]"));
+
+        let hooks: Value = serde_json::from_str(&file(".codex/hooks.json")).unwrap();
+        let command = hooks["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
+        let hook_id = command.strip_prefix(&format!("{exec} ")).unwrap();
+        assert_eq!(collected.hosted[hook_id].program, "/bin/sh");
+        assert!(collected.hosted[hook_id].args[1].ends_with("/.local/bin/wrapped --stop"));
+        // The Claude hook's folder came along, so it runs on the runner.
+        assert!(file(".claude/settings.json").contains("/.local/share/hooks/dispatch.py"));
+        let manifest = collected.manifest();
+        assert_eq!(manifest["origin_hosted"].as_array().unwrap().len(), 3);
+        assert!(!manifest.to_string().contains("py-mcp"), "commands stay on the origin");
+    }
+
+    #[test]
+    fn a_runner_writes_its_origin_exec_and_retrusts_codex_hooks() {
+        let home = origin_home();
+        let hooks = format!(
+            r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"{}/.local/share/hooks/dispatch.py"}}]}}]}}}}"#,
+            home.display()
+        );
+        write(&home.join(".codex/hooks.json"), &hooks);
+        let parsed: Value = serde_json::from_str(&hooks).unwrap();
+        let group = &parsed["hooks"]["Stop"][0];
+        let hash = origin_hosting::codex_hook_hash("stop", group, &group["hooks"][0]).unwrap();
+        write(
+            &home.join(".codex/config.toml"),
+            &format!(
+                "[hooks.state.\"{}/.codex/hooks.json:stop:0:0\"]\ntrusted_hash = \"{hash}\"\n",
+                home.display()
+            ),
+        );
+        let collected = collect_from(&home);
+        assert_eq!(collected.codex_trusted_hooks.len(), 1);
+        let profiles = Profiles::open(scratch("runner"));
+        push(&profiles, "laptop", &collected);
+        let profile = profiles.home("laptop").unwrap();
+        let script = fs::read_to_string(profile.join(".xd/origin-exec")).unwrap();
+        assert!(script.contains("origin-exec --data") && script.contains("--origin 'laptop'"));
+        let runner_hooks = fs::read_to_string(profile.join(".codex/hooks.json")).unwrap();
+        let runner: Value = serde_json::from_str(&runner_hooks).unwrap();
+        let group = &runner["hooks"]["Stop"][0];
+        let expected = origin_hosting::codex_hook_hash("stop", group, &group["hooks"][0]).unwrap();
+        assert_ne!(expected, hash, "the command moved into the profile");
+        let config = fs::read_to_string(profile.join(".codex/config.toml")).unwrap();
+        assert!(config.contains(&expected), "{config}");
+        assert!(config.contains(&format!("{}/.codex/hooks.json:stop:0:0", profile.display())));
+        // The rewrite is the runner's own, not a change it offers back.
+        let again = push(&profiles, "laptop", &collect_from(&home));
+        assert_eq!(again["written"], json!([]));
+        assert!(profiles.pull("laptop").unwrap()["changed"].as_array().unwrap().is_empty());
     }
 
     #[test]

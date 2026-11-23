@@ -139,14 +139,31 @@ copy, not a live forward:
   how often this happens and whether a dedicated per-runner login (an extra
   xd account, as `accounts.rs` already supports) is the safer default.
 
-### MCP servers
+### MCP servers and hooks
 
-MCP servers run **on the runner** by default, launched from the inherited
-config, because the runner must work with the origin offline. A server the
-runner can't start (a missing binary) is reported in the chat rather than
-silently dropped. A server bound to the origin machine (a game client, a
-local device) can be marked **origin-hosted**. Its stdio is then tunneled to
-the origin, and it's available only while the origin is connected.
+Each stdio MCP server and command hook runs wherever it behaves exactly as it
+does on the origin:
+
+- **On the runner**, when everything it names inside the origin's home came
+  along whole: the program, the folder it belongs to (its checkout or package,
+  up to 64 MiB), the files a wrapper starts in turn, and the folders its
+  arguments and variables point to. Such a server keeps working while the
+  origin is offline.
+- **Hosted on the origin** otherwise. That covers Python virtualenvs, a hook
+  inside a checkout too large to carry, and a server whose data folder only
+  the origin has. The origin keeps the real command under an id. The
+  runner's configuration starts `~/.xd/origin-exec <id>` instead, and its
+  standard input, output, error and exit code are tunneled through the
+  origin's link (`origin-link`, `origin-exec-*`). The runner only ever names
+  an id, the origin runs only programs its own configuration offered, and the
+  server's variables never leave the origin. A hosted program is available
+  while the origin is linked. Without the link, its MCP server fails to start
+  and its hook fails closed.
+
+Codex runs a hook only while `[hooks.state]` holds its current hash. The
+runner recomputes the hash after rewriting a hook, for exactly the hooks the
+origin trusts. A hook the origin doesn't trust stays untrusted on the runner
+too.
 
 ### What can't be inherited
 
@@ -241,18 +258,38 @@ over the protocol.
 - Neither CLI refreshed its login during the test (the Claude token had 7.5 h
   left), so the origin's sign-ins were untouched.
 
-**What doesn't, and what it means for the design**
+**Hosted MCP servers and hooks (second round)**
+
+The origin ran `xd-host profile link`, which pushes the profile and keeps the
+link open. It found 4 programs to host: the `discord` and `src-mcp` venvs,
+`minecraft` (its game data stays on the origin), and the Cinnabar dispatch
+hook. On the runner (empty home, `env -i`):
+
+- Claude listed `src-mcp`, `discord`, `minecraft`, `lens` and `xd` with no
+  startup failures. It called `src-mcp project_list` (the indexed `artemis`
+  project), `discord list_guilds` (the account's servers) and `minecraft
+  list` (installed version, no instances). Its Bash ran, with the PreToolUse
+  hook answered on the origin. `git ls-remote` over SSH and `gh api user`
+  (`RestartFU`) worked.
+- Codex called `src-mcp` and `discord` the same way and ran the same shell
+  commands. It has no `minecraft` server, and neither does the origin's Codex
+  config. Its Cinnabar hooks are untrusted on the origin (their trust hashes
+  were made for an older path), so they're untrusted on the runner too.
+- Neither CLI refreshed a login.
+
+**What the first round found, and what it meant for the design**
 
 - **Python virtualenvs aren't portable.** Two MCP servers launch from
   `.venv`s (one through a wrapper in `~/.local/bin`). A venv hardcodes its
-  interpreter and paths, so it can't be copied. Options for phase 5: rebuild
-  the venv on the runner (`uv sync` when there's a `pyproject.toml`), or run
-  the server origin-hosted.
+  interpreter and paths, so it can't be copied. These are now hosted on the
+  origin. Rebuilding a venv on the runner (`uv sync`) could later let them
+  work offline too.
 - **Some hooks are bound to the origin.** A PreToolUse hook whose script lives
   in a 2 GiB private checkout was carried alone and failed closed, so Claude's
-  Bash was blocked on the runner. This is the right failure, since a guard
-  must never be dropped silently, but such a hook needs an explicit choice:
-  carry its checkout, run it origin-hosted, or turn it off on runners.
+  Bash was blocked on the runner. It's now hosted on the origin. A hook still
+  sees the runner's paths in its event (its `cwd`), so a hook that decides by
+  path, such as "is this one of my repositories", decides by the runner's
+  paths.
 - **Process coverage.** The host's own `gh`/`git` helpers in `storage.rs` used
   the daemon's process environment, so pull-request lookups ran signed out.
   The spike puts the profile on `run_git_with_env` and `run_gh`. The roughly 40
@@ -280,6 +317,9 @@ over the protocol.
 - `pull` reports logins the runner refreshed, but the origin doesn't adopt
   them back yet.
 - On macOS, Claude's login is in the keychain and isn't read yet.
+- Hosted programs run in the origin's home with its login environment.
+  Variables the CLI sets for a hook (`CLAUDE_PROJECT_DIR`) aren't forwarded
+  yet.
 
 ## Open questions
 

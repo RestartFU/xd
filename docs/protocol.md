@@ -1356,6 +1356,38 @@ origin's version wins and the path is listed in `conflicts`. `pull` returns
 those refreshed sign-ins. For now, the active origin's environment applies to
 every process the host starts.
 
+### Programs hosted on the origin (experimental)
+
+An origin keeps a link to a runner, and the runner runs the origin's
+MCP servers and hooks that cannot run anywhere else through it:
+
+```json
+{"op":"origin-link","origin":"laptop"}
+{"ok":true,"origin":"laptop"}
+```
+
+On the runner, `xd-host origin-exec` starts one by the id the origin gave it
+(local socket only):
+
+```json
+{"op":"origin-exec-start","origin":"laptop","command":"86f66dd641beb6c3d4f89a41"}
+{"ok":true,"exec":4}
+{"op":"origin-exec-input","exec":4,"data":"base64…"}
+{"op":"origin-exec-input","exec":4}
+```
+
+`origin-exec-input` without `data` closes the program's standard input. The
+origin's link gets the events `origin-exec-start` (`exec`, `command`),
+`origin-exec-input`, `origin-exec-eof` and `origin-exec-kill`. It answers with
+`origin-exec-output` (`exec`, `stream` `stdout` or `stderr`, base64 `data`)
+and `origin-exec-exit` (`exec`, `code`, optional `error`). The requester
+gets those as `origin-exec-output` and `origin-exec-exit` events, which go
+only to it. The origin runs only the ids its own configuration offered and
+refuses any other with exit code 127. A requester that disconnects has its
+program killed on the origin. A link that disconnects ends its programs with
+`"error":"The origin disconnected."`. `origin-profile-status` reports
+`linked` for each origin.
+
 ### Linked pull requests
 
 A chat can have any number of pull requests linked to it. Clients list them

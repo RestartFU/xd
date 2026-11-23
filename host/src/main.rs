@@ -22,6 +22,8 @@ enum CliCommand {
     Mcp(HostOptions, String),
     /// Pushes this machine's origin profile to a runner, or reads one back.
     Profile(HostOptions, ProfileAction, String),
+    /// On a runner: runs a program the origin hosts, by its id.
+    OriginExec(HostOptions, String, String),
     Version,
     Help,
 }
@@ -45,6 +47,15 @@ fn main() -> ExitCode {
         Ok(CliCommand::Mcp(options, chat)) => finish(mcp::serve(options, &chat)),
         Ok(CliCommand::Profile(options, action, origin)) => {
             finish(profile::run(options, action, &origin))
+        }
+        Ok(CliCommand::OriginExec(options, origin, command)) => {
+            match profile::origin_exec(options, &origin, &command) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("xd-host: {error}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Err(error) => {
             eprintln!("xd-host: {error}");
@@ -98,7 +109,8 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
                 Some("pull") => ProfileAction::Pull,
                 Some("status") => ProfileAction::Status,
                 Some("show") => ProfileAction::Show,
-                _ => return Err("profile needs push, pull, status or show".into()),
+                Some("link") => ProfileAction::Link,
+                _ => return Err("profile needs push, link, pull, status or show".into()),
             };
             let mut origin = None;
             let mut rest = Vec::new();
@@ -124,6 +136,27 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
             }
             host_arguments(rest.into_iter())
                 .map(|options| CliCommand::Profile(options, action, origin))
+        }
+        Some("origin-exec") => {
+            let mut origin = None;
+            let mut command = None;
+            let mut rest = Vec::new();
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
+                    "--origin" => origin = Some(arguments.next().ok_or("--origin needs an id")?),
+                    "--data" | "--database" | "--workspaces" | "--root" => {
+                        rest.push(argument);
+                        rest.push(arguments.next().ok_or("an option needs a value")?);
+                    }
+                    _ if argument.starts_with("--") => rest.push(argument),
+                    _ if command.is_none() => command = Some(argument),
+                    _ => return Err("origin-exec takes one program id".into()),
+                }
+            }
+            let origin = origin.ok_or("origin-exec needs --origin")?;
+            let command = command.ok_or("origin-exec needs a program id")?;
+            host_arguments(rest.into_iter())
+                .map(|options| CliCommand::OriginExec(options, origin, command))
         }
         Some("--version" | "-v") if arguments.next().is_none() => Ok(CliCommand::Version),
         Some("--help" | "-h") if arguments.next().is_none() => Ok(CliCommand::Help),
@@ -205,7 +238,7 @@ fn version_string() -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: xd-host <stdio|daemon|daemon-status|daemon-stop> --data DIR\n       xd-host profile <push|pull|status> --data RUNNER_DATA [--origin ID]\n       xd-host profile show\n\nstdio connects to the persistent daemon, starting it if needed.\ndaemon runs it in the foreground; with --stop-with-app it stops once no xd app is connected. Remote clients use TLS pairing on port 4001."
+    "usage: xd-host <stdio|daemon|daemon-status|daemon-stop> --data DIR\n       xd-host profile <push|link|pull|status> --data RUNNER_DATA [--origin ID]\n       xd-host profile show\n\nstdio connects to the persistent daemon, starting it if needed.\ndaemon runs it in the foreground; with --stop-with-app it stops once no xd app is connected. Remote clients use TLS pairing on port 4001."
 }
 
 #[cfg(test)]

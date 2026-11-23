@@ -2,10 +2,22 @@
 //! same machine through its local socket. Paired runners get the same
 //! operations over TLS from the desktop; this is the spike's way in.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    io::{BufRead, BufReader, Read, Write},
+    os::unix::{net::UnixStream, process::CommandExt},
+    process::{Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        mpsc::{Sender, channel},
+    },
+    thread,
+    time::Duration,
+};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use xd_host::origin_profile;
+use xd_host::origin_profile::{self, Hosted};
 
 use crate::{HostOptions, daemon};
 
@@ -15,7 +27,12 @@ pub(crate) enum ProfileAction {
     Pull,
     Status,
     Show,
+    /// Push, then stay linked so the runner can run hosted programs here.
+    Link,
 }
+
+/// Input and output travel in pieces of at most this many bytes.
+const CHUNK: usize = 64 * 1024;
 
 /// A large first push carries every skill and plugin in one frame.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(600);
@@ -64,11 +81,12 @@ pub(crate) fn run(options: HostOptions, action: ProfileAction, origin: &str) -> 
             }
             print(reply)
         }
-        ProfileAction::Push => push(&options, origin),
+        ProfileAction::Push => push(&options, origin).map(|_| ()),
+        ProfileAction::Link => link(&options, origin),
     }
 }
 
-fn push(options: &HostOptions, origin: &str) -> Result<(), String> {
+fn push(options: &HostOptions, origin: &str) -> Result<origin_profile::Collected, String> {
     let collected = origin_profile::collect_local().map_err(|e| e.to_string())?;
     eprintln!("{}", summary(&collected));
     let manifest = collected.manifest();
@@ -106,7 +124,277 @@ fn push(options: &HostOptions, origin: &str) -> Result<(), String> {
         options,
         json!({"op": "origin-profile-push", "origin": origin, "manifest": manifest, "blobs": blobs}),
     )?;
-    print(reply)
+    print(reply)?;
+    Ok(collected)
+}
+
+/// One connection's writing side, shared by the threads that answer on it.
+type Writer = Arc<Mutex<UnixStream>>;
+
+fn send(writer: &Writer, body: Value) -> std::io::Result<()> {
+    let mut line = body.to_string();
+    line.push('\n');
+    writer
+        .lock()
+        .map_err(|_| std::io::Error::other("connection lock"))?
+        .write_all(line.as_bytes())
+}
+
+/// Pushes the profile, then keeps a link open so the runner can run this
+/// origin's hosted MCP servers and hooks here. Reconnects when the runner
+/// restarts.
+fn link(options: &HostOptions, origin: &str) -> Result<(), String> {
+    loop {
+        match push(options, origin).and_then(|collected| serve_link(options, origin, collected)) {
+            Ok(()) => eprintln!("xd-host: the runner closed the link; reconnecting"),
+            Err(error) => eprintln!("xd-host: {error}; retrying"),
+        }
+        thread::sleep(Duration::from_secs(3));
+    }
+}
+
+struct Running {
+    input: Option<Sender<Vec<u8>>>,
+    pid: i32,
+}
+
+fn serve_link(
+    options: &HostOptions,
+    origin: &str,
+    collected: origin_profile::Collected,
+) -> Result<(), String> {
+    let stream = daemon::connect(options, false, false).map_err(|e| e.to_string())?;
+    let writer: Writer = Arc::new(Mutex::new(stream.try_clone().map_err(|e| e.to_string())?));
+    send(&writer, json!({"op": "origin-link", "origin": origin, "_xd_request": 1}))
+        .map_err(|e| e.to_string())?;
+    eprintln!(
+        "linked to the runner as {origin}; hosting {} program(s)",
+        collected.hosted.len()
+    );
+    let hosted = Arc::new(collected.hosted);
+    let environment = Arc::new(collected.login_env);
+    let home = collected.origin_home;
+    let running: Arc<Mutex<HashMap<u64, Running>>> = Arc::default();
+    for line in BufReader::new(stream).lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if message.get("_xd_request") == Some(&json!(1)) && message["ok"] != true {
+            return Err(message["error"].as_str().unwrap_or("The runner refused the link.").into());
+        }
+        let Some(exec) = message["exec"].as_u64() else {
+            continue;
+        };
+        match message["event"].as_str() {
+            Some("origin-exec-start") => {
+                let command = message["command"].as_str().unwrap_or_default();
+                match hosted.get(command) {
+                    Some(program) => {
+                        if let Err(error) = start(&writer, &running, exec, program, &environment, &home) {
+                            let _ = send(&writer, json!({"op": "origin-exec-exit", "exec": exec,
+                                "code": 127, "error": error}));
+                        }
+                    }
+                    // Only what this origin's own configuration offered runs.
+                    None => {
+                        let _ = send(&writer, json!({"op": "origin-exec-exit", "exec": exec,
+                            "code": 127, "error": "The origin does not offer that program."}));
+                    }
+                }
+            }
+            Some("origin-exec-input") => {
+                let data = STANDARD
+                    .decode(message["data"].as_str().unwrap_or_default())
+                    .unwrap_or_default();
+                if let Some(input) = running
+                    .lock()
+                    .ok()
+                    .and_then(|running| running.get(&exec).and_then(|r| r.input.clone()))
+                {
+                    let _ = input.send(data);
+                }
+            }
+            Some("origin-exec-eof") => {
+                if let Ok(mut running) = running.lock()
+                    && let Some(program) = running.get_mut(&exec)
+                {
+                    program.input = None;
+                }
+            }
+            Some("origin-exec-kill") => {
+                if let Some(pid) = running.lock().ok().and_then(|r| r.get(&exec).map(|p| p.pid)) {
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // The runner went: what it started here has nobody to talk to.
+    if let Ok(running) = running.lock() {
+        for program in running.values() {
+            unsafe {
+                libc::kill(-program.pid, libc::SIGKILL);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn start(
+    writer: &Writer,
+    running: &Arc<Mutex<HashMap<u64, Running>>>,
+    exec: u64,
+    program: &Hosted,
+    environment: &HashMap<String, String>,
+    home: &str,
+) -> Result<(), String> {
+    let mut command = Command::new(&program.program);
+    command
+        .args(&program.args)
+        .env_clear()
+        .envs(environment)
+        .envs(&program.env)
+        .current_dir(program.cwd.as_deref().unwrap_or(home))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn().map_err(|e| format!("{}: {e}", program.label))?;
+    let pid = child.id() as i32;
+    let mut stdin = child.stdin.take().ok_or("no input")?;
+    let (input, inputs) = channel::<Vec<u8>>();
+    thread::spawn(move || {
+        for data in inputs {
+            if stdin.write_all(&data).and_then(|()| stdin.flush()).is_err() {
+                break;
+            }
+        }
+    });
+    let pumps = [
+        (child.stdout.take().map(|out| Box::new(out) as Box<dyn Read + Send>), "stdout"),
+        (child.stderr.take().map(|err| Box::new(err) as Box<dyn Read + Send>), "stderr"),
+    ]
+    .into_iter()
+    .filter_map(|(reader, stream)| Some((reader?, stream)))
+    .map(|(mut reader, stream)| {
+        let writer = writer.clone();
+        thread::spawn(move || {
+            let mut buffer = vec![0; CHUNK];
+            while let Ok(read) = reader.read(&mut buffer) {
+                if read == 0
+                    || send(&writer, json!({"op": "origin-exec-output", "exec": exec,
+                        "stream": stream, "data": STANDARD.encode(&buffer[..read])}))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+    })
+    .collect::<Vec<_>>();
+    running
+        .lock()
+        .map_err(|_| "running programs lock")?
+        .insert(exec, Running { input: Some(input), pid });
+    let writer = writer.clone();
+    let running = running.clone();
+    thread::spawn(move || {
+        let status = child.wait();
+        for pump in pumps {
+            let _ = pump.join();
+        }
+        if let Ok(mut running) = running.lock() {
+            running.remove(&exec);
+        }
+        let code = status.ok().and_then(|status| status.code()).unwrap_or(1);
+        let _ = send(&writer, json!({"op": "origin-exec-exit", "exec": exec, "code": code}));
+    });
+    Ok(())
+}
+
+/// Runs the program the origin hosts as `command`, through this runner, with
+/// this process's standard input and output as its own. Returns its exit code.
+pub(crate) fn origin_exec(options: HostOptions, origin: &str, command: &str) -> Result<u8, String> {
+    let stream = daemon::connect(&options, false, false).map_err(|e| e.to_string())?;
+    let writer: Writer = Arc::new(Mutex::new(stream.try_clone().map_err(|e| e.to_string())?));
+    send(&writer, json!({"op": "origin-exec-start", "origin": origin, "command": command,
+        "_xd_request": 1}))
+    .map_err(|e| e.to_string())?;
+    let mut lines = BufReader::new(stream).lines();
+    let exec = loop {
+        let line = lines
+            .next()
+            .ok_or("The runner closed the connection.")?
+            .map_err(|e| e.to_string())?;
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if message.get("_xd_request") == Some(&json!(1)) {
+            if message["ok"] != true {
+                return Err(message["error"].as_str().unwrap_or("The runner refused.").into());
+            }
+            break message["exec"].as_u64().ok_or("The runner gave no exec.")?;
+        }
+    };
+    {
+        let writer = writer.clone();
+        thread::spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut buffer = vec![0; CHUNK];
+            loop {
+                match stdin.read(&mut buffer) {
+                    Ok(0) | Err(_) => {
+                        let _ = send(&writer, json!({"op": "origin-exec-input", "exec": exec}));
+                        break;
+                    }
+                    Ok(read) => {
+                        let body = json!({"op": "origin-exec-input", "exec": exec,
+                            "data": STANDARD.encode(&buffer[..read])});
+                        if send(&writer, body).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+    for line in lines {
+        let line = line.map_err(|e| e.to_string())?;
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if message["exec"].as_u64() != Some(exec) {
+            continue;
+        }
+        match message["event"].as_str() {
+            Some("origin-exec-output") => {
+                let data = STANDARD
+                    .decode(message["data"].as_str().unwrap_or_default())
+                    .unwrap_or_default();
+                let target: &mut dyn Write = if message["stream"] == "stderr" {
+                    &mut stderr
+                } else {
+                    &mut stdout
+                };
+                if target.write_all(&data).and_then(|()| target.flush()).is_err() {
+                    return Ok(1);
+                }
+            }
+            Some("origin-exec-exit") => {
+                if let Some(error) = message["error"].as_str() {
+                    eprintln!("xd-host: {error}");
+                }
+                return Ok(message["code"].as_i64().unwrap_or(1).clamp(0, 255) as u8);
+            }
+            _ => {}
+        }
+    }
+    Err("The runner closed the connection.".into())
 }
 
 fn summary(collected: &origin_profile::Collected) -> String {
