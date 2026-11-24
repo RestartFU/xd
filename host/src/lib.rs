@@ -38,6 +38,9 @@ mod local_socket;
 #[cfg(target_os = "linux")]
 mod memory_guard;
 mod model_catalog;
+mod origin_hosting;
+pub mod origin_profile;
+mod origin_relay;
 mod owner_icon;
 mod pairing;
 mod private_fs;
@@ -225,6 +228,8 @@ pub struct Engine {
     quota_settings: Mutex<()>,
     /// Desktops offering their browser to agents; see [`browser_relay`].
     browser: browser_relay::BrowserRelay,
+    /// Programs run on a linked origin for this runner; see [`origin_relay`].
+    origin_relay: origin_relay::OriginRelay,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,6 +296,7 @@ impl Engine {
             quota_meter: Mutex::new(None),
             quota_settings: Mutex::new(()),
             browser: browser_relay::BrowserRelay::default(),
+            origin_relay: origin_relay::OriginRelay::default(),
             events,
             runtime: None,
         }
@@ -334,6 +340,11 @@ impl Engine {
         );
         let self_update = SelfUpdate::new(events.clone());
         let repository_monitor = RepositoryMonitor::new(store.clone(), events.clone());
+        // Profiles other devices push for the work they send here; see
+        // docs/runners.md. Unit tests keep to the user's own environment.
+        if let Some(data) = data_directory.as_deref().filter(|_| cfg!(not(test))) {
+            origin_profile::install(data.join("origins"));
+        }
         let engine = Self {
             shutdown: AtomicBool::new(false),
             app_clients: Mutex::default(),
@@ -365,6 +376,7 @@ impl Engine {
             quota_meter: Mutex::new(None),
             quota_settings: Mutex::new(()),
             browser: browser_relay::BrowserRelay::default(),
+            origin_relay: origin_relay::OriginRelay::default(),
             events,
         };
         engine.auth.refresh_all();
@@ -410,6 +422,35 @@ impl Engine {
             Some("peer-pairing") => self.peer_pairing(owner, &request),
             Some("tree") => self.tree(),
             Some("devices") => self.devices(),
+            Some(
+                "origin-profile-offer"
+                | "origin-profile-push"
+                | "origin-profile-pull"
+                | "origin-profile-status",
+            ) => self.origin_profile(owner, &request),
+            Some("origin-link") => match self.origin_of(owner, &request) {
+                Ok(origin) => self.origin_relay.link(&origin, owner),
+                Err(error) => error_reply(error),
+            },
+            // Only this runner's own processes start programs on an origin.
+            Some("origin-exec-start") if self.pairing.is_local(owner) => {
+                match request["origin"].as_str() {
+                    Some(origin) => self.origin_relay.start(
+                        &self.events,
+                        owner,
+                        origin,
+                        request["command"].as_str().unwrap_or_default(),
+                    ),
+                    None => error_reply("origin-exec-start needs an origin."),
+                }
+            }
+            Some("origin-exec-start") => {
+                error_reply("Programs on an origin are started by the runner's own processes.")
+            }
+            Some("origin-exec-input") => self.origin_relay.input(&self.events, owner, &request),
+            Some("origin-exec-output" | "origin-exec-exit") => {
+                self.origin_relay.output(&self.events, owner, &request)
+            }
             Some("rename-device") => self.read(|store| store.rename_device(&request)),
             Some("revoke-device") => self.revoke_device(&request),
             Some("chat") => match required_string(&request, "chat", "chat needs a chat id") {
@@ -950,6 +991,66 @@ impl Engine {
         {
             let _ = connection.set_read_timeout(None);
         }
+    }
+
+    /// The origin a connection speaks for: a paired device is its own
+    /// origin; the local socket names one.
+    fn origin_of(&self, owner: u64, request: &Value) -> Result<String, &'static str> {
+        let origin = match self.pairing.device_for(owner) {
+            Some(device) => device,
+            None if self.pairing.is_local(owner) => request["origin"]
+                .as_str()
+                .ok_or("This needs an origin.")?
+                .to_owned(),
+            None => return Err("Only a paired device can speak for an origin."),
+        };
+        if origin_profile::valid_origin(&origin) {
+            Ok(origin)
+        } else {
+            Err("That origin id is not valid.")
+        }
+    }
+
+    /// Origin profiles: another device's environment, pushed here so the
+    /// work it sends runs as if on that device. A paired device can only push
+    /// its own profile and never makes it the active one; the local socket
+    /// names the origin it pushes for and whether to activate it.
+    fn origin_profile(&self, owner: u64, request: &Value) -> Value {
+        let Some(profiles) = origin_profile::installed() else {
+            return error_reply("This host keeps no origin profiles.");
+        };
+        let operation = request["op"].as_str().unwrap_or_default();
+        if operation == "origin-profile-status" {
+            let mut status = profiles.status();
+            for origin in status["origins"].as_array_mut().into_iter().flatten() {
+                let linked = origin["origin"]
+                    .as_str()
+                    .is_some_and(|id| self.origin_relay.linked(&self.events, id));
+                origin["linked"] = json!(linked);
+            }
+            return status;
+        }
+        let origin = match self.origin_of(owner, request) {
+            Ok(origin) => origin,
+            Err(error) => return error_reply(error),
+        };
+        let empty = serde_json::Map::new();
+        let result = match operation {
+            "origin-profile-offer" => profiles
+                .missing(&origin, &request["manifest"])
+                .map(|missing| json!({"ok": true, "origin": origin, "missing": missing})),
+            "origin-profile-push" => profiles.apply(
+                &origin,
+                &request["manifest"],
+                request["blobs"].as_object().unwrap_or(&empty),
+                // Which profile every process on this host runs under is the
+                // host's choice: only an explicit local request changes it,
+                // never a paired device's upload.
+                self.pairing.is_local(owner) && request["activate"] == true,
+            ),
+            _ => profiles.pull(&origin),
+        };
+        result.unwrap_or_else(error_reply)
     }
 
     fn devices(&self) -> Value {
@@ -3158,6 +3259,7 @@ impl Engine {
     fn unsubscribe(&self, id: u64) {
         self.release_app_client(id);
         self.browser.forget(&self.events, id);
+        self.origin_relay.closed(&self.events, id);
         self.pairing.unregister(id);
         self.events.unsubscribe(id);
     }
@@ -3502,6 +3604,13 @@ pub fn serve_daemon_connection(
                             // the desktop's slower reads must not hold it up.
                             | "browser-provider"
                             | "browser-result"
+                            // A program's input and output stream through
+                            // these, and its MCP client waits on each.
+                            | "origin-link"
+                            | "origin-exec-start"
+                            | "origin-exec-input"
+                            | "origin-exec-output"
+                            | "origin-exec-exit"
                     )
                 );
             if authenticated && request["op"] == "pause-all" {
@@ -3606,6 +3715,7 @@ pub fn serve_daemon_connection(
     // agent's tool server that has gone will read no answer: neither waits
     // for this connection's other work to finish.
     engine.browser.closed(&engine.events, subscriber);
+    engine.origin_relay.closed(&engine.events, subscriber);
     if result.is_err() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
     }

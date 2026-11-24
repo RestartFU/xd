@@ -1326,6 +1326,86 @@ works in that chat's checkout:
   answers `url`, empty when there is none or GitHub could not say. A pull request it
   finds is linked to the chat.
 
+### Origin profiles (experimental)
+
+A runner keeps the environment of each device that sends it work: its agent
+configuration, sign-ins, Git and GitHub CLI setup, SSH identity and
+login-shell variables. See [runners](runners.md). A paired device's origin is
+its device id. On the local socket, `origin` names it.
+
+```json
+{"op":"origin-profile-offer","origin":"laptop","manifest":{"origin_home":"/home/me","os":"linux","arch":"x86_64","files":[{"path":".claude/CLAUDE.md","mode":420,"sha256":"…","size":12,"secret":false,"merge":"replace"}],"env":{"LANG":"C.UTF-8"}}}
+{"ok":true,"origin":"laptop","missing":["…"]}
+{"op":"origin-profile-push","origin":"laptop","manifest":{…},"blobs":{"<sha256>":"base64…"},"activate":true}
+{"ok":true,"origin":"laptop","home":"/data/origins/laptop/home","written":[…],"removed":[…],"kept_runner_changes":[…],"conflicts":[…],"active":true}
+{"op":"origin-profile-pull","origin":"laptop"}
+{"ok":true,"origin":"laptop","changed":[{"path":".claude/.credentials.json","sha256":"…","data":"base64…"}]}
+{"op":"origin-profile-status"}
+{"ok":true,"active":"laptop","origins":[{"origin":"laptop","origin_home":"/home/me","files":4890,"variables":2,"pushed_at_ms":0,"active":true}]}
+```
+
+`offer` lists the hashes whose path the runner doesn't hold at that hash, or
+whose file is gone from the profile home. `push` must carry those bodies. If
+any are missing, it replies `ok:false` with `missing`. Paths are relative to
+the origin's home. Unsafe paths, a path named as both a file and a folder, and
+paths under `.xd/` (the runner's own) are refused. A push is all or nothing:
+everything is checked and staged first, and a file the origin dropped that
+stands where a new file or folder goes is moved aside only if the runner never
+changed it; anything else in the way refuses the push. A file's mode follows
+the manifest even when its body is unchanged.
+Secret files (sign-ins, private keys) are written mode 0600 and never
+rewritten. In every other text file, the origin's home is rewritten to the
+profile's home. `merge:"json-keys"` writes the origin's top-level keys over the
+runner's JSON object, and removes keys the origin wrote before and has since
+dropped. A sign-in the runner's CLI refreshed since the last push
+is kept and listed in `kept_runner_changes`. If the origin changed it too, the
+origin's version wins and the path is listed in `conflicts`. `pull` returns
+those refreshed sign-ins.
+
+`activate:true` makes the pushed origin the host's active profile. Only a
+request on the local socket can do that; a paired device's push is stored but
+never activated. For now, the active origin's variables (`CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, `GIT_CONFIG_GLOBAL`, `GH_CONFIG_DIR`, `GIT_SSH_COMMAND` and the
+origin's login-shell variables) reach the agent CLIs and what they start,
+terminals, background processes, and the host's own `git` and `gh` calls
+made through its storage helpers.
+Other direct Git commands, such as worktree setup and the CI watch, still run
+with the runner's own environment. `GIT_CONFIG_GLOBAL` names a file beside the
+profile home that includes the origin's `~/.config/git/config` and then its
+`~/.gitconfig`, the order Git reads them in.
+
+### Programs hosted on the origin (experimental)
+
+An origin keeps a link to a runner, and the runner runs the origin's
+MCP servers and hooks that cannot run anywhere else through it:
+
+```json
+{"op":"origin-link","origin":"laptop"}
+{"ok":true,"origin":"laptop"}
+```
+
+On the runner, `xd-host origin-exec` starts one by the id the origin gave it
+(local socket only):
+
+```json
+{"op":"origin-exec-start","origin":"laptop","command":"86f66dd641beb6c3d4f89a41"}
+{"ok":true,"exec":4}
+{"op":"origin-exec-input","exec":4,"data":"base64…"}
+{"op":"origin-exec-input","exec":4}
+```
+
+`origin-exec-input` without `data` closes the program's standard input. The
+origin's link gets the events `origin-exec-start` (`exec`, `command`),
+`origin-exec-input`, `origin-exec-eof` and `origin-exec-kill`. It answers with
+`origin-exec-output` (`exec`, `stream` `stdout` or `stderr`, base64 `data`)
+and `origin-exec-exit` (`exec`, `code`, optional `error`). The requester
+gets those as `origin-exec-output` and `origin-exec-exit` events, which go
+only to it. The origin runs only the ids its own configuration offered and
+refuses any other with exit code 127. A requester that disconnects has its
+program killed on the origin. A link that disconnects ends its programs with
+`"error":"The origin disconnected."`. `origin-profile-status` reports
+`linked` for each origin.
+
 ### Linked pull requests
 
 A chat can have any number of pull requests linked to it. Clients list them

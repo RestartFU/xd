@@ -10827,6 +10827,8 @@ fn run_git_with_env(
     command
         .args(arguments)
         .current_dir(workdir)
+        // The active origin's Git identity, credentials and SSH key.
+        .envs(crate::origin_profile::active_environment())
         .envs(environment.iter().map(|(key, value)| (key, value)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -10846,6 +10848,8 @@ fn run_gh(
     command
         .args(arguments)
         .current_dir(workdir)
+        // The active origin's GitHub CLI sign-in.
+        .envs(crate::origin_profile::active_environment())
         .env("GH_PROMPT_DISABLED", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(Stdio::piped())

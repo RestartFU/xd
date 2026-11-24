@@ -279,6 +279,13 @@ fn run_inner(options: HostOptions, stop_with_app: bool) -> io::Result<()> {
     store
         .recover_interrupted_turns()
         .map_err(io::Error::other)?;
+    // Programs the daemon writes for origins reach exactly this daemon.
+    xd_host::origin_profile::set_daemon_arguments(vec![
+        "--database".into(),
+        options.database.to_string_lossy().into_owned(),
+        "--workspaces".into(),
+        options.workspaces.to_string_lossy().into_owned(),
+    ]);
     let engine = Arc::new(Engine::with_store_and_data(store, Some(paths.data.clone())));
     engine.start_auto_settle();
     engine.start_account_switching();

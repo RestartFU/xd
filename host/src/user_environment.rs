@@ -16,12 +16,49 @@ const NAMES: &[&str] = &["PATH", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "SSH_AUTH_SO
 const LIMIT: u64 = 64 * 1024;
 static ENVIRONMENT: OnceLock<HashMap<String, OsString>> = OnceLock::new();
 
-pub(crate) fn values() -> &'static HashMap<String, OsString> {
-    ENVIRONMENT.get_or_init(discover)
+/// The environment xd's processes run with: the login shell's, with the
+/// active origin profile's variables over it when this host runs work for
+/// another device (see `origin_profile`).
+pub(crate) fn values() -> HashMap<String, OsString> {
+    let mut values = ENVIRONMENT.get_or_init(discover).clone();
+    for (name, value) in crate::origin_profile::active_environment() {
+        values.insert(name, value.into());
+    }
+    values
 }
 
 pub(crate) fn apply(command: &mut Command) {
     command.envs(values());
+}
+
+/// The login shell's whole environment, for collecting an origin profile.
+/// An error when the shell could not be run or read, so a failure is never
+/// taken for a shell that sets nothing.
+pub fn login_environment() -> std::io::Result<HashMap<String, String>> {
+    const START: &str = "__XD_ENVIRONMENT_START__";
+    const END: &str = "__XD_ENVIRONMENT_END__";
+    let shell = env::var_os("SHELL")
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into());
+    let script = format!("printf '%s' {START}; env -0; printf '%s' {END}");
+    let failed = || {
+        std::io::Error::other(format!(
+            "Could not read the environment of the login shell {}.",
+            Path::new(&shell).display()
+        ))
+    };
+    let output = capture(Path::new(&shell), &script, Duration::from_secs(5), true).ok_or_else(failed)?;
+    let body = output
+        .split_once(START)
+        .and_then(|(_, rest)| rest.rsplit_once(END))
+        .map(|(body, _)| body)
+        .ok_or_else(failed)?;
+    Ok(body
+        .split('\0')
+        .filter_map(|pair| pair.split_once('='))
+        .filter(|(name, _)| !name.is_empty())
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect())
 }
 
 fn discover() -> HashMap<String, OsString> {
@@ -105,9 +142,27 @@ fn parse_capture(output: &str) -> HashMap<String, OsString> {
 }
 
 fn probe(shell: &Path, timeout: Duration) -> Option<HashMap<String, OsString>> {
+    let values = parse_capture(&capture(shell, &capture_command(shell), timeout, false)?);
+    values.contains_key("PATH").then_some(values)
+}
+
+/// Runs `script` in an interactive login `shell` and returns what it printed.
+/// A `clean` shell starts from nothing but the user's identity, so what it
+/// prints is what the user's own startup files set, not what this process
+/// happened to inherit.
+fn capture(shell: &Path, script: &str, timeout: Duration, clean: bool) -> Option<String> {
     let mut command = Command::new(shell);
+    if clean {
+        command.env_clear();
+        for name in ["HOME", "USER", "LOGNAME", "SHELL", "LANG"] {
+            if let Some(value) = env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        command.env("PATH", "/usr/local/bin:/usr/bin:/bin").env("TERM", "dumb");
+    }
     command
-        .args(["-ilc", &capture_command(shell)])
+        .args(["-ilc", script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -143,8 +198,7 @@ fn probe(shell: &Path, timeout: Duration) -> Option<HashMap<String, OsString>> {
     if !success || bytes.len() > LIMIT as usize {
         return None;
     }
-    let values = parse_capture(std::str::from_utf8(&bytes).ok()?);
-    values.contains_key("PATH").then_some(values)
+    String::from_utf8(bytes).ok()
 }
 
 #[cfg(test)]
