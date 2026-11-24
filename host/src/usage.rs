@@ -1803,7 +1803,9 @@ struct Rates {
 }
 
 struct Shared {
-    roots: TranscriptRoots,
+    /// Fixed roots, or `None` to find them on every scan, so the transcripts
+    /// read follow the origin profile active at the time.
+    roots: Option<TranscriptRoots>,
     scan: Mutex<ScanCache>,
     rates: Mutex<Rates>,
     prices: Mutex<()>,
@@ -1898,6 +1900,7 @@ impl Shared {
         let window = UsageWindow::new(days, zone, read_at);
         let (rates, pricing) = self.ensure_rates(refresh);
         let settings = self.read_prices();
+        let roots = self.roots.clone().unwrap_or_else(TranscriptRoots::discover);
         let scans = {
             let mut cache = self
                 .scan
@@ -1906,13 +1909,13 @@ impl Shared {
             vec![
                 scan_source(
                     "codex",
-                    self.roots.codex.as_deref(),
+                    roots.codex.as_deref(),
                     window.earliest_ms(),
                     &mut cache,
                 ),
                 scan_source(
                     "claude",
-                    self.roots.claude.as_deref(),
+                    roots.claude.as_deref(),
                     window.earliest_ms(),
                     &mut cache,
                 ),
@@ -2789,13 +2792,13 @@ impl UsageService {
             .into();
         let fetch: Arc<RatesFetcher> =
             Arc::new(move |url, accept| fetch_rates_document(&agent, url, accept));
-        Self::with_parts(events, data_directory, TranscriptRoots::discover(), fetch)
+        Self::with_parts(events, data_directory, None, fetch)
     }
 
     fn with_parts(
         events: Arc<EventBus>,
         data_directory: Option<PathBuf>,
-        roots: TranscriptRoots,
+        roots: Option<TranscriptRoots>,
         fetch_rates: Arc<RatesFetcher>,
     ) -> Self {
         Self {
@@ -4042,10 +4045,10 @@ read e; case "$e" in *consume*) echo '{"id":2,"result":{"outcome":"reset"}}';; e
         UsageService::with_parts(
             Arc::new(EventBus::default()),
             Some(directory.join("data")),
-            TranscriptRoots {
+            Some(TranscriptRoots {
                 claude: Some(directory.join("claude/projects")),
                 codex: Some(directory.join("codex/sessions")),
-            },
+            }),
             fetch,
         )
     }
@@ -4142,10 +4145,10 @@ read e; case "$e" in *consume*) echo '{"id":2,"result":{"outcome":"reset"}}';; e
         let usage_service = UsageService::with_parts(
             Arc::new(EventBus::default()),
             None,
-            TranscriptRoots {
+            Some(TranscriptRoots {
                 claude: None,
                 codex: Some(directory.join("absent")),
-            },
+            }),
             fetch,
         );
         let summary = usage_service.shared.summary(7, Tz::UTC, false, now_ms());

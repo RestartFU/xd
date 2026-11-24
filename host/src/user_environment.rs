@@ -32,28 +32,33 @@ pub(crate) fn apply(command: &mut Command) {
 }
 
 /// The login shell's whole environment, for collecting an origin profile.
-pub fn login_environment() -> HashMap<String, String> {
+/// An error when the shell could not be run or read, so a failure is never
+/// taken for a shell that sets nothing.
+pub fn login_environment() -> std::io::Result<HashMap<String, String>> {
     const START: &str = "__XD_ENVIRONMENT_START__";
     const END: &str = "__XD_ENVIRONMENT_END__";
     let shell = env::var_os("SHELL")
         .filter(|shell| !shell.is_empty())
         .unwrap_or_else(|| "/bin/sh".into());
     let script = format!("printf '%s' {START}; env -0; printf '%s' {END}");
-    let Some(output) = capture(Path::new(&shell), &script, Duration::from_secs(5), true) else {
-        return HashMap::new();
+    let failed = || {
+        std::io::Error::other(format!(
+            "Could not read the environment of the login shell {}.",
+            Path::new(&shell).display()
+        ))
     };
-    let Some(body) = output
+    let output = capture(Path::new(&shell), &script, Duration::from_secs(5), true).ok_or_else(failed)?;
+    let body = output
         .split_once(START)
         .and_then(|(_, rest)| rest.rsplit_once(END))
         .map(|(body, _)| body)
-    else {
-        return HashMap::new();
-    };
-    body.split('\0')
+        .ok_or_else(failed)?;
+    Ok(body
+        .split('\0')
         .filter_map(|pair| pair.split_once('='))
         .filter(|(name, _)| !name.is_empty())
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
-        .collect()
+        .collect())
 }
 
 fn discover() -> HashMap<String, OsString> {

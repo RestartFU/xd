@@ -1344,17 +1344,35 @@ its device id. On the local socket, `origin` names it.
 {"ok":true,"active":"laptop","origins":[{"origin":"laptop","origin_home":"/home/me","files":4890,"variables":2,"pushed_at_ms":0,"active":true}]}
 ```
 
-`offer` lists the hashes whose path the runner doesn't hold at that hash.
-`push` must carry those bodies. If any are missing, it replies `ok:false` with
-`missing`. Paths are relative to the origin's home. Unsafe paths are refused.
+`offer` lists the hashes whose path the runner doesn't hold at that hash, or
+whose file is gone from the profile home. `push` must carry those bodies. If
+any are missing, it replies `ok:false` with `missing`. Paths are relative to
+the origin's home. Unsafe paths, a path named as both a file and a folder, and
+paths under `.xd/` (the runner's own) are refused. A push is all or nothing:
+everything is checked and staged first, and a file the origin dropped that
+stands where a new file or folder goes is moved aside only if the runner never
+changed it; anything else in the way refuses the push. A file's mode follows
+the manifest even when its body is unchanged.
 Secret files (sign-ins, private keys) are written mode 0600 and never
 rewritten. In every other text file, the origin's home is rewritten to the
 profile's home. `merge:"json-keys"` writes the origin's top-level keys over the
-runner's JSON object. A sign-in the runner's CLI refreshed since the last push
+runner's JSON object, and removes keys the origin wrote before and has since
+dropped. A sign-in the runner's CLI refreshed since the last push
 is kept and listed in `kept_runner_changes`. If the origin changed it too, the
 origin's version wins and the path is listed in `conflicts`. `pull` returns
-those refreshed sign-ins. For now, the active origin's environment applies to
-every process the host starts.
+those refreshed sign-ins.
+
+`activate:true` makes the pushed origin the host's active profile. Only a
+request on the local socket can do that; a paired device's push is stored but
+never activated. For now, the active origin's variables (`CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, `GIT_CONFIG_GLOBAL`, `GH_CONFIG_DIR`, `GIT_SSH_COMMAND` and the
+origin's login-shell variables) reach the agent CLIs and what they start,
+terminals, background processes, and the host's own `git` and `gh` calls
+made through its storage helpers.
+Other direct Git commands, such as worktree setup and the CI watch, still run
+with the runner's own environment. `GIT_CONFIG_GLOBAL` names a file beside the
+profile home that includes the origin's `~/.config/git/config` and then its
+`~/.gitconfig`, the order Git reads them in.
 
 ### Programs hosted on the origin (experimental)
 

@@ -1013,7 +1013,8 @@ impl Engine {
 
     /// Origin profiles: another device's environment, pushed here so the
     /// work it sends runs as if on that device. A paired device can only push
-    /// its own profile; the local socket names the origin it pushes for.
+    /// its own profile and never makes it the active one; the local socket
+    /// names the origin it pushes for and whether to activate it.
     fn origin_profile(&self, owner: u64, request: &Value) -> Value {
         let Some(profiles) = origin_profile::installed() else {
             return error_reply("This host keeps no origin profiles.");
@@ -1042,7 +1043,10 @@ impl Engine {
                 &origin,
                 &request["manifest"],
                 request["blobs"].as_object().unwrap_or(&empty),
-                request["activate"].as_bool().unwrap_or(true),
+                // Which profile every process on this host runs under is the
+                // host's choice: only an explicit local request changes it,
+                // never a paired device's upload.
+                self.pairing.is_local(owner) && request["activate"] == true,
             ),
             _ => profiles.pull(&origin),
         };

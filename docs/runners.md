@@ -105,10 +105,16 @@ own home is never touched, and origins never share a profile.
 | Shell env | the login shell's environment, filtered | the agent's and terminal's environment |
 | xd settings | account and agent preferences | the runner's settings for that origin |
 
+`~/.ssh` comes along whole, keys included. The runner must push and pull
+over SSH as the origin does while the origin is offline. Every file there
+except `config`, `known_hosts*`, `authorized_keys` and `*.pub` is treated as
+a key, whatever it is called: written mode 0600, never rewritten, and passed
+to `ssh` with `-i`. Pushing a profile to a runner therefore hands it the
+origin's keys, so runners are machines the user owns.
+
 Excluded: transcripts and caches (`projects/`, `sessions/`, `todos/`,
-`shell-snapshots/`, `statsig/`, logs, history files), anything machine-bound
-(`DISPLAY`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`, `PATH`), and SSH private keys
-unless explicitly opted in.
+`shell-snapshots/`, `statsig/`, logs, history files), and anything
+machine-bound (`DISPLAY`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`, `PATH`).
 
 ### Sync
 
@@ -306,9 +312,13 @@ hook. On the runner (empty home, `env -i`):
 
 **Spike shortcuts to replace in phase 2**
 
-- One runner-wide *active* origin (the last pushed) instead of each session
-  carrying its origin. Several origins can be stored, but only one is
-  applied at a time.
+- One runner-wide *active* origin (the last one pushed with `activate`)
+  instead of each session carrying its origin. Several origins can be stored,
+  but only one is applied at a time, and only a local request can switch it:
+  a paired device's push is stored, never activated.
+- Direct `git` spawns outside the storage helpers (worktree setup, the CI
+  watch) still run with the runner's own environment until the Executor
+  boundary lands.
 - One request carries every changed body. Real sync streams the bodies in
   chunks.
 - `profile push` reaches the runner over its local socket. Paired devices get

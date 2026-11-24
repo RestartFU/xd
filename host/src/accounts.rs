@@ -766,14 +766,15 @@ impl Accounts {
         if !self.exists(provider, id) {
             return Vec::new();
         }
-        // Found on first use: it waits on the user's login shell.
-        let source = self.inner.homes.lock().ok().and_then(|mut homes| {
-            let provider = PROVIDERS.iter().find(|known| **known == provider)?;
-            if !homes.contains_key(provider) {
-                homes.insert(provider, user_home(provider)?);
-            }
-            homes.get(provider).cloned()
-        });
+        // Looked up each time rather than kept: on a runner the user's home is
+        // the active origin's profile, which a push can change.
+        let source = self
+            .inner
+            .homes
+            .lock()
+            .ok()
+            .and_then(|homes| homes.get(provider).cloned())
+            .or_else(|| user_home(provider));
         if let Some(source) = source
             && let Err(error) = link_home(provider, &source, &home)
         {
@@ -1485,6 +1486,16 @@ fn link_home(provider: &str, source: &Path, home: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
+    // Links into a home this account used before (another origin's profile)
+    // go, so nothing of it stays shared.
+    for entry in fs::read_dir(home)? {
+        let target = entry?.path();
+        if fs::symlink_metadata(&target)?.file_type().is_symlink()
+            && fs::read_link(&target)?.parent() != Some(source)
+        {
+            fs::remove_file(&target)?;
+        }
+    }
     Ok(())
 }
 
@@ -1597,6 +1608,21 @@ mod tests {
             .unwrap()
             .unwrap();
         id
+    }
+
+    #[test]
+    fn an_account_home_follows_a_new_source_home() {
+        let root = std::env::temp_dir().join(format!("xd-link-{}", uuid::Uuid::new_v4()));
+        let (first, second, home) = (root.join("a"), root.join("b"), root.join("account"));
+        fs::create_dir_all(first.join("skills")).unwrap();
+        fs::create_dir_all(first.join("agents")).unwrap();
+        fs::create_dir_all(second.join("skills")).unwrap();
+        link_home("claude", &first, &home).unwrap();
+        assert_eq!(fs::read_link(home.join("agents")).unwrap(), first.join("agents"));
+        link_home("claude", &second, &home).unwrap();
+        assert_eq!(fs::read_link(home.join("skills")).unwrap(), second.join("skills"));
+        assert!(fs::symlink_metadata(home.join("agents")).is_err(), "nothing of the old home stays");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

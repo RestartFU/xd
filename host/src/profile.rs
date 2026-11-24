@@ -9,7 +9,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc, Mutex,
-        mpsc::{Sender, channel},
+        mpsc::{SyncSender, TrySendError, sync_channel},
     },
     thread,
     time::Duration,
@@ -122,7 +122,8 @@ fn push(options: &HostOptions, origin: &str) -> Result<origin_profile::Collected
     );
     let reply = request(
         options,
-        json!({"op": "origin-profile-push", "origin": origin, "manifest": manifest, "blobs": blobs}),
+        json!({"op": "origin-profile-push", "origin": origin, "manifest": manifest,
+            "blobs": blobs, "activate": true}),
     )?;
     print(reply)?;
     Ok(collected)
@@ -154,9 +155,13 @@ fn link(options: &HostOptions, origin: &str) -> Result<(), String> {
 }
 
 struct Running {
-    input: Option<Sender<Vec<u8>>>,
+    input: Option<SyncSender<Vec<u8>>>,
     pid: i32,
 }
+
+/// Input waiting for a hosted program, in chunks. A program that stops
+/// reading is stopped once this many are queued, rather than queuing more.
+const QUEUED_INPUT: usize = 64;
 
 fn serve_link(
     options: &HostOptions,
@@ -207,12 +212,17 @@ fn serve_link(
                 let data = STANDARD
                     .decode(message["data"].as_str().unwrap_or_default())
                     .unwrap_or_default();
-                if let Some(input) = running
+                let program = running
                     .lock()
                     .ok()
-                    .and_then(|running| running.get(&exec).and_then(|r| r.input.clone()))
+                    .and_then(|running| running.get(&exec).map(|r| (r.input.clone(), r.pid)));
+                if let Some((Some(input), pid)) = program
+                    && let Err(TrySendError::Full(_)) = input.try_send(data)
                 {
-                    let _ = input.send(data);
+                    eprintln!("xd-host: a hosted program stopped reading its input; stopping it");
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
                 }
             }
             Some("origin-exec-eof") => {
@@ -265,7 +275,7 @@ fn start(
     let mut child = command.spawn().map_err(|e| format!("{}: {e}", program.label))?;
     let pid = child.id() as i32;
     let mut stdin = child.stdin.take().ok_or("no input")?;
-    let (input, inputs) = channel::<Vec<u8>>();
+    let (input, inputs) = sync_channel::<Vec<u8>>(QUEUED_INPUT);
     thread::spawn(move || {
         for data in inputs {
             if stdin.write_all(&data).and_then(|()| stdin.flush()).is_err() {
@@ -324,6 +334,9 @@ pub(crate) fn origin_exec(options: HostOptions, origin: &str, command: &str) -> 
         "_xd_request": 1}))
     .map_err(|e| e.to_string())?;
     let mut lines = BufReader::new(stream).lines();
+    // A program that finishes at once can answer before the start reply
+    // arrives, so its output is kept until the reply says whose it is.
+    let mut early = Vec::new();
     let exec = loop {
         let line = lines
             .next()
@@ -337,6 +350,9 @@ pub(crate) fn origin_exec(options: HostOptions, origin: &str, command: &str) -> 
                 return Err(message["error"].as_str().unwrap_or("The runner refused.").into());
             }
             break message["exec"].as_u64().ok_or("The runner gave no exec.")?;
+        }
+        if matches!(message["event"].as_str(), Some("origin-exec-output" | "origin-exec-exit")) {
+            early.push(message);
         }
     };
     {
@@ -363,11 +379,10 @@ pub(crate) fn origin_exec(options: HostOptions, origin: &str, command: &str) -> 
     }
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    for line in lines {
-        let line = line.map_err(|e| e.to_string())?;
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
+    let later = lines
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok());
+    for message in early.into_iter().chain(later) {
         if message["exec"].as_u64() != Some(exec) {
             continue;
         }

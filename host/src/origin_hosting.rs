@@ -85,23 +85,26 @@ pub(crate) fn event_label(event: &str) -> String {
 }
 
 /// The `sha256:<hex>` Codex trusts a command hook by: its event, its group's
-/// matcher, and the handler normalized with Codex's defaults.
+/// matcher, and the handler normalized as Codex 0.171 normalizes it
+/// (`codex-rs/hooks/src/engine/discovery.rs`): the Unix command only, the
+/// event's timeout default and cap, `async` as written, and the context limit
+/// only for events that emit context and only when not the default.
 pub(crate) fn codex_hook_hash(label: &str, group: &Value, handler: &Value) -> Option<String> {
     if handler["type"].as_str().unwrap_or("command") != "command" {
         return None;
     }
+    let command = handler.get("command")?.as_str()?;
+    if command.trim().is_empty() {
+        return None;
+    }
     let mut normalized = Map::new();
     normalized.insert("type".into(), json!("command"));
-    normalized.insert("command".into(), handler.get("command")?.clone());
-    if let Some(windows) = handler.get("commandWindows").filter(|value| !value.is_null()) {
-        normalized.insert("commandWindows".into(), windows.clone());
-    }
-    let timeout = handler
-        .get("timeout")
-        .or_else(|| handler.get("timeout_sec"))
-        .and_then(Value::as_u64)
-        .unwrap_or(600)
-        .max(1);
+    normalized.insert("command".into(), json!(command));
+    let timeout = handler.get("timeout").and_then(Value::as_u64);
+    let timeout = match label {
+        "session_end" | "interrupt" => timeout.unwrap_or(1).clamp(1, 3),
+        _ => timeout.unwrap_or(600).max(1),
+    };
     normalized.insert("timeout".into(), json!(timeout));
     normalized.insert(
         "async".into(),
@@ -110,15 +113,34 @@ pub(crate) fn codex_hook_hash(label: &str, group: &Value, handler: &Value) -> Op
     if let Some(message) = handler.get("statusMessage").filter(|value| !value.is_null()) {
         normalized.insert("statusMessage".into(), message.clone());
     }
+    let emits_context = matches!(
+        label,
+        "pre_tool_use" | "post_tool_use" | "session_start" | "user_prompt_submit" | "subagent_start"
+    );
+    if emits_context
+        && let Some(limit) = handler.get("additionalContextLimit").and_then(Value::as_u64)
+        && limit != DEFAULT_CONTEXT_LIMIT
+    {
+        normalized.insert("additionalContextLimit".into(), json!(limit));
+    }
     let mut identity = Map::new();
     identity.insert("event_name".into(), json!(label));
-    if let Some(matcher) = group.get("matcher").filter(|value| !value.is_null()) {
+    let matcher_applies = !matches!(
+        label,
+        "pre_model_request" | "post_model_request" | "user_prompt_submit" | "stop" | "interrupt"
+    );
+    if matcher_applies
+        && let Some(matcher) = group.get("matcher").filter(|value| !value.is_null())
+    {
         identity.insert("matcher".into(), matcher.clone());
     }
     identity.insert("hooks".into(), Value::Array(vec![Value::Object(normalized)]));
     let digest = crate::origin_profile::sha256(canonical_json(&Value::Object(identity)).as_bytes());
     Some(format!("sha256:{digest}"))
 }
+
+/// Codex's default `additionalContextLimit`, which it leaves out of the hash.
+const DEFAULT_CONTEXT_LIMIT: u64 = 2500;
 
 /// The handler a trust key names in `hooks`: `<file>:<event>:<group>:<handler>`.
 fn keyed_handler<'a>(hooks: &'a Value, key: &str) -> Option<(String, &'a Value, &'a Value)> {
@@ -154,6 +176,10 @@ pub(crate) fn trusted_codex_hooks(config: &str, hooks: &str, hooks_file: &str) -
         .iter()
         .filter(|(key, _)| key.starts_with(&prefix))
         .filter_map(|(key, entry)| {
+            // A hook the user turned off does not run on the origin either.
+            if entry.get("enabled").and_then(toml_edit::Item::as_bool) == Some(false) {
+                return None;
+            }
             let stored = entry.get("trusted_hash")?.as_str()?;
             let (label, group, handler) = keyed_handler(&hooks, key)?;
             (codex_hook_hash(&label, group, handler)? == stored).then(|| key.to_owned())
@@ -201,6 +227,56 @@ mod tests {
             "sha256:e267bb77bf5a668181f26087d2075b426950bc67eba30004122dbfebb3bb76b0"
         );
         assert_eq!(event_label("SubagentStart"), "subagent_start");
+    }
+
+    #[test]
+    fn normalizes_per_event_as_codex_does() {
+        let hash = |label: &str, group: Value| {
+            codex_hook_hash(label, &group, &group["hooks"][0]).unwrap()
+        };
+        // SessionEnd defaults to one second and is capped at three.
+        assert_eq!(
+            hash("session_end", json!({"hooks": [{"command": "x"}]})),
+            hash("session_end", json!({"hooks": [{"command": "x", "timeout": 1}]}))
+        );
+        assert_eq!(
+            hash("session_end", json!({"hooks": [{"command": "x", "timeout": 60}]})),
+            hash("session_end", json!({"hooks": [{"command": "x", "timeout": 3}]}))
+        );
+        // Windows commands and matchers on events that ignore them do not count.
+        assert_eq!(
+            hash("stop", json!({"matcher": "a", "hooks": [{"command": "x", "commandWindows": "y"}]})),
+            hash("stop", json!({"hooks": [{"command": "x"}]}))
+        );
+        assert_ne!(
+            hash("pre_tool_use", json!({"matcher": "a", "hooks": [{"command": "x"}]})),
+            hash("pre_tool_use", json!({"hooks": [{"command": "x"}]}))
+        );
+        // The context limit counts only when set to something else.
+        assert_eq!(
+            hash("session_start", json!({"hooks": [{"command": "x", "additionalContextLimit": 2500}]})),
+            hash("session_start", json!({"hooks": [{"command": "x"}]}))
+        );
+        assert_ne!(
+            hash("session_start", json!({"hooks": [{"command": "x", "additionalContextLimit": 10}]})),
+            hash("session_start", json!({"hooks": [{"command": "x"}]}))
+        );
+        assert_eq!(
+            hash("stop", json!({"hooks": [{"command": "x", "additionalContextLimit": 10}]})),
+            hash("stop", json!({"hooks": [{"command": "x"}]}))
+        );
+    }
+
+    #[test]
+    fn a_disabled_hook_is_not_trusted() {
+        let hooks = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/home/a/stop"}]}]}}"#;
+        let parsed: Value = serde_json::from_str(hooks).unwrap();
+        let group = &parsed["hooks"]["Stop"][0];
+        let hash = codex_hook_hash("stop", group, &group["hooks"][0]).unwrap();
+        let config = format!(
+            "[hooks.state.\"/home/a/.codex/hooks.json:stop:0:0\"]\nenabled = false\ntrusted_hash = \"{hash}\"\n"
+        );
+        assert!(trusted_codex_hooks(&config, hooks, "/home/a/.codex/hooks.json").is_empty());
     }
 
     #[test]
